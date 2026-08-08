@@ -25,7 +25,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install Linux system dependencies
         if: matrix.platform == 'linux'
@@ -44,13 +44,13 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Install pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           version: 11.16.0
           run_install: false
 
       - name: Install Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: pnpm
@@ -65,7 +65,7 @@ jobs:
         run: pnpm tauri build
 
       - name: Upload desktop package
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: linked-info-${{ matrix.platform }}
           path: target/release/bundle/**
