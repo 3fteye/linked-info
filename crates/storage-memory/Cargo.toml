@@ -1,0 +1,9 @@
+[package]
+name = "linked-info-storage-memory"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+linked-info-domain = { path = "../domain" }
+linked-info-storage-port = { path = "../storage-port" }

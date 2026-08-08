@@ -1,0 +1,12 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "linked-info-api",
+  "main": "build/index.js",
+  "compatibility_date": "2026-08-06",
+  "observability": {
+    "enabled": true
+  },
+  "build": {
+    "command": "cargo install -q \"worker-build@^0.8\" && worker-build --release"
+  }
+}

@@ -1,0 +1,15 @@
+[package]
+name = "cloudflare-worker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+worker = { version = "0.8", features = ['http', 'axum'] }
+worker-macros = { version = "0.8", features = ['http'] }
+axum = { version = "0.8", default-features = false, features = ["json"] }
+serde.workspace = true
+tower-service = "0.3.3"
