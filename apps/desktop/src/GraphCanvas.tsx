@@ -18,7 +18,7 @@ import {
   useEdgesState,
   useNodesState,
 } from "@xyflow/react";
-import { Filter, GripVertical, Link2, Pencil, Plus } from "lucide-react";
+import { Filter, GripVertical, Link2, Pencil, Plus, Trash2 } from "lucide-react";
 import {
   useCallback,
   useEffect,
@@ -63,7 +63,12 @@ interface InformationNodeData extends Record<string, unknown> {
 type InformationFlowNode = Node<InformationNodeData, "information">;
 
 interface GraphLabels {
+  cancel: string;
+  confirmDeleteNode: string;
   createNode: string;
+  deleteNode: string;
+  deleteNodeBody: (name: string) => string;
+  deleteNodeTitle: string;
   content: string;
   contentPlaceholder: string;
   editNode: string;
@@ -91,6 +96,7 @@ interface GraphCanvasProps {
   unnamedOnly: boolean;
   labels: GraphLabels;
   onCreateNode: (position: { x: number; y: number }) => void;
+  onDeleteNode: (nodeId: string) => void;
   onEditNode: (nodeId: string) => void;
   onLayoutChange: (layout: NodeLayout[]) => void;
   onNodeCommit: (nodeId: string) => void;
@@ -306,6 +312,7 @@ export default function GraphCanvas({
   unnamedOnly,
   labels,
   onCreateNode,
+  onDeleteNode,
   onEditNode,
   onLayoutChange,
   onNodeCommit,
@@ -318,6 +325,7 @@ export default function GraphCanvas({
   const [flowInstance, setFlowInstance] =
     useState<ReactFlowInstance<InformationFlowNode, Edge> | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+  const [pendingDeletionNodeId, setPendingDeletionNodeId] = useState<string | null>(null);
   const [flowNodes, setFlowNodes, applyNodeChanges] =
     useNodesState<InformationFlowNode>([]);
   const [flowEdges, setFlowEdges, applyEdgeChanges] = useEdgesState<Edge>([]);
@@ -467,6 +475,20 @@ export default function GraphCanvas({
     };
   }, [contextMenu]);
 
+  useEffect(() => {
+    if (pendingDeletionNodeId === null) {
+      return;
+    }
+
+    const cancelOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setPendingDeletionNodeId(null);
+      }
+    };
+    window.addEventListener("keydown", cancelOnEscape);
+    return () => window.removeEventListener("keydown", cancelOnEscape);
+  }, [pendingDeletionNodeId]);
+
   const handleNodesChange = useCallback(
     (changes: NodeChange<InformationFlowNode>[]) => {
       applyNodeChanges(changes);
@@ -584,6 +606,7 @@ export default function GraphCanvas({
   }, [flowInstance, onCreateNode]);
 
   const visibleNodeCount = flowNodes.filter((node) => !node.hidden).length;
+  const pendingDeletionNode = nodes.find((node) => node.id === pendingDeletionNodeId);
 
   return (
     <div
@@ -680,17 +703,72 @@ export default function GraphCanvas({
               <span>{labels.createNode}</span>
             </button>
           ) : (
-            <button
-              onClick={() => {
-                onEditNode(contextMenu.nodeId);
-                setContextMenu(null);
-              }}
-              type="button"
-            >
-              <Pencil size={16} />
-              <span>{labels.editNode}</span>
-            </button>
+            <>
+              <button
+                onClick={() => {
+                  onEditNode(contextMenu.nodeId);
+                  setContextMenu(null);
+                }}
+                type="button"
+              >
+                <Pencil size={16} />
+                <span>{labels.editNode}</span>
+              </button>
+              <button
+                className="danger-menu-item"
+                onClick={() => {
+                  setPendingDeletionNodeId(contextMenu.nodeId);
+                  setContextMenu(null);
+                }}
+                type="button"
+              >
+                <Trash2 size={16} />
+                <span>{labels.deleteNode}</span>
+              </button>
+            </>
           )}
+        </div>
+      )}
+
+      {pendingDeletionNode !== undefined && (
+        <div className="modal-backdrop" role="presentation">
+          <section
+            aria-labelledby="delete-node-dialog-title"
+            aria-modal="true"
+            className="confirmation-dialog"
+            role="dialog"
+          >
+            <h2 id="delete-node-dialog-title">{labels.deleteNodeTitle}</h2>
+            <p>
+              {labels.deleteNodeBody(
+                referencedNodeLabel(
+                  pendingDeletionNode,
+                  labels.unnamed,
+                  labels.noContent,
+                ),
+              )}
+            </p>
+            <div className="confirmation-dialog-actions">
+              <button
+                className="secondary-button"
+                onClick={() => setPendingDeletionNodeId(null)}
+                type="button"
+              >
+                {labels.cancel}
+              </button>
+              <button
+                className="danger-button"
+                onClick={() => {
+                  onDeleteNode(pendingDeletionNode.id);
+                  setPendingDeletionNodeId(null);
+                }}
+                type="button"
+              >
+                <Trash2 size={15} />
+                {labels.confirmDeleteNode}
+              </button>
+            </div>
+          </section>
         </div>
       )}
     </div>

@@ -24,6 +24,9 @@ pub trait GraphStore {
     /// Saves a node and atomically enforces uniqueness for non-empty names.
     fn save_node(&self, node: Node) -> impl Future<Output = Result<(), Self::Error>> + '_;
 
+    /// Deletes a node and atomically removes every reference connected to it.
+    fn delete_node(&self, id: NodeId) -> impl Future<Output = Result<(), Self::Error>> + '_;
+
     /// Adds a reference only when both endpoint nodes exist.
     fn add_reference(
         &self,

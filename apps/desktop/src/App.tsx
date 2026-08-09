@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  ArchiveRestore,
   Database,
+  Download,
   FileText,
   Filter,
   Languages,
@@ -9,6 +11,7 @@ import {
   Plus,
   Search,
   Settings,
+  Upload,
   X,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -16,17 +19,38 @@ import GraphCanvas from "./GraphCanvas";
 import { supportedLanguages, type SupportedLanguage } from "./locales";
 import {
   isUnnamedNode,
-  loadWorkspace,
+  localWorkspacePersistence,
   normalizeNodeName,
-  saveWorkspace,
   type InformationNode,
   type NodeLayout,
   type NodeReference,
   type WorkspaceSnapshot,
 } from "./workspaceStore";
+import {
+  parseWorkspaceExport,
+  serializeWorkspaceExport,
+  type WorkspaceImportFailure,
+} from "./workspaceBackup";
+import {
+  exportWorkspaceFile,
+  importWorkspaceFile,
+} from "./workspaceFileBridge";
 import "./App.css";
 
 type ViewId = "canvas" | "nodes" | "settings";
+
+interface PendingWorkspaceReplacement {
+  kind: "import" | "recovery";
+  sourceName: string;
+  workspace: WorkspaceSnapshot;
+}
+
+const importFailureTranslationKeys: Record<WorkspaceImportFailure, string> = {
+  invalidJson: "backup.errors.invalidJson",
+  invalidFormat: "backup.errors.invalidFormat",
+  unsupportedVersion: "backup.errors.unsupportedVersion",
+  invalidWorkspace: "backup.errors.invalidWorkspace",
+};
 
 const views = [
   {
@@ -77,12 +101,18 @@ function nodeFilterLabel(
 function App() {
   const { t, i18n } = useTranslation();
   const [activeView, setActiveView] = useState<ViewId>("canvas");
-  const [workspace, setWorkspace] = useState(loadWorkspace);
+  const [workspace, setWorkspace] = useState(() => localWorkspacePersistence.load());
   const workspaceRef = useRef(workspace);
   const [editingNodeId, setEditingNodeId] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState("");
   const [unnamedOnly, setUnnamedOnly] = useState(false);
   const [referenceFilterNodeIds, setReferenceFilterNodeIds] = useState<string[]>([]);
+  const [pendingWorkspaceReplacement, setPendingWorkspaceReplacement] =
+    useState<PendingWorkspaceReplacement | null>(null);
+  const [backupStatus, setBackupStatus] = useState<string | null>(null);
+  const [recoveryAvailable, setRecoveryAvailable] = useState(
+    () => localWorkspacePersistence.loadRecovery() !== null,
+  );
   const currentView = views.find((view) => view.id === activeView) ?? views[0];
   const activeLanguage = i18n.resolvedLanguage ?? i18n.language;
   const normalizedSearch = normalizeNodeName(searchTerm);
@@ -153,12 +183,16 @@ function App() {
 
   useEffect(() => {
     workspaceRef.current = workspace;
-    const saveTimer = window.setTimeout(() => saveWorkspace(workspace), 300);
+    const saveTimer = window.setTimeout(
+      () => localWorkspacePersistence.save(workspace),
+      300,
+    );
     return () => window.clearTimeout(saveTimer);
   }, [workspace]);
 
   useEffect(() => {
-    const flushLocalWorkspace = () => saveWorkspace(workspaceRef.current);
+    const flushLocalWorkspace = () =>
+      localWorkspacePersistence.save(workspaceRef.current);
     window.addEventListener("beforeunload", flushLocalWorkspace);
     return () => {
       window.removeEventListener("beforeunload", flushLocalWorkspace);
@@ -178,7 +212,7 @@ function App() {
       const next = updater(current);
       workspaceRef.current = next;
       if (flushImmediately) {
-        saveWorkspace(next);
+        localWorkspacePersistence.save(next);
       }
       return next;
     });
@@ -203,6 +237,24 @@ function App() {
       setActiveView("canvas");
       window.setTimeout(() => setEditingNodeId(nodeId), 0);
     }
+  }
+
+  function deleteNode(nodeId: string) {
+    updateWorkspace(
+      (current) => ({
+        nodes: current.nodes.filter((node) => node.id !== nodeId),
+        layout: current.layout.filter((item) => item.nodeId !== nodeId),
+        references: current.references.filter(
+          (reference) =>
+            reference.sourceNodeId !== nodeId && reference.targetNodeId !== nodeId,
+        ),
+      }),
+      true,
+    );
+    setEditingNodeId((current) => (current === nodeId ? null : current));
+    setReferenceFilterNodeIds((current) =>
+      current.filter((currentNodeId) => currentNodeId !== nodeId),
+    );
   }
 
   function updateNodeName(nodeId: string, name: string) {
@@ -264,6 +316,86 @@ function App() {
         ? current.filter((currentNodeId) => currentNodeId !== nodeId)
         : [...current, nodeId],
     );
+  }
+
+  async function exportWorkspace() {
+    setBackupStatus(null);
+    try {
+      const date = new Date().toISOString().slice(0, 10);
+      const exported = await exportWorkspaceFile(
+        serializeWorkspaceExport(workspaceRef.current),
+        `linked-info-${date}.json`,
+      );
+      if (exported) {
+        setBackupStatus(t("backup.exportSuccess"));
+      }
+    } catch {
+      setBackupStatus(t("backup.exportFailed"));
+    }
+  }
+
+  async function chooseWorkspaceImport() {
+    setBackupStatus(null);
+    try {
+      const file = await importWorkspaceFile();
+      if (file === null) {
+        return;
+      }
+      const result = parseWorkspaceExport(file.text);
+      if (!result.ok) {
+        setBackupStatus(t(importFailureTranslationKeys[result.reason]));
+        return;
+      }
+      setPendingWorkspaceReplacement({
+        kind: "import",
+        sourceName: file.name,
+        workspace: result.workspace,
+      });
+    } catch {
+      setBackupStatus(t("backup.importFailed"));
+    }
+  }
+
+  function chooseRecoveryWorkspace() {
+    setBackupStatus(null);
+    const recovery = localWorkspacePersistence.loadRecovery();
+    if (recovery === null) {
+      setRecoveryAvailable(false);
+      setBackupStatus(t("backup.recoveryUnavailable"));
+      return;
+    }
+    setPendingWorkspaceReplacement({
+      kind: "recovery",
+      sourceName: t("backup.recoverySource"),
+      workspace: recovery,
+    });
+  }
+
+  function applyWorkspaceReplacement() {
+    if (pendingWorkspaceReplacement === null) {
+      return;
+    }
+
+    try {
+      localWorkspacePersistence.preserveForRecovery(workspaceRef.current);
+      localWorkspacePersistence.save(pendingWorkspaceReplacement.workspace);
+      workspaceRef.current = pendingWorkspaceReplacement.workspace;
+      setWorkspace(pendingWorkspaceReplacement.workspace);
+      setEditingNodeId(null);
+      setSearchTerm("");
+      setUnnamedOnly(false);
+      setReferenceFilterNodeIds([]);
+      setRecoveryAvailable(true);
+      setActiveView("canvas");
+      setBackupStatus(
+        pendingWorkspaceReplacement.kind === "recovery"
+          ? t("backup.recoverySuccess")
+          : t("backup.importSuccess"),
+      );
+      setPendingWorkspaceReplacement(null);
+    } catch {
+      setBackupStatus(t("backup.importFailed"));
+    }
   }
 
   return (
@@ -434,15 +566,62 @@ function App() {
                   ))}
                 </div>
               </div>
+              <div className="setting-row data-setting-row">
+                <div className="setting-label">
+                  <ArchiveRestore size={18} />
+                  <div className="setting-label-copy">
+                    <span>{t("backup.title")}</span>
+                    <small>{t("backup.description")}</small>
+                  </div>
+                </div>
+                <div className="backup-actions">
+                  <button
+                    className="secondary-button"
+                    onClick={() => void exportWorkspace()}
+                    type="button"
+                  >
+                    <Download size={15} />
+                    {t("backup.export")}
+                  </button>
+                  <button
+                    className="secondary-button"
+                    onClick={() => void chooseWorkspaceImport()}
+                    type="button"
+                  >
+                    <Upload size={15} />
+                    {t("backup.import")}
+                  </button>
+                  {recoveryAvailable && (
+                    <button
+                      className="secondary-button"
+                      onClick={chooseRecoveryWorkspace}
+                      type="button"
+                    >
+                      <ArchiveRestore size={15} />
+                      {t("backup.restoreRecovery")}
+                    </button>
+                  )}
+                </div>
+                {backupStatus !== null && (
+                  <p className="backup-status" role="status">
+                    {backupStatus}
+                  </p>
+                )}
+              </div>
             </section>
           ) : activeView === "canvas" ? (
             <GraphCanvas
               editingNodeId={editingNodeId}
               labels={{
+                cancel: t("actions.cancel"),
+                confirmDeleteNode: t("actions.confirmDeleteNode"),
                 createNode: t("actions.newNode"),
                 content: t("editor.content"),
                 contentPlaceholder: t("editor.contentPlaceholder"),
                 editNode: t("actions.editNode"),
+                deleteNode: t("actions.deleteNode"),
+                deleteNodeBody: (name) => t("deleteNode.body", { name }),
+                deleteNodeTitle: t("deleteNode.title"),
                 empty: t("empty.canvas"),
                 filterByNode: t("filters.filterByNode"),
                 name: t("editor.name"),
@@ -459,6 +638,7 @@ function App() {
               nameConflictNodeIds={nameConflictNodeIds}
               nodes={workspace.nodes}
               onCreateNode={createNode}
+              onDeleteNode={deleteNode}
               onEditNode={editNode}
               onLayoutChange={updateLayout}
               onNodeCommit={commitNode}
@@ -497,6 +677,42 @@ function App() {
 
         </div>
       </main>
+
+      {pendingWorkspaceReplacement !== null && (
+        <div className="modal-backdrop" role="presentation">
+          <section
+            aria-labelledby="replace-workspace-dialog-title"
+            aria-modal="true"
+            className="confirmation-dialog"
+            role="dialog"
+          >
+            <h2 id="replace-workspace-dialog-title">{t("backup.confirmTitle")}</h2>
+            <p>
+              {t("backup.confirmBody", {
+                name: pendingWorkspaceReplacement.sourceName,
+                nodes: pendingWorkspaceReplacement.workspace.nodes.length,
+                references: pendingWorkspaceReplacement.workspace.references.length,
+              })}
+            </p>
+            <div className="confirmation-dialog-actions">
+              <button
+                className="secondary-button"
+                onClick={() => setPendingWorkspaceReplacement(null)}
+                type="button"
+              >
+                {t("actions.cancel")}
+              </button>
+              <button
+                className="primary-button"
+                onClick={applyWorkspaceReplacement}
+                type="button"
+              >
+                {t("backup.confirmReplace")}
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
     </div>
   );
 }

@@ -19,6 +19,9 @@ const SAVE_NODE_SQL: &str = "INSERT INTO nodes (id, name, normalized_name, conte
        name = excluded.name, \
        normalized_name = excluded.normalized_name, \
        content = excluded.content";
+const DELETE_NODE_REFERENCES_SQL: &str = "DELETE FROM node_references \
+     WHERE source_node_id = ? OR target_node_id = ?";
+const DELETE_NODE_SQL: &str = "DELETE FROM nodes WHERE id = ?";
 const ADD_REFERENCE_SQL: &str = "INSERT OR IGNORE INTO node_references \
      (source_node_id, target_node_id) VALUES (?, ?)";
 const REMOVE_REFERENCE_SQL: &str = "DELETE FROM node_references \
@@ -141,6 +144,46 @@ impl GraphStore for D1GraphStore {
             .await
             .map_err(D1StoreError::from)?;
         ensure_success(&result)
+    }
+
+    async fn delete_node(&self, id: NodeId) -> Result<(), Self::Error> {
+        let node_id = id;
+        let id = id.to_string();
+        let reference_values = [D1Type::Text(&id), D1Type::Text(&id)];
+        let node_values = [D1Type::Text(&id)];
+        let delete_references = self
+            .database
+            .prepare(DELETE_NODE_REFERENCES_SQL)
+            .bind_refs(&reference_values)
+            .map_err(D1StoreError::from)?;
+        let delete_node = self
+            .database
+            .prepare(DELETE_NODE_SQL)
+            .bind_refs(&node_values)
+            .map_err(D1StoreError::from)?;
+        let results = self
+            .database
+            .batch(vec![delete_references, delete_node])
+            .await
+            .map_err(D1StoreError::from)?;
+        if results.len() != 2 {
+            return Err(D1StoreError::Operation(format!(
+                "D1 deletion batch returned {} results instead of 2",
+                results.len()
+            )));
+        }
+        for result in &results {
+            ensure_success(result)?;
+        }
+        let deleted_node_count = results[1]
+            .meta()
+            .map_err(D1StoreError::from)?
+            .and_then(|meta| meta.changes)
+            .unwrap_or(0);
+        if deleted_node_count == 0 {
+            return Err(D1StoreError::NodeNotFound(node_id));
+        }
+        Ok(())
     }
 
     async fn add_reference(&self, reference: Reference) -> Result<(), Self::Error> {

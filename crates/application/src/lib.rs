@@ -25,6 +25,10 @@ where
         self.store.save_node(node).await
     }
 
+    pub async fn delete_node(&self, id: NodeId) -> Result<(), S::Error> {
+        self.store.delete_node(id).await
+    }
+
     pub async fn search_nodes_by_name(
         &self,
         query: &str,
@@ -207,6 +211,49 @@ mod tests {
                 .await
                 .expect("filter succeeds"),
             vec![note]
+        );
+    }
+
+    #[tokio::test]
+    async fn deleting_a_node_removes_incoming_and_outgoing_references() {
+        let service = GraphService::new(MemoryGraphStore::default());
+        let deleted = Node::new(Some("Deleted".into()), None);
+        let incoming = Node::new(Some("Incoming".into()), None);
+        let outgoing = Node::new(Some("Outgoing".into()), None);
+        for node in [&deleted, &incoming, &outgoing] {
+            service
+                .save_node(node.clone())
+                .await
+                .expect("save succeeds");
+        }
+        service
+            .add_reference(Reference::new(incoming.id(), deleted.id()))
+            .await
+            .expect("incoming reference succeeds");
+        service
+            .add_reference(Reference::new(deleted.id(), outgoing.id()))
+            .await
+            .expect("outgoing reference succeeds");
+
+        service
+            .delete_node(deleted.id())
+            .await
+            .expect("deletion succeeds");
+
+        assert_eq!(service.find_node(deleted.id()).await.unwrap(), None);
+        assert!(
+            service
+                .nodes_referenced_by(incoming.id(), 0, 100)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            service
+                .nodes_referencing(outgoing.id(), 0, 100)
+                .await
+                .unwrap()
+                .is_empty()
         );
     }
 }

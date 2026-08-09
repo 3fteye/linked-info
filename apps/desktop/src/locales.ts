@@ -14,8 +14,15 @@ export const resources = {
         itemCount: "{{count}} 条",
       },
       actions: {
+        cancel: "取消",
+        confirmDeleteNode: "删除节点",
+        deleteNode: "删除节点",
         newNode: "新建节点",
         editNode: "编辑节点",
+      },
+      deleteNode: {
+        title: "删除这个节点？",
+        body: "节点“{{name}}”以及与它连接的全部引用都会被删除。此操作无法撤销。",
       },
       search: {
         label: "搜索节点",
@@ -56,6 +63,29 @@ export const resources = {
       settings: {
         language: "界面语言",
       },
+      backup: {
+        title: "工作区备份",
+        description: "导出或恢复节点、引用和画布位置。筛选状态不会写入备份。",
+        export: "导出",
+        import: "导入",
+        restoreRecovery: "恢复导入前数据",
+        exportSuccess: "工作区已导出。",
+        exportFailed: "导出失败，未写入文件。",
+        importFailed: "导入失败，当前工作区没有改变。",
+        importSuccess: "工作区已导入，原数据已保存在本地恢复副本中。",
+        recoverySuccess: "恢复副本已载入，刚才的数据也已保留为恢复副本。",
+        recoveryUnavailable: "没有可用的本地恢复副本。",
+        recoverySource: "本地恢复副本",
+        confirmTitle: "替换当前工作区？",
+        confirmBody: "将从“{{name}}”恢复 {{nodes}} 个节点和 {{references}} 条引用。当前工作区会先保存在本地，确认后才会被替换。",
+        confirmReplace: "确认替换",
+        errors: {
+          invalidJson: "所选文件不是有效的 JSON。",
+          invalidFormat: "所选文件不是关联信息工作区备份。",
+          unsupportedVersion: "此备份版本暂不受支持。",
+          invalidWorkspace: "备份中的节点、引用或画布位置不完整，未执行导入。",
+        },
+      },
       language: {
         zhCN: "简体中文",
         enUS: "English",
@@ -81,8 +111,15 @@ export const resources = {
         itemCount: "{{count}} items",
       },
       actions: {
+        cancel: "Cancel",
+        confirmDeleteNode: "Delete node",
+        deleteNode: "Delete node",
         newNode: "New node",
         editNode: "Edit node",
+      },
+      deleteNode: {
+        title: "Delete this node?",
+        body: "“{{name}}” and every reference connected to it will be deleted. This cannot be undone.",
       },
       search: {
         label: "Search nodes",
@@ -122,6 +159,29 @@ export const resources = {
       },
       settings: {
         language: "Interface language",
+      },
+      backup: {
+        title: "Workspace backup",
+        description: "Export or restore nodes, references, and canvas positions. Filters are excluded.",
+        export: "Export",
+        import: "Import",
+        restoreRecovery: "Restore pre-import data",
+        exportSuccess: "Workspace exported.",
+        exportFailed: "Export failed. No file was written.",
+        importFailed: "Import failed. The current workspace was not changed.",
+        importSuccess: "Workspace imported. Previous data is available as a local recovery copy.",
+        recoverySuccess: "Recovery copy loaded. The workspace it replaced is now the recovery copy.",
+        recoveryUnavailable: "No local recovery copy is available.",
+        recoverySource: "Local recovery copy",
+        confirmTitle: "Replace the current workspace?",
+        confirmBody: "Restore {{nodes}} nodes and {{references}} references from “{{name}}”. The current workspace will be preserved locally before replacement.",
+        confirmReplace: "Replace workspace",
+        errors: {
+          invalidJson: "The selected file is not valid JSON.",
+          invalidFormat: "The selected file is not a Linked Info workspace backup.",
+          unsupportedVersion: "This backup version is not supported yet.",
+          invalidWorkspace: "The backup contains incomplete nodes, references, or canvas positions. Nothing was imported.",
+        },
       },
       language: {
         zhCN: "简体中文",

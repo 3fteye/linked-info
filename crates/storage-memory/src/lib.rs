@@ -78,6 +78,21 @@ impl GraphStore for MemoryGraphStore {
         Ok(())
     }
 
+    async fn delete_node(&self, id: NodeId) -> Result<(), Self::Error> {
+        let mut state = self.state.write().expect("memory store lock poisoned");
+        let deleted = state
+            .nodes
+            .remove(&id)
+            .ok_or(MemoryStoreError::NodeNotFound(id))?;
+        if let Some(normalized_name) = deleted.normalized_name() {
+            state.node_names.remove(&normalized_name);
+        }
+        state.references.retain(|reference| {
+            reference.source_node_id() != id && reference.target_node_id() != id
+        });
+        Ok(())
+    }
+
     async fn add_reference(&self, reference: Reference) -> Result<(), Self::Error> {
         let mut state = self.state.write().expect("memory store lock poisoned");
 
@@ -227,5 +242,16 @@ mod tests {
             .expect("second unnamed node saves");
 
         assert_eq!(store.list_nodes(0, 100).await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn deleting_a_missing_node_returns_not_found() {
+        let store = MemoryGraphStore::default();
+        let missing_id = NodeId::new();
+
+        assert_eq!(
+            store.delete_node(missing_id).await,
+            Err(MemoryStoreError::NodeNotFound(missing_id))
+        );
     }
 }

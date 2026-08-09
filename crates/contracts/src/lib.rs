@@ -109,6 +109,7 @@ pub struct ApiErrorResponse {
         endpoints::create_node,
         endpoints::get_node,
         endpoints::update_node,
+        endpoints::delete_node,
         endpoints::list_references,
         endpoints::list_referrers,
         endpoints::create_reference,
@@ -199,6 +200,18 @@ mod endpoints {
     pub fn update_node() {}
 
     #[utoipa::path(
+        delete,
+        path = "/v1/nodes/{node_id}",
+        params(("node_id" = Uuid, Path, description = "Stable node ID")),
+        responses(
+            (status = 204, description = "Node and all connected references removed"),
+            (status = 404, description = "Node not found", body = ApiErrorResponse)
+        ),
+        tag = "nodes"
+    )]
+    pub fn delete_node() {}
+
+    #[utoipa::path(
         get,
         path = "/v1/nodes/{node_id}/references",
         params(
@@ -258,6 +271,7 @@ mod tests {
         let document = serde_json::to_value(openapi_document()).expect("OpenAPI serializes");
 
         assert!(document["paths"][routes::NODES].is_object());
+        assert!(document["paths"][routes::NODE]["delete"].is_object());
         assert!(document["paths"][routes::NODE_REFERENCES].is_object());
         assert!(document["paths"][routes::REFERENCE].is_object());
     }

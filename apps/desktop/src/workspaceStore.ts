@@ -21,13 +21,19 @@ export interface WorkspaceSnapshot {
   references: NodeReference[];
 }
 
-const workspaceStorageKey = "linked-info.workspace.v1";
+export interface WorkspacePersistence {
+  load(): WorkspaceSnapshot;
+  loadRecovery(): WorkspaceSnapshot | null;
+  preserveForRecovery(workspace: WorkspaceSnapshot): void;
+  save(workspace: WorkspaceSnapshot): void;
+}
 
-const emptyWorkspace: WorkspaceSnapshot = {
-  nodes: [],
-  layout: [],
-  references: [],
-};
+const workspaceStorageKey = "linked-info.workspace.v1";
+const workspaceRecoveryStorageKey = "linked-info.workspace.recovery.v1";
+
+function emptyWorkspace(): WorkspaceSnapshot {
+  return { nodes: [], layout: [], references: [] };
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -58,10 +64,9 @@ export function isUnnamedNode(node: InformationNode): boolean {
   return node.name === null || node.name.trim().length === 0;
 }
 
-export function loadWorkspace(): WorkspaceSnapshot {
-  const stored = readJson(workspaceStorageKey);
+function parseStoredWorkspace(stored: unknown): WorkspaceSnapshot | null {
   if (!isRecord(stored) || stored.version !== 1 || !Array.isArray(stored.nodes)) {
-    return emptyWorkspace;
+    return null;
   }
 
   const nodes: InformationNode[] = [];
@@ -149,9 +154,24 @@ export function loadWorkspace(): WorkspaceSnapshot {
   return { nodes, layout, references };
 }
 
-export function saveWorkspace(workspace: WorkspaceSnapshot): void {
+function saveStoredWorkspace(key: string, workspace: WorkspaceSnapshot): void {
   localStorage.setItem(
-    workspaceStorageKey,
+    key,
     JSON.stringify({ version: 1, ...workspace }),
   );
 }
+
+export const localWorkspacePersistence: WorkspacePersistence = {
+  load() {
+    return parseStoredWorkspace(readJson(workspaceStorageKey)) ?? emptyWorkspace();
+  },
+  loadRecovery() {
+    return parseStoredWorkspace(readJson(workspaceRecoveryStorageKey));
+  },
+  preserveForRecovery(workspace) {
+    saveStoredWorkspace(workspaceRecoveryStorageKey, workspace);
+  },
+  save(workspace) {
+    saveStoredWorkspace(workspaceStorageKey, workspace);
+  },
+};

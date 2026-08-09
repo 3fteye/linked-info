@@ -121,6 +121,7 @@ button {
 .canvas-icon-button:focus-visible,
 .primary-button:focus-visible,
 .secondary-button:focus-visible,
+.danger-button:focus-visible,
 .node-list-row:focus-visible {
   outline: 2px solid #2c7d58;
   outline-offset: 2px;
@@ -351,6 +352,7 @@ h1 {
 
 .primary-button,
 .secondary-button,
+.danger-button,
 .icon-button,
 .canvas-icon-button {
   display: inline-flex;
@@ -360,7 +362,8 @@ h1 {
 }
 
 .primary-button,
-.secondary-button {
+.secondary-button,
+.danger-button {
   min-height: 36px;
   padding: 0 13px;
   gap: 7px;
@@ -386,6 +389,15 @@ h1 {
 
 .secondary-button:hover {
   background: #f3f6f3;
+}
+
+.danger-button {
+  color: #ffffff;
+  background: #a4433d;
+}
+
+.danger-button:hover {
+  background: #8e3732;
 }
 
 .icon-button,
@@ -716,6 +728,15 @@ h1 {
   background: #eaf2ed;
 }
 
+.graph-context-menu .danger-menu-item {
+  color: #963d37;
+}
+
+.graph-context-menu .danger-menu-item:hover {
+  color: #7d2f2a;
+  background: #f8e9e7;
+}
+
 .node-list-view {
   min-width: 0;
   min-height: 0;
@@ -798,6 +819,81 @@ h1 {
   color: #343935;
   font-size: 14px;
   font-weight: 550;
+}
+
+.setting-label-copy {
+  display: grid;
+  gap: 4px;
+}
+
+.setting-label-copy small {
+  max-width: 330px;
+  color: #747b75;
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 1.45;
+}
+
+.data-setting-row {
+  align-items: flex-start;
+  min-height: 88px;
+  padding: 16px 0;
+  flex-wrap: wrap;
+}
+
+.backup-actions {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.backup-status {
+  width: 100%;
+  margin: -2px 0 0;
+  color: #536159;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgb(20 28 23 / 38%);
+}
+
+.confirmation-dialog {
+  width: min(430px, 100%);
+  padding: 22px;
+  border: 1px solid #d5dbd6;
+  border-radius: 9px;
+  color: #252a26;
+  background: #ffffff;
+  box-shadow: 0 18px 52px rgb(19 30 23 / 24%);
+}
+
+.confirmation-dialog h2 {
+  font-size: 17px;
+  font-weight: 650;
+}
+
+.confirmation-dialog p {
+  margin: 12px 0 0;
+  color: #5f675f;
+  font-size: 13px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.confirmation-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 20px;
+  gap: 8px;
 }
 
 .segmented-control {
@@ -918,6 +1014,11 @@ h1 {
 
   .segmented-control {
     width: 100%;
+  }
+
+  .backup-actions {
+    width: 100%;
+    justify-content: flex-start;
   }
 }
 

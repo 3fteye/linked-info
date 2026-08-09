@@ -34,7 +34,10 @@ fn router(env: Env) -> Router {
         .route(routes::HEALTH, get(health))
         .route(routes::OPENAPI, get(openapi))
         .route(routes::NODES, get(list_nodes).post(create_node))
-        .route(routes::NODE, get(get_node).put(update_node))
+        .route(
+            routes::NODE,
+            get(get_node).put(update_node).delete(delete_node),
+        )
         .route(routes::NODE_REFERENCES, get(list_references))
         .route(routes::NODE_REFERRERS, get(list_referrers))
         .route(routes::REFERENCES, axum::routing::post(create_reference))
@@ -125,6 +128,19 @@ async fn update_node(
     node.set_content(request.content);
     service.save_node(node.clone()).await?;
     Ok(Json(node_resource(&node)))
+}
+
+#[worker::send]
+async fn delete_node(
+    State(state): State<AppState>,
+    Path(node_id): Path<String>,
+) -> Result<StatusCode, ApiFailure> {
+    let node_id = parse_node_id(&node_id)?;
+    match graph_service(&state)?.delete_node(node_id).await {
+        Ok(()) => Ok(StatusCode::NO_CONTENT),
+        Err(D1StoreError::NodeNotFound(_)) => Err(ApiFailure::NodeNotFound),
+        Err(error) => Err(ApiFailure::from(error)),
+    }
 }
 
 #[worker::send]
