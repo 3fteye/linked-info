@@ -131,12 +131,7 @@ impl GraphStore for D1GraphStore {
             Some(content) => D1Type::Text(content),
             None => D1Type::Null,
         };
-        let values = [
-            D1Type::Text(&id),
-            name,
-            normalized_name,
-            content,
-        ];
+        let values = [D1Type::Text(&id), name, normalized_name, content];
         let result = self
             .database
             .prepare(SAVE_NODE_SQL)

@@ -46,11 +46,7 @@ impl GraphStore for MemoryGraphStore {
         let query = linked_info_domain::normalize_node_name(&query);
         let state = self.state.read().expect("memory store lock poisoned");
         let mut nodes: Vec<_> = state.nodes.values().cloned().collect();
-        nodes.retain(|node| {
-            node.normalized_name()
-                .unwrap_or_default()
-                .contains(&query)
-        });
+        nodes.retain(|node| node.normalized_name().unwrap_or_default().contains(&query));
         nodes.sort_by_key(Node::normalized_name);
         Ok(paginate(nodes, offset, limit))
     }
@@ -71,11 +67,7 @@ impl GraphStore for MemoryGraphStore {
             return Err(MemoryStoreError::DuplicateNodeName);
         }
 
-        if let Some(existing_name) = state
-            .nodes
-            .get(&node.id())
-            .and_then(Node::normalized_name)
-        {
+        if let Some(existing_name) = state.nodes.get(&node.id()).and_then(Node::normalized_name) {
             state.node_names.remove(&existing_name);
         }
 
