@@ -65,6 +65,7 @@ async fn openapi() -> impl IntoResponse {
     Json(openapi_document())
 }
 
+#[worker::send]
 async fn list_nodes(
     State(state): State<AppState>,
     query: Result<Query<ListNodesQuery>, QueryRejection>,
@@ -83,6 +84,7 @@ async fn list_nodes(
     Ok(Json(node_list_response(nodes, page)))
 }
 
+#[worker::send]
 async fn create_node(
     State(state): State<AppState>,
     payload: Result<Json<CreateNodeRequest>, JsonRejection>,
@@ -93,6 +95,7 @@ async fn create_node(
     Ok((StatusCode::CREATED, Json(node_resource(&node))))
 }
 
+#[worker::send]
 async fn get_node(
     State(state): State<AppState>,
     Path(node_id): Path<String>,
@@ -105,6 +108,7 @@ async fn get_node(
     Ok(Json(node_resource(&node)))
 }
 
+#[worker::send]
 async fn update_node(
     State(state): State<AppState>,
     Path(node_id): Path<String>,
@@ -123,6 +127,7 @@ async fn update_node(
     Ok(Json(node_resource(&node)))
 }
 
+#[worker::send]
 async fn list_references(
     State(state): State<AppState>,
     Path(node_id): Path<String>,
@@ -139,6 +144,7 @@ async fn list_references(
     Ok(Json(node_list_response(nodes, page)))
 }
 
+#[worker::send]
 async fn list_referrers(
     State(state): State<AppState>,
     Path(node_id): Path<String>,
@@ -155,6 +161,7 @@ async fn list_referrers(
     Ok(Json(node_list_response(nodes, page)))
 }
 
+#[worker::send]
 async fn create_reference(
     State(state): State<AppState>,
     payload: Result<Json<CreateReferenceRequest>, JsonRejection>,
@@ -174,6 +181,7 @@ async fn create_reference(
     ))
 }
 
+#[worker::send]
 async fn remove_reference(
     State(state): State<AppState>,
     Path((source_node_id, target_node_id)): Path<(String, String)>,
