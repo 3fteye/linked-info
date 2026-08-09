@@ -61,12 +61,20 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Build desktop package
+        if: matrix.platform != 'windows'
         working-directory: apps/desktop
         run: pnpm tauri build
+
+      - name: Build Windows portable executable
+        if: matrix.platform == 'windows'
+        working-directory: apps/desktop
+        run: pnpm tauri build --no-bundle
 
       - name: Upload desktop package
         uses: actions/upload-artifact@v7
         with:
           name: linked-info-${{ matrix.platform }}
-          path: target/release/bundle/**
+          path: |
+            target/release/bundle/**
+            target/release/linked-info-desktop.exe
           if-no-files-found: error
