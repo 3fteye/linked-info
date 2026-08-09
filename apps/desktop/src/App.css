@@ -34,6 +34,11 @@ button {
   cursor: pointer;
 }
 
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 .visually-hidden {
   position: absolute;
   width: 1px;
@@ -52,6 +57,47 @@ button {
   width: 100%;
   height: 100%;
   background: #ffffff;
+}
+
+.storage-problem-shell {
+  display: grid;
+  width: 100%;
+  height: 100%;
+  place-items: center;
+  padding: 28px;
+  background: #eef1ee;
+}
+
+.storage-problem-card {
+  width: min(560px, 100%);
+  padding: 28px;
+  border: 1px solid #d8ddd8;
+  border-radius: 10px;
+  background: #ffffff;
+  box-shadow: 0 12px 36px rgb(25 38 30 / 12%);
+}
+
+.storage-problem-icon {
+  color: #a45a2c;
+}
+
+.storage-problem-card h1 {
+  margin-top: 12px;
+  font-size: 20px;
+}
+
+.storage-problem-card > p {
+  margin: 10px 0 0;
+  color: #606861;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.storage-problem-actions {
+  display: flex;
+  margin-top: 20px;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .sidebar {

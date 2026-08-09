@@ -2,6 +2,7 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
 import "./i18n";
+import { localWorkspacePersistence } from "./workspaceStore";
 
 document.addEventListener(
   "contextmenu",
@@ -11,6 +12,6 @@ document.addEventListener(
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
-    <App />
+    <App persistence={localWorkspacePersistence} />
   </React.StrictMode>,
 );

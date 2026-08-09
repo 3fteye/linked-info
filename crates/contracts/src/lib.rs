@@ -205,7 +205,9 @@ mod endpoints {
         params(("node_id" = Uuid, Path, description = "Stable node ID")),
         responses(
             (status = 204, description = "Node and all connected references removed"),
-            (status = 404, description = "Node not found", body = ApiErrorResponse)
+            (status = 400, description = "Invalid node ID", body = ApiErrorResponse),
+            (status = 404, description = "Node not found", body = ApiErrorResponse),
+            (status = 500, description = "Storage failure", body = ApiErrorResponse)
         ),
         tag = "nodes"
     )]
@@ -272,6 +274,9 @@ mod tests {
 
         assert!(document["paths"][routes::NODES].is_object());
         assert!(document["paths"][routes::NODE]["delete"].is_object());
+        assert!(document["paths"][routes::NODE]["delete"]["responses"]["400"].is_object());
+        assert!(document["paths"][routes::NODE]["delete"]["responses"]["404"].is_object());
+        assert!(document["paths"][routes::NODE]["delete"]["responses"]["500"].is_object());
         assert!(document["paths"][routes::NODE_REFERENCES].is_object());
         assert!(document["paths"][routes::REFERENCE].is_object());
     }

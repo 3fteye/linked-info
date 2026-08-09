@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  AlertTriangle,
   ArchiveRestore,
   Database,
   Download,
@@ -11,6 +12,7 @@ import {
   Plus,
   Search,
   Settings,
+  Trash2,
   Upload,
   X,
 } from "lucide-react";
@@ -18,13 +20,16 @@ import { useTranslation } from "react-i18next";
 import GraphCanvas from "./GraphCanvas";
 import { supportedLanguages, type SupportedLanguage } from "./locales";
 import {
+  emptyWorkspace,
+  isNodeNameAvailable,
   isUnnamedNode,
-  localWorkspacePersistence,
   normalizeNodeName,
   type InformationNode,
   type NodeLayout,
   type NodeReference,
   type WorkspaceSnapshot,
+  type WorkspaceLoadResult,
+  type WorkspacePersistence,
 } from "./workspaceStore";
 import {
   parseWorkspaceExport,
@@ -43,6 +48,10 @@ interface PendingWorkspaceReplacement {
   kind: "import" | "recovery";
   sourceName: string;
   workspace: WorkspaceSnapshot;
+}
+
+interface AppProps {
+  persistence: WorkspacePersistence;
 }
 
 const importFailureTranslationKeys: Record<WorkspaceImportFailure, string> = {
@@ -98,11 +107,16 @@ function nodeFilterLabel(
   return `${unnamedLabel} · ${summary || noContentLabel}`;
 }
 
-function App() {
+function App({ persistence }: AppProps) {
   const { t, i18n } = useTranslation();
   const [activeView, setActiveView] = useState<ViewId>("canvas");
-  const [workspace, setWorkspace] = useState(() => localWorkspacePersistence.load());
+  const [workspace, setWorkspace] = useState(emptyWorkspace);
   const workspaceRef = useRef(workspace);
+  const [persistenceReady, setPersistenceReady] = useState(false);
+  const [primaryStorageProblem, setPrimaryStorageProblem] = useState<string | null>(null);
+  const [recoveryStorageProblem, setRecoveryStorageProblem] = useState<string | null>(null);
+  const [confirmClearUnreadable, setConfirmClearUnreadable] = useState(false);
+  const [storageProblemStatus, setStorageProblemStatus] = useState<string | null>(null);
   const [editingNodeId, setEditingNodeId] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState("");
   const [unnamedOnly, setUnnamedOnly] = useState(false);
@@ -110,12 +124,54 @@ function App() {
   const [pendingWorkspaceReplacement, setPendingWorkspaceReplacement] =
     useState<PendingWorkspaceReplacement | null>(null);
   const [backupStatus, setBackupStatus] = useState<string | null>(null);
-  const [recoveryAvailable, setRecoveryAvailable] = useState(
-    () => localWorkspacePersistence.loadRecovery() !== null,
-  );
+  const [recoveryAvailable, setRecoveryAvailable] = useState(false);
   const currentView = views.find((view) => view.id === activeView) ?? views[0];
   const activeLanguage = i18n.resolvedLanguage ?? i18n.language;
   const normalizedSearch = normalizeNodeName(searchTerm);
+
+  useEffect(() => {
+    let active = true;
+
+    async function initializePersistence() {
+      try {
+        const [primary, recovery] = await Promise.all([
+          persistence.load(),
+          persistence.loadRecovery(),
+        ]);
+        if (!active) {
+          return;
+        }
+
+        if (primary.status === "ready") {
+          workspaceRef.current = primary.workspace;
+          setWorkspace(primary.workspace);
+          setPersistenceReady(true);
+        } else if (primary.status === "missing") {
+          const initialWorkspace = emptyWorkspace();
+          workspaceRef.current = initialWorkspace;
+          setWorkspace(initialWorkspace);
+          setPersistenceReady(true);
+        } else {
+          setPrimaryStorageProblem(primary.raw);
+        }
+
+        if (recovery.status === "ready") {
+          setRecoveryAvailable(true);
+        } else if (recovery.status === "invalid") {
+          setRecoveryStorageProblem(recovery.raw);
+        }
+      } catch {
+        if (active) {
+          setPrimaryStorageProblem("");
+        }
+      }
+    }
+
+    void initializePersistence();
+    return () => {
+      active = false;
+    };
+  }, [persistence]);
 
   const referencedTargetIdsBySource = useMemo(() => {
     const targetIdsBySource = new Map<string, Set<string>>();
@@ -182,23 +238,34 @@ function App() {
   }, [workspace.nodes]);
 
   useEffect(() => {
+    if (!persistenceReady) {
+      return;
+    }
     workspaceRef.current = workspace;
     const saveTimer = window.setTimeout(
-      () => localWorkspacePersistence.save(workspace),
+      () => {
+        void persistence.save(workspace).catch(() => {
+          setBackupStatus(t("storage.saveFailed"));
+        });
+      },
       300,
     );
     return () => window.clearTimeout(saveTimer);
-  }, [workspace]);
+  }, [persistence, persistenceReady, t, workspace]);
 
   useEffect(() => {
-    const flushLocalWorkspace = () =>
-      localWorkspacePersistence.save(workspaceRef.current);
+    if (!persistenceReady) {
+      return;
+    }
+    const flushLocalWorkspace = () => {
+      void persistence.save(workspaceRef.current);
+    };
     window.addEventListener("beforeunload", flushLocalWorkspace);
     return () => {
       window.removeEventListener("beforeunload", flushLocalWorkspace);
       flushLocalWorkspace();
     };
-  }, []);
+  }, [persistence, persistenceReady]);
 
   function changeLanguage(language: SupportedLanguage) {
     void i18n.changeLanguage(language);
@@ -212,7 +279,9 @@ function App() {
       const next = updater(current);
       workspaceRef.current = next;
       if (flushImmediately) {
-        localWorkspacePersistence.save(next);
+        void persistence.save(next).catch(() => {
+          setBackupStatus(t("storage.saveFailed"));
+        });
       }
       return next;
     });
@@ -257,13 +326,17 @@ function App() {
     );
   }
 
-  function updateNodeName(nodeId: string, name: string) {
+  function updateNodeName(nodeId: string, name: string): boolean {
+    if (!isNodeNameAvailable(workspaceRef.current.nodes, nodeId, name)) {
+      return false;
+    }
     updateWorkspace((current) => ({
       ...current,
       nodes: current.nodes.map((node) =>
         node.id === nodeId ? { ...node, name: name.length === 0 ? null : name } : node,
       ),
     }));
+    return true;
   }
 
   function updateNodeContent(nodeId: string, content: string) {
@@ -293,9 +366,7 @@ function App() {
       }),
       true,
     );
-    if (!nameConflictNodeIds.has(nodeId)) {
-      setEditingNodeId((current) => (current === nodeId ? null : current));
-    }
+    setEditingNodeId((current) => (current === nodeId ? null : current));
   }
 
   function updateLayout(layout: NodeLayout[]) {
@@ -356,29 +427,41 @@ function App() {
     }
   }
 
-  function chooseRecoveryWorkspace() {
+  async function chooseRecoveryWorkspace() {
     setBackupStatus(null);
-    const recovery = localWorkspacePersistence.loadRecovery();
-    if (recovery === null) {
+    let recovery: WorkspaceLoadResult;
+    try {
+      recovery = await persistence.loadRecovery();
+    } catch {
+      setBackupStatus(t("backup.recoveryUnavailable"));
+      return;
+    }
+    if (recovery.status === "missing") {
       setRecoveryAvailable(false);
       setBackupStatus(t("backup.recoveryUnavailable"));
+      return;
+    }
+    if (recovery.status === "invalid") {
+      setRecoveryAvailable(false);
+      setRecoveryStorageProblem(recovery.raw);
+      setBackupStatus(t("backup.recoveryInvalid"));
       return;
     }
     setPendingWorkspaceReplacement({
       kind: "recovery",
       sourceName: t("backup.recoverySource"),
-      workspace: recovery,
+      workspace: recovery.workspace,
     });
   }
 
-  function applyWorkspaceReplacement() {
+  async function applyWorkspaceReplacement() {
     if (pendingWorkspaceReplacement === null) {
       return;
     }
 
     try {
-      localWorkspacePersistence.preserveForRecovery(workspaceRef.current);
-      localWorkspacePersistence.save(pendingWorkspaceReplacement.workspace);
+      await persistence.preserveForRecovery(workspaceRef.current);
+      await persistence.save(pendingWorkspaceReplacement.workspace);
       workspaceRef.current = pendingWorkspaceReplacement.workspace;
       setWorkspace(pendingWorkspaceReplacement.workspace);
       setEditingNodeId(null);
@@ -386,6 +469,7 @@ function App() {
       setUnnamedOnly(false);
       setReferenceFilterNodeIds([]);
       setRecoveryAvailable(true);
+      setRecoveryStorageProblem(null);
       setActiveView("canvas");
       setBackupStatus(
         pendingWorkspaceReplacement.kind === "recovery"
@@ -396,6 +480,120 @@ function App() {
     } catch {
       setBackupStatus(t("backup.importFailed"));
     }
+  }
+
+  async function exportUnreadableData(raw: string, source: "primary" | "recovery") {
+    setStorageProblemStatus(null);
+    try {
+      const date = new Date().toISOString().slice(0, 10);
+      const exported = await exportWorkspaceFile(
+        raw,
+        `linked-info-unreadable-${source}-${date}.json`,
+      );
+      if (exported) {
+        const message = t("storageProblem.exportSuccess");
+        setStorageProblemStatus(message);
+        if (source === "recovery") {
+          setBackupStatus(message);
+        }
+      }
+    } catch {
+      const message = t("storageProblem.exportFailed");
+      setStorageProblemStatus(message);
+      if (source === "recovery") {
+        setBackupStatus(message);
+      }
+    }
+  }
+
+  async function clearUnreadableWorkspace() {
+    const initialWorkspace = emptyWorkspace();
+    try {
+      await persistence.save(initialWorkspace);
+      workspaceRef.current = initialWorkspace;
+      setWorkspace(initialWorkspace);
+      setPrimaryStorageProblem(null);
+      setConfirmClearUnreadable(false);
+      setPersistenceReady(true);
+    } catch {
+      setStorageProblemStatus(t("storageProblem.clearFailed"));
+    }
+  }
+
+  if (!persistenceReady) {
+    return (
+      <main className="storage-problem-shell">
+        {primaryStorageProblem === null ? (
+          <section className="storage-problem-card" aria-live="polite">
+            <p>{t("storageProblem.loading")}</p>
+          </section>
+        ) : (
+          <section className="storage-problem-card" aria-labelledby="storage-problem-title">
+            <AlertTriangle aria-hidden="true" className="storage-problem-icon" size={28} />
+            <h1 id="storage-problem-title">{t("storageProblem.title")}</h1>
+            <p>{t("storageProblem.description")}</p>
+            <div className="storage-problem-actions">
+              <button
+                className="secondary-button"
+                disabled={primaryStorageProblem.length === 0}
+                onClick={() =>
+                  void exportUnreadableData(primaryStorageProblem, "primary")
+                }
+                type="button"
+              >
+                <Download size={15} />
+                {t("storageProblem.exportRaw")}
+              </button>
+              <button
+                className="danger-button"
+                onClick={() => setConfirmClearUnreadable(true)}
+                type="button"
+              >
+                <Trash2 size={15} />
+                {t("storageProblem.clear")}
+              </button>
+            </div>
+            {storageProblemStatus !== null && (
+              <p className="backup-status" role="status">
+                {storageProblemStatus}
+              </p>
+            )}
+          </section>
+        )}
+
+        {confirmClearUnreadable && (
+          <div className="modal-backdrop" role="presentation">
+            <section
+              aria-labelledby="clear-unreadable-dialog-title"
+              aria-modal="true"
+              className="confirmation-dialog"
+              role="dialog"
+            >
+              <h2 id="clear-unreadable-dialog-title">
+                {t("storageProblem.confirmTitle")}
+              </h2>
+              <p>{t("storageProblem.confirmBody")}</p>
+              <div className="confirmation-dialog-actions">
+                <button
+                  className="secondary-button"
+                  onClick={() => setConfirmClearUnreadable(false)}
+                  type="button"
+                >
+                  {t("actions.cancel")}
+                </button>
+                <button
+                  className="danger-button"
+                  onClick={() => void clearUnreadableWorkspace()}
+                  type="button"
+                >
+                  {t("storageProblem.confirmClear")}
+                </button>
+              </div>
+            </section>
+          </div>
+        )}
+      </main>
+    );
   }
 
   return (
@@ -594,11 +792,23 @@ function App() {
                   {recoveryAvailable && (
                     <button
                       className="secondary-button"
-                      onClick={chooseRecoveryWorkspace}
+                      onClick={() => void chooseRecoveryWorkspace()}
                       type="button"
                     >
                       <ArchiveRestore size={15} />
                       {t("backup.restoreRecovery")}
+                    </button>
+                  )}
+                  {recoveryStorageProblem !== null && (
+                    <button
+                      className="secondary-button"
+                      onClick={() =>
+                        void exportUnreadableData(recoveryStorageProblem, "recovery")
+                      }
+                      type="button"
+                    >
+                      <Download size={15} />
+                      {t("backup.exportInvalidRecovery")}
                     </button>
                   )}
                 </div>
@@ -704,7 +914,7 @@ function App() {
               </button>
               <button
                 className="primary-button"
-                onClick={applyWorkspaceReplacement}
+                onClick={() => void applyWorkspaceReplacement()}
                 type="button"
               >
                 {t("backup.confirmReplace")}

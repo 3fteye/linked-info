@@ -56,7 +56,7 @@ interface InformationNodeData extends Record<string, unknown> {
   targetLabel: string;
   onCommit: (nodeId: string) => void;
   onContentChange: (nodeId: string, content: string) => void;
-  onNameChange: (nodeId: string, name: string) => void;
+  onNameChange: (nodeId: string, name: string) => boolean;
   onToggleReferenceFilter: (nodeId: string) => void;
 }
 
@@ -101,7 +101,7 @@ interface GraphCanvasProps {
   onLayoutChange: (layout: NodeLayout[]) => void;
   onNodeCommit: (nodeId: string) => void;
   onNodeContentChange: (nodeId: string, content: string) => void;
-  onNodeNameChange: (nodeId: string, name: string) => void;
+  onNodeNameChange: (nodeId: string, name: string) => boolean;
   onReferencesChange: (references: NodeReference[]) => void;
   onToggleReferenceFilter: (nodeId: string) => void;
 }
@@ -125,6 +125,7 @@ function InformationNodeCard({ id, data, selected }: NodeProps<InformationFlowNo
   const nameInputRef = useRef<HTMLInputElement>(null);
   const [nameValue, setNameValue] = useState(data.name ?? "");
   const [contentValue, setContentValue] = useState(data.content ?? "");
+  const [draftNameConflict, setDraftNameConflict] = useState(false);
 
   useEffect(() => {
     if (data.editing) {
@@ -133,6 +134,7 @@ function InformationNodeCard({ id, data, selected }: NodeProps<InformationFlowNo
 
     setNameValue(data.name ?? "");
     setContentValue(data.content ?? "");
+    setDraftNameConflict(false);
   }, [data.content, data.editing, data.name]);
 
   useLayoutEffect(() => {
@@ -155,6 +157,9 @@ function InformationNodeCard({ id, data, selected }: NodeProps<InformationFlowNo
     }
 
     window.setTimeout(() => {
+      if (draftNameConflict) {
+        return;
+      }
       const nodeElement = nodeRef.current;
       if (nodeElement?.contains(document.activeElement)) {
         return;
@@ -182,13 +187,13 @@ function InformationNodeCard({ id, data, selected }: NodeProps<InformationFlowNo
           <>
             <GripVertical aria-hidden="true" className="graph-node-drag-handle" size={15} />
             <input
-              aria-invalid={data.nameConflict}
+              aria-invalid={data.nameConflict || draftNameConflict}
               aria-label={data.nameLabel}
               autoFocus
               className="nodrag nowheel graph-node-name-input"
               onChange={(event) => {
                 setNameValue(event.target.value);
-                data.onNameChange(id, event.target.value);
+                setDraftNameConflict(!data.onNameChange(id, event.target.value));
               }}
               placeholder={data.namePlaceholder}
               ref={nameInputRef}
@@ -230,7 +235,7 @@ function InformationNodeCard({ id, data, selected }: NodeProps<InformationFlowNo
             rows={4}
             value={contentValue}
           />
-          {data.nameConflict && (
+          {(data.nameConflict || draftNameConflict) && (
             <span className="graph-node-error" role="alert">
               {data.nameConflictLabel}
             </span>
