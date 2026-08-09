@@ -1,143 +1,128 @@
-use std::collections::BTreeMap;
-
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use thiserror::Error;
 use uuid::Uuid;
 
-macro_rules! entity_id {
-    ($name:ident) => {
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-        #[serde(transparent)]
-        pub struct $name(Uuid);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct NodeId(Uuid);
 
-        impl $name {
-            pub fn new() -> Self {
-                Self(Uuid::new_v4())
-            }
-        }
-
-        impl Default for $name {
-            fn default() -> Self {
-                Self::new()
-            }
-        }
-    };
+impl NodeId {
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
 }
 
-entity_id!(InformationTypeId);
-entity_id!(InformationId);
-entity_id!(RelationTypeId);
-entity_id!(RelationId);
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FieldKind {
-    ShortText,
-    LongText,
-    Number,
-    Boolean,
-    Date,
-    Url,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
-pub enum FieldValue {
-    Text(String),
-    Number(f64),
-    Boolean(bool),
-    Date(String),
-    Url(String),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FieldDefinition {
-    pub key: String,
-    pub name: String,
-    pub kind: FieldKind,
-    pub required: bool,
-    pub position: u32,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct InformationType {
-    pub id: InformationTypeId,
-    pub name: String,
-    pub description: String,
-    pub fields: Vec<FieldDefinition>,
-    pub active: bool,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct InformationContext {
-    pub source: String,
-    pub reason: String,
-    pub scene: String,
-    pub outcome: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Information {
-    pub id: InformationId,
-    pub information_type_id: Option<InformationTypeId>,
-    pub title: String,
-    pub body: String,
-    pub fields: BTreeMap<String, FieldValue>,
-    pub context: InformationContext,
-    pub archived: bool,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
-
-impl Information {
-    pub fn new(
-        title: impl Into<String>,
-        body: impl Into<String>,
-        information_type_id: Option<InformationTypeId>,
-        context: InformationContext,
-    ) -> Result<Self, DomainError> {
-        let title = title.into().trim().to_owned();
-        if title.is_empty() {
-            return Err(DomainError::EmptyTitle);
-        }
-
-        let now = Utc::now();
-        Ok(Self {
-            id: InformationId::new(),
-            information_type_id,
-            title,
-            body: body.into(),
-            fields: BTreeMap::new(),
-            context,
-            archived: false,
-            created_at: now,
-            updated_at: now,
-        })
+impl Default for NodeId {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RelationType {
-    pub id: RelationTypeId,
-    pub forward_name: String,
-    pub reverse_name: String,
+pub struct Node {
+    id: NodeId,
+    name: NodeName,
+    content: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct InformationRelation {
-    pub id: RelationId,
-    pub relation_type_id: RelationTypeId,
-    pub from_id: InformationId,
-    pub to_id: InformationId,
-    pub note: String,
-    pub created_at: DateTime<Utc>,
+impl Node {
+    pub fn new(name: impl Into<String>, content: Option<String>) -> Result<Self, DomainError> {
+        let name = NodeName::new(name)?;
+
+        Ok(Self {
+            id: NodeId::new(),
+            name,
+            content,
+        })
+    }
+
+    pub fn id(&self) -> NodeId {
+        self.id
+    }
+
+    pub fn name(&self) -> &str {
+        self.name.as_str()
+    }
+
+    pub fn content(&self) -> Option<&str> {
+        self.content.as_deref()
+    }
+
+    pub fn rename(&mut self, name: impl Into<String>) -> Result<(), DomainError> {
+        self.name = NodeName::new(name)?;
+        Ok(())
+    }
+
+    pub fn set_content(&mut self, content: Option<String>) {
+        self.content = content;
+    }
+
+    pub fn normalized_name(&self) -> String {
+        normalize_node_name(self.name.as_str())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+struct NodeName(String);
+
+impl NodeName {
+    fn new(name: impl Into<String>) -> Result<Self, DomainError> {
+        let name = name.into();
+        let name = name.trim().to_owned();
+        if name.is_empty() {
+            return Err(DomainError::EmptyNodeName);
+        }
+
+        Ok(Self(name))
+    }
+
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for NodeName {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let name = String::deserialize(deserializer)?;
+        Self::new(name).map_err(D::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Reference {
+    source_node_id: NodeId,
+    target_node_id: NodeId,
+}
+
+impl Reference {
+    pub fn new(source_node_id: NodeId, target_node_id: NodeId) -> Self {
+        Self {
+            source_node_id,
+            target_node_id,
+        }
+    }
+
+    pub fn source_node_id(&self) -> NodeId {
+        self.source_node_id
+    }
+
+    pub fn target_node_id(&self) -> NodeId {
+        self.target_node_id
+    }
+}
+
+pub fn normalize_node_name(name: &str) -> String {
+    name.trim().to_lowercase()
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum DomainError {
-    #[error("information title cannot be empty")]
-    EmptyTitle,
+    #[error("node name cannot be empty")]
+    EmptyNodeName,
 }
 
 #[cfg(test)]
@@ -145,24 +130,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn information_requires_a_title() {
-        let result = Information::new("   ", "body", None, InformationContext::default());
+    fn node_requires_a_name() {
+        let result = Node::new("   ", None);
 
-        assert_eq!(result.unwrap_err(), DomainError::EmptyTitle);
+        assert_eq!(result.unwrap_err(), DomainError::EmptyNodeName);
     }
 
     #[test]
-    fn information_keeps_the_manual_context() {
-        let context = InformationContext {
-            source: "project documentation".into(),
-            reason: "needed for deployment".into(),
-            scene: "setting up a new machine".into(),
-            outcome: "not used yet".into(),
-        };
+    fn node_content_can_be_empty() {
+        let node = Node::new("OpenAI", None).expect("valid node");
 
-        let information = Information::new("Deploy script", "cargo run", None, context.clone())
-            .expect("valid information");
+        assert_eq!(node.content(), None);
+    }
 
-        assert_eq!(information.context, context);
+    #[test]
+    fn renaming_keeps_the_stable_id() {
+        let mut node = Node::new("OpenAI", None).expect("valid node");
+        let id = node.id();
+
+        node.rename("OpenAI API").expect("valid new name");
+
+        assert_eq!(node.id(), id);
+        assert_eq!(node.name(), "OpenAI API");
+    }
+
+    #[test]
+    fn normalized_names_ignore_surrounding_whitespace_and_case() {
+        assert_eq!(
+            normalize_node_name("  OpenAI  "),
+            normalize_node_name("openai")
+        );
     }
 }

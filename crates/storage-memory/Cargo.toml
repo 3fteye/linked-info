@@ -7,3 +7,7 @@ license.workspace = true
 [dependencies]
 linked-info-domain = { path = "../domain" }
 linked-info-storage-port = { path = "../storage-port" }
+thiserror.workspace = true
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }

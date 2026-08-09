@@ -180,6 +180,62 @@ h1 {
   font-weight: 550;
 }
 
+.settings-panel {
+  padding: 28px 32px;
+}
+
+.setting-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 56px;
+  max-width: 680px;
+  gap: 24px;
+  border-bottom: 1px solid #eceeeb;
+}
+
+.setting-label {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 10px;
+  color: #343935;
+  font-size: 14px;
+  font-weight: 550;
+}
+
+.segmented-control {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(92px, 1fr));
+  min-width: 204px;
+  padding: 3px;
+  border: 1px solid #d9ddd8;
+  border-radius: 7px;
+  background: #f1f3f0;
+}
+
+.segmented-control button {
+  min-height: 32px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 5px;
+  color: #626863;
+  background: transparent;
+  cursor: pointer;
+}
+
+.segmented-control button[data-active="true"] {
+  color: #184d35;
+  background: #ffffff;
+  box-shadow: 0 1px 2px rgb(24 39 30 / 12%);
+  font-weight: 600;
+}
+
+.segmented-control button:focus-visible {
+  outline: 2px solid #2c7d58;
+  outline-offset: 1px;
+}
+
 @media (max-width: 720px) {
   .app-shell {
     grid-template-columns: 72px minmax(0, 1fr);
@@ -213,5 +269,20 @@ h1 {
 
   .empty-state {
     padding: 20px;
+  }
+
+  .settings-panel {
+    padding: 20px;
+  }
+
+  .setting-row {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 12px;
+    padding-bottom: 18px;
+  }
+
+  .segmented-control {
+    width: 100%;
   }
 }
