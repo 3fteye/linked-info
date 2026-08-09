@@ -2,12 +2,14 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Database,
   FileText,
+  Filter,
   Languages,
   Link2,
   Network,
   Plus,
   Search,
   Settings,
+  X,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import GraphCanvas from "./GraphCanvas";
@@ -17,6 +19,7 @@ import {
   loadWorkspace,
   normalizeNodeName,
   saveWorkspace,
+  type InformationNode,
   type NodeLayout,
   type NodeReference,
   type WorkspaceSnapshot,
@@ -50,6 +53,27 @@ function defaultNodePosition(index: number): { x: number; y: number } {
   };
 }
 
+function compactContent(content: string | null, maxLength = 32): string {
+  const compacted = (content ?? "").replace(/\s+/g, " ").trim();
+  if (compacted.length <= maxLength) {
+    return compacted;
+  }
+  return `${compacted.slice(0, maxLength - 1)}…`;
+}
+
+function nodeFilterLabel(
+  node: InformationNode,
+  unnamedLabel: string,
+  noContentLabel: string,
+): string {
+  if (node.name !== null) {
+    return node.name;
+  }
+
+  const summary = compactContent(node.content);
+  return `${unnamedLabel} · ${summary || noContentLabel}`;
+}
+
 function App() {
   const { t, i18n } = useTranslation();
   const [activeView, setActiveView] = useState<ViewId>("canvas");
@@ -58,19 +82,57 @@ function App() {
   const [editingNodeId, setEditingNodeId] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState("");
   const [unnamedOnly, setUnnamedOnly] = useState(false);
+  const [referenceFilterNodeIds, setReferenceFilterNodeIds] = useState<string[]>([]);
   const currentView = views.find((view) => view.id === activeView) ?? views[0];
   const activeLanguage = i18n.resolvedLanguage ?? i18n.language;
   const normalizedSearch = normalizeNodeName(searchTerm);
 
+  const referencedTargetIdsBySource = useMemo(() => {
+    const targetIdsBySource = new Map<string, Set<string>>();
+    for (const reference of workspace.references) {
+      const targetIds = targetIdsBySource.get(reference.sourceNodeId) ?? new Set<string>();
+      targetIds.add(reference.targetNodeId);
+      targetIdsBySource.set(reference.sourceNodeId, targetIds);
+    }
+    return targetIdsBySource;
+  }, [workspace.references]);
+
   const filteredNodes = useMemo(() => {
     return workspace.nodes.filter(
       (node) =>
-        node.id === editingNodeId ||
-        ((!unnamedOnly || isUnnamedNode(node)) &&
+        (!unnamedOnly || isUnnamedNode(node)) &&
           (normalizedSearch.length === 0 ||
-            normalizeNodeName(node.name ?? "").includes(normalizedSearch))),
+            normalizeNodeName(node.name ?? "").includes(normalizedSearch)) &&
+          referenceFilterNodeIds.every((targetNodeId) =>
+            referencedTargetIdsBySource.get(node.id)?.has(targetNodeId),
+          ),
     );
-  }, [editingNodeId, normalizedSearch, unnamedOnly, workspace.nodes]);
+  }, [
+    normalizedSearch,
+    referenceFilterNodeIds,
+    referencedTargetIdsBySource,
+    unnamedOnly,
+    workspace.nodes,
+  ]);
+
+  const selectedReferenceFilterNodes = useMemo(() => {
+    const nodesById = new Map(workspace.nodes.map((node) => [node.id, node]));
+    return referenceFilterNodeIds
+      .map((nodeId) => nodesById.get(nodeId))
+      .filter((node): node is InformationNode => node !== undefined);
+  }, [referenceFilterNodeIds, workspace.nodes]);
+
+  const availableReferenceFilterNodes = useMemo(() => {
+    const selectedIds = new Set(referenceFilterNodeIds);
+    return workspace.nodes
+      .filter((node) => !selectedIds.has(node.id))
+      .sort((left, right) =>
+        nodeFilterLabel(left, t("nodes.unnamed"), t("nodes.noContent")).localeCompare(
+          nodeFilterLabel(right, t("nodes.unnamed"), t("nodes.noContent")),
+          activeLanguage,
+        ),
+      );
+  }, [activeLanguage, referenceFilterNodeIds, t, workspace.nodes]);
 
   const nameConflictNodeIds = useMemo(() => {
     const idsByName = new Map<string, string[]>();
@@ -192,6 +254,18 @@ function App() {
     updateWorkspace((current) => ({ ...current, references }), true);
   }
 
+  function toggleReferenceFilter(nodeId: string) {
+    if (!workspace.nodes.some((node) => node.id === nodeId)) {
+      return;
+    }
+
+    setReferenceFilterNodeIds((current) =>
+      current.includes(nodeId)
+        ? current.filter((currentNodeId) => currentNodeId !== nodeId)
+        : [...current, nodeId],
+    );
+  }
+
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -256,6 +330,65 @@ function App() {
                   value={searchTerm}
                 />
               </label>
+              <div className="reference-filter-area">
+                <label className="reference-filter-picker">
+                  <Filter aria-hidden="true" size={15} />
+                  <span className="visually-hidden">{t("filters.referencePicker")}</span>
+                  <select
+                    aria-label={t("filters.referencePicker")}
+                    disabled={availableReferenceFilterNodes.length === 0}
+                    onChange={(event) => {
+                      if (event.target.value.length > 0) {
+                        toggleReferenceFilter(event.target.value);
+                      }
+                    }}
+                    value=""
+                  >
+                    <option value="">{t("filters.addReference")}</option>
+                    {availableReferenceFilterNodes.map((node) => (
+                      <option key={node.id} value={node.id}>
+                        {nodeFilterLabel(node, t("nodes.unnamed"), t("nodes.noContent"))}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                {selectedReferenceFilterNodes.length > 0 && (
+                  <div
+                    aria-label={t("filters.activeReferences")}
+                    className="active-reference-filters"
+                  >
+                    {selectedReferenceFilterNodes.map((node) => {
+                      const label = nodeFilterLabel(
+                        node,
+                        t("nodes.unnamed"),
+                        t("nodes.noContent"),
+                      );
+                      return (
+                        <button
+                          aria-label={t("filters.removeReference", { name: label })}
+                          className="active-reference-filter"
+                          key={node.id}
+                          onClick={() => toggleReferenceFilter(node.id)}
+                          title={t("filters.removeReference", { name: label })}
+                          type="button"
+                        >
+                          <span>{label}</span>
+                          <X aria-hidden="true" size={12} />
+                        </button>
+                      );
+                    })}
+                    {selectedReferenceFilterNodes.length > 1 && (
+                      <button
+                        className="clear-reference-filters"
+                        onClick={() => setReferenceFilterNodeIds([])}
+                        type="button"
+                      >
+                        {t("filters.clearReferences")}
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
               <label className="unnamed-filter">
                 <input
                   aria-label={t("filters.unnamedOnly")}
@@ -311,9 +444,13 @@ function App() {
                 contentPlaceholder: t("editor.contentPlaceholder"),
                 editNode: t("actions.editNode"),
                 empty: t("empty.canvas"),
+                filterByNode: t("filters.filterByNode"),
                 name: t("editor.name"),
                 nameConflict: t("validation.nameUnique"),
                 namePlaceholder: t("editor.namePlaceholder"),
+                noContent: t("nodes.noContent"),
+                references: t("references.list"),
+                removeNodeFilter: t("filters.removeNodeFilter"),
                 sourceHandle: t("references.sourceHandle"),
                 targetHandle: t("references.targetHandle"),
                 unnamed: t("nodes.unnamed"),
@@ -328,6 +465,8 @@ function App() {
               onNodeContentChange={updateNodeContent}
               onNodeNameChange={updateNodeName}
               onReferencesChange={updateReferences}
+              onToggleReferenceFilter={toggleReferenceFilter}
+              referenceFilterNodeIds={referenceFilterNodeIds}
               references={workspace.references}
               searchTerm={searchTerm}
               unnamedOnly={unnamedOnly}

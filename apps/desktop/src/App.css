@@ -191,7 +191,95 @@ h1 {
   align-items: center;
   justify-content: flex-end;
   min-width: 0;
+  flex-wrap: wrap;
   gap: 10px;
+}
+
+.reference-filter-area {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 6px;
+}
+
+.reference-filter-picker {
+  display: flex;
+  align-items: center;
+  min-width: 142px;
+  height: 36px;
+  padding: 0 7px 0 9px;
+  gap: 6px;
+  border: 1px solid #d9dfd9;
+  border-radius: 6px;
+  color: #59615b;
+  background: #ffffff;
+}
+
+.reference-filter-picker:focus-within {
+  border-color: #4c8a6a;
+  box-shadow: 0 0 0 2px rgb(44 125 88 / 12%);
+}
+
+.reference-filter-picker select {
+  min-width: 0;
+  max-width: 150px;
+  height: 100%;
+  border: 0;
+  outline: 0;
+  color: #4f5952;
+  background: transparent;
+  font-size: 12px;
+}
+
+.active-reference-filters {
+  display: flex;
+  align-items: center;
+  max-width: min(36vw, 440px);
+  overflow-x: auto;
+  gap: 5px;
+  scrollbar-width: thin;
+}
+
+.active-reference-filter,
+.clear-reference-filters {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  flex: 0 0 auto;
+  border: 1px solid #9fbaa9;
+  border-radius: 999px;
+  color: #1f5a3d;
+  background: #e9f2ec;
+  font-size: 11px;
+}
+
+.active-reference-filter {
+  max-width: 170px;
+  padding: 0 8px 0 10px;
+  gap: 5px;
+}
+
+.active-reference-filter span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.active-reference-filter:hover {
+  border-color: #719b82;
+  background: #dfece3;
+}
+
+.clear-reference-filters {
+  padding: 0 9px;
+  border-color: #d4dad5;
+  color: #687069;
+  background: #ffffff;
+}
+
+.clear-reference-filters:hover {
+  color: #303733;
+  background: #f1f4f1;
 }
 
 .unnamed-filter {
@@ -377,12 +465,36 @@ h1 {
 }
 
 .graph-node-header strong {
+  flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   font-size: 13px;
   font-weight: 650;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.graph-node-filter-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 25px;
+  height: 25px;
+  margin-left: auto;
+  flex: 0 0 auto;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: #527060;
+  background: transparent;
+  opacity: 0.7;
+}
+
+.graph-node-filter-button:hover,
+.graph-node-filter-button[data-active="true"] {
+  border-color: #9db7a6;
+  color: #175b3b;
+  background: #dcebe1;
+  opacity: 1;
 }
 
 .graph-node-header strong[data-unnamed="true"],
@@ -458,6 +570,54 @@ h1 {
   overflow-wrap: anywhere;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 3;
+}
+
+.graph-node-references {
+  display: grid;
+  padding: 8px 10px 10px;
+  gap: 6px;
+  border-top: 1px solid #edf0ed;
+}
+
+.graph-node-references-label {
+  color: #778079;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.graph-node-reference-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.graph-node-reference-chip {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  min-height: 25px;
+  padding: 0 8px;
+  gap: 5px;
+  border: 1px solid #d2dcd5;
+  border-radius: 999px;
+  color: #4c5b52;
+  background: #f5f8f6;
+  font-size: 10px;
+}
+
+.graph-node-reference-chip span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.graph-node-reference-chip:hover,
+.graph-node-reference-chip[data-active="true"] {
+  border-color: #8fae9b;
+  color: #18583a;
+  background: #e3efe7;
 }
 
 .graph-handle.react-flow__handle {

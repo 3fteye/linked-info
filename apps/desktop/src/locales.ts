@@ -30,6 +30,13 @@ export const resources = {
         unnamed: "未命名",
       },
       filters: {
+        activeReferences: "当前引用筛选",
+        addReference: "添加引用筛选",
+        clearReferences: "清除全部",
+        filterByNode: "以此节点筛选",
+        referencePicker: "选择引用筛选条件",
+        removeNodeFilter: "移除此筛选条件",
+        removeReference: "移除筛选条件：{{name}}",
         unnamedOnly: "仅未命名",
       },
       editor: {
@@ -42,6 +49,7 @@ export const resources = {
         nameUnique: "该名称已经存在",
       },
       references: {
+        list: "引用",
         sourceHandle: "拖动以引用其他节点",
         targetHandle: "拖到这里建立引用",
       },
@@ -89,6 +97,13 @@ export const resources = {
         unnamed: "Unnamed",
       },
       filters: {
+        activeReferences: "Active reference filters",
+        addReference: "Add reference filter",
+        clearReferences: "Clear all",
+        filterByNode: "Filter by this node",
+        referencePicker: "Choose a reference filter",
+        removeNodeFilter: "Remove this filter",
+        removeReference: "Remove filter: {{name}}",
         unnamedOnly: "Unnamed only",
       },
       editor: {
@@ -101,6 +116,7 @@ export const resources = {
         nameUnique: "This name already exists",
       },
       references: {
+        list: "References",
         sourceHandle: "Drag to reference another node",
         targetHandle: "Drop here to create a reference",
       },

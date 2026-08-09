@@ -18,7 +18,7 @@ import {
   useEdgesState,
   useNodesState,
 } from "@xyflow/react";
-import { GripVertical, Link2, Pencil, Plus } from "lucide-react";
+import { Filter, GripVertical, Link2, Pencil, Plus } from "lucide-react";
 import {
   useCallback,
   useEffect,
@@ -46,12 +46,18 @@ interface InformationNodeData extends Record<string, unknown> {
   nameConflictLabel: string;
   nameLabel: string;
   namePlaceholder: string;
+  referencedTargets: Array<{ filterActive: boolean; id: string; label: string }>;
+  referencesLabel: string;
   unnamedLabel: string;
+  filterActive: boolean;
+  filterByNodeLabel: string;
+  removeNodeFilterLabel: string;
   sourceLabel: string;
   targetLabel: string;
   onCommit: (nodeId: string) => void;
   onContentChange: (nodeId: string, content: string) => void;
   onNameChange: (nodeId: string, name: string) => void;
+  onToggleReferenceFilter: (nodeId: string) => void;
 }
 
 type InformationFlowNode = Node<InformationNodeData, "information">;
@@ -62,9 +68,13 @@ interface GraphLabels {
   contentPlaceholder: string;
   editNode: string;
   empty: string;
+  filterByNode: string;
   name: string;
   nameConflict: string;
   namePlaceholder: string;
+  noContent: string;
+  references: string;
+  removeNodeFilter: string;
   sourceHandle: string;
   targetHandle: string;
   unnamed: string;
@@ -76,6 +86,7 @@ interface GraphCanvasProps {
   references: NodeReference[];
   editingNodeId: string | null;
   nameConflictNodeIds: Set<string>;
+  referenceFilterNodeIds: string[];
   searchTerm: string;
   unnamedOnly: boolean;
   labels: GraphLabels;
@@ -86,6 +97,7 @@ interface GraphCanvasProps {
   onNodeContentChange: (nodeId: string, content: string) => void;
   onNodeNameChange: (nodeId: string, name: string) => void;
   onReferencesChange: (references: NodeReference[]) => void;
+  onToggleReferenceFilter: (nodeId: string) => void;
 }
 
 type ContextMenuState =
@@ -183,6 +195,21 @@ function InformationNodeCard({ id, data, selected }: NodeProps<InformationFlowNo
             <strong data-unnamed={data.name === null}>{data.name ?? data.unnamedLabel}</strong>
           </>
         )}
+        <button
+          aria-label={data.filterActive ? data.removeNodeFilterLabel : data.filterByNodeLabel}
+          aria-pressed={data.filterActive}
+          className="nodrag nowheel graph-node-filter-button"
+          data-active={data.filterActive}
+          onClick={(event) => {
+            event.stopPropagation();
+            data.onToggleReferenceFilter(id);
+          }}
+          onPointerDown={(event) => event.stopPropagation()}
+          title={data.filterActive ? data.removeNodeFilterLabel : data.filterByNodeLabel}
+          type="button"
+        >
+          <Filter aria-hidden="true" size={13} />
+        </button>
       </header>
       {data.editing ? (
         <div className="graph-node-editor">
@@ -207,6 +234,31 @@ function InformationNodeCard({ id, data, selected }: NodeProps<InformationFlowNo
         data.content !== null &&
         data.content.length > 0 && <p className="graph-node-content">{data.content}</p>
       )}
+      {data.referencedTargets.length > 0 && (
+        <section aria-label={data.referencesLabel} className="graph-node-references">
+          <span className="graph-node-references-label">{data.referencesLabel}</span>
+          <div className="graph-node-reference-list">
+            {data.referencedTargets.map((target) => (
+              <button
+                aria-pressed={target.filterActive}
+                className="nodrag nowheel graph-node-reference-chip"
+                data-active={target.filterActive}
+                key={target.id}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  data.onToggleReferenceFilter(target.id);
+                }}
+                onPointerDown={(event) => event.stopPropagation()}
+                title={target.filterActive ? data.removeNodeFilterLabel : data.filterByNodeLabel}
+                type="button"
+              >
+                <Link2 aria-hidden="true" size={11} />
+                <span>{target.label}</span>
+              </button>
+            ))}
+          </div>
+        </section>
+      )}
       <Handle
         className="graph-handle graph-handle-source"
         position={Position.Right}
@@ -223,12 +275,33 @@ function edgeId(reference: NodeReference): string {
   return `reference:${reference.sourceNodeId}:${reference.targetNodeId}`;
 }
 
+function compactNodeContent(content: string | null, maxLength = 32): string {
+  const compacted = (content ?? "").replace(/\s+/g, " ").trim();
+  if (compacted.length <= maxLength) {
+    return compacted;
+  }
+  return `${compacted.slice(0, maxLength - 1)}…`;
+}
+
+function referencedNodeLabel(
+  node: InformationNode,
+  unnamedLabel: string,
+  noContentLabel: string,
+): string {
+  if (node.name !== null) {
+    return node.name;
+  }
+
+  return `${unnamedLabel} · ${compactNodeContent(node.content) || noContentLabel}`;
+}
+
 export default function GraphCanvas({
   nodes,
   layout,
   references,
   editingNodeId,
   nameConflictNodeIds,
+  referenceFilterNodeIds,
   searchTerm,
   unnamedOnly,
   labels,
@@ -239,6 +312,7 @@ export default function GraphCanvas({
   onNodeContentChange,
   onNodeNameChange,
   onReferencesChange,
+  onToggleReferenceFilter,
 }: GraphCanvasProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [flowInstance, setFlowInstance] =
@@ -254,12 +328,34 @@ export default function GraphCanvas({
     [layout],
   );
 
+  const referenceFilterNodeIdSet = useMemo(
+    () => new Set(referenceFilterNodeIds),
+    [referenceFilterNodeIds],
+  );
+
+  const referencedNodesBySource = useMemo(() => {
+    const nodesById = new Map(nodes.map((node) => [node.id, node]));
+    const result = new Map<string, InformationNode[]>();
+    for (const reference of references) {
+      const targetNode = nodesById.get(reference.targetNodeId);
+      if (targetNode === undefined) {
+        continue;
+      }
+      const referencedNodes = result.get(reference.sourceNodeId) ?? [];
+      referencedNodes.push(targetNode);
+      result.set(reference.sourceNodeId, referencedNodes);
+    }
+    return result;
+  }, [nodes, references]);
+
   useEffect(() => {
     setFlowNodes((current) => {
       const currentById = new Map(current.map((node) => [node.id, node]));
       return nodes.map((node, index) => {
         const savedLayout = layoutByNode.get(node.id);
         const currentNode = currentById.get(node.id);
+        const referencedNodes = referencedNodesBySource.get(node.id) ?? [];
+        const referencedTargetIds = new Set(referencedNodes.map((target) => target.id));
         return {
           id: node.id,
           type: "information",
@@ -270,9 +366,13 @@ export default function GraphCanvas({
           selected: currentNode?.selected ?? false,
           hidden:
             editingNodeId !== node.id &&
+            !referenceFilterNodeIdSet.has(node.id) &&
             ((unnamedOnly && node.name !== null) ||
               (normalizedSearch.length > 0 &&
-                !(node.name ?? "").toLowerCase().includes(normalizedSearch))),
+                !(node.name ?? "").toLowerCase().includes(normalizedSearch)) ||
+              referenceFilterNodeIds.some(
+                (targetNodeId) => !referencedTargetIds.has(targetNodeId),
+              )),
           data: {
             name: node.name,
             content: node.content,
@@ -283,12 +383,24 @@ export default function GraphCanvas({
             nameConflictLabel: labels.nameConflict,
             nameLabel: labels.name,
             namePlaceholder: labels.namePlaceholder,
+            referencedTargets: referencedNodes
+              .map((target) => ({
+                filterActive: referenceFilterNodeIdSet.has(target.id),
+                id: target.id,
+                label: referencedNodeLabel(target, labels.unnamed, labels.noContent),
+              }))
+              .sort((left, right) => left.label.localeCompare(right.label)),
+            referencesLabel: labels.references,
             unnamedLabel: labels.unnamed,
+            filterActive: referenceFilterNodeIdSet.has(node.id),
+            filterByNodeLabel: labels.filterByNode,
+            removeNodeFilterLabel: labels.removeNodeFilter,
             sourceLabel: labels.sourceHandle,
             targetLabel: labels.targetHandle,
             onCommit: onNodeCommit,
             onContentChange: onNodeContentChange,
             onNameChange: onNodeNameChange,
+            onToggleReferenceFilter,
           },
         };
       });
@@ -303,6 +415,10 @@ export default function GraphCanvas({
     onNodeCommit,
     onNodeContentChange,
     onNodeNameChange,
+    onToggleReferenceFilter,
+    referenceFilterNodeIds,
+    referenceFilterNodeIdSet,
+    referencedNodesBySource,
     setFlowNodes,
     unnamedOnly,
   ]);
