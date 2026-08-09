@@ -105,6 +105,17 @@ type ContextMenuState =
 function InformationNodeCard({ id, data, selected }: NodeProps<InformationFlowNode>) {
   const nodeRef = useRef<HTMLElement>(null);
   const nameInputRef = useRef<HTMLInputElement>(null);
+  const [nameValue, setNameValue] = useState(data.name ?? "");
+  const [contentValue, setContentValue] = useState(data.content ?? "");
+
+  useEffect(() => {
+    if (data.editing) {
+      return;
+    }
+
+    setNameValue(data.name ?? "");
+    setContentValue(data.content ?? "");
+  }, [data.content, data.editing, data.name]);
 
   useLayoutEffect(() => {
     if (!data.editing) {
@@ -157,10 +168,13 @@ function InformationNodeCard({ id, data, selected }: NodeProps<InformationFlowNo
               aria-label={data.nameLabel}
               autoFocus
               className="nodrag nowheel graph-node-name-input"
-              onChange={(event) => data.onNameChange(id, event.target.value)}
+              onChange={(event) => {
+                setNameValue(event.target.value);
+                data.onNameChange(id, event.target.value);
+              }}
               placeholder={data.namePlaceholder}
               ref={nameInputRef}
-              value={data.name ?? ""}
+              value={nameValue}
             />
           </>
         ) : (
@@ -175,10 +189,13 @@ function InformationNodeCard({ id, data, selected }: NodeProps<InformationFlowNo
           <textarea
             aria-label={data.contentLabel}
             className="nodrag nowheel graph-node-content-input"
-            onChange={(event) => data.onContentChange(id, event.target.value)}
+            onChange={(event) => {
+              setContentValue(event.target.value);
+              data.onContentChange(id, event.target.value);
+            }}
             placeholder={data.contentPlaceholder}
             rows={4}
-            value={data.content ?? ""}
+            value={contentValue}
           />
           {data.nameConflict && (
             <span className="graph-node-error" role="alert">
