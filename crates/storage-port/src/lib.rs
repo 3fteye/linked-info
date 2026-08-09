@@ -13,7 +13,7 @@ pub trait GraphStore {
 
     fn search_nodes_by_name(
         &self,
-        query: &str,
+        query: String,
         offset: u32,
         limit: u32,
     ) -> impl Future<Output = Result<Vec<Node>, Self::Error>> + '_;

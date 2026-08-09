@@ -39,11 +39,11 @@ impl GraphStore for MemoryGraphStore {
 
     async fn search_nodes_by_name(
         &self,
-        query: &str,
+        query: String,
         offset: u32,
         limit: u32,
     ) -> Result<Vec<Node>, Self::Error> {
-        let query = linked_info_domain::normalize_node_name(query);
+        let query = linked_info_domain::normalize_node_name(&query);
         let state = self.state.read().expect("memory store lock poisoned");
         let mut nodes: Vec<_> = state.nodes.values().cloned().collect();
         nodes.retain(|node| node.normalized_name().contains(&query));

@@ -84,11 +84,11 @@ impl GraphStore for D1GraphStore {
 
     async fn search_nodes_by_name(
         &self,
-        query: &str,
+        query: String,
         offset: u32,
         limit: u32,
     ) -> Result<Vec<Node>, Self::Error> {
-        let query = escape_like(&normalize_node_name(query));
+        let query = escape_like(&normalize_node_name(&query));
         let values = [
             D1Type::Text(&query),
             D1Type::Integer(to_d1_integer(limit)?),

@@ -31,7 +31,9 @@ where
         offset: u32,
         limit: u32,
     ) -> Result<Vec<Node>, S::Error> {
-        self.store.search_nodes_by_name(query, offset, limit).await
+        self.store
+            .search_nodes_by_name(query.to_owned(), offset, limit)
+            .await
     }
 
     pub async fn add_reference(&self, reference: Reference) -> Result<(), S::Error> {
