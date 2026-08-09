@@ -1,0 +1,203 @@
+export interface InformationNode {
+  id: string;
+  name: string;
+  content: string | null;
+}
+
+export interface NodeLayout {
+  nodeId: string;
+  x: number;
+  y: number;
+}
+
+export interface NodeReference {
+  sourceNodeId: string;
+  targetNodeId: string;
+}
+
+export interface WorkspaceSnapshot {
+  nodes: InformationNode[];
+  layout: NodeLayout[];
+  references: NodeReference[];
+}
+
+export interface NodeDraft {
+  nodeId: string | null;
+  name: string;
+  content: string;
+  position: { x: number; y: number };
+  referenceTargetIds: string[];
+}
+
+const workspaceStorageKey = "linked-info.workspace.v1";
+const draftStorageKey = "linked-info.node-draft.v1";
+
+const emptyWorkspace: WorkspaceSnapshot = {
+  nodes: [],
+  layout: [],
+  references: [],
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function readJson(key: string): unknown {
+  const value = localStorage.getItem(key);
+  if (value === null) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+export function normalizeNodeName(name: string): string {
+  return name.trim().toLowerCase();
+}
+
+export function loadWorkspace(): WorkspaceSnapshot {
+  const stored = readJson(workspaceStorageKey);
+  if (!isRecord(stored) || stored.version !== 1 || !Array.isArray(stored.nodes)) {
+    return emptyWorkspace;
+  }
+
+  const nodes: InformationNode[] = [];
+  const nodeIds = new Set<string>();
+  const normalizedNames = new Set<string>();
+
+  for (const candidate of stored.nodes) {
+    if (
+      !isRecord(candidate) ||
+      typeof candidate.id !== "string" ||
+      typeof candidate.name !== "string" ||
+      (candidate.content !== null && typeof candidate.content !== "string")
+    ) {
+      continue;
+    }
+
+    const name = candidate.name.trim();
+    const normalizedName = normalizeNodeName(name);
+    if (
+      name.length === 0 ||
+      nodeIds.has(candidate.id) ||
+      normalizedNames.has(normalizedName)
+    ) {
+      continue;
+    }
+
+    nodeIds.add(candidate.id);
+    normalizedNames.add(normalizedName);
+    nodes.push({
+      id: candidate.id,
+      name,
+      content: candidate.content,
+    });
+  }
+
+  const layoutByNode = new Map<string, NodeLayout>();
+  if (Array.isArray(stored.layout)) {
+    for (const candidate of stored.layout) {
+      if (
+        isRecord(candidate) &&
+        typeof candidate.nodeId === "string" &&
+        nodeIds.has(candidate.nodeId) &&
+        isFiniteNumber(candidate.x) &&
+        isFiniteNumber(candidate.y)
+      ) {
+        layoutByNode.set(candidate.nodeId, {
+          nodeId: candidate.nodeId,
+          x: candidate.x,
+          y: candidate.y,
+        });
+      }
+    }
+  }
+
+  const layout = nodes.map((node, index) => {
+    return (
+      layoutByNode.get(node.id) ?? {
+        nodeId: node.id,
+        x: 80 + (index % 4) * 300,
+        y: 80 + Math.floor(index / 4) * 210,
+      }
+    );
+  });
+
+  const references: NodeReference[] = [];
+  const referenceKeys = new Set<string>();
+  if (Array.isArray(stored.references)) {
+    for (const candidate of stored.references) {
+      if (
+        !isRecord(candidate) ||
+        typeof candidate.sourceNodeId !== "string" ||
+        typeof candidate.targetNodeId !== "string" ||
+        !nodeIds.has(candidate.sourceNodeId) ||
+        !nodeIds.has(candidate.targetNodeId)
+      ) {
+        continue;
+      }
+
+      const key = `${candidate.sourceNodeId}\u0000${candidate.targetNodeId}`;
+      if (referenceKeys.has(key)) {
+        continue;
+      }
+
+      referenceKeys.add(key);
+      references.push({
+        sourceNodeId: candidate.sourceNodeId,
+        targetNodeId: candidate.targetNodeId,
+      });
+    }
+  }
+
+  return { nodes, layout, references };
+}
+
+export function saveWorkspace(workspace: WorkspaceSnapshot): void {
+  localStorage.setItem(
+    workspaceStorageKey,
+    JSON.stringify({ version: 1, ...workspace }),
+  );
+}
+
+export function loadDraft(): NodeDraft | null {
+  const stored = readJson(draftStorageKey);
+  if (
+    !isRecord(stored) ||
+    (stored.nodeId !== null && typeof stored.nodeId !== "string") ||
+    typeof stored.name !== "string" ||
+    typeof stored.content !== "string" ||
+    !isRecord(stored.position) ||
+    !isFiniteNumber(stored.position.x) ||
+    !isFiniteNumber(stored.position.y) ||
+    !Array.isArray(stored.referenceTargetIds) ||
+    !stored.referenceTargetIds.every((value) => typeof value === "string")
+  ) {
+    return null;
+  }
+
+  return {
+    nodeId: stored.nodeId,
+    name: stored.name,
+    content: stored.content,
+    position: { x: stored.position.x, y: stored.position.y },
+    referenceTargetIds: [...new Set(stored.referenceTargetIds)],
+  };
+}
+
+export function saveDraft(draft: NodeDraft | null): void {
+  if (draft === null) {
+    localStorage.removeItem(draftStorageKey);
+    return;
+  }
+
+  localStorage.setItem(draftStorageKey, JSON.stringify(draft));
+}
