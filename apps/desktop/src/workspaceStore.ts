@@ -7,6 +7,7 @@ export {
   emptyWorkspace,
   isNodeNameAvailable,
   isUnnamedNode,
+  moveNodeLayoutToFront,
   normalizeNodeName,
   type InformationNode,
   type NodeLayout,

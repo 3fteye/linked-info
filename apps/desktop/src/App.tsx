@@ -23,6 +23,7 @@ import {
   emptyWorkspace,
   isNodeNameAvailable,
   isUnnamedNode,
+  moveNodeLayoutToFront,
   normalizeNodeName,
   type InformationNode,
   type NodeLayout,
@@ -277,6 +278,9 @@ function App({ persistence }: AppProps) {
   ) {
     setWorkspace((current) => {
       const next = updater(current);
+      if (next === current) {
+        return current;
+      }
       workspaceRef.current = next;
       if (flushImmediately) {
         void persistence.save(next).catch(() => {
@@ -303,9 +307,20 @@ function App({ persistence }: AppProps) {
 
   function editNode(nodeId: string) {
     if (workspace.nodes.some((node) => node.id === nodeId)) {
+      bringNodeToFront(nodeId);
       setActiveView("canvas");
       window.setTimeout(() => setEditingNodeId(nodeId), 0);
     }
+  }
+
+  function bringNodeToFront(nodeId: string) {
+    updateWorkspace(
+      (current) => {
+        const layout = moveNodeLayoutToFront(current.layout, nodeId);
+        return layout === current.layout ? current : { ...current, layout };
+      },
+      true,
+    );
   }
 
   function deleteNode(nodeId: string) {
@@ -853,6 +868,7 @@ function App({ persistence }: AppProps) {
               onLayoutChange={updateLayout}
               onNodeCommit={commitNode}
               onNodeContentChange={updateNodeContent}
+              onNodeBringToFront={bringNodeToFront}
               onNodeNameChange={updateNodeName}
               onReferencesChange={updateReferences}
               onToggleReferenceFilter={toggleReferenceFilter}

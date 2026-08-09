@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   isNodeNameAvailable,
+  moveNodeLayoutToFront,
   parseWorkspaceSnapshot,
   type WorkspaceSnapshot,
 } from "./workspaceData";
@@ -80,5 +81,25 @@ describe("isNodeNameAvailable", () => {
     expect(isNodeNameAvailable(nodes, accountId, "")).toBe(true);
     expect(isNodeNameAvailable(nodes, accountId, " Account ")).toBe(true);
     expect(isNodeNameAvailable(nodes, accountId, " openai ")).toBe(false);
+  });
+});
+
+describe("moveNodeLayoutToFront", () => {
+  it("moves the interacted node to the end without changing coordinates", () => {
+    const layout = validWorkspace().layout;
+
+    const next = moveNodeLayoutToFront(layout, accountId);
+
+    expect(next).toEqual([layout[1], layout[0]]);
+    expect(next[1]).toBe(layout[0]);
+  });
+
+  it("keeps the same array when the node is already frontmost or missing", () => {
+    const layout = validWorkspace().layout;
+
+    expect(moveNodeLayoutToFront(layout, serviceId)).toBe(layout);
+    expect(
+      moveNodeLayoutToFront(layout, "33333333-3333-4333-8333-333333333333"),
+    ).toBe(layout);
   });
 });

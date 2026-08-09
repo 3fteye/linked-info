@@ -66,6 +66,23 @@ export function isNodeNameAvailable(
   );
 }
 
+export function moveNodeLayoutToFront(
+  layout: NodeLayout[],
+  nodeId: string,
+): NodeLayout[] {
+  const currentIndex = layout.findIndex((item) => item.nodeId === nodeId);
+  if (currentIndex < 0 || currentIndex === layout.length - 1) {
+    return layout;
+  }
+
+  const item = layout[currentIndex];
+  return [
+    ...layout.slice(0, currentIndex),
+    ...layout.slice(currentIndex + 1),
+    item,
+  ];
+}
+
 export function parseWorkspaceSnapshot(value: unknown): WorkspaceSnapshot | null {
   if (
     !isRecord(value) ||

@@ -101,6 +101,7 @@ interface GraphCanvasProps {
   onLayoutChange: (layout: NodeLayout[]) => void;
   onNodeCommit: (nodeId: string) => void;
   onNodeContentChange: (nodeId: string, content: string) => void;
+  onNodeBringToFront: (nodeId: string) => void;
   onNodeNameChange: (nodeId: string, name: string) => boolean;
   onReferencesChange: (references: NodeReference[]) => void;
   onToggleReferenceFilter: (nodeId: string) => void;
@@ -322,6 +323,7 @@ export default function GraphCanvas({
   onLayoutChange,
   onNodeCommit,
   onNodeContentChange,
+  onNodeBringToFront,
   onNodeNameChange,
   onReferencesChange,
   onToggleReferenceFilter,
@@ -338,6 +340,10 @@ export default function GraphCanvas({
 
   const layoutByNode = useMemo(
     () => new Map(layout.map((item) => [item.nodeId, item])),
+    [layout],
+  );
+  const stackOrderByNode = useMemo(
+    () => new Map(layout.map((item, index) => [item.nodeId, index])),
     [layout],
   );
 
@@ -377,6 +383,7 @@ export default function GraphCanvas({
             ? { x: savedLayout.x, y: savedLayout.y }
             : { x: 80 + (index % 4) * 300, y: 80 + Math.floor(index / 4) * 210 },
           selected: currentNode?.selected ?? false,
+          zIndex: stackOrderByNode.get(node.id) ?? index,
           hidden:
             editingNodeId !== node.id &&
             !referenceFilterNodeIdSet.has(node.id) &&
@@ -433,6 +440,7 @@ export default function GraphCanvas({
     referenceFilterNodeIdSet,
     referencedNodesBySource,
     setFlowNodes,
+    stackOrderByNode,
     unnamedOnly,
   ]);
 
@@ -589,13 +597,14 @@ export default function GraphCanvas({
     (event, node) => {
       event.preventDefault();
       event.stopPropagation();
+      onNodeBringToFront(node.id);
       setContextMenu({
         kind: "node",
         ...positionContextMenu(event.clientX, event.clientY),
         nodeId: node.id,
       });
     },
-    [positionContextMenu],
+    [onNodeBringToFront, positionContextMenu],
   );
 
   const createAtCenter = useCallback(() => {
@@ -627,6 +636,7 @@ export default function GraphCanvas({
         deleteKeyCode={["Backspace", "Delete"]}
         edges={flowEdges}
         edgesReconnectable={false}
+        elevateNodesOnSelect={false}
         fitView
         fitViewOptions={{ maxZoom: 1, padding: 0.25 }}
         maxZoom={2.2}
@@ -637,7 +647,9 @@ export default function GraphCanvas({
         onEdgesChange={handleEdgesChange}
         onInit={setFlowInstance}
         onNodeContextMenu={handleNodeContextMenu}
+        onNodeClick={(_event, node) => onNodeBringToFront(node.id)}
         onNodeDoubleClick={(_event, node) => onEditNode(node.id)}
+        onNodeDragStart={(_event, node) => onNodeBringToFront(node.id)}
         onNodeDragStop={handleNodeDragStop}
         onNodesChange={handleNodesChange}
         onPaneClick={() => setContextMenu(null)}
@@ -647,6 +659,7 @@ export default function GraphCanvas({
         selectNodesOnDrag={false}
         selectionOnDrag
         zoomOnDoubleClick={false}
+        zIndexMode="manual"
       >
         <Background
           color="#d0d8d2"
