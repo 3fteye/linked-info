@@ -15,10 +15,20 @@ import {
   type NodeMouseHandler,
   type NodeProps,
   type ReactFlowInstance,
+  type Viewport,
   useEdgesState,
   useNodesState,
 } from "@xyflow/react";
-import { Filter, GripVertical, Link2, Pencil, Plus, Trash2 } from "lucide-react";
+import {
+  Filter,
+  GripVertical,
+  Link2,
+  Pencil,
+  Plus,
+  Redo2,
+  Trash2,
+  Undo2,
+} from "lucide-react";
 import {
   useCallback,
   useEffect,
@@ -30,10 +40,12 @@ import {
   type MouseEvent as ReactMouseEvent,
 } from "react";
 import type {
+  CanvasViewport,
   InformationNode,
   NodeLayout,
   NodeReference,
 } from "./workspaceStore";
+import { updateNodeLayoutPositions } from "./workspaceStore";
 import "@xyflow/react/dist/style.css";
 
 interface InformationNodeData extends Record<string, unknown> {
@@ -64,11 +76,11 @@ type InformationFlowNode = Node<InformationNodeData, "information">;
 
 interface GraphLabels {
   cancel: string;
-  confirmDeleteNode: string;
+  confirmDeleteNode: (count: number) => string;
   createNode: string;
   deleteNode: string;
-  deleteNodeBody: (name: string) => string;
-  deleteNodeTitle: string;
+  deleteNodeBody: (names: string[]) => string;
+  deleteNodeTitle: (count: number) => string;
   content: string;
   contentPlaceholder: string;
   editNode: string;
@@ -79,9 +91,11 @@ interface GraphLabels {
   namePlaceholder: string;
   noContent: string;
   references: string;
+  redo: string;
   removeNodeFilter: string;
   sourceHandle: string;
   targetHandle: string;
+  undo: string;
   unnamed: string;
 }
 
@@ -89,14 +103,18 @@ interface GraphCanvasProps {
   nodes: InformationNode[];
   layout: NodeLayout[];
   references: NodeReference[];
+  viewport: CanvasViewport | null;
   editingNodeId: string | null;
+  canRedo: boolean;
+  canUndo: boolean;
+  historyBlocked: boolean;
   nameConflictNodeIds: Set<string>;
   referenceFilterNodeIds: string[];
   searchTerm: string;
   unnamedOnly: boolean;
   labels: GraphLabels;
   onCreateNode: (position: { x: number; y: number }) => void;
-  onDeleteNode: (nodeId: string) => void;
+  onDeleteNodes: (nodeIds: string[]) => void;
   onEditNode: (nodeId: string) => void;
   onLayoutChange: (layout: NodeLayout[]) => void;
   onNodeCommit: (nodeId: string) => void;
@@ -104,7 +122,10 @@ interface GraphCanvasProps {
   onNodeBringToFront: (nodeId: string) => void;
   onNodeNameChange: (nodeId: string, name: string) => boolean;
   onReferencesChange: (references: NodeReference[]) => void;
+  onRedo: () => void;
   onToggleReferenceFilter: (nodeId: string) => void;
+  onUndo: () => void;
+  onViewportChange: (viewport: CanvasViewport) => void;
 }
 
 type ContextMenuState =
@@ -282,6 +303,29 @@ function InformationNodeCard({ id, data, selected }: NodeProps<InformationFlowNo
 }
 
 const nodeTypes = { information: InformationNodeCard };
+const defaultCanvasViewport: Viewport = { x: 0, y: 0, zoom: 1 };
+
+function isTextEntryTarget(target: EventTarget | null): boolean {
+  return (
+    target instanceof HTMLInputElement ||
+    target instanceof HTMLTextAreaElement ||
+    (target instanceof HTMLElement && target.isContentEditable)
+  );
+}
+
+function canvasViewportsEqual(
+  left: CanvasViewport | null,
+  right: CanvasViewport | null,
+): boolean {
+  return (
+    left === right ||
+    (left !== null &&
+      right !== null &&
+      left.x === right.x &&
+      left.y === right.y &&
+      left.zoom === right.zoom)
+  );
+}
 
 function edgeId(reference: NodeReference): string {
   return `reference:${reference.sourceNodeId}:${reference.targetNodeId}`;
@@ -311,14 +355,18 @@ export default function GraphCanvas({
   nodes,
   layout,
   references,
+  viewport,
   editingNodeId,
+  canRedo,
+  canUndo,
+  historyBlocked,
   nameConflictNodeIds,
   referenceFilterNodeIds,
   searchTerm,
   unnamedOnly,
   labels,
   onCreateNode,
-  onDeleteNode,
+  onDeleteNodes,
   onEditNode,
   onLayoutChange,
   onNodeCommit,
@@ -326,17 +374,45 @@ export default function GraphCanvas({
   onNodeBringToFront,
   onNodeNameChange,
   onReferencesChange,
+  onRedo,
   onToggleReferenceFilter,
+  onUndo,
+  onViewportChange,
 }: GraphCanvasProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [flowInstance, setFlowInstance] =
     useState<ReactFlowInstance<InformationFlowNode, Edge> | null>(null);
+  const lastWorkspaceViewportRef = useRef<CanvasViewport | null>(viewport);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
-  const [pendingDeletionNodeId, setPendingDeletionNodeId] = useState<string | null>(null);
+  const [pendingDeletionNodeIds, setPendingDeletionNodeIds] = useState<string[]>([]);
   const [flowNodes, setFlowNodes, applyNodeChanges] =
     useNodesState<InformationFlowNode>([]);
   const [flowEdges, setFlowEdges, applyEdgeChanges] = useEdgesState<Edge>([]);
   const normalizedSearch = searchTerm.trim().toLowerCase();
+
+  useEffect(() => {
+    if (flowInstance === null) {
+      return;
+    }
+
+    const previousViewport = lastWorkspaceViewportRef.current;
+    if (canvasViewportsEqual(previousViewport, viewport)) {
+      return;
+    }
+    lastWorkspaceViewportRef.current = viewport;
+
+    if (viewport === null) {
+      const fitTimer = window.setTimeout(() => {
+        void flowInstance.fitView({ maxZoom: 1, padding: 0.25 });
+      }, 0);
+      return () => window.clearTimeout(fitTimer);
+    }
+
+    const currentViewport = flowInstance.getViewport();
+    if (!canvasViewportsEqual(currentViewport, viewport)) {
+      void flowInstance.setViewport(viewport, { duration: 0 });
+    }
+  }, [flowInstance, viewport]);
 
   const layoutByNode = useMemo(
     () => new Map(layout.map((item) => [item.nodeId, item])),
@@ -489,18 +565,75 @@ export default function GraphCanvas({
   }, [contextMenu]);
 
   useEffect(() => {
-    if (pendingDeletionNodeId === null) {
+    if (pendingDeletionNodeIds.length === 0) {
       return;
     }
 
     const cancelOnEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
-        setPendingDeletionNodeId(null);
+        setPendingDeletionNodeIds([]);
       }
     };
     window.addEventListener("keydown", cancelOnEscape);
     return () => window.removeEventListener("keydown", cancelOnEscape);
-  }, [pendingDeletionNodeId]);
+  }, [pendingDeletionNodeIds.length]);
+
+  useEffect(() => {
+    const handleCanvasShortcut = (event: KeyboardEvent) => {
+      if (isTextEntryTarget(event.target)) {
+        return;
+      }
+
+      const key = event.key.toLowerCase();
+      const modifierPressed = event.ctrlKey || event.metaKey;
+      if (modifierPressed && key === "a") {
+        event.preventDefault();
+        setFlowNodes((current) =>
+          current.map((node) => ({
+            ...node,
+            selected: !node.hidden,
+          })),
+        );
+        return;
+      }
+
+      if (modifierPressed && key === "z") {
+        if (historyBlocked) {
+          return;
+        }
+        event.preventDefault();
+        if (event.shiftKey) {
+          onRedo();
+        } else {
+          onUndo();
+        }
+        return;
+      }
+
+      if (modifierPressed && key === "y") {
+        if (historyBlocked) {
+          return;
+        }
+        event.preventDefault();
+        onRedo();
+        return;
+      }
+
+      if (key === "delete" || key === "backspace") {
+        const selectedNodeIds = flowNodes
+          .filter((node) => node.selected && !node.hidden)
+          .map((node) => node.id);
+        if (selectedNodeIds.length > 0) {
+          event.preventDefault();
+          event.stopPropagation();
+          setPendingDeletionNodeIds(selectedNodeIds);
+        }
+      }
+    };
+
+    window.addEventListener("keydown", handleCanvasShortcut, true);
+    return () => window.removeEventListener("keydown", handleCanvasShortcut, true);
+  }, [flowNodes, historyBlocked, onRedo, onUndo, setFlowNodes]);
 
   const handleNodesChange = useCallback(
     (changes: NodeChange<InformationFlowNode>[]) => {
@@ -549,15 +682,23 @@ export default function GraphCanvas({
   );
 
   const handleNodeDragStop = useCallback(
-    (_event: MouseEvent | TouchEvent, node: InformationFlowNode) => {
-      const nextLayout = layout.some((item) => item.nodeId === node.id)
-        ? layout.map((item) =>
-            item.nodeId === node.id
-              ? { ...item, x: node.position.x, y: node.position.y }
-              : item,
-          )
-        : [...layout, { nodeId: node.id, x: node.position.x, y: node.position.y }];
-      onLayoutChange(nextLayout);
+    (
+      _event: MouseEvent | TouchEvent,
+      node: InformationFlowNode,
+      draggedNodes: InformationFlowNode[],
+    ) => {
+      const movedNodes = draggedNodes.length > 0 ? draggedNodes : [node];
+      const nextLayout = updateNodeLayoutPositions(
+        layout,
+        movedNodes.map((movedNode) => ({
+          nodeId: movedNode.id,
+          x: movedNode.position.x,
+          y: movedNode.position.y,
+        })),
+      );
+      if (nextLayout !== layout) {
+        onLayoutChange(nextLayout);
+      }
     },
     [layout, onLayoutChange],
   );
@@ -620,7 +761,9 @@ export default function GraphCanvas({
   }, [flowInstance, onCreateNode]);
 
   const visibleNodeCount = flowNodes.filter((node) => !node.hidden).length;
-  const pendingDeletionNode = nodes.find((node) => node.id === pendingDeletionNodeId);
+  const pendingDeletionNodes = pendingDeletionNodeIds
+    .map((nodeId) => nodes.find((node) => node.id === nodeId))
+    .filter((node): node is InformationNode => node !== undefined);
 
   return (
     <div
@@ -637,7 +780,8 @@ export default function GraphCanvas({
         edges={flowEdges}
         edgesReconnectable={false}
         elevateNodesOnSelect={false}
-        fitView
+        defaultViewport={viewport ?? defaultCanvasViewport}
+        fitView={viewport === null}
         fitViewOptions={{ maxZoom: 1, padding: 0.25 }}
         maxZoom={2.2}
         minZoom={0.25}
@@ -652,12 +796,12 @@ export default function GraphCanvas({
         onNodeDragStart={(_event, node) => onNodeBringToFront(node.id)}
         onNodeDragStop={handleNodeDragStop}
         onNodesChange={handleNodesChange}
+        onMoveEnd={(_event, nextViewport) => onViewportChange(nextViewport)}
         onPaneClick={() => setContextMenu(null)}
         onPaneContextMenu={handlePaneContextMenu}
         panOnDrag={[0, 1]}
         proOptions={{ hideAttribution: true }}
-        selectNodesOnDrag={false}
-        selectionOnDrag
+        multiSelectionKeyCode={["Control", "Shift"]}
         zoomOnDoubleClick={false}
         zIndexMode="manual"
       >
@@ -684,7 +828,27 @@ export default function GraphCanvas({
           zoomable
         />
         <Controls className="graph-controls" position="bottom-left" showInteractive={false} />
-        <Panel position="top-right">
+        <Panel className="canvas-action-panel" position="top-right">
+          <button
+            aria-label={labels.undo}
+            className="canvas-icon-button"
+            disabled={historyBlocked || !canUndo}
+            onClick={onUndo}
+            title={labels.undo}
+            type="button"
+          >
+            <Undo2 size={18} />
+          </button>
+          <button
+            aria-label={labels.redo}
+            className="canvas-icon-button"
+            disabled={historyBlocked || !canRedo}
+            onClick={onRedo}
+            title={labels.redo}
+            type="button"
+          >
+            <Redo2 size={18} />
+          </button>
           <button
             aria-label={labels.createNode}
             className="canvas-icon-button"
@@ -735,7 +899,7 @@ export default function GraphCanvas({
               <button
                 className="danger-menu-item"
                 onClick={() => {
-                  setPendingDeletionNodeId(contextMenu.nodeId);
+                  setPendingDeletionNodeIds([contextMenu.nodeId]);
                   setContextMenu(null);
                 }}
                 type="button"
@@ -748,7 +912,7 @@ export default function GraphCanvas({
         </div>
       )}
 
-      {pendingDeletionNode !== undefined && (
+      {pendingDeletionNodes.length > 0 && (
         <div className="modal-backdrop" role="presentation">
           <section
             aria-labelledby="delete-node-dialog-title"
@@ -756,20 +920,20 @@ export default function GraphCanvas({
             className="confirmation-dialog"
             role="dialog"
           >
-            <h2 id="delete-node-dialog-title">{labels.deleteNodeTitle}</h2>
+            <h2 id="delete-node-dialog-title">
+              {labels.deleteNodeTitle(pendingDeletionNodes.length)}
+            </h2>
             <p>
               {labels.deleteNodeBody(
-                referencedNodeLabel(
-                  pendingDeletionNode,
-                  labels.unnamed,
-                  labels.noContent,
+                pendingDeletionNodes.map((node) =>
+                  referencedNodeLabel(node, labels.unnamed, labels.noContent),
                 ),
               )}
             </p>
             <div className="confirmation-dialog-actions">
               <button
                 className="secondary-button"
-                onClick={() => setPendingDeletionNodeId(null)}
+                onClick={() => setPendingDeletionNodeIds([])}
                 type="button"
               >
                 {labels.cancel}
@@ -777,13 +941,13 @@ export default function GraphCanvas({
               <button
                 className="danger-button"
                 onClick={() => {
-                  onDeleteNode(pendingDeletionNode.id);
-                  setPendingDeletionNodeId(null);
+                  onDeleteNodes(pendingDeletionNodes.map((node) => node.id));
+                  setPendingDeletionNodeIds([]);
                 }}
                 type="button"
               >
                 <Trash2 size={15} />
-                {labels.confirmDeleteNode}
+                {labels.confirmDeleteNode(pendingDeletionNodes.length)}
               </button>
             </div>
           </section>

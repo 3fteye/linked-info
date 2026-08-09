@@ -39,6 +39,7 @@ function validWorkspace(): WorkspaceSnapshot {
     nodes: [{ id: nodeId, name: "OpenAI", content: null }],
     layout: [{ nodeId, x: 10, y: 20 }],
     references: [],
+    viewport: { x: 12, y: 34, zoom: 0.8 },
   };
 }
 
@@ -50,10 +51,15 @@ describe("localWorkspacePersistence", () => {
   it("distinguishes missing data from a valid empty workspace", async () => {
     expect(await localWorkspacePersistence.load()).toEqual({ status: "missing" });
 
-    await localWorkspacePersistence.save({ nodes: [], layout: [], references: [] });
+    await localWorkspacePersistence.save({
+      nodes: [],
+      layout: [],
+      references: [],
+      viewport: null,
+    });
     expect(await localWorkspacePersistence.load()).toEqual({
       status: "ready",
-      workspace: { nodes: [], layout: [], references: [] },
+      workspace: { nodes: [], layout: [], references: [], viewport: null },
     });
   });
 

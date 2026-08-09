@@ -9,6 +9,8 @@ export {
   isUnnamedNode,
   moveNodeLayoutToFront,
   normalizeNodeName,
+  updateNodeLayoutPositions,
+  type CanvasViewport,
   type InformationNode,
   type NodeLayout,
   type NodeReference,

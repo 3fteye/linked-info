@@ -732,6 +732,17 @@ h1 {
   box-shadow: 0 3px 10px rgb(29 45 34 / 10%);
 }
 
+.canvas-icon-button:disabled {
+  cursor: not-allowed;
+  color: #a5ada7;
+  background: #f4f6f4;
+}
+
+.canvas-action-panel {
+  display: flex;
+  gap: 6px;
+}
+
 .graph-empty {
   position: absolute;
   top: 50%;

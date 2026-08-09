@@ -9,6 +9,7 @@ function validWorkspace(): WorkspaceSnapshot {
     nodes: [{ id: nodeId, name: "OpenAI", content: "Service" }],
     layout: [{ nodeId, x: 10, y: 20 }],
     references: [],
+    viewport: { x: 120, y: -80, zoom: 1.4 },
   };
 }
 

@@ -3,6 +3,7 @@ import {
   isNodeNameAvailable,
   moveNodeLayoutToFront,
   parseWorkspaceSnapshot,
+  updateNodeLayoutPositions,
   type WorkspaceSnapshot,
 } from "./workspaceData";
 
@@ -20,6 +21,7 @@ function validWorkspace(): WorkspaceSnapshot {
       { nodeId: serviceId, x: 30, y: 40 },
     ],
     references: [{ sourceNodeId: accountId, targetNodeId: serviceId }],
+    viewport: { x: 100, y: -50, zoom: 1.25 },
   };
 }
 
@@ -72,6 +74,15 @@ describe("parseWorkspaceSnapshot", () => {
     duplicate.references.push({ ...duplicate.references[0] });
     expect(parseWorkspaceSnapshot(duplicate)).toBeNull();
   });
+
+  it("accepts legacy snapshots without a viewport and rejects invalid viewports", () => {
+    const { viewport: _viewport, ...legacy } = validWorkspace();
+    expect(parseWorkspaceSnapshot(legacy)?.viewport).toBeNull();
+
+    const invalid = validWorkspace();
+    invalid.viewport = { x: 0, y: 0, zoom: 0 };
+    expect(parseWorkspaceSnapshot(invalid)).toBeNull();
+  });
 });
 
 describe("isNodeNameAvailable", () => {
@@ -101,5 +112,28 @@ describe("moveNodeLayoutToFront", () => {
     expect(
       moveNodeLayoutToFront(layout, "33333333-3333-4333-8333-333333333333"),
     ).toBe(layout);
+  });
+});
+
+describe("updateNodeLayoutPositions", () => {
+  it("updates every dragged node while preserving the stacking order", () => {
+    const layout = validWorkspace().layout;
+
+    const next = updateNodeLayoutPositions(layout, [
+      { nodeId: accountId, x: 110, y: 120 },
+      { nodeId: serviceId, x: 230, y: 240 },
+    ]);
+
+    expect(next).toEqual([
+      { nodeId: accountId, x: 110, y: 120 },
+      { nodeId: serviceId, x: 230, y: 240 },
+    ]);
+    expect(next.map((item) => item.nodeId)).toEqual([accountId, serviceId]);
+  });
+
+  it("keeps the same array when no position changed", () => {
+    const layout = validWorkspace().layout;
+
+    expect(updateNodeLayoutPositions(layout, layout)).toBe(layout);
   });
 });

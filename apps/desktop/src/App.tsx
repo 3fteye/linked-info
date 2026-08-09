@@ -25,6 +25,7 @@ import {
   isUnnamedNode,
   moveNodeLayoutToFront,
   normalizeNodeName,
+  type CanvasViewport,
   type InformationNode,
   type NodeLayout,
   type NodeReference,
@@ -41,6 +42,15 @@ import {
   exportWorkspaceFile,
   importWorkspaceFile,
 } from "./workspaceFileBridge";
+import {
+  appendWorkspaceHistory,
+  captureWorkspaceHistory,
+  emptyWorkspaceHistoryTimeline,
+  restoreWorkspaceHistory,
+  stepWorkspaceHistoryBackward,
+  stepWorkspaceHistoryForward,
+  type WorkspaceHistoryState,
+} from "./workspaceHistory";
 import "./App.css";
 
 type ViewId = "canvas" | "nodes" | "settings";
@@ -54,6 +64,13 @@ interface PendingWorkspaceReplacement {
 interface AppProps {
   persistence: WorkspacePersistence;
 }
+
+interface WorkspaceUpdateOptions {
+  flushImmediately?: boolean;
+  recordHistory?: boolean;
+}
+
+const workspaceHistoryLimit = 100;
 
 const importFailureTranslationKeys: Record<WorkspaceImportFailure, string> = {
   invalidJson: "backup.errors.invalidJson",
@@ -119,6 +136,15 @@ function App({ persistence }: AppProps) {
   const [confirmClearUnreadable, setConfirmClearUnreadable] = useState(false);
   const [storageProblemStatus, setStorageProblemStatus] = useState<string | null>(null);
   const [editingNodeId, setEditingNodeId] = useState<string | null>(null);
+  const editBaselineRef = useRef<{
+    nodeId: string;
+    state: WorkspaceHistoryState;
+  } | null>(null);
+  const historyTimelineRef = useRef(emptyWorkspaceHistoryTimeline());
+  const [historyAvailability, setHistoryAvailability] = useState({
+    canUndo: false,
+    canRedo: false,
+  });
   const [searchTerm, setSearchTerm] = useState("");
   const [unnamedOnly, setUnnamedOnly] = useState(false);
   const [referenceFilterNodeIds, setReferenceFilterNodeIds] = useState<string[]>([]);
@@ -274,40 +300,117 @@ function App({ persistence }: AppProps) {
 
   function updateWorkspace(
     updater: (current: WorkspaceSnapshot) => WorkspaceSnapshot,
-    flushImmediately = false,
-  ) {
-    setWorkspace((current) => {
-      const next = updater(current);
-      if (next === current) {
-        return current;
-      }
-      workspaceRef.current = next;
-      if (flushImmediately) {
-        void persistence.save(next).catch(() => {
-          setBackupStatus(t("storage.saveFailed"));
-        });
-      }
-      return next;
+    options: WorkspaceUpdateOptions = {},
+  ): WorkspaceSnapshot {
+    const current = workspaceRef.current;
+    const next = updater(current);
+    if (next === current) {
+      return current;
+    }
+    if (options.recordHistory) {
+      recordHistory(captureWorkspaceHistory(current), captureWorkspaceHistory(next));
+    }
+    workspaceRef.current = next;
+    setWorkspace(next);
+    if (options.flushImmediately) {
+      void persistence.save(next).catch(() => {
+        setBackupStatus(t("storage.saveFailed"));
+      });
+    }
+    return next;
+  }
+
+  function syncHistoryAvailability() {
+    setHistoryAvailability({
+      canUndo: historyTimelineRef.current.undo.length > 0,
+      canRedo: historyTimelineRef.current.redo.length > 0,
     });
   }
 
-  function createNode(position = defaultNodePosition(workspace.nodes.length)) {
+  function clearHistory() {
+    historyTimelineRef.current = emptyWorkspaceHistoryTimeline();
+    editBaselineRef.current = null;
+    syncHistoryAvailability();
+  }
+
+  function recordHistory(before: WorkspaceHistoryState, after: WorkspaceHistoryState) {
+    historyTimelineRef.current = appendWorkspaceHistory(
+      historyTimelineRef.current,
+      before,
+      after,
+      workspaceHistoryLimit,
+    );
+    syncHistoryAvailability();
+  }
+
+  function applyHistoryState(state: WorkspaceHistoryState) {
+    const next = restoreWorkspaceHistory(state, workspaceRef.current.viewport);
+    workspaceRef.current = next;
+    setWorkspace(next);
+    setEditingNodeId(null);
+    editBaselineRef.current = null;
+    const existingNodeIds = new Set(next.nodes.map((node) => node.id));
+    setReferenceFilterNodeIds((current) =>
+      current.filter((nodeId) => existingNodeIds.has(nodeId)),
+    );
+    void persistence.save(next).catch(() => {
+      setBackupStatus(t("storage.saveFailed"));
+    });
+  }
+
+  function undoWorkspace() {
+    if (editingNodeId !== null) {
+      return;
+    }
+    const step = stepWorkspaceHistoryBackward(historyTimelineRef.current);
+    if (step === null) {
+      return;
+    }
+    historyTimelineRef.current = step.timeline;
+    applyHistoryState(step.state);
+    syncHistoryAvailability();
+  }
+
+  function redoWorkspace() {
+    if (editingNodeId !== null) {
+      return;
+    }
+    const step = stepWorkspaceHistoryForward(historyTimelineRef.current);
+    if (step === null) {
+      return;
+    }
+    historyTimelineRef.current = step.timeline;
+    applyHistoryState(step.state);
+    syncHistoryAvailability();
+  }
+
+  function createNode(
+    position = defaultNodePosition(workspaceRef.current.nodes.length),
+  ) {
     const nodeId = crypto.randomUUID();
-    updateWorkspace(
+    const next = updateWorkspace(
       (current) => ({
         ...current,
         nodes: [...current.nodes, { id: nodeId, name: null, content: null }],
         layout: [...current.layout, { nodeId, x: position.x, y: position.y }],
       }),
-      true,
+      { flushImmediately: true, recordHistory: true },
     );
+    editBaselineRef.current = {
+      nodeId,
+      state: captureWorkspaceHistory(next),
+    };
     setActiveView("canvas");
     setEditingNodeId(nodeId);
   }
 
   function editNode(nodeId: string) {
-    if (workspace.nodes.some((node) => node.id === nodeId)) {
+    if (workspaceRef.current.nodes.some((node) => node.id === nodeId)) {
       bringNodeToFront(nodeId);
+      editBaselineRef.current = {
+        nodeId,
+        state: captureWorkspaceHistory(workspaceRef.current),
+      };
       setActiveView("canvas");
       window.setTimeout(() => setEditingNodeId(nodeId), 0);
     }
@@ -319,25 +422,39 @@ function App({ persistence }: AppProps) {
         const layout = moveNodeLayoutToFront(current.layout, nodeId);
         return layout === current.layout ? current : { ...current, layout };
       },
-      true,
+      { flushImmediately: true },
     );
   }
 
-  function deleteNode(nodeId: string) {
+  function deleteNodes(nodeIds: string[]) {
+    const deletedNodeIds = new Set(nodeIds);
+    if (deletedNodeIds.size === 0) {
+      return;
+    }
     updateWorkspace(
       (current) => ({
-        nodes: current.nodes.filter((node) => node.id !== nodeId),
-        layout: current.layout.filter((item) => item.nodeId !== nodeId),
+        ...current,
+        nodes: current.nodes.filter((node) => !deletedNodeIds.has(node.id)),
+        layout: current.layout.filter((item) => !deletedNodeIds.has(item.nodeId)),
         references: current.references.filter(
           (reference) =>
-            reference.sourceNodeId !== nodeId && reference.targetNodeId !== nodeId,
+            !deletedNodeIds.has(reference.sourceNodeId) &&
+            !deletedNodeIds.has(reference.targetNodeId),
         ),
       }),
-      true,
+      { flushImmediately: true, recordHistory: true },
     );
-    setEditingNodeId((current) => (current === nodeId ? null : current));
+    setEditingNodeId((current) =>
+      current !== null && deletedNodeIds.has(current) ? null : current,
+    );
+    if (
+      editBaselineRef.current !== null &&
+      deletedNodeIds.has(editBaselineRef.current.nodeId)
+    ) {
+      editBaselineRef.current = null;
+    }
     setReferenceFilterNodeIds((current) =>
-      current.filter((currentNodeId) => currentNodeId !== nodeId),
+      current.filter((currentNodeId) => !deletedNodeIds.has(currentNodeId)),
     );
   }
 
@@ -366,7 +483,7 @@ function App({ persistence }: AppProps) {
   }
 
   function commitNode(nodeId: string) {
-    updateWorkspace(
+    const next = updateWorkspace(
       (current) => ({
         ...current,
         nodes: current.nodes.map((node) => {
@@ -379,17 +496,41 @@ function App({ persistence }: AppProps) {
           };
         }),
       }),
-      true,
+      { flushImmediately: true },
     );
+    const baseline = editBaselineRef.current;
+    if (baseline?.nodeId === nodeId) {
+      recordHistory(baseline.state, captureWorkspaceHistory(next));
+      editBaselineRef.current = null;
+    }
     setEditingNodeId((current) => (current === nodeId ? null : current));
   }
 
   function updateLayout(layout: NodeLayout[]) {
-    updateWorkspace((current) => ({ ...current, layout }), true);
+    updateWorkspace((current) => ({ ...current, layout }), {
+      flushImmediately: true,
+      recordHistory: true,
+    });
   }
 
   function updateReferences(references: NodeReference[]) {
-    updateWorkspace((current) => ({ ...current, references }), true);
+    updateWorkspace((current) => ({ ...current, references }), {
+      flushImmediately: true,
+      recordHistory: true,
+    });
+  }
+
+  function updateViewport(viewport: CanvasViewport) {
+    updateWorkspace(
+      (current) =>
+        current.viewport !== null &&
+        current.viewport.x === viewport.x &&
+        current.viewport.y === viewport.y &&
+        current.viewport.zoom === viewport.zoom
+          ? current
+          : { ...current, viewport },
+      { flushImmediately: true },
+    );
   }
 
   function toggleReferenceFilter(nodeId: string) {
@@ -479,6 +620,7 @@ function App({ persistence }: AppProps) {
       await persistence.save(pendingWorkspaceReplacement.workspace);
       workspaceRef.current = pendingWorkspaceReplacement.workspace;
       setWorkspace(pendingWorkspaceReplacement.workspace);
+      clearHistory();
       setEditingNodeId(null);
       setSearchTerm("");
       setUnnamedOnly(false);
@@ -527,6 +669,7 @@ function App({ persistence }: AppProps) {
       await persistence.save(initialWorkspace);
       workspaceRef.current = initialWorkspace;
       setWorkspace(initialWorkspace);
+      clearHistory();
       setPrimaryStorageProblem(null);
       setConfirmClearUnreadable(false);
       setPersistenceReady(true);
@@ -836,17 +979,29 @@ function App({ persistence }: AppProps) {
             </section>
           ) : activeView === "canvas" ? (
             <GraphCanvas
+              canRedo={historyAvailability.canRedo}
+              canUndo={historyAvailability.canUndo}
               editingNodeId={editingNodeId}
+              historyBlocked={editingNodeId !== null}
               labels={{
                 cancel: t("actions.cancel"),
-                confirmDeleteNode: t("actions.confirmDeleteNode"),
+                confirmDeleteNode: (count) =>
+                  count === 1
+                    ? t("actions.confirmDeleteNode")
+                    : t("actions.confirmDeleteNodes"),
                 createNode: t("actions.newNode"),
                 content: t("editor.content"),
                 contentPlaceholder: t("editor.contentPlaceholder"),
                 editNode: t("actions.editNode"),
                 deleteNode: t("actions.deleteNode"),
-                deleteNodeBody: (name) => t("deleteNode.body", { name }),
-                deleteNodeTitle: t("deleteNode.title"),
+                deleteNodeBody: (names) =>
+                  names.length === 1
+                    ? t("deleteNode.body", { name: names[0] })
+                    : t("deleteNode.bodyMultiple", { count: names.length }),
+                deleteNodeTitle: (count) =>
+                  count === 1
+                    ? t("deleteNode.title")
+                    : t("deleteNode.titleMultiple", { count }),
                 empty: t("empty.canvas"),
                 filterByNode: t("filters.filterByNode"),
                 name: t("editor.name"),
@@ -854,16 +1009,18 @@ function App({ persistence }: AppProps) {
                 namePlaceholder: t("editor.namePlaceholder"),
                 noContent: t("nodes.noContent"),
                 references: t("references.list"),
+                redo: t("actions.redo"),
                 removeNodeFilter: t("filters.removeNodeFilter"),
                 sourceHandle: t("references.sourceHandle"),
                 targetHandle: t("references.targetHandle"),
+                undo: t("actions.undo"),
                 unnamed: t("nodes.unnamed"),
               }}
               layout={workspace.layout}
               nameConflictNodeIds={nameConflictNodeIds}
               nodes={workspace.nodes}
               onCreateNode={createNode}
-              onDeleteNode={deleteNode}
+              onDeleteNodes={deleteNodes}
               onEditNode={editNode}
               onLayoutChange={updateLayout}
               onNodeCommit={commitNode}
@@ -871,11 +1028,15 @@ function App({ persistence }: AppProps) {
               onNodeBringToFront={bringNodeToFront}
               onNodeNameChange={updateNodeName}
               onReferencesChange={updateReferences}
+              onRedo={redoWorkspace}
               onToggleReferenceFilter={toggleReferenceFilter}
+              onUndo={undoWorkspace}
+              onViewportChange={updateViewport}
               referenceFilterNodeIds={referenceFilterNodeIds}
               references={workspace.references}
               searchTerm={searchTerm}
               unnamedOnly={unnamedOnly}
+              viewport={workspace.viewport}
             />
           ) : (
             <section className="node-list-view" aria-live="polite">

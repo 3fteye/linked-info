@@ -16,13 +16,18 @@ export const resources = {
       actions: {
         cancel: "取消",
         confirmDeleteNode: "删除节点",
+        confirmDeleteNodes: "删除所选节点",
         deleteNode: "删除节点",
         newNode: "新建节点",
         editNode: "编辑节点",
+        undo: "撤销",
+        redo: "重做",
       },
       deleteNode: {
         title: "删除这个节点？",
-        body: "节点“{{name}}”以及与它连接的全部引用都会被删除。此操作无法撤销。",
+        titleMultiple: "删除选中的 {{count}} 个节点？",
+        body: "节点“{{name}}”以及与它连接的全部引用都会被删除。删除后可以使用撤销恢复。",
+        bodyMultiple: "选中的 {{count}} 个节点以及与它们连接的全部引用都会被删除。删除后可以使用撤销恢复。",
       },
       search: {
         label: "搜索节点",
@@ -129,13 +134,18 @@ export const resources = {
       actions: {
         cancel: "Cancel",
         confirmDeleteNode: "Delete node",
+        confirmDeleteNodes: "Delete selected nodes",
         deleteNode: "Delete node",
         newNode: "New node",
         editNode: "Edit node",
+        undo: "Undo",
+        redo: "Redo",
       },
       deleteNode: {
         title: "Delete this node?",
-        body: "“{{name}}” and every reference connected to it will be deleted. This cannot be undone.",
+        titleMultiple: "Delete the {{count}} selected nodes?",
+        body: "“{{name}}” and every reference connected to it will be deleted. Undo can restore it.",
+        bodyMultiple: "The {{count}} selected nodes and every reference connected to them will be deleted. Undo can restore them.",
       },
       search: {
         label: "Search nodes",

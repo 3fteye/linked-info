@@ -15,10 +15,17 @@ export interface NodeReference {
   targetNodeId: string;
 }
 
+export interface CanvasViewport {
+  x: number;
+  y: number;
+  zoom: number;
+}
+
 export interface WorkspaceSnapshot {
   nodes: InformationNode[];
   layout: NodeLayout[];
   references: NodeReference[];
+  viewport: CanvasViewport | null;
 }
 
 const uuidPattern =
@@ -39,7 +46,7 @@ function canonicalNodeId(value: unknown): string | null {
 }
 
 export function emptyWorkspace(): WorkspaceSnapshot {
-  return { nodes: [], layout: [], references: [] };
+  return { nodes: [], layout: [], references: [], viewport: null };
 }
 
 export function normalizeNodeName(name: string): string {
@@ -83,6 +90,34 @@ export function moveNodeLayoutToFront(
   ];
 }
 
+export function updateNodeLayoutPositions(
+  layout: NodeLayout[],
+  positions: Array<{ nodeId: string; x: number; y: number }>,
+): NodeLayout[] {
+  if (positions.length === 0) {
+    return layout;
+  }
+
+  const positionByNodeId = new Map(positions.map((position) => [position.nodeId, position]));
+  const existingNodeIds = new Set(layout.map((item) => item.nodeId));
+  let changed = false;
+  const updated = layout.map((item) => {
+    const position = positionByNodeId.get(item.nodeId);
+    if (position === undefined || (position.x === item.x && position.y === item.y)) {
+      return item;
+    }
+    changed = true;
+    return { ...item, x: position.x, y: position.y };
+  });
+  const missing = positions.filter((position) => !existingNodeIds.has(position.nodeId));
+  if (missing.length > 0) {
+    changed = true;
+    updated.push(...missing.map((position) => ({ ...position })));
+  }
+
+  return changed ? updated : layout;
+}
+
 export function parseWorkspaceSnapshot(value: unknown): WorkspaceSnapshot | null {
   if (
     !isRecord(value) ||
@@ -91,6 +126,24 @@ export function parseWorkspaceSnapshot(value: unknown): WorkspaceSnapshot | null
     !Array.isArray(value.references)
   ) {
     return null;
+  }
+
+  let viewport: CanvasViewport | null = null;
+  if (value.viewport !== undefined && value.viewport !== null) {
+    if (
+      !isRecord(value.viewport) ||
+      !isFiniteNumber(value.viewport.x) ||
+      !isFiniteNumber(value.viewport.y) ||
+      !isFiniteNumber(value.viewport.zoom) ||
+      value.viewport.zoom <= 0
+    ) {
+      return null;
+    }
+    viewport = {
+      x: value.viewport.x,
+      y: value.viewport.y,
+      zoom: value.viewport.zoom,
+    };
   }
 
   const nodes: InformationNode[] = [];
@@ -170,5 +223,5 @@ export function parseWorkspaceSnapshot(value: unknown): WorkspaceSnapshot | null
     references.push({ sourceNodeId, targetNodeId });
   }
 
-  return { nodes, layout, references };
+  return { nodes, layout, references, viewport };
 }
