@@ -18,7 +18,8 @@ pub mod routes {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct CreateNodeRequest {
-    pub name: String,
+    #[serde(default)]
+    pub name: Option<String>,
     #[serde(default)]
     pub content: Option<String>,
 }
@@ -54,7 +55,8 @@ pub struct ListNodesQuery {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct UpdateNodeRequest {
-    pub name: String,
+    #[serde(default)]
+    pub name: Option<String>,
     #[serde(default)]
     pub content: Option<String>,
 }
@@ -68,7 +70,7 @@ pub struct CreateReferenceRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct NodeResource {
     pub id: Uuid,
-    pub name: String,
+    pub name: Option<String>,
     pub content: Option<String>,
 }
 
@@ -88,7 +90,6 @@ pub struct ReferenceResource {
 #[serde(rename_all = "snake_case")]
 pub enum ApiErrorCode {
     InvalidRequest,
-    InvalidNodeName,
     NodeNotFound,
     DuplicateNodeName,
     ReferenceEndpointNotFound,
@@ -164,7 +165,7 @@ mod endpoints {
         responses(
             (status = 201, description = "Node created", body = NodeResource),
             (status = 400, description = "Invalid request", body = ApiErrorResponse),
-            (status = 409, description = "Name already exists", body = ApiErrorResponse)
+            (status = 409, description = "Non-empty name already exists", body = ApiErrorResponse)
         ),
         tag = "nodes"
     )]
@@ -191,7 +192,7 @@ mod endpoints {
             (status = 200, description = "Node updated", body = NodeResource),
             (status = 400, description = "Invalid request", body = ApiErrorResponse),
             (status = 404, description = "Node not found", body = ApiErrorResponse),
-            (status = 409, description = "Name already exists", body = ApiErrorResponse)
+            (status = 409, description = "Non-empty name already exists", body = ApiErrorResponse)
         ),
         tag = "nodes"
     )]

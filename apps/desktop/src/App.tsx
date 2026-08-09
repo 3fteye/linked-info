@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Database,
   FileText,
@@ -11,17 +11,15 @@ import {
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import GraphCanvas from "./GraphCanvas";
-import NodeEditor from "./NodeEditor";
 import { supportedLanguages, type SupportedLanguage } from "./locales";
 import {
-  loadDraft,
+  isUnnamedNode,
   loadWorkspace,
   normalizeNodeName,
-  saveDraft,
   saveWorkspace,
-  type NodeDraft,
   type NodeLayout,
   type NodeReference,
+  type WorkspaceSnapshot,
 } from "./workspaceStore";
 import "./App.css";
 
@@ -56,121 +54,142 @@ function App() {
   const { t, i18n } = useTranslation();
   const [activeView, setActiveView] = useState<ViewId>("canvas");
   const [workspace, setWorkspace] = useState(loadWorkspace);
-  const [draft, setDraft] = useState<NodeDraft | null>(loadDraft);
-  const [draftError, setDraftError] = useState<string | null>(null);
+  const workspaceRef = useRef(workspace);
+  const [editingNodeId, setEditingNodeId] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState("");
+  const [unnamedOnly, setUnnamedOnly] = useState(false);
   const currentView = views.find((view) => view.id === activeView) ?? views[0];
   const activeLanguage = i18n.resolvedLanguage ?? i18n.language;
   const normalizedSearch = normalizeNodeName(searchTerm);
 
   const filteredNodes = useMemo(() => {
-    if (normalizedSearch.length === 0) {
-      return workspace.nodes;
-    }
-    return workspace.nodes.filter((node) =>
-      normalizeNodeName(node.name).includes(normalizedSearch),
+    return workspace.nodes.filter(
+      (node) =>
+        node.id === editingNodeId ||
+        ((!unnamedOnly || isUnnamedNode(node)) &&
+          (normalizedSearch.length === 0 ||
+            normalizeNodeName(node.name ?? "").includes(normalizedSearch))),
     );
-  }, [normalizedSearch, workspace.nodes]);
+  }, [editingNodeId, normalizedSearch, unnamedOnly, workspace.nodes]);
+
+  const nameConflictNodeIds = useMemo(() => {
+    const idsByName = new Map<string, string[]>();
+    for (const node of workspace.nodes) {
+      const normalizedName = normalizeNodeName(node.name ?? "");
+      if (normalizedName.length === 0) {
+        continue;
+      }
+      const ids = idsByName.get(normalizedName) ?? [];
+      ids.push(node.id);
+      idsByName.set(normalizedName, ids);
+    }
+
+    return new Set(
+      [...idsByName.values()].filter((ids) => ids.length > 1).flat(),
+    );
+  }, [workspace.nodes]);
 
   useEffect(() => {
-    saveWorkspace(workspace);
+    workspaceRef.current = workspace;
+    const saveTimer = window.setTimeout(() => saveWorkspace(workspace), 300);
+    return () => window.clearTimeout(saveTimer);
   }, [workspace]);
 
   useEffect(() => {
-    saveDraft(draft);
-  }, [draft]);
+    const flushLocalWorkspace = () => saveWorkspace(workspaceRef.current);
+    window.addEventListener("beforeunload", flushLocalWorkspace);
+    return () => {
+      window.removeEventListener("beforeunload", flushLocalWorkspace);
+      flushLocalWorkspace();
+    };
+  }, []);
 
   function changeLanguage(language: SupportedLanguage) {
     void i18n.changeLanguage(language);
   }
 
-  function openCreateNode(position = defaultNodePosition(workspace.nodes.length)) {
-    setDraft({
-      nodeId: null,
-      name: "",
-      content: "",
-      position,
-      referenceTargetIds: [],
+  function updateWorkspace(
+    updater: (current: WorkspaceSnapshot) => WorkspaceSnapshot,
+    flushImmediately = false,
+  ) {
+    setWorkspace((current) => {
+      const next = updater(current);
+      workspaceRef.current = next;
+      if (flushImmediately) {
+        saveWorkspace(next);
+      }
+      return next;
     });
-    setDraftError(null);
   }
 
-  function openEditNode(nodeId: string) {
-    const node = workspace.nodes.find((candidate) => candidate.id === nodeId);
-    if (!node) {
-      return;
-    }
-    const layout = workspace.layout.find((item) => item.nodeId === nodeId);
-    setDraft({
-      nodeId,
-      name: node.name,
-      content: node.content ?? "",
-      position: layout ?? defaultNodePosition(workspace.nodes.length),
-      referenceTargetIds: workspace.references
-        .filter((reference) => reference.sourceNodeId === nodeId)
-        .map((reference) => reference.targetNodeId),
-    });
-    setDraftError(null);
-  }
-
-  function updateDraft(nextDraft: NodeDraft) {
-    setDraft(nextDraft);
-    if (draftError !== null) {
-      setDraftError(null);
-    }
-  }
-
-  function submitDraft() {
-    if (draft === null) {
-      return;
-    }
-
-    const name = draft.name.trim();
-    if (name.length === 0) {
-      setDraftError(t("validation.nameRequired"));
-      return;
-    }
-
-    const normalizedName = normalizeNodeName(name);
-    const duplicate = workspace.nodes.some(
-      (node) =>
-        node.id !== draft.nodeId && normalizeNodeName(node.name) === normalizedName,
+  function createNode(position = defaultNodePosition(workspace.nodes.length)) {
+    const nodeId = crypto.randomUUID();
+    updateWorkspace(
+      (current) => ({
+        ...current,
+        nodes: [...current.nodes, { id: nodeId, name: null, content: null }],
+        layout: [...current.layout, { nodeId, x: position.x, y: position.y }],
+      }),
+      true,
     );
-    if (duplicate) {
-      setDraftError(t("validation.nameUnique"));
-      return;
-    }
+    setActiveView("canvas");
+    setEditingNodeId(nodeId);
+  }
 
-    const content = draft.content.length === 0 ? null : draft.content;
-    if (draft.nodeId === null) {
-      const nodeId = crypto.randomUUID();
-      setWorkspace((current) => ({
-        ...current,
-        nodes: [...current.nodes, { id: nodeId, name, content }],
-        layout: [
-          ...current.layout,
-          { nodeId, x: draft.position.x, y: draft.position.y },
-        ],
-      }));
-    } else {
-      setWorkspace((current) => ({
-        ...current,
-        nodes: current.nodes.map((node) =>
-          node.id === draft.nodeId ? { ...node, name, content } : node,
-        ),
-      }));
+  function editNode(nodeId: string) {
+    if (workspace.nodes.some((node) => node.id === nodeId)) {
+      setActiveView("canvas");
+      window.setTimeout(() => setEditingNodeId(nodeId), 0);
     }
+  }
 
-    setDraft(null);
-    setDraftError(null);
+  function updateNodeName(nodeId: string, name: string) {
+    updateWorkspace((current) => ({
+      ...current,
+      nodes: current.nodes.map((node) =>
+        node.id === nodeId ? { ...node, name: name.length === 0 ? null : name } : node,
+      ),
+    }));
+  }
+
+  function updateNodeContent(nodeId: string, content: string) {
+    updateWorkspace((current) => ({
+      ...current,
+      nodes: current.nodes.map((node) =>
+        node.id === nodeId
+          ? { ...node, content: content.length === 0 ? null : content }
+          : node,
+      ),
+    }));
+  }
+
+  function commitNode(nodeId: string) {
+    updateWorkspace(
+      (current) => ({
+        ...current,
+        nodes: current.nodes.map((node) => {
+          if (node.id !== nodeId) {
+            return node;
+          }
+          return {
+            ...node,
+            name: node.name?.trim() || null,
+          };
+        }),
+      }),
+      true,
+    );
+    if (!nameConflictNodeIds.has(nodeId)) {
+      setEditingNodeId((current) => (current === nodeId ? null : current));
+    }
   }
 
   function updateLayout(layout: NodeLayout[]) {
-    setWorkspace((current) => ({ ...current, layout }));
+    updateWorkspace((current) => ({ ...current, layout }), true);
   }
 
   function updateReferences(references: NodeReference[]) {
-    setWorkspace((current) => ({ ...current, references }));
+    updateWorkspace((current) => ({ ...current, references }), true);
   }
 
   return (
@@ -237,12 +256,21 @@ function App() {
                   value={searchTerm}
                 />
               </label>
+              <label className="unnamed-filter">
+                <input
+                  aria-label={t("filters.unnamedOnly")}
+                  checked={unnamedOnly}
+                  onChange={(event) => setUnnamedOnly(event.target.checked)}
+                  type="checkbox"
+                />
+                <span>{t("filters.unnamedOnly")}</span>
+              </label>
               <span className="item-count">
                 {t("workspace.itemCount", { count: filteredNodes.length })}
               </span>
               <button
                 className="primary-button header-create-button"
-                onClick={() => openCreateNode()}
+                onClick={() => createNode()}
                 type="button"
               >
                 <Plus size={16} />
@@ -252,10 +280,7 @@ function App() {
           )}
         </header>
 
-        <div
-          className="workspace-content"
-          data-editor-open={activeView !== "settings" && draft !== null}
-        >
+        <div className="workspace-content">
           {activeView === "settings" ? (
             <section className="settings-panel">
               <div className="setting-row">
@@ -279,21 +304,33 @@ function App() {
             </section>
           ) : activeView === "canvas" ? (
             <GraphCanvas
+              editingNodeId={editingNodeId}
               labels={{
                 createNode: t("actions.newNode"),
+                content: t("editor.content"),
+                contentPlaceholder: t("editor.contentPlaceholder"),
                 editNode: t("actions.editNode"),
                 empty: t("empty.canvas"),
+                name: t("editor.name"),
+                nameConflict: t("validation.nameUnique"),
+                namePlaceholder: t("editor.namePlaceholder"),
                 sourceHandle: t("references.sourceHandle"),
                 targetHandle: t("references.targetHandle"),
+                unnamed: t("nodes.unnamed"),
               }}
               layout={workspace.layout}
+              nameConflictNodeIds={nameConflictNodeIds}
               nodes={workspace.nodes}
-              onCreateNode={openCreateNode}
-              onEditNode={openEditNode}
+              onCreateNode={createNode}
+              onEditNode={editNode}
               onLayoutChange={updateLayout}
+              onNodeCommit={commitNode}
+              onNodeContentChange={updateNodeContent}
+              onNodeNameChange={updateNodeName}
               onReferencesChange={updateReferences}
               references={workspace.references}
               searchTerm={searchTerm}
+              unnamedOnly={unnamedOnly}
             />
           ) : (
             <section className="node-list-view" aria-live="polite">
@@ -305,10 +342,12 @@ function App() {
                     <button
                       className="node-list-row"
                       key={node.id}
-                      onClick={() => openEditNode(node.id)}
+                      onClick={() => editNode(node.id)}
                       type="button"
                     >
-                      <strong>{node.name}</strong>
+                      <strong data-unnamed={isUnnamedNode(node)}>
+                        {node.name ?? t("nodes.unnamed")}
+                      </strong>
                       <span>{node.content ?? t("nodes.noContent")}</span>
                     </button>
                   ))}
@@ -317,29 +356,6 @@ function App() {
             </section>
           )}
 
-          {activeView !== "settings" && draft !== null && (
-            <NodeEditor
-              draft={draft}
-              error={draftError}
-              labels={{
-                createTitle: t("editor.createTitle"),
-                editTitle: t("editor.editTitle"),
-                name: t("editor.name"),
-                namePlaceholder: t("editor.namePlaceholder"),
-                content: t("editor.content"),
-                contentPlaceholder: t("editor.contentPlaceholder"),
-                save: t("actions.save"),
-                cancel: t("actions.cancel"),
-                close: t("actions.close"),
-              }}
-              onCancel={() => {
-                setDraft(null);
-                setDraftError(null);
-              }}
-              onChange={updateDraft}
-              onSubmit={submitDraft}
-            />
-          )}
         </div>
       </main>
     </div>

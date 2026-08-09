@@ -1,17 +1,17 @@
 use std::str::FromStr;
 
-use linked_info_domain::{DomainError, Node, NodeId, Reference, normalize_node_name};
+use linked_info_domain::{Node, NodeId, Reference, normalize_node_name};
 use linked_info_storage_port::GraphStore;
 use serde::Deserialize;
 use thiserror::Error;
 use uuid::Error as UuidError;
 use worker::{D1Database, D1PreparedStatement, D1Result, D1Type};
 
-const LIST_NODES_SQL: &str =
-    "SELECT id, name, content FROM nodes ORDER BY normalized_name, id LIMIT ? OFFSET ?";
+const LIST_NODES_SQL: &str = "SELECT id, name, content FROM nodes \
+     ORDER BY normalized_name IS NOT NULL, normalized_name, id LIMIT ? OFFSET ?";
 const SEARCH_NODES_SQL: &str = "SELECT id, name, content FROM nodes \
-     WHERE normalized_name LIKE '%' || ? || '%' ESCAPE '\\' \
-     ORDER BY normalized_name, id LIMIT ? OFFSET ?";
+     WHERE COALESCE(normalized_name, '') LIKE '%' || ? || '%' ESCAPE '\\' \
+     ORDER BY normalized_name IS NOT NULL, normalized_name, id LIMIT ? OFFSET ?";
 const FIND_NODE_SQL: &str = "SELECT id, name, content FROM nodes WHERE id = ?";
 const SAVE_NODE_SQL: &str = "INSERT INTO nodes (id, name, normalized_name, content) \
      VALUES (?, ?, ?, ?) \
@@ -27,12 +27,12 @@ const LIST_REFERRERS_SQL: &str = "SELECT n.id, n.name, n.content \
      FROM node_references r \
      JOIN nodes n ON n.id = r.source_node_id \
      WHERE r.target_node_id = ? \
-     ORDER BY n.normalized_name, n.id LIMIT ? OFFSET ?";
+     ORDER BY n.normalized_name IS NOT NULL, n.normalized_name, n.id LIMIT ? OFFSET ?";
 const LIST_REFERENCES_SQL: &str = "SELECT n.id, n.name, n.content \
      FROM node_references r \
      JOIN nodes n ON n.id = r.target_node_id \
      WHERE r.source_node_id = ? \
-     ORDER BY n.normalized_name, n.id LIMIT ? OFFSET ?";
+     ORDER BY n.normalized_name IS NOT NULL, n.normalized_name, n.id LIMIT ? OFFSET ?";
 
 #[derive(Debug)]
 pub struct D1GraphStore {
@@ -119,14 +119,22 @@ impl GraphStore for D1GraphStore {
     async fn save_node(&self, node: Node) -> Result<(), Self::Error> {
         let id = node.id().to_string();
         let normalized_name = node.normalized_name();
+        let name = match node.name() {
+            Some(name) => D1Type::Text(name),
+            None => D1Type::Null,
+        };
+        let normalized_name = match normalized_name.as_deref() {
+            Some(normalized_name) => D1Type::Text(normalized_name),
+            None => D1Type::Null,
+        };
         let content = match node.content() {
             Some(content) => D1Type::Text(content),
             None => D1Type::Null,
         };
         let values = [
             D1Type::Text(&id),
-            D1Type::Text(node.name()),
-            D1Type::Text(&normalized_name),
+            name,
+            normalized_name,
             content,
         ];
         let result = self
@@ -217,7 +225,7 @@ impl GraphStore for D1GraphStore {
 #[derive(Debug, Deserialize)]
 struct NodeRow {
     id: String,
-    name: String,
+    name: Option<String>,
     content: Option<String>,
 }
 
@@ -227,7 +235,7 @@ impl NodeRow {
             value: self.id,
             source,
         })?;
-        Node::restore(id, self.name, self.content).map_err(D1StoreError::from)
+        Ok(Node::restore(id, self.name, self.content))
     }
 }
 
@@ -243,8 +251,6 @@ pub enum D1StoreError {
         #[source]
         source: UuidError,
     },
-    #[error("stored node is invalid: {0}")]
-    InvalidNode(#[from] DomainError),
     #[error("pagination value exceeds the D1 integer range: {0}")]
     InvalidPagination(u32),
     #[error("D1 operation failed: {0}")]

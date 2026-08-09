@@ -2,9 +2,14 @@ PRAGMA foreign_keys = ON;
 
 CREATE TABLE nodes (
     id TEXT PRIMARY KEY NOT NULL,
-    name TEXT NOT NULL CHECK (length(trim(name)) > 0),
-    normalized_name TEXT NOT NULL UNIQUE,
-    content TEXT
+    name TEXT,
+    normalized_name TEXT UNIQUE,
+    content TEXT,
+    CHECK (
+        (name IS NULL AND normalized_name IS NULL)
+        OR
+        (name IS NOT NULL AND length(trim(name)) > 0 AND normalized_name IS NOT NULL)
+    )
 ) STRICT;
 
 CREATE TABLE node_references (

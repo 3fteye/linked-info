@@ -78,13 +78,14 @@ mod tests {
     async fn search_defaults_to_node_names() {
         let service = GraphService::new(MemoryGraphStore::default());
         service
-            .save_node(Node::new("OpenAI", None).expect("valid node"))
+            .save_node(Node::new(Some("OpenAI".into()), None))
             .await
             .expect("save succeeds");
         service
-            .save_node(
-                Node::new("Deployment script", Some("uses OpenAI".into())).expect("valid node"),
-            )
+            .save_node(Node::new(
+                Some("Deployment script".into()),
+                Some("uses OpenAI".into()),
+            ))
             .await
             .expect("save succeeds");
 
@@ -94,7 +95,7 @@ mod tests {
             .expect("search succeeds");
 
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].name(), "OpenAI");
+        assert_eq!(result[0].name(), Some("OpenAI"));
     }
 
     #[tokio::test]
@@ -102,7 +103,7 @@ mod tests {
         let service = GraphService::new(MemoryGraphStore::default());
         for name in ["Charlie", "Alpha", "Bravo"] {
             service
-                .save_node(Node::new(name, None).expect("valid node"))
+                .save_node(Node::new(Some(name.into()), None))
                 .await
                 .expect("save succeeds");
         }
@@ -110,15 +111,15 @@ mod tests {
         let result = service.list_nodes(1, 1).await.expect("list succeeds");
 
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].name(), "Bravo");
+        assert_eq!(result[0].name(), Some("Bravo"));
     }
 
     #[tokio::test]
     async fn filtering_by_a_node_returns_its_direct_referrers() {
         let service = GraphService::new(MemoryGraphStore::default());
-        let tag = Node::new("OpenAI", None).expect("valid node");
-        let script = Node::new("Deployment script", None).expect("valid node");
-        let unrelated = Node::new("Unrelated", None).expect("valid node");
+        let tag = Node::new(Some("OpenAI".into()), None);
+        let script = Node::new(Some("Deployment script".into()), None);
+        let unrelated = Node::new(Some("Unrelated".into()), None);
 
         for node in [&tag, &script, &unrelated] {
             service
@@ -142,8 +143,8 @@ mod tests {
     #[tokio::test]
     async fn references_can_be_listed_from_the_source_and_removed() {
         let service = GraphService::new(MemoryGraphStore::default());
-        let source = Node::new("Script", None).expect("valid node");
-        let target = Node::new("OpenAI", None).expect("valid node");
+        let source = Node::new(Some("Script".into()), None);
+        let target = Node::new(Some("OpenAI".into()), None);
         service
             .save_node(source.clone())
             .await
@@ -182,8 +183,8 @@ mod tests {
     #[tokio::test]
     async fn renaming_a_target_keeps_existing_references() {
         let service = GraphService::new(MemoryGraphStore::default());
-        let mut tag = Node::new("OpenAI", None).expect("valid node");
-        let note = Node::new("API note", None).expect("valid node");
+        let mut tag = Node::new(Some("OpenAI".into()), None);
+        let note = Node::new(Some("API note".into()), None);
         service.save_node(tag.clone()).await.expect("save succeeds");
         service
             .save_node(note.clone())
@@ -194,7 +195,7 @@ mod tests {
             .await
             .expect("reference succeeds");
 
-        tag.rename("OpenAI API").expect("valid name");
+        tag.set_name(Some("OpenAI API".into()));
         service
             .save_node(tag.clone())
             .await

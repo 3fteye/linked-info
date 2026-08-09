@@ -18,13 +18,15 @@ import {
   useEdgesState,
   useNodesState,
 } from "@xyflow/react";
-import { Link2, Pencil, Plus } from "lucide-react";
+import { GripVertical, Link2, Pencil, Plus } from "lucide-react";
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
+  type FocusEvent as ReactFocusEvent,
   type MouseEvent as ReactMouseEvent,
 } from "react";
 import type {
@@ -35,31 +37,54 @@ import type {
 import "@xyflow/react/dist/style.css";
 
 interface InformationNodeData extends Record<string, unknown> {
-  name: string;
+  name: string | null;
   content: string | null;
+  contentLabel: string;
+  contentPlaceholder: string;
+  editing: boolean;
+  nameConflict: boolean;
+  nameConflictLabel: string;
+  nameLabel: string;
+  namePlaceholder: string;
+  unnamedLabel: string;
   sourceLabel: string;
   targetLabel: string;
+  onCommit: (nodeId: string) => void;
+  onContentChange: (nodeId: string, content: string) => void;
+  onNameChange: (nodeId: string, name: string) => void;
 }
 
 type InformationFlowNode = Node<InformationNodeData, "information">;
 
 interface GraphLabels {
   createNode: string;
+  content: string;
+  contentPlaceholder: string;
   editNode: string;
   empty: string;
+  name: string;
+  nameConflict: string;
+  namePlaceholder: string;
   sourceHandle: string;
   targetHandle: string;
+  unnamed: string;
 }
 
 interface GraphCanvasProps {
   nodes: InformationNode[];
   layout: NodeLayout[];
   references: NodeReference[];
+  editingNodeId: string | null;
+  nameConflictNodeIds: Set<string>;
   searchTerm: string;
+  unnamedOnly: boolean;
   labels: GraphLabels;
   onCreateNode: (position: { x: number; y: number }) => void;
   onEditNode: (nodeId: string) => void;
   onLayoutChange: (layout: NodeLayout[]) => void;
+  onNodeCommit: (nodeId: string) => void;
+  onNodeContentChange: (nodeId: string, content: string) => void;
+  onNodeNameChange: (nodeId: string, name: string) => void;
   onReferencesChange: (references: NodeReference[]) => void;
 }
 
@@ -77,9 +102,46 @@ type ContextMenuState =
       nodeId: string;
     };
 
-function InformationNodeCard({ data, selected }: NodeProps<InformationFlowNode>) {
+function InformationNodeCard({ id, data, selected }: NodeProps<InformationFlowNode>) {
+  const nodeRef = useRef<HTMLElement>(null);
+  const nameInputRef = useRef<HTMLInputElement>(null);
+
+  useLayoutEffect(() => {
+    if (!data.editing) {
+      return;
+    }
+
+    nameInputRef.current?.focus({ preventScroll: true });
+    const focusTimer = window.setTimeout(
+      () => nameInputRef.current?.focus({ preventScroll: true }),
+      0,
+    );
+    return () => window.clearTimeout(focusTimer);
+  }, [data.editing]);
+
+  const commitWhenLeavingNode = (event: ReactFocusEvent<HTMLElement>) => {
+    const nextTarget = event.relatedTarget;
+    if (nextTarget instanceof HTMLElement && event.currentTarget.contains(nextTarget)) {
+      return;
+    }
+
+    window.setTimeout(() => {
+      const nodeElement = nodeRef.current;
+      if (nodeElement?.contains(document.activeElement)) {
+        return;
+      }
+      data.onCommit(id);
+    }, 0);
+  };
+
   return (
-    <article className="graph-node" data-selected={selected}>
+    <article
+      className="graph-node"
+      data-editing={data.editing}
+      data-selected={selected}
+      onBlur={commitWhenLeavingNode}
+      ref={nodeRef}
+    >
       <Handle
         className="graph-handle graph-handle-target"
         position={Position.Left}
@@ -87,11 +149,46 @@ function InformationNodeCard({ data, selected }: NodeProps<InformationFlowNode>)
         type="target"
       />
       <header className="graph-node-header">
-        <Link2 aria-hidden="true" size={14} />
-        <strong>{data.name}</strong>
+        {data.editing ? (
+          <>
+            <GripVertical aria-hidden="true" className="graph-node-drag-handle" size={15} />
+            <input
+              aria-invalid={data.nameConflict}
+              aria-label={data.nameLabel}
+              autoFocus
+              className="nodrag nowheel graph-node-name-input"
+              onChange={(event) => data.onNameChange(id, event.target.value)}
+              placeholder={data.namePlaceholder}
+              ref={nameInputRef}
+              value={data.name ?? ""}
+            />
+          </>
+        ) : (
+          <>
+            <Link2 aria-hidden="true" size={14} />
+            <strong data-unnamed={data.name === null}>{data.name ?? data.unnamedLabel}</strong>
+          </>
+        )}
       </header>
-      {data.content !== null && data.content.length > 0 && (
-        <p className="graph-node-content">{data.content}</p>
+      {data.editing ? (
+        <div className="graph-node-editor">
+          <textarea
+            aria-label={data.contentLabel}
+            className="nodrag nowheel graph-node-content-input"
+            onChange={(event) => data.onContentChange(id, event.target.value)}
+            placeholder={data.contentPlaceholder}
+            rows={4}
+            value={data.content ?? ""}
+          />
+          {data.nameConflict && (
+            <span className="graph-node-error" role="alert">
+              {data.nameConflictLabel}
+            </span>
+          )}
+        </div>
+      ) : (
+        data.content !== null &&
+        data.content.length > 0 && <p className="graph-node-content">{data.content}</p>
       )}
       <Handle
         className="graph-handle graph-handle-source"
@@ -113,11 +210,17 @@ export default function GraphCanvas({
   nodes,
   layout,
   references,
+  editingNodeId,
+  nameConflictNodeIds,
   searchTerm,
+  unnamedOnly,
   labels,
   onCreateNode,
   onEditNode,
   onLayoutChange,
+  onNodeCommit,
+  onNodeContentChange,
+  onNodeNameChange,
   onReferencesChange,
 }: GraphCanvasProps) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -149,18 +252,43 @@ export default function GraphCanvas({
             : { x: 80 + (index % 4) * 300, y: 80 + Math.floor(index / 4) * 210 },
           selected: currentNode?.selected ?? false,
           hidden:
-            normalizedSearch.length > 0 &&
-            !node.name.toLowerCase().includes(normalizedSearch),
+            editingNodeId !== node.id &&
+            ((unnamedOnly && node.name !== null) ||
+              (normalizedSearch.length > 0 &&
+                !(node.name ?? "").toLowerCase().includes(normalizedSearch))),
           data: {
             name: node.name,
             content: node.content,
+            contentLabel: labels.content,
+            contentPlaceholder: labels.contentPlaceholder,
+            editing: editingNodeId === node.id,
+            nameConflict: nameConflictNodeIds.has(node.id),
+            nameConflictLabel: labels.nameConflict,
+            nameLabel: labels.name,
+            namePlaceholder: labels.namePlaceholder,
+            unnamedLabel: labels.unnamed,
             sourceLabel: labels.sourceHandle,
             targetLabel: labels.targetHandle,
+            onCommit: onNodeCommit,
+            onContentChange: onNodeContentChange,
+            onNameChange: onNodeNameChange,
           },
         };
       });
     });
-  }, [labels.sourceHandle, labels.targetHandle, layoutByNode, nodes, normalizedSearch, setFlowNodes]);
+  }, [
+    editingNodeId,
+    labels,
+    layoutByNode,
+    nameConflictNodeIds,
+    nodes,
+    normalizedSearch,
+    onNodeCommit,
+    onNodeContentChange,
+    onNodeNameChange,
+    setFlowNodes,
+    unnamedOnly,
+  ]);
 
   useEffect(() => {
     const visibleNodeIds = new Set(
@@ -359,7 +487,20 @@ export default function GraphCanvas({
         selectionOnDrag
         zoomOnDoubleClick={false}
       >
-        <Background color="#c8d0ca" gap={22} size={1.2} variant={BackgroundVariant.Dots} />
+        <Background
+          color="#d0d8d2"
+          gap={24}
+          id="minor-grid"
+          lineWidth={1}
+          variant={BackgroundVariant.Lines}
+        />
+        <Background
+          color="#aebbb2"
+          gap={120}
+          id="major-grid"
+          lineWidth={1.2}
+          variant={BackgroundVariant.Lines}
+        />
         <MiniMap
           className="graph-minimap"
           maskColor="rgb(245 247 245 / 72%)"

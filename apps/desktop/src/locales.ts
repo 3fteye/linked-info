@@ -16,9 +16,6 @@ export const resources = {
       actions: {
         newNode: "新建节点",
         editNode: "编辑节点",
-        save: "保存",
-        cancel: "取消",
-        close: "关闭",
       },
       search: {
         label: "搜索节点",
@@ -30,17 +27,18 @@ export const resources = {
       },
       nodes: {
         noContent: "无内容",
+        unnamed: "未命名",
+      },
+      filters: {
+        unnamedOnly: "仅未命名",
       },
       editor: {
-        createTitle: "新建节点",
-        editTitle: "编辑节点",
         name: "名称",
-        namePlaceholder: "输入唯一名称",
+        namePlaceholder: "名称可空",
         content: "内容",
         contentPlaceholder: "输入纯文本内容",
       },
       validation: {
-        nameRequired: "名称不能为空",
         nameUnique: "该名称已经存在",
       },
       references: {
@@ -77,9 +75,6 @@ export const resources = {
       actions: {
         newNode: "New node",
         editNode: "Edit node",
-        save: "Save",
-        cancel: "Cancel",
-        close: "Close",
       },
       search: {
         label: "Search nodes",
@@ -91,17 +86,18 @@ export const resources = {
       },
       nodes: {
         noContent: "No content",
+        unnamed: "Unnamed",
+      },
+      filters: {
+        unnamedOnly: "Unnamed only",
       },
       editor: {
-        createTitle: "New node",
-        editTitle: "Edit node",
         name: "Name",
-        namePlaceholder: "Enter a unique name",
+        namePlaceholder: "Name optional",
         content: "Content",
         contentPlaceholder: "Enter plain text content",
       },
       validation: {
-        nameRequired: "Name is required",
         nameUnique: "This name already exists",
       },
       references: {

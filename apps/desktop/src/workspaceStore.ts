@@ -1,6 +1,6 @@
 export interface InformationNode {
   id: string;
-  name: string;
+  name: string | null;
   content: string | null;
 }
 
@@ -21,16 +21,7 @@ export interface WorkspaceSnapshot {
   references: NodeReference[];
 }
 
-export interface NodeDraft {
-  nodeId: string | null;
-  name: string;
-  content: string;
-  position: { x: number; y: number };
-  referenceTargetIds: string[];
-}
-
 const workspaceStorageKey = "linked-info.workspace.v1";
-const draftStorageKey = "linked-info.node-draft.v1";
 
 const emptyWorkspace: WorkspaceSnapshot = {
   nodes: [],
@@ -63,6 +54,10 @@ export function normalizeNodeName(name: string): string {
   return name.trim().toLowerCase();
 }
 
+export function isUnnamedNode(node: InformationNode): boolean {
+  return node.name === null || node.name.trim().length === 0;
+}
+
 export function loadWorkspace(): WorkspaceSnapshot {
   const stored = readJson(workspaceStorageKey);
   if (!isRecord(stored) || stored.version !== 1 || !Array.isArray(stored.nodes)) {
@@ -71,30 +66,23 @@ export function loadWorkspace(): WorkspaceSnapshot {
 
   const nodes: InformationNode[] = [];
   const nodeIds = new Set<string>();
-  const normalizedNames = new Set<string>();
 
   for (const candidate of stored.nodes) {
     if (
       !isRecord(candidate) ||
       typeof candidate.id !== "string" ||
-      typeof candidate.name !== "string" ||
+      (candidate.name !== null && typeof candidate.name !== "string") ||
       (candidate.content !== null && typeof candidate.content !== "string")
     ) {
       continue;
     }
 
-    const name = candidate.name.trim();
-    const normalizedName = normalizeNodeName(name);
-    if (
-      name.length === 0 ||
-      nodeIds.has(candidate.id) ||
-      normalizedNames.has(normalizedName)
-    ) {
+    if (nodeIds.has(candidate.id)) {
       continue;
     }
 
+    const name = candidate.name?.trim() || null;
     nodeIds.add(candidate.id);
-    normalizedNames.add(normalizedName);
     nodes.push({
       id: candidate.id,
       name,
@@ -166,38 +154,4 @@ export function saveWorkspace(workspace: WorkspaceSnapshot): void {
     workspaceStorageKey,
     JSON.stringify({ version: 1, ...workspace }),
   );
-}
-
-export function loadDraft(): NodeDraft | null {
-  const stored = readJson(draftStorageKey);
-  if (
-    !isRecord(stored) ||
-    (stored.nodeId !== null && typeof stored.nodeId !== "string") ||
-    typeof stored.name !== "string" ||
-    typeof stored.content !== "string" ||
-    !isRecord(stored.position) ||
-    !isFiniteNumber(stored.position.x) ||
-    !isFiniteNumber(stored.position.y) ||
-    !Array.isArray(stored.referenceTargetIds) ||
-    !stored.referenceTargetIds.every((value) => typeof value === "string")
-  ) {
-    return null;
-  }
-
-  return {
-    nodeId: stored.nodeId,
-    name: stored.name,
-    content: stored.content,
-    position: { x: stored.position.x, y: stored.position.y },
-    referenceTargetIds: [...new Set(stored.referenceTargetIds)],
-  };
-}
-
-export function saveDraft(draft: NodeDraft | null): void {
-  if (draft === null) {
-    localStorage.removeItem(draftStorageKey);
-    return;
-  }
-
-  localStorage.setItem(draftStorageKey, JSON.stringify(draft));
 }

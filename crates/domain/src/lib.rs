@@ -3,8 +3,7 @@ use std::{
     str::FromStr,
 };
 
-use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
-use thiserror::Error;
+use serde::{Deserialize, Deserializer, Serialize};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -45,59 +44,69 @@ impl FromStr for NodeId {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Node {
     id: NodeId,
-    name: NodeName,
+    name: Option<NodeName>,
     content: Option<String>,
 }
 
 impl Node {
-    pub fn new(name: impl Into<String>, content: Option<String>) -> Result<Self, DomainError> {
-        let name = NodeName::new(name)?;
-
-        Ok(Self {
+    pub fn new(name: Option<String>, content: Option<String>) -> Self {
+        Self {
             id: NodeId::new(),
-            name,
+            name: NodeName::new(name),
             content,
-        })
+        }
     }
 
-    pub fn restore(
-        id: NodeId,
-        name: impl Into<String>,
-        content: Option<String>,
-    ) -> Result<Self, DomainError> {
-        Ok(Self {
+    pub fn restore(id: NodeId, name: Option<String>, content: Option<String>) -> Self {
+        Self {
             id,
-            name: NodeName::new(name)?,
+            name: NodeName::new(name),
             content,
-        })
+        }
     }
 
     pub fn id(&self) -> NodeId {
         self.id
     }
 
-    pub fn name(&self) -> &str {
-        self.name.as_str()
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_ref().map(NodeName::as_str)
     }
 
     pub fn content(&self) -> Option<&str> {
         self.content.as_deref()
     }
 
-    pub fn rename(&mut self, name: impl Into<String>) -> Result<(), DomainError> {
-        self.name = NodeName::new(name)?;
-        Ok(())
+    pub fn set_name(&mut self, name: Option<String>) {
+        self.name = NodeName::new(name);
     }
 
     pub fn set_content(&mut self, content: Option<String>) {
         self.content = content;
     }
 
-    pub fn normalized_name(&self) -> String {
-        normalize_node_name(self.name.as_str())
+    pub fn normalized_name(&self) -> Option<String> {
+        self.name().map(normalize_node_name)
+    }
+}
+
+impl<'de> Deserialize<'de> for Node {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct StoredNode {
+            id: NodeId,
+            name: Option<String>,
+            content: Option<String>,
+        }
+
+        let stored = StoredNode::deserialize(deserializer)?;
+        Ok(Self::restore(stored.id, stored.name, stored.content))
     }
 }
 
@@ -106,28 +115,13 @@ impl Node {
 struct NodeName(String);
 
 impl NodeName {
-    fn new(name: impl Into<String>) -> Result<Self, DomainError> {
-        let name = name.into();
-        let name = name.trim().to_owned();
-        if name.is_empty() {
-            return Err(DomainError::EmptyNodeName);
-        }
-
-        Ok(Self(name))
+    fn new(name: Option<String>) -> Option<Self> {
+        let name = name?.trim().to_owned();
+        (!name.is_empty()).then_some(Self(name))
     }
 
     fn as_str(&self) -> &str {
         &self.0
-    }
-}
-
-impl<'de> Deserialize<'de> for NodeName {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let name = String::deserialize(deserializer)?;
-        Self::new(name).map_err(D::Error::custom)
     }
 }
 
@@ -158,39 +152,34 @@ pub fn normalize_node_name(name: &str) -> String {
     name.trim().to_lowercase()
 }
 
-#[derive(Debug, Error, PartialEq, Eq)]
-pub enum DomainError {
-    #[error("node name cannot be empty")]
-    EmptyNodeName,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn node_requires_a_name() {
-        let result = Node::new("   ", None);
+    fn blank_names_are_stored_as_unnamed() {
+        let node = Node::new(Some("   ".into()), None);
 
-        assert_eq!(result.unwrap_err(), DomainError::EmptyNodeName);
+        assert_eq!(node.name(), None);
+        assert_eq!(node.normalized_name(), None);
     }
 
     #[test]
     fn node_content_can_be_empty() {
-        let node = Node::new("OpenAI", None).expect("valid node");
+        let node = Node::new(Some("OpenAI".into()), None);
 
         assert_eq!(node.content(), None);
     }
 
     #[test]
     fn renaming_keeps_the_stable_id() {
-        let mut node = Node::new("OpenAI", None).expect("valid node");
+        let mut node = Node::new(Some("OpenAI".into()), None);
         let id = node.id();
 
-        node.rename("OpenAI API").expect("valid new name");
+        node.set_name(Some("OpenAI API".into()));
 
         assert_eq!(node.id(), id);
-        assert_eq!(node.name(), "OpenAI API");
+        assert_eq!(node.name(), Some("OpenAI API"));
     }
 
     #[test]
@@ -204,7 +193,7 @@ mod tests {
     #[test]
     fn restored_nodes_keep_their_persisted_id() {
         let id = NodeId::new();
-        let restored = Node::restore(id, "OpenAI", None).expect("valid stored node");
+        let restored = Node::restore(id, Some("OpenAI".into()), None);
 
         assert_eq!(restored.id(), id);
         assert_eq!(NodeId::from_str(&id.to_string()).expect("valid ID"), id);

@@ -21,7 +21,7 @@ pub trait GraphStore {
     fn find_node(&self, id: NodeId)
     -> impl Future<Output = Result<Option<Node>, Self::Error>> + '_;
 
-    /// Saves a node and enforces name uniqueness atomically.
+    /// Saves a node and atomically enforces uniqueness for non-empty names.
     fn save_node(&self, node: Node) -> impl Future<Output = Result<(), Self::Error>> + '_;
 
     /// Adds a reference only when both endpoint nodes exist.

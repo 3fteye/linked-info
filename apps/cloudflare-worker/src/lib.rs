@@ -14,7 +14,7 @@ use linked_info_contracts::{
     MAX_PAGE_LIMIT, NodeListResponse, NodeResource, PageQuery, ReferenceResource,
     UpdateNodeRequest, openapi_document, routes,
 };
-use linked_info_domain::{DomainError, Node, NodeId, Reference};
+use linked_info_domain::{Node, NodeId, Reference};
 use linked_info_storage_d1::{D1GraphStore, D1StoreError};
 use serde::Serialize;
 use tower_service::Service;
@@ -90,7 +90,7 @@ async fn create_node(
     payload: Result<Json<CreateNodeRequest>, JsonRejection>,
 ) -> Result<(StatusCode, Json<NodeResource>), ApiFailure> {
     let Json(request) = payload.map_err(|_| ApiFailure::InvalidRequest)?;
-    let node = Node::new(request.name, request.content).map_err(ApiFailure::from)?;
+    let node = Node::new(request.name, request.content);
     graph_service(&state)?.save_node(node.clone()).await?;
     Ok((StatusCode::CREATED, Json(node_resource(&node))))
 }
@@ -121,7 +121,7 @@ async fn update_node(
         .find_node(node_id)
         .await?
         .ok_or(ApiFailure::NodeNotFound)?;
-    node.rename(request.name).map_err(ApiFailure::from)?;
+    node.set_name(request.name);
     node.set_content(request.content);
     service.save_node(node.clone()).await?;
     Ok(Json(node_resource(&node)))
@@ -222,7 +222,7 @@ fn parse_node_id(value: &str) -> Result<NodeId, ApiFailure> {
 fn node_resource(node: &Node) -> NodeResource {
     NodeResource {
         id: node.id().as_uuid(),
-        name: node.name().to_owned(),
+        name: node.name().map(str::to_owned),
         content: node.content().map(str::to_owned),
     }
 }
@@ -265,19 +265,10 @@ fn node_list_response(mut nodes: Vec<Node>, page: PageWindow) -> NodeListRespons
 #[derive(Debug)]
 enum ApiFailure {
     InvalidRequest,
-    InvalidNodeName,
     NodeNotFound,
     DuplicateNodeName,
     ReferenceEndpointNotFound,
     Storage(D1StoreError),
-}
-
-impl From<DomainError> for ApiFailure {
-    fn from(error: DomainError) -> Self {
-        match error {
-            DomainError::EmptyNodeName => Self::InvalidNodeName,
-        }
-    }
 }
 
 impl From<D1StoreError> for ApiFailure {
@@ -294,7 +285,6 @@ impl IntoResponse for ApiFailure {
     fn into_response(self) -> Response {
         let (status, code) = match self {
             Self::InvalidRequest => (StatusCode::BAD_REQUEST, ApiErrorCode::InvalidRequest),
-            Self::InvalidNodeName => (StatusCode::BAD_REQUEST, ApiErrorCode::InvalidNodeName),
             Self::NodeNotFound => (StatusCode::NOT_FOUND, ApiErrorCode::NodeNotFound),
             Self::DuplicateNodeName => (StatusCode::CONFLICT, ApiErrorCode::DuplicateNodeName),
             Self::ReferenceEndpointNotFound => (

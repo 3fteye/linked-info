@@ -46,7 +46,11 @@ impl GraphStore for MemoryGraphStore {
         let query = linked_info_domain::normalize_node_name(&query);
         let state = self.state.read().expect("memory store lock poisoned");
         let mut nodes: Vec<_> = state.nodes.values().cloned().collect();
-        nodes.retain(|node| node.normalized_name().contains(&query));
+        nodes.retain(|node| {
+            node.normalized_name()
+                .unwrap_or_default()
+                .contains(&query)
+        });
         nodes.sort_by_key(Node::normalized_name);
         Ok(paginate(nodes, offset, limit))
     }
@@ -60,17 +64,24 @@ impl GraphStore for MemoryGraphStore {
         let mut state = self.state.write().expect("memory store lock poisoned");
         let normalized_name = node.normalized_name();
 
-        if let Some(existing_id) = state.node_names.get(&normalized_name)
+        if let Some(normalized_name) = normalized_name.as_ref()
+            && let Some(existing_id) = state.node_names.get(normalized_name)
             && *existing_id != node.id()
         {
             return Err(MemoryStoreError::DuplicateNodeName);
         }
 
-        if let Some(existing_name) = state.nodes.get(&node.id()).map(Node::normalized_name) {
+        if let Some(existing_name) = state
+            .nodes
+            .get(&node.id())
+            .and_then(Node::normalized_name)
+        {
             state.node_names.remove(&existing_name);
         }
 
-        state.node_names.insert(normalized_name, node.id());
+        if let Some(normalized_name) = normalized_name {
+            state.node_names.insert(normalized_name, node.id());
+        }
         state.nodes.insert(node.id(), node);
         Ok(())
     }
@@ -157,12 +168,12 @@ mod tests {
     async fn rejects_duplicate_names_after_normalization() {
         let store = MemoryGraphStore::default();
         store
-            .save_node(Node::new("OpenAI", None).expect("valid node"))
+            .save_node(Node::new(Some("OpenAI".into()), None))
             .await
             .expect("first save succeeds");
 
         let result = store
-            .save_node(Node::new(" openai ", None).expect("valid node"))
+            .save_node(Node::new(Some(" openai ".into()), None))
             .await;
 
         assert_eq!(result, Err(MemoryStoreError::DuplicateNodeName));
@@ -171,14 +182,14 @@ mod tests {
     #[tokio::test]
     async fn rename_updates_the_name_index_without_changing_the_id() {
         let store = MemoryGraphStore::default();
-        let mut node = Node::new("Old name", None).expect("valid node");
+        let mut node = Node::new(Some("Old name".into()), None);
         let id = node.id();
         store.save_node(node.clone()).await.expect("initial save");
 
-        node.rename("New name").expect("valid new name");
+        node.set_name(Some("New name".into()));
         store.save_node(node).await.expect("renamed save");
         store
-            .save_node(Node::new("Old name", None).expect("valid node"))
+            .save_node(Node::new(Some("Old name".into()), None))
             .await
             .expect("old name is available again");
 
@@ -196,7 +207,7 @@ mod tests {
     #[tokio::test]
     async fn reference_requires_existing_endpoints() {
         let store = MemoryGraphStore::default();
-        let source = Node::new("Source", None).expect("valid node");
+        let source = Node::new(Some("Source".into()), None);
         let missing_target = NodeId::new();
         store
             .save_node(source.clone())
@@ -208,5 +219,21 @@ mod tests {
             .await;
 
         assert_eq!(result, Err(MemoryStoreError::NodeNotFound(missing_target)));
+    }
+
+    #[tokio::test]
+    async fn multiple_unnamed_nodes_are_allowed() {
+        let store = MemoryGraphStore::default();
+
+        store
+            .save_node(Node::new(None, None))
+            .await
+            .expect("first unnamed node saves");
+        store
+            .save_node(Node::new(Some("   ".into()), None))
+            .await
+            .expect("second unnamed node saves");
+
+        assert_eq!(store.list_nodes(0, 100).await.unwrap().len(), 2);
     }
 }
