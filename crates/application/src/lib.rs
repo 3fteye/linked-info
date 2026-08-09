@@ -1,4 +1,4 @@
-use linked_info_domain::{Node, NodeId, Reference, normalize_node_name};
+use linked_info_domain::{Node, NodeId, Reference};
 use linked_info_storage_port::GraphStore;
 
 pub struct GraphService<S> {
@@ -13,27 +13,55 @@ where
         Self { store }
     }
 
-    pub async fn list_nodes(&self) -> Result<Vec<Node>, S::Error> {
-        self.store.list_nodes().await
+    pub async fn list_nodes(&self, offset: u32, limit: u32) -> Result<Vec<Node>, S::Error> {
+        self.store.list_nodes(offset, limit).await
+    }
+
+    pub async fn find_node(&self, id: NodeId) -> Result<Option<Node>, S::Error> {
+        self.store.find_node(id).await
     }
 
     pub async fn save_node(&self, node: Node) -> Result<(), S::Error> {
         self.store.save_node(node).await
     }
 
-    pub async fn search_nodes_by_name(&self, query: &str) -> Result<Vec<Node>, S::Error> {
-        let query = normalize_node_name(query);
-        let mut nodes = self.store.list_nodes().await?;
-        nodes.retain(|node| node.normalized_name().contains(&query));
-        Ok(nodes)
+    pub async fn search_nodes_by_name(
+        &self,
+        query: &str,
+        offset: u32,
+        limit: u32,
+    ) -> Result<Vec<Node>, S::Error> {
+        self.store.search_nodes_by_name(query, offset, limit).await
     }
 
     pub async fn add_reference(&self, reference: Reference) -> Result<(), S::Error> {
         self.store.add_reference(reference).await
     }
 
-    pub async fn nodes_referencing(&self, target_node_id: NodeId) -> Result<Vec<Node>, S::Error> {
-        self.store.list_nodes_referencing(target_node_id).await
+    pub async fn nodes_referencing(
+        &self,
+        target_node_id: NodeId,
+        offset: u32,
+        limit: u32,
+    ) -> Result<Vec<Node>, S::Error> {
+        self.store
+            .list_nodes_referencing(target_node_id, offset, limit)
+            .await
+    }
+
+    pub async fn nodes_referenced_by(
+        &self,
+        source_node_id: NodeId,
+        offset: u32,
+        limit: u32,
+    ) -> Result<Vec<Node>, S::Error> {
+        self.store
+            .list_nodes_referenced_by(source_node_id, offset, limit)
+            .await
+    }
+
+    pub async fn remove_reference(&self, reference: Reference) -> Result<(), S::Error> {
+        self.store.remove_reference(reference).await
     }
 }
 
@@ -59,12 +87,28 @@ mod tests {
             .expect("save succeeds");
 
         let result = service
-            .search_nodes_by_name("open")
+            .search_nodes_by_name("open", 0, 100)
             .await
             .expect("search succeeds");
 
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].name(), "OpenAI");
+    }
+
+    #[tokio::test]
+    async fn node_listing_uses_stable_name_order_and_pagination() {
+        let service = GraphService::new(MemoryGraphStore::default());
+        for name in ["Charlie", "Alpha", "Bravo"] {
+            service
+                .save_node(Node::new(name, None).expect("valid node"))
+                .await
+                .expect("save succeeds");
+        }
+
+        let result = service.list_nodes(1, 1).await.expect("list succeeds");
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].name(), "Bravo");
     }
 
     #[tokio::test]
@@ -86,11 +130,51 @@ mod tests {
             .expect("reference succeeds");
 
         let result = service
-            .nodes_referencing(tag.id())
+            .nodes_referencing(tag.id(), 0, 100)
             .await
             .expect("filter succeeds");
 
         assert_eq!(result, vec![script]);
+    }
+
+    #[tokio::test]
+    async fn references_can_be_listed_from_the_source_and_removed() {
+        let service = GraphService::new(MemoryGraphStore::default());
+        let source = Node::new("Script", None).expect("valid node");
+        let target = Node::new("OpenAI", None).expect("valid node");
+        service
+            .save_node(source.clone())
+            .await
+            .expect("save succeeds");
+        service
+            .save_node(target.clone())
+            .await
+            .expect("save succeeds");
+        let reference = Reference::new(source.id(), target.id());
+        service
+            .add_reference(reference)
+            .await
+            .expect("reference succeeds");
+
+        assert_eq!(
+            service
+                .nodes_referenced_by(source.id(), 0, 100)
+                .await
+                .expect("query succeeds"),
+            vec![target]
+        );
+
+        service
+            .remove_reference(reference)
+            .await
+            .expect("removal succeeds");
+        assert!(
+            service
+                .nodes_referenced_by(source.id(), 0, 100)
+                .await
+                .expect("query succeeds")
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -116,7 +200,7 @@ mod tests {
 
         assert_eq!(
             service
-                .nodes_referencing(tag.id())
+                .nodes_referencing(tag.id(), 0, 100)
                 .await
                 .expect("filter succeeds"),
             vec![note]

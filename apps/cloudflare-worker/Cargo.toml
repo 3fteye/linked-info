@@ -8,8 +8,14 @@ license.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-worker = { version = "0.8", features = ['http', 'axum'] }
+linked-info-application = { path = "../../crates/application" }
+linked-info-contracts = { path = "../../crates/contracts" }
+linked-info-domain = { path = "../../crates/domain" }
+linked-info-storage-d1 = { path = "../../crates/storage-d1" }
+worker = { version = "0.8", features = ["http", "axum", "d1"] }
 worker-macros = { version = "0.8", features = ['http'] }
-axum = { version = "0.8", default-features = false, features = ["json"] }
+axum = { version = "0.8", default-features = false, features = ["json", "query"] }
 serde.workspace = true
+serde_json.workspace = true
 tower-service = "0.3.3"
+uuid.workspace = true

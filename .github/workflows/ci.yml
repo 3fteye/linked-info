@@ -34,6 +34,7 @@ jobs:
       - name: Lint core crates
         run: >-
           cargo clippy
+          -p linked-info-contracts
           -p linked-info-domain
           -p linked-info-storage-port
           -p linked-info-storage-memory
@@ -43,6 +44,7 @@ jobs:
       - name: Test core crates
         run: >-
           cargo test
+          -p linked-info-contracts
           -p linked-info-domain
           -p linked-info-storage-port
           -p linked-info-storage-memory

@@ -1,3 +1,8 @@
+use std::{
+    fmt::{Display, Formatter},
+    str::FromStr,
+};
+
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use thiserror::Error;
 use uuid::Uuid;
@@ -10,11 +15,33 @@ impl NodeId {
     pub fn new() -> Self {
         Self(Uuid::new_v4())
     }
+
+    pub const fn from_uuid(value: Uuid) -> Self {
+        Self(value)
+    }
+
+    pub const fn as_uuid(self) -> Uuid {
+        self.0
+    }
 }
 
 impl Default for NodeId {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl Display for NodeId {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl FromStr for NodeId {
+    type Err = uuid::Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Uuid::parse_str(value).map(Self)
     }
 }
 
@@ -32,6 +59,18 @@ impl Node {
         Ok(Self {
             id: NodeId::new(),
             name,
+            content,
+        })
+    }
+
+    pub fn restore(
+        id: NodeId,
+        name: impl Into<String>,
+        content: Option<String>,
+    ) -> Result<Self, DomainError> {
+        Ok(Self {
+            id,
+            name: NodeName::new(name)?,
             content,
         })
     }
@@ -160,5 +199,14 @@ mod tests {
             normalize_node_name("  OpenAI  "),
             normalize_node_name("openai")
         );
+    }
+
+    #[test]
+    fn restored_nodes_keep_their_persisted_id() {
+        let id = NodeId::new();
+        let restored = Node::restore(id, "OpenAI", None).expect("valid stored node");
+
+        assert_eq!(restored.id(), id);
+        assert_eq!(NodeId::from_str(&id.to_string()).expect("valid ID"), id);
     }
 }

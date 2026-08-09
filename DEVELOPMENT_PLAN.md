@@ -283,11 +283,16 @@ crates/
 - Tauri 2 + React + TypeScript 桌面应用骨架。
 - 基于独立语言资源的简体中文、英文界面及语言选择持久化。
 - 分层的领域层、应用层和异步存储接口。
-- 内存存储实现和 Rust Cloudflare Worker 骨架。
+- 内存存储实现、供应商无关的 HTTP/JSON 与 OpenAPI 契约，以及 Rust Cloudflare Worker。
+- Cloudflare D1 初始迁移和独立 `storage-d1` 适配器。
 - GitHub Actions 的核心 Rust、Worker Wasm、前端和 Windows Tauri 检查。
 - 手动触发的 Windows、macOS 和 Linux 安装包构建工作流。
 
 领域代码已经替换为 `Node` 与 `Reference` 模型；名称非空由领域类型保证，名称唯一由存储保存边界原子保证。内存适配器和应用用例覆盖名称搜索、直接引用者筛选以及改名后引用稳定。旧的“信息类型、自定义字段、固定上下文、关系类型”模型已移除。
+
+阶段二正在进行：Worker 已按版本化契约提供节点创建、读取、更新、分页名称搜索、引用创建、移除和分页双向浏览接口，并通过 D1 binding 调用存储适配器。API 使用稳定错误码并提供 OpenAPI 文档，用户界面负责按当前语言翻译错误。当前没有创建或部署远程 D1 数据库，也没有实施尚未确定的应用级身份认证，因此不能把当前 API 直接作为公开服务部署。
+
+主体框架之后再评估的功能单独记录在 `BACKLOG.md`；其中内容不进入当前实施范围。
 
 开发环境：
 

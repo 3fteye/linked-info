@@ -2,7 +2,17 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "linked-info-api",
   "main": "build/index.js",
-  "compatibility_date": "2026-08-06",
+  "compatibility_date": "2026-08-09",
+  "compatibility_flags": ["nodejs_compat"],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "linked-info",
+      // Replaced with the real UUID only when a remote D1 database is created.
+      "database_id": "local",
+      "migrations_dir": "migrations"
+    }
+  ],
   "observability": {
     "enabled": true
   },

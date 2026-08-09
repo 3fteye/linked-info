@@ -30,11 +30,25 @@ pub enum MemoryStoreError {
 impl GraphStore for MemoryGraphStore {
     type Error = MemoryStoreError;
 
-    async fn list_nodes(&self) -> Result<Vec<Node>, Self::Error> {
+    async fn list_nodes(&self, offset: u32, limit: u32) -> Result<Vec<Node>, Self::Error> {
         let state = self.state.read().expect("memory store lock poisoned");
         let mut nodes: Vec<_> = state.nodes.values().cloned().collect();
         nodes.sort_by_key(Node::normalized_name);
-        Ok(nodes)
+        Ok(paginate(nodes, offset, limit))
+    }
+
+    async fn search_nodes_by_name(
+        &self,
+        query: &str,
+        offset: u32,
+        limit: u32,
+    ) -> Result<Vec<Node>, Self::Error> {
+        let query = linked_info_domain::normalize_node_name(query);
+        let state = self.state.read().expect("memory store lock poisoned");
+        let mut nodes: Vec<_> = state.nodes.values().cloned().collect();
+        nodes.retain(|node| node.normalized_name().contains(&query));
+        nodes.sort_by_key(Node::normalized_name);
+        Ok(paginate(nodes, offset, limit))
     }
 
     async fn find_node(&self, id: NodeId) -> Result<Option<Node>, Self::Error> {
@@ -77,6 +91,8 @@ impl GraphStore for MemoryGraphStore {
     async fn list_nodes_referencing(
         &self,
         target_node_id: NodeId,
+        offset: u32,
+        limit: u32,
     ) -> Result<Vec<Node>, Self::Error> {
         let state = self.state.read().expect("memory store lock poisoned");
         let mut nodes: Vec<_> = state
@@ -92,8 +108,45 @@ impl GraphStore for MemoryGraphStore {
             })
             .collect::<Result<_, _>>()?;
         nodes.sort_by_key(Node::normalized_name);
-        Ok(nodes)
+        Ok(paginate(nodes, offset, limit))
     }
+
+    async fn list_nodes_referenced_by(
+        &self,
+        source_node_id: NodeId,
+        offset: u32,
+        limit: u32,
+    ) -> Result<Vec<Node>, Self::Error> {
+        let state = self.state.read().expect("memory store lock poisoned");
+        let mut nodes: Vec<_> = state
+            .references
+            .iter()
+            .filter(|reference| reference.source_node_id() == source_node_id)
+            .map(|reference| {
+                state
+                    .nodes
+                    .get(&reference.target_node_id())
+                    .cloned()
+                    .ok_or(MemoryStoreError::NodeNotFound(reference.target_node_id()))
+            })
+            .collect::<Result<_, _>>()?;
+        nodes.sort_by_key(Node::normalized_name);
+        Ok(paginate(nodes, offset, limit))
+    }
+
+    async fn remove_reference(&self, reference: Reference) -> Result<(), Self::Error> {
+        let mut state = self.state.write().expect("memory store lock poisoned");
+        state.references.remove(&reference);
+        Ok(())
+    }
+}
+
+fn paginate(nodes: Vec<Node>, offset: u32, limit: u32) -> Vec<Node> {
+    nodes
+        .into_iter()
+        .skip(offset as usize)
+        .take(limit as usize)
+        .collect()
 }
 
 #[cfg(test)]

@@ -101,6 +101,7 @@ checksum = "31b698c5f9a010f6573133b09e0de5408834d0c82f8d7475a89fc1867a71cd90"
 dependencies = [
  "axum-core",
  "bytes",
+ "form_urlencoded",
  "futures-util",
  "http",
  "http-body",
@@ -114,6 +115,7 @@ dependencies = [
  "serde_core",
  "serde_json",
  "serde_path_to_error",
+ "serde_urlencoded",
  "sync_wrapper",
  "tower",
  "tower-layer",
@@ -384,8 +386,14 @@ name = "cloudflare-worker"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "linked-info-application",
+ "linked-info-contracts",
+ "linked-info-domain",
+ "linked-info-storage-d1",
  "serde",
+ "serde_json",
  "tower-service",
+ "uuid",
  "worker",
  "worker-macros",
 ]
@@ -1727,6 +1735,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "linked-info-contracts"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "utoipa",
+ "uuid",
+]
+
+[[package]]
 name = "linked-info-desktop"
 version = "0.1.0"
 dependencies = [
@@ -1747,11 +1765,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "linked-info-storage-d1"
+version = "0.1.0"
+dependencies = [
+ "linked-info-domain",
+ "linked-info-storage-port",
+ "serde",
+ "thiserror 2.0.20",
+ "uuid",
+ "worker",
+]
+
+[[package]]
 name = "linked-info-storage-memory"
 version = "0.1.0"
 dependencies = [
  "linked-info-domain",
  "linked-info-storage-port",
+ "thiserror 2.0.20",
+ "tokio",
 ]
 
 [[package]]
@@ -3808,6 +3840,30 @@ name = "utf8_iter"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6c140620e7ffbb22c2dee59cafe6084a59b5ffc27a8859a5f0d494b5d52b6be"
+
+[[package]]
+name = "utoipa"
+version = "5.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8bde15df68e80b16c7d16b9616e80770ad158988daa56a27dccd1e55558b0160"
+dependencies = [
+ "indexmap 2.14.0",
+ "serde",
+ "serde_json",
+ "utoipa-gen",
+]
+
+[[package]]
+name = "utoipa-gen"
+version = "5.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6ba0b99ee52df3028635d93840c797102da61f8a7bb3cf751032455895b52ef8"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+ "uuid",
+]
 
 [[package]]
 name = "uuid"
