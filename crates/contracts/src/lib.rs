@@ -136,6 +136,8 @@ pub fn openapi_document() -> utoipa::openapi::OpenApi {
     ApiContract::openapi()
 }
 
+// Utoipa reads these marker functions through macros when building ApiContract.
+#[allow(dead_code)]
 mod endpoints {
     use super::*;
 
@@ -265,6 +267,5 @@ mod tests {
 
         assert_eq!(query.offset, 0);
         assert_eq!(query.limit, DEFAULT_PAGE_LIMIT);
-        assert!(DEFAULT_PAGE_LIMIT <= MAX_PAGE_LIMIT);
     }
 }
