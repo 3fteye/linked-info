@@ -22,4 +22,4 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 utoipa = { version = "5", features = ["uuid"] }
-uuid = { version = "1", features = ["serde", "v4"] }
+uuid = { version = "1", features = ["serde", "v4", "js"] }
