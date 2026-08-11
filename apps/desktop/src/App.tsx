@@ -719,7 +719,9 @@ function App({
     setSecurityMessage(null);
     try {
       const status = enable
-        ? await workspaceSecurity.enableSystemUnlock()
+        ? await workspaceSecurity.enableSystemUnlock(
+            t("security.systemUnlockEnablePrompt"),
+          )
         : await workspaceSecurity.disableSystemUnlock();
       updateWorkspaceSecurityStatus(status);
       setSecurityMessage(
@@ -1824,6 +1826,10 @@ function App({
         <div className="workspace-content">
           {activeView === "settings" ? (
             <section className="settings-panel">
+              <header className="settings-group-heading">
+                <h2>{t("settings.generalTitle")}</h2>
+                <p>{t("settings.generalDescription")}</p>
+              </header>
               <div className="setting-row">
                 <div className="setting-label">
                   <Languages size={18} />
@@ -1842,6 +1848,10 @@ function App({
                   ))}
                 </div>
               </div>
+              <header className="settings-group-heading">
+                <h2>{t("settings.smartReferenceTitle")}</h2>
+                <p>{t("settings.smartReferenceDescription")}</p>
+              </header>
               <div className="setting-row data-setting-row smart-reference-setting-row">
                 <div className="setting-label">
                   <BrainCircuit size={18} />
@@ -2023,91 +2033,6 @@ function App({
                       </label>
                       <small>{t("smartReference.settings.tokenDescription")}</small>
                     </div>
-                  )}
-                </div>
-              </div>
-              <div className="setting-row data-setting-row">
-                <div className="setting-label">
-                  {workspaceSecurityStatus.encrypted ? (
-                    <ShieldCheck size={18} />
-                  ) : (
-                    <LockKeyhole size={18} />
-                  )}
-                  <div className="setting-label-copy">
-                    <span>{t("security.settingsTitle")}</span>
-                    <small>
-                      {workspaceSecurityStatus.encrypted
-                        ? t("security.encryptedDescription")
-                        : t("security.plaintextDescription")}
-                    </small>
-                  </div>
-                </div>
-                <div className="security-settings-actions">
-                  {workspaceSecurityStatus.encrypted ? (
-                    <>
-                      <button
-                        className="secondary-button"
-                        disabled={
-                          securityBusy ||
-                          !workspaceSecurityStatus.systemUnlockAvailable
-                        }
-                        onClick={() =>
-                          void toggleSystemUnlock(
-                            !workspaceSecurityStatus.systemUnlockEnabled,
-                          )
-                        }
-                        type="button"
-                      >
-                        <Fingerprint aria-hidden="true" size={15} />
-                        {workspaceSecurityStatus.systemUnlockEnabled
-                          ? t("security.disableSystemUnlock")
-                          : t("security.enableSystemUnlock")}
-                      </button>
-                      <button
-                        className="secondary-button"
-                        disabled={securityBusy}
-                        onClick={() => {
-                          setSecurityMessage(null);
-                          setSecurityDialog("change");
-                        }}
-                        type="button"
-                      >
-                        <KeyRound aria-hidden="true" size={15} />
-                        {t("security.changePassword")}
-                      </button>
-                      <button
-                        className="secondary-button"
-                        disabled={securityBusy}
-                        onClick={() => void lockEncryptedWorkspace()}
-                        type="button"
-                      >
-                        <LockKeyhole aria-hidden="true" size={15} />
-                        {t("security.lockNow")}
-                      </button>
-                      <small>
-                        {!workspaceSecurityStatus.systemUnlockAvailable
-                          ? t("security.systemUnlockUnavailable")
-                          : workspaceSecurityStatus.systemUnlockEnabled
-                            ? t("security.systemUnlockEnabledDescription")
-                            : t("security.systemUnlockDisabledDescription")}
-                      </small>
-                    </>
-                  ) : (
-                    <button
-                      className="primary-button"
-                      disabled={!workspaceSecurity.available || securityBusy}
-                      onClick={() => {
-                        setSecurityMessage(null);
-                        setSecurityDialog("enable");
-                      }}
-                      type="button"
-                    >
-                      <LockKeyhole aria-hidden="true" size={15} />
-                      {t("security.enable")}
-                    </button>
-                  )}
-                  {securityMessage !== null && (
-                    <small role="status">{securityMessage}</small>
                   )}
                 </div>
               </div>
@@ -2322,6 +2247,95 @@ function App({
                       : t("smartReference.settings.vectorCache.clear")}
                   </button>
                   {vectorCacheMessage !== null && <small>{vectorCacheMessage}</small>}
+                </div>
+              </div>
+              <header className="settings-group-heading">
+                <h2>{t("settings.dataSecurityTitle")}</h2>
+                <p>{t("settings.dataSecurityDescription")}</p>
+              </header>
+              <div className="setting-row data-setting-row">
+                <div className="setting-label">
+                  {workspaceSecurityStatus.encrypted ? (
+                    <ShieldCheck size={18} />
+                  ) : (
+                    <LockKeyhole size={18} />
+                  )}
+                  <div className="setting-label-copy">
+                    <span>{t("security.settingsTitle")}</span>
+                    <small>
+                      {workspaceSecurityStatus.encrypted
+                        ? t("security.encryptedDescription")
+                        : t("security.plaintextDescription")}
+                    </small>
+                  </div>
+                </div>
+                <div className="security-settings-actions">
+                  {workspaceSecurityStatus.encrypted ? (
+                    <>
+                      <button
+                        className="secondary-button"
+                        disabled={
+                          securityBusy ||
+                          !workspaceSecurityStatus.systemUnlockAvailable
+                        }
+                        onClick={() =>
+                          void toggleSystemUnlock(
+                            !workspaceSecurityStatus.systemUnlockEnabled,
+                          )
+                        }
+                        type="button"
+                      >
+                        <Fingerprint aria-hidden="true" size={15} />
+                        {workspaceSecurityStatus.systemUnlockEnabled
+                          ? t("security.disableSystemUnlock")
+                          : t("security.enableSystemUnlock")}
+                      </button>
+                      <button
+                        className="secondary-button"
+                        disabled={securityBusy}
+                        onClick={() => {
+                          setSecurityMessage(null);
+                          setSecurityDialog("change");
+                        }}
+                        type="button"
+                      >
+                        <KeyRound aria-hidden="true" size={15} />
+                        {t("security.changePassword")}
+                      </button>
+                      <button
+                        className="secondary-button"
+                        disabled={securityBusy}
+                        onClick={() => void lockEncryptedWorkspace()}
+                        type="button"
+                      >
+                        <LockKeyhole aria-hidden="true" size={15} />
+                        {t("security.lockNow")}
+                      </button>
+                      <small>
+                        {!workspaceSecurityStatus.systemUnlockAvailable
+                          ? t("security.systemUnlockUnavailable")
+                          : workspaceSecurityStatus.systemUnlockEnabled
+                            ? t("security.systemUnlockEnabledDescription")
+                            : t("security.systemUnlockDisabledDescription")}
+                      </small>
+                    </>
+                  ) : (
+                    <button
+                      className="primary-button"
+                      disabled={!workspaceSecurity.available || securityBusy}
+                      onClick={() => {
+                        setSecurityMessage(null);
+                        setSecurityDialog("enable");
+                      }}
+                      type="button"
+                    >
+                      <LockKeyhole aria-hidden="true" size={15} />
+                      {t("security.enable")}
+                    </button>
+                  )}
+                  {securityMessage !== null && (
+                    <small role="status">{securityMessage}</small>
+                  )}
                 </div>
               </div>
               <div className="setting-row data-setting-row">

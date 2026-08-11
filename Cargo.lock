@@ -2542,6 +2542,8 @@ dependencies = [
  "tauri-plugin-single-instance",
  "tokio",
  "uuid",
+ "windows",
+ "windows-future",
  "windows-sys 0.61.2",
  "zeroize",
 ]

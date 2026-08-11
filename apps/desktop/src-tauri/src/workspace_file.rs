@@ -407,6 +407,7 @@ pub async fn unlock_workspace_with_system(
     app: AppHandle,
     state: tauri::State<'_, WorkspaceVaultState>,
     system_unlock_state: tauri::State<'_, SystemUnlockState>,
+    message: String,
 ) -> Result<WorkspaceSecurityStatus, String> {
     let store = workspace_store(&app).map_err(|error| error.to_string())?;
     let operation_lock = Arc::clone(&state.operation_lock);
@@ -414,6 +415,7 @@ pub async fn unlock_workspace_with_system(
     if !provider.available() {
         return Err("system_unlock_unavailable".to_owned());
     }
+    crate::system_unlock::verify_user_presence(&app, message).await?;
     let provider_for_unlock = Arc::clone(&provider);
     let data_key = tauri::async_runtime::spawn_blocking(move || {
         let _guard = operation_lock
@@ -509,6 +511,7 @@ pub async fn enable_system_unlock(
     app: AppHandle,
     state: tauri::State<'_, WorkspaceVaultState>,
     system_unlock_state: tauri::State<'_, SystemUnlockState>,
+    message: String,
 ) -> Result<WorkspaceSecurityStatus, String> {
     let provider = system_unlock_state.provider();
     if !provider.available() {
@@ -517,6 +520,7 @@ pub async fn enable_system_unlock(
     let store = workspace_store(&app).map_err(|error| error.to_string())?;
     let operation_lock = Arc::clone(&state.operation_lock);
     let data_key = state.data_key()?;
+    crate::system_unlock::verify_user_presence(&app, message).await?;
     let provider_for_enable = Arc::clone(&provider);
     tauri::async_runtime::spawn_blocking(move || {
         let _guard = operation_lock

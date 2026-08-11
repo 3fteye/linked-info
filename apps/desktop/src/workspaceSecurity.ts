@@ -11,9 +11,9 @@ export interface WorkspaceSecurity {
   readonly available: boolean;
   inspect(): Promise<WorkspaceSecurityStatus>;
   unlock(password: string): Promise<WorkspaceSecurityStatus>;
-  unlockWithSystem(): Promise<WorkspaceSecurityStatus>;
+  unlockWithSystem(message: string): Promise<WorkspaceSecurityStatus>;
   enable(password: string): Promise<WorkspaceSecurityStatus>;
-  enableSystemUnlock(): Promise<WorkspaceSecurityStatus>;
+  enableSystemUnlock(message: string): Promise<WorkspaceSecurityStatus>;
   disableSystemUnlock(): Promise<WorkspaceSecurityStatus>;
   changePassword(password: string): Promise<void>;
   lock(): Promise<WorkspaceSecurityStatus>;
@@ -36,16 +36,18 @@ export const tauriWorkspaceSecurity: WorkspaceSecurity = {
   unlock(password) {
     return invoke<WorkspaceSecurityStatus>("unlock_workspace", { password });
   },
-  unlockWithSystem() {
-    return invoke<WorkspaceSecurityStatus>("unlock_workspace_with_system");
+  unlockWithSystem(message) {
+    return invoke<WorkspaceSecurityStatus>("unlock_workspace_with_system", {
+      message,
+    });
   },
   enable(password) {
     return invoke<WorkspaceSecurityStatus>("enable_workspace_encryption", {
       password,
     });
   },
-  enableSystemUnlock() {
-    return invoke<WorkspaceSecurityStatus>("enable_system_unlock");
+  enableSystemUnlock(message) {
+    return invoke<WorkspaceSecurityStatus>("enable_system_unlock", { message });
   },
   disableSystemUnlock() {
     return invoke<WorkspaceSecurityStatus>("disable_system_unlock");

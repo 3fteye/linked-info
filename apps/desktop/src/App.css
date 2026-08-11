@@ -1055,30 +1055,67 @@ h1 {
 }
 
 .settings-panel {
+  display: grid;
+  align-content: start;
+  justify-items: start;
   min-width: 0;
   min-height: 0;
   overflow: auto;
   padding: 26px 30px;
+  gap: 12px;
+}
+
+.settings-group-heading {
+  width: min(920px, 100%);
+  margin-top: 18px;
+}
+
+.settings-group-heading:first-child {
+  margin-top: 0;
+}
+
+.settings-group-heading h2 {
+  color: #2f3731;
+  font-size: 15px;
+  font-weight: 680;
+}
+
+.settings-group-heading p {
+  max-width: 680px;
+  margin: 4px 0 0;
+  color: #737c75;
+  font-size: 11px;
+  line-height: 1.5;
 }
 
 .setting-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  min-height: 56px;
-  max-width: 680px;
-  gap: 24px;
-  border-bottom: 1px solid #eceeeb;
+  display: grid;
+  grid-template-columns: minmax(220px, 0.8fr) minmax(320px, 1.2fr);
+  align-items: start;
+  width: min(920px, 100%);
+  min-height: 68px;
+  padding: 18px 20px;
+  gap: 28px;
+  border: 1px solid #e1e5e1;
+  border-radius: 9px;
+  background: #ffffff;
+  box-shadow: 0 1px 2px rgb(33 48 38 / 4%);
 }
 
 .setting-label {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   min-width: 0;
   gap: 10px;
   color: #343935;
   font-size: 14px;
   font-weight: 550;
+}
+
+.setting-label > svg {
+  margin-top: 1px;
+  flex: 0 0 auto;
+  color: #4a6b57;
 }
 
 .setting-label-copy {
@@ -1095,15 +1132,20 @@ h1 {
 }
 
 .smart-reference-setting-row {
-  max-width: 820px;
+  max-width: none;
 }
 
 .smart-reference-settings,
 .automatic-reference-settings,
 .vector-cache-settings {
   display: grid;
-  width: min(430px, 100%);
+  width: 100%;
   gap: 12px;
+}
+
+.setting-row > .segmented-control {
+  width: min(430px, 100%);
+  justify-self: start;
 }
 
 .smart-reference-settings .segmented-control {
@@ -1317,23 +1359,21 @@ h1 {
 }
 
 .data-setting-row {
-  align-items: flex-start;
-  min-height: 88px;
-  padding: 16px 0;
-  flex-wrap: wrap;
+  min-height: 0;
 }
 
 .backup-actions {
   display: flex;
-  justify-content: flex-end;
+  width: 100%;
+  justify-content: flex-start;
   flex-wrap: wrap;
   gap: 7px;
 }
 
 .security-settings-actions {
   display: flex;
-  width: min(430px, 100%);
-  justify-content: flex-end;
+  width: 100%;
+  justify-content: flex-start;
   flex-wrap: wrap;
   gap: 8px;
 }
@@ -1346,6 +1386,7 @@ h1 {
 }
 
 .backup-status {
+  grid-column: 2;
   width: 100%;
   margin: -2px 0 0;
   color: #536159;
@@ -1754,10 +1795,13 @@ h1 {
   }
 
   .setting-row {
-    align-items: stretch;
-    flex-direction: column;
+    grid-template-columns: minmax(0, 1fr);
     gap: 12px;
-    padding-bottom: 18px;
+    padding: 16px;
+  }
+
+  .backup-status {
+    grid-column: 1;
   }
 
   .segmented-control {
