@@ -26,4 +26,14 @@ describe("embedding settings", () => {
     expect(changed.thresholdFingerprint).toBeNull();
     expect(embeddingSettingsFingerprint(changed)).toContain('"remote"');
   });
+
+  it("preserves a supported saved local model and rejects unknown models", () => {
+    expect(
+      parseEmbeddingSettings({ localModel: "intfloat/multilingual-e5-small" })
+        .localModel,
+    ).toBe("intfloat/multilingual-e5-small");
+    expect(parseEmbeddingSettings({ localModel: "unknown/model" }).localModel).toBe(
+      defaultEmbeddingSettings.localModel,
+    );
+  });
 });

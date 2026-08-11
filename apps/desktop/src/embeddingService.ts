@@ -3,6 +3,7 @@ import {
   embeddingSettingsFingerprint,
   type EmbeddingSettings,
 } from "./embeddingSettings";
+import type { LocalEmbeddingModelId } from "./localEmbeddingModels";
 
 export type EmbeddingInputRole = "query" | "document";
 
@@ -18,7 +19,10 @@ export interface RemoteEmbeddingConfiguration {
 }
 
 export interface EmbeddingGateway {
-  embedLocal(inputs: EmbeddingInput[]): Promise<number[][]>;
+  embedLocal(
+    modelId: LocalEmbeddingModelId,
+    inputs: EmbeddingInput[],
+  ): Promise<number[][]>;
   embedRemote(
     configuration: RemoteEmbeddingConfiguration,
     inputs: EmbeddingInput[],
@@ -235,7 +239,7 @@ export class EmbeddingAnalyzer {
         const batchKeys = missingKeys.slice(start, start + maximumEmbeddingBatchSize);
         let vectors: number[][];
         if (settings.provider === "local") {
-          vectors = await this.gateway.embedLocal(batchInputs);
+          vectors = await this.gateway.embedLocal(settings.localModel, batchInputs);
         } else {
           const endpoint = settings.remoteEndpoint.trim();
           const model = settings.remoteModel.trim();

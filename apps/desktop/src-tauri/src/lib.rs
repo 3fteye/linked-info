@@ -29,8 +29,11 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .invoke_handler(tauri::generate_handler![
+            embedding::cancel_local_embedding_download,
             embedding::embed_local_texts,
             embedding::embed_remote_texts,
+            embedding::inspect_local_embedding_models,
+            embedding::prepare_local_embedding_model,
             exit_application,
             workspace_file::read_workspace_file,
             workspace_file::write_workspace_file

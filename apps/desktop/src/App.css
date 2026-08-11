@@ -1035,6 +1035,111 @@ h1 {
   line-height: 1.5;
 }
 
+.local-model-settings,
+.local-model-list {
+  display: grid;
+  gap: 8px;
+}
+
+.local-model-card {
+  display: flex;
+  align-items: flex-start;
+  padding: 11px 12px;
+  gap: 9px;
+  border: 1px solid #dfe4df;
+  border-radius: 7px;
+  color: #3d463f;
+  background: #fafbfa;
+  cursor: pointer;
+}
+
+.local-model-card[data-selected="true"] {
+  border-color: #6f9f84;
+  background: #f2f8f4;
+  box-shadow: 0 0 0 1px rgb(54 122 87 / 10%);
+}
+
+.local-model-card:has(input:disabled) {
+  cursor: default;
+  opacity: 0.75;
+}
+
+.local-model-card input {
+  margin-top: 3px;
+  accent-color: #2d7653;
+}
+
+.local-model-card-body {
+  display: grid;
+  min-width: 0;
+  flex: 1;
+  gap: 4px;
+}
+
+.local-model-card-heading {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.local-model-card-heading strong {
+  color: #303832;
+  font-size: 12px;
+}
+
+.local-model-card-heading em {
+  padding: 2px 5px;
+  border-radius: 999px;
+  color: #296044;
+  background: #dfeee5;
+  font-size: 9px;
+  font-style: normal;
+  font-weight: 650;
+}
+
+.local-model-card-heading small {
+  margin-left: auto;
+  color: #577064;
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+}
+
+.local-model-description,
+.local-model-limitation,
+.local-model-metadata,
+.local-model-actions small {
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.local-model-description {
+  color: #59645c;
+}
+
+.local-model-metadata {
+  color: #296044;
+  font-variant-numeric: tabular-nums;
+}
+
+.local-model-limitation,
+.local-model-actions small {
+  color: #7a7160;
+}
+
+.local-model-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.local-model-actions small {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .remote-embedding-fields {
   display: grid;
   gap: 10px;
@@ -1186,8 +1291,13 @@ h1 {
 }
 
 .smart-reference-progress > div {
-  display: grid;
-  gap: 2px;
+    display: grid;
+    gap: 2px;
+}
+
+.smart-reference-progress-copy {
+  min-width: 0;
+  flex: 1;
 }
 
 .smart-reference-progress strong {
@@ -1195,7 +1305,28 @@ h1 {
 }
 
 .smart-reference-progress span {
-  color: #607168;
+    color: #607168;
+    font-size: 11px;
+}
+
+.smart-reference-progress progress {
+  width: 100%;
+  height: 7px;
+  margin: 4px 0 2px;
+  overflow: hidden;
+  border: 0;
+  border-radius: 999px;
+  accent-color: #2f7a55;
+}
+
+.smart-reference-progress-metrics {
+  font-variant-numeric: tabular-nums;
+}
+
+.smart-reference-cancel-download {
+  min-height: 30px;
+  flex: none;
+  padding: 0 10px;
   font-size: 11px;
 }
 

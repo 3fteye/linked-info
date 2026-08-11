@@ -69,6 +69,14 @@ import {
   type EmbeddingSettings,
   type EmbeddingSettingsStore,
 } from "./embeddingSettings";
+import {
+  localEmbeddingModelDefinition,
+  localEmbeddingModels,
+  type LocalEmbeddingModelId,
+  type LocalEmbeddingModelStatus,
+  type LocalEmbeddingProgress,
+  type LocalEmbeddingRuntime,
+} from "./localEmbeddingModels";
 import "./App.css";
 
 type ViewId = "canvas" | "nodes" | "settings";
@@ -82,6 +90,7 @@ interface PendingWorkspaceReplacement {
 interface AppProps {
   embeddingGateway: EmbeddingGateway;
   embeddingSettingsStore: EmbeddingSettingsStore;
+  localEmbeddingRuntime: LocalEmbeddingRuntime;
   lifecycle: WorkspaceLifecycle;
   persistence: WorkspacePersistence;
 }
@@ -100,6 +109,28 @@ interface WorkspaceUpdateOptions {
 }
 
 const workspaceHistoryLimit = 100;
+
+function formatByteCount(bytes: number): string {
+  if (bytes < 1024) {
+    return `${bytes} B`;
+  }
+  const units = ["KiB", "MiB", "GiB"];
+  let value = bytes / 1024;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  return `${value >= 100 ? value.toFixed(0) : value.toFixed(1)} ${units[unitIndex]}`;
+}
+
+function formatDuration(seconds: number): string {
+  if (seconds < 60) {
+    return `${Math.max(1, Math.round(seconds))}s`;
+  }
+  const minutes = Math.ceil(seconds / 60);
+  return minutes < 60 ? `${minutes}m` : `${Math.ceil(minutes / 60)}h`;
+}
 
 const importFailureTranslationKeys: Record<WorkspaceImportFailure, string> = {
   invalidJson: "backup.errors.invalidJson",
@@ -157,6 +188,7 @@ function nodeFilterLabel(
 function App({
   embeddingGateway,
   embeddingSettingsStore,
+  localEmbeddingRuntime,
   lifecycle,
   persistence,
 }: AppProps) {
@@ -198,9 +230,63 @@ function App({
   const [smartReferenceResult, setSmartReferenceResult] =
     useState<SmartReferenceResult | null>(null);
   const [smartReferenceStatus, setSmartReferenceStatus] = useState<string | null>(null);
+  const [localEmbeddingProgress, setLocalEmbeddingProgress] =
+    useState<LocalEmbeddingProgress | null>(null);
+  const [localModelStatuses, setLocalModelStatuses] = useState<
+    LocalEmbeddingModelStatus[]
+  >([]);
+  const [preparingLocalModelId, setPreparingLocalModelId] =
+    useState<LocalEmbeddingModelId | null>(null);
+  const [cancellingLocalDownload, setCancellingLocalDownload] = useState(false);
   const currentView = views.find((view) => view.id === activeView) ?? views[0];
   const activeLanguage = i18n.resolvedLanguage ?? i18n.language;
   const normalizedSearch = normalizeNodeName(searchTerm);
+
+  useEffect(() => {
+    let active = true;
+    let unsubscribe: (() => void) | undefined;
+
+    function refreshModelStatuses() {
+      void localEmbeddingRuntime
+        .inspectModels()
+        .then((statuses) => {
+          if (active) {
+            setLocalModelStatuses(statuses);
+          }
+        })
+        .catch(() => undefined);
+    }
+
+    refreshModelStatuses();
+    void localEmbeddingRuntime
+      .subscribe((progress) => {
+        if (!active) {
+          return;
+        }
+        setLocalEmbeddingProgress(progress);
+        if (
+          progress.phase === "ready" ||
+          progress.phase === "cancelled" ||
+          progress.phase === "failed"
+        ) {
+          setCancellingLocalDownload(false);
+          refreshModelStatuses();
+        }
+      })
+      .then((nextUnsubscribe) => {
+        if (active) {
+          unsubscribe = nextUnsubscribe;
+        } else {
+          nextUnsubscribe();
+        }
+      })
+      .catch(() => undefined);
+
+    return () => {
+      active = false;
+      unsubscribe?.();
+    };
+  }, [localEmbeddingRuntime]);
 
   useEffect(() => {
     let active = true;
@@ -373,6 +459,7 @@ function App({
       embeddingAnalyzer.clearCache();
       setRemoteEmbeddingToken("");
       setSmartReferenceResult(null);
+      setLocalEmbeddingProgress(null);
     }
     setEmbeddingSettings(next);
     try {
@@ -384,10 +471,12 @@ function App({
   }
 
   async function analyzeNodeReferences(nodeId: string) {
-    if (analyzingNodeId !== null) {
+    if (analyzingNodeId !== null || preparingLocalModelId !== null) {
       return;
     }
     setAnalyzingNodeId(nodeId);
+    setLocalEmbeddingProgress(null);
+    setCancellingLocalDownload(false);
     setSmartReferenceStatus(null);
     try {
       const currentWorkspace = workspaceRef.current;
@@ -444,10 +533,52 @@ function App({
         setSmartReferenceStatus(t(`smartReference.errors.${error.reason}`));
       } else {
         const reason = error instanceof Error ? error.message : String(error);
-        setSmartReferenceStatus(t("smartReference.errors.failed", { reason }));
+        setSmartReferenceStatus(
+          reason.includes("local embedding download cancelled")
+            ? t("smartReference.download.cancelled")
+            : t("smartReference.errors.failed", { reason }),
+        );
       }
     } finally {
       setAnalyzingNodeId(null);
+    }
+  }
+
+  async function prepareLocalEmbeddingModel(modelId: LocalEmbeddingModelId) {
+    if (analyzingNodeId !== null || preparingLocalModelId !== null) {
+      return;
+    }
+    setPreparingLocalModelId(modelId);
+    setLocalEmbeddingProgress(null);
+    setCancellingLocalDownload(false);
+    setSmartReferenceStatus(null);
+    try {
+      await localEmbeddingRuntime.prepareModel(modelId);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      setSmartReferenceStatus(
+        reason.includes("local embedding download cancelled")
+          ? t("smartReference.download.cancelled")
+          : t("smartReference.errors.modelPreparationFailed", { reason }),
+      );
+    } finally {
+      setPreparingLocalModelId(null);
+    }
+  }
+
+  async function cancelLocalEmbeddingDownload() {
+    if (cancellingLocalDownload) {
+      return;
+    }
+    setCancellingLocalDownload(true);
+    try {
+      await localEmbeddingRuntime.cancelDownload();
+    } catch (error) {
+      setCancellingLocalDownload(false);
+      const reason = error instanceof Error ? error.message : String(error);
+      setSmartReferenceStatus(
+        t("smartReference.errors.cancelDownloadFailed", { reason }),
+      );
     }
   }
 
@@ -969,6 +1100,27 @@ function App({
     );
   }
 
+  const selectedLocalModel = localEmbeddingModelDefinition(
+    embeddingSettings.localModel,
+  );
+  const selectedLocalModelStatus = localModelStatuses.find(
+    (status) => status.modelId === embeddingSettings.localModel,
+  );
+  const localModelTaskRunning =
+    preparingLocalModelId !== null ||
+    (analyzingNodeId !== null && embeddingSettings.provider === "local");
+  const localDownloadCancellable =
+    localModelTaskRunning && localEmbeddingProgress?.phase === "downloading";
+  const progressModel =
+    localEmbeddingProgress === null
+      ? selectedLocalModel
+      : localEmbeddingModels.find(
+          (model) => model.id === localEmbeddingProgress.modelId,
+        ) ?? selectedLocalModel;
+  const progressModelName = t(
+    `smartReference.settings.models.${progressModel.translationKey}.name`,
+  );
+
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -1149,6 +1301,7 @@ function App({
                   <div className="segmented-control">
                     <button
                       data-active={embeddingSettings.provider === "local"}
+                      disabled={localModelTaskRunning || analyzingNodeId !== null}
                       onClick={() =>
                         changeEmbeddingConfiguration({ provider: "local" })
                       }
@@ -1159,6 +1312,7 @@ function App({
                     </button>
                     <button
                       data-active={embeddingSettings.provider === "remote"}
+                      disabled={localModelTaskRunning || analyzingNodeId !== null}
                       onClick={() =>
                         changeEmbeddingConfiguration({ provider: "remote" })
                       }
@@ -1169,9 +1323,94 @@ function App({
                     </button>
                   </div>
                   {embeddingSettings.provider === "local" ? (
-                    <div className="embedding-model-note">
-                      <strong>{embeddingSettings.localModel}</strong>
-                      <span>{t("smartReference.settings.localDescription")}</span>
+                    <div className="local-model-settings">
+                      <div
+                        aria-label={t("smartReference.settings.localModelChoice")}
+                        className="local-model-list"
+                        role="radiogroup"
+                      >
+                        {localEmbeddingModels.map((model, index) => {
+                          const status = localModelStatuses.find(
+                            (candidate) => candidate.modelId === model.id,
+                          );
+                          const translationBase = `smartReference.settings.models.${model.translationKey}`;
+                          return (
+                            <label
+                              className="local-model-card"
+                              data-selected={embeddingSettings.localModel === model.id}
+                              key={model.id}
+                            >
+                              <input
+                                checked={embeddingSettings.localModel === model.id}
+                                disabled={localModelTaskRunning}
+                                name="local-embedding-model"
+                                onChange={() =>
+                                  changeEmbeddingConfiguration({ localModel: model.id })
+                                }
+                                type="radio"
+                                value={model.id}
+                              />
+                              <span className="local-model-card-body">
+                                <span className="local-model-card-heading">
+                                  <strong>{t(`${translationBase}.name`)}</strong>
+                                  {index === 0 && (
+                                    <em>{t("smartReference.settings.recommended")}</em>
+                                  )}
+                                  <small>
+                                    {status?.ready
+                                      ? t("smartReference.settings.modelReady")
+                                      : status !== undefined && status.cachedBytes > 0
+                                        ? t("smartReference.settings.modelPartial", {
+                                            cached: formatByteCount(status.cachedBytes),
+                                            total: formatByteCount(status.totalBytes),
+                                          })
+                                        : t("smartReference.settings.modelNotDownloaded")}
+                                  </small>
+                                </span>
+                                <span className="local-model-description">
+                                  {t(`${translationBase}.description`)}
+                                </span>
+                                <span className="local-model-metadata">
+                                  {t("smartReference.settings.modelMetadata", {
+                                    size: formatByteCount(model.downloadBytes),
+                                    dimensions: model.dimensions,
+                                    license: model.license,
+                                  })}
+                                </span>
+                                <span className="local-model-limitation">
+                                  {t(`${translationBase}.limitation`)}
+                                </span>
+                              </span>
+                            </label>
+                          );
+                        })}
+                      </div>
+                      <div className="local-model-actions">
+                        <button
+                          className="secondary-button"
+                          disabled={
+                            localModelTaskRunning || selectedLocalModelStatus?.ready === true
+                          }
+                          onClick={() =>
+                            void prepareLocalEmbeddingModel(embeddingSettings.localModel)
+                          }
+                          type="button"
+                        >
+                          <Download aria-hidden="true" size={15} />
+                          {selectedLocalModelStatus?.ready
+                            ? t("smartReference.settings.modelReady")
+                            : selectedLocalModelStatus !== undefined &&
+                                selectedLocalModelStatus.cachedBytes > 0
+                              ? t("smartReference.settings.continueDownload")
+                              : t("smartReference.settings.downloadModel")}
+                        </button>
+                        <small>
+                          {t("smartReference.settings.modelSource", {
+                            repository: selectedLocalModel.repository,
+                            revision: selectedLocalModel.revision.slice(0, 8),
+                          })}
+                        </small>
+                      </div>
                     </div>
                   ) : (
                     <div className="remote-embedding-fields">
@@ -1419,16 +1658,94 @@ function App({
         </div>
       </main>
 
-      {analyzingNodeId !== null && (
+      {localModelTaskRunning && (
         <div className="smart-reference-progress" role="status">
           <BrainCircuit aria-hidden="true" size={17} />
+          <div className="smart-reference-progress-copy">
+            <strong>
+              {localEmbeddingProgress === null
+                ? t("smartReference.download.preparing", { model: progressModelName })
+                : t(
+                    `smartReference.download.phases.${localEmbeddingProgress.phase}`,
+                    { model: progressModelName },
+                  )}
+            </strong>
+            {localEmbeddingProgress?.fileName !== null &&
+              localEmbeddingProgress?.fileName !== undefined && (
+                <span>
+                  {t("smartReference.download.currentFile", {
+                    current: localEmbeddingProgress.fileIndex,
+                    count: localEmbeddingProgress.fileCount,
+                    file: localEmbeddingProgress.fileName,
+                  })}
+                </span>
+              )}
+            {localEmbeddingProgress !== null &&
+              localEmbeddingProgress.totalBytes > 0 && (
+                <>
+                  <progress
+                    aria-label={t("smartReference.download.progressLabel")}
+                    max={localEmbeddingProgress.totalBytes}
+                    value={localEmbeddingProgress.downloadedBytes}
+                  />
+                  <span className="smart-reference-progress-metrics">
+                    {t("smartReference.download.bytes", {
+                      downloaded: formatByteCount(
+                        localEmbeddingProgress.downloadedBytes,
+                      ),
+                      total: formatByteCount(localEmbeddingProgress.totalBytes),
+                      percent: Math.min(
+                        100,
+                        Math.floor(
+                          (localEmbeddingProgress.downloadedBytes /
+                            localEmbeddingProgress.totalBytes) *
+                            100,
+                        ),
+                      ),
+                    })}
+                    {localEmbeddingProgress.bytesPerSecond !== null && (
+                      <>
+                        {" · "}
+                        {t("smartReference.download.speed", {
+                          speed: formatByteCount(
+                            localEmbeddingProgress.bytesPerSecond,
+                          ),
+                        })}
+                      </>
+                    )}
+                    {localEmbeddingProgress.etaSeconds !== null && (
+                      <>
+                        {" · "}
+                        {t("smartReference.download.eta", {
+                          eta: formatDuration(localEmbeddingProgress.etaSeconds),
+                        })}
+                      </>
+                    )}
+                  </span>
+                </>
+              )}
+          </div>
+          {localDownloadCancellable && (
+            <button
+              className="secondary-button smart-reference-cancel-download"
+              disabled={cancellingLocalDownload}
+              onClick={() => void cancelLocalEmbeddingDownload()}
+              type="button"
+            >
+              {cancellingLocalDownload
+                ? t("smartReference.download.cancelling")
+                : t("smartReference.download.cancel")}
+            </button>
+          )}
+        </div>
+      )}
+
+      {analyzingNodeId !== null && embeddingSettings.provider === "remote" && (
+        <div className="smart-reference-progress" role="status">
+          <Cloud aria-hidden="true" size={17} />
           <div>
             <strong>{t("smartReference.analyzing")}</strong>
-            <span>
-              {embeddingSettings.provider === "local"
-                ? t("smartReference.analyzingLocalDescription")
-                : t("smartReference.analyzingRemoteDescription")}
-            </span>
+            <span>{t("smartReference.analyzingRemoteDescription")}</span>
           </div>
         </div>
       )}

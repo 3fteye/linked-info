@@ -1,8 +1,13 @@
+import {
+  isLocalEmbeddingModelId,
+  type LocalEmbeddingModelId,
+} from "./localEmbeddingModels";
+
 export type EmbeddingProviderMode = "local" | "remote";
 
 export interface EmbeddingSettings {
   provider: EmbeddingProviderMode;
-  localModel: "intfloat/multilingual-e5-small";
+  localModel: LocalEmbeddingModelId;
   remoteEndpoint: string;
   remoteModel: string;
   autoReferenceEnabled: boolean;
@@ -17,7 +22,7 @@ export interface EmbeddingSettingsStore {
 
 export const defaultEmbeddingSettings: EmbeddingSettings = {
   provider: "local",
-  localModel: "intfloat/multilingual-e5-small",
+  localModel: "BAAI/bge-small-zh-v1.5",
   remoteEndpoint: "",
   remoteModel: "",
   autoReferenceEnabled: false,
@@ -50,7 +55,9 @@ export function parseEmbeddingSettings(value: unknown): EmbeddingSettings {
   const provider = candidate.provider === "remote" ? "remote" : "local";
   return {
     provider,
-    localModel: "intfloat/multilingual-e5-small",
+    localModel: isLocalEmbeddingModelId(candidate.localModel)
+      ? candidate.localModel
+      : defaultEmbeddingSettings.localModel,
     remoteEndpoint:
       typeof candidate.remoteEndpoint === "string"
         ? candidate.remoteEndpoint.slice(0, 2048)

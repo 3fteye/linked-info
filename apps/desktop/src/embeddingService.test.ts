@@ -23,7 +23,7 @@ function vectorFor(input: EmbeddingInput): number[] {
 }
 
 const gateway: EmbeddingGateway = {
-  async embedLocal(inputs) {
+  async embedLocal(_modelId, inputs) {
     return inputs.map(vectorFor);
   },
   async embedRemote(_configuration, inputs) {

@@ -12,7 +12,9 @@ import {
 } from "./workspaceLifecycle";
 import {
   tauriEmbeddingGateway,
+  tauriLocalEmbeddingRuntime,
   unavailableEmbeddingGateway,
+  unavailableLocalEmbeddingRuntime,
 } from "./embeddingBridge";
 import { localEmbeddingSettingsStore } from "./embeddingSettings";
 
@@ -39,12 +41,16 @@ const lifecycle = runningInTauri
 const embeddingGateway = runningInTauri
   ? tauriEmbeddingGateway
   : unavailableEmbeddingGateway;
+const localEmbeddingRuntime = runningInTauri
+  ? tauriLocalEmbeddingRuntime
+  : unavailableLocalEmbeddingRuntime;
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
     <App
       embeddingGateway={embeddingGateway}
       embeddingSettingsStore={localEmbeddingSettingsStore}
+      localEmbeddingRuntime={localEmbeddingRuntime}
       lifecycle={lifecycle}
       persistence={persistence}
     />
