@@ -76,6 +76,9 @@ fn local_http_endpoint_allowed(url: &Url) -> bool {
     };
     host.eq_ignore_ascii_case("localhost")
         || host
+            .strip_prefix('[')
+            .and_then(|host| host.strip_suffix(']'))
+            .unwrap_or(host)
             .parse::<IpAddr>()
             .map(|address| address.is_loopback())
             .unwrap_or(false)
