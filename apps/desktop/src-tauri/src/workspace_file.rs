@@ -364,7 +364,7 @@ pub async fn unlock_workspace(
             .ok_or_else(|| "workspace_vault_not_configured".to_owned())?;
         let data_key = unwrap_data_key(&metadata, &password)?;
         verify_encrypted_store(&store, &data_key)?;
-        Ok(data_key)
+        Ok::<[u8; DATA_KEY_BYTES], String>(data_key)
     })
     .await
     .map_err(|error| error.to_string())??;
