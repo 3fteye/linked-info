@@ -52,6 +52,7 @@ import {
   appendNodeReference,
   availableReferenceTargets,
   referenceSearchCommand,
+  referenceTargetCreationName,
 } from "./referenceSearch";
 import "@xyflow/react/dist/style.css";
 
@@ -99,6 +100,7 @@ interface GraphLabels {
   noContent: string;
   references: string;
   referenceSearchEmpty: string;
+  referenceSearchCreate: (name: string) => string;
   referenceSearchHint: string;
   referenceSearchLabel: string;
   referenceSearchPlaceholder: string;
@@ -125,6 +127,11 @@ interface GraphCanvasProps {
   unnamedOnly: boolean;
   labels: GraphLabels;
   onCreateNode: (position: { x: number; y: number }) => void;
+  onCreateReferencedNode: (
+    sourceNodeId: string,
+    name: string,
+    position: { x: number; y: number },
+  ) => string | null;
   onDeleteNodes: (nodeIds: string[]) => void;
   onEditNode: (nodeId: string) => void;
   onLayoutChange: (layout: NodeLayout[]) => void;
@@ -155,6 +162,8 @@ type ContextMenuState =
 
 interface ReferenceSearchState {
   activeIndex: number;
+  createdNodeCount: number;
+  dropPosition: { x: number; y: number };
   left: number;
   query: string;
   selectedTargetNodeIds: string[];
@@ -386,6 +395,7 @@ export default function GraphCanvas({
   unnamedOnly,
   labels,
   onCreateNode,
+  onCreateReferencedNode,
   onDeleteNodes,
   onEditNode,
   onLayoutChange,
@@ -522,6 +532,13 @@ export default function GraphCanvas({
       ),
     );
   }, [labels.noContent, labels.unnamed, nodes, referenceSearch, references]);
+
+  const referenceSearchCreationName = useMemo(() => {
+    if (referenceSearch === null || referenceSearchCandidates.length > 0) {
+      return null;
+    }
+    return referenceTargetCreationName(nodes, referenceSearch.query);
+  }, [nodes, referenceSearch, referenceSearchCandidates.length]);
 
   useEffect(() => {
     setFlowNodes((current) => {
@@ -796,6 +813,46 @@ export default function GraphCanvas({
     [appendReference, referenceSearch],
   );
 
+  const createReferenceSearchTarget = useCallback(
+    (closeAfterSelection: boolean) => {
+      if (referenceSearch === null || referenceSearchCreationName === null) {
+        return;
+      }
+      const offset = referenceSearch.createdNodeCount * 36;
+      const nodeId = onCreateReferencedNode(
+        referenceSearch.sourceNodeId,
+        referenceSearchCreationName,
+        {
+          x: referenceSearch.dropPosition.x + offset,
+          y: referenceSearch.dropPosition.y + offset,
+        },
+      );
+      if (nodeId === null) {
+        return;
+      }
+      referencesRef.current = appendNodeReference(
+        referencesRef.current,
+        referenceSearch.sourceNodeId,
+        nodeId,
+      );
+      if (closeAfterSelection) {
+        setReferenceSearch(null);
+        return;
+      }
+      setReferenceSearch({
+        ...referenceSearch,
+        activeIndex: 0,
+        createdNodeCount: referenceSearch.createdNodeCount + 1,
+        query: "",
+        selectedTargetNodeIds: [
+          ...referenceSearch.selectedTargetNodeIds,
+          nodeId,
+        ],
+      });
+    },
+    [onCreateReferencedNode, referenceSearch, referenceSearchCreationName],
+  );
+
   const handleConnectEnd = useCallback(
     (
       event: MouseEvent | TouchEvent,
@@ -819,13 +876,18 @@ export default function GraphCanvas({
       }
 
       const bounds = containerRef.current?.getBoundingClientRect();
-      if (bounds === undefined) {
+      if (bounds === undefined || flowInstance === null) {
         return;
       }
       const popoverWidth = 300;
       const popoverHeight = 330;
       setReferenceSearch({
         activeIndex: 0,
+        createdNodeCount: 0,
+        dropPosition: flowInstance.screenToFlowPosition({
+          x: event.clientX,
+          y: event.clientY,
+        }),
         left: Math.min(
           Math.max(8, event.clientX - bounds.left),
           Math.max(8, bounds.width - popoverWidth - 8),
@@ -839,7 +901,7 @@ export default function GraphCanvas({
         ),
       });
     },
-    [],
+    [flowInstance],
   );
 
   const handleNodeDragStop = useCallback(
@@ -1043,7 +1105,9 @@ export default function GraphCanvas({
             <input
               aria-activedescendant={
                 referenceSearchCandidates[referenceSearch.activeIndex] === undefined
-                  ? undefined
+                  ? referenceSearchCreationName === null
+                    ? undefined
+                    : "reference-search-create-option"
                   : `reference-search-option-${referenceSearchCandidates[referenceSearch.activeIndex].id}`
               }
               aria-autocomplete="list"
@@ -1097,6 +1161,8 @@ export default function GraphCanvas({
                     candidate.id,
                     command === "select-and-close",
                   );
+                } else if (referenceSearchCreationName !== null) {
+                  createReferenceSearchTarget(command === "select-and-close");
                 } else if (command === "select-and-close") {
                   setReferenceSearch(null);
                 }
@@ -1114,7 +1180,24 @@ export default function GraphCanvas({
             role="listbox"
           >
             {referenceSearchCandidates.length === 0 ? (
-              <p className="reference-search-empty">{labels.referenceSearchEmpty}</p>
+              referenceSearchCreationName === null ? (
+                <p className="reference-search-empty">{labels.referenceSearchEmpty}</p>
+              ) : (
+                <button
+                  aria-selected="true"
+                  className="reference-search-option reference-search-create-option"
+                  data-active="true"
+                  id="reference-search-create-option"
+                  onClick={() => createReferenceSearchTarget(false)}
+                  role="option"
+                  type="button"
+                >
+                  <Plus aria-hidden="true" size={15} />
+                  <strong>
+                    {labels.referenceSearchCreate(referenceSearchCreationName)}
+                  </strong>
+                </button>
+              )
             ) : (
               referenceSearchCandidates.map((node, index) => (
                 <button

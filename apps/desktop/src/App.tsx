@@ -51,6 +51,7 @@ import {
   stepWorkspaceHistoryForward,
   type WorkspaceHistoryState,
 } from "./workspaceHistory";
+import { appendNodeReference } from "./referenceSearch";
 import "./App.css";
 
 type ViewId = "canvas" | "nodes" | "settings";
@@ -402,6 +403,40 @@ function App({ persistence }: AppProps) {
     };
     setActiveView("canvas");
     setEditingNodeId(nodeId);
+  }
+
+  function createReferencedNode(
+    sourceNodeId: string,
+    name: string,
+    position: { x: number; y: number },
+  ): string | null {
+    const trimmedName = name.trim();
+    const nodeId = crypto.randomUUID();
+    if (
+      trimmedName.length === 0 ||
+      !workspaceRef.current.nodes.some((node) => node.id === sourceNodeId) ||
+      !isNodeNameAvailable(workspaceRef.current.nodes, nodeId, trimmedName)
+    ) {
+      return null;
+    }
+
+    updateWorkspace(
+      (current) => ({
+        ...current,
+        nodes: [
+          ...current.nodes,
+          { id: nodeId, name: trimmedName, content: null },
+        ],
+        layout: [...current.layout, { nodeId, x: position.x, y: position.y }],
+        references: appendNodeReference(
+          current.references,
+          sourceNodeId,
+          nodeId,
+        ),
+      }),
+      { flushImmediately: true, recordHistory: true },
+    );
+    return nodeId;
   }
 
   function editNode(nodeId: string) {
@@ -1009,6 +1044,8 @@ function App({ persistence }: AppProps) {
                 namePlaceholder: t("editor.namePlaceholder"),
                 noContent: t("nodes.noContent"),
                 references: t("references.list"),
+                referenceSearchCreate: (name) =>
+                  t("references.searchCreate", { name }),
                 referenceSearchEmpty: t("references.searchEmpty"),
                 referenceSearchHint: t("references.searchHint"),
                 referenceSearchLabel: t("references.searchLabel"),
@@ -1024,6 +1061,7 @@ function App({ persistence }: AppProps) {
               nameConflictNodeIds={nameConflictNodeIds}
               nodes={workspace.nodes}
               onCreateNode={createNode}
+              onCreateReferencedNode={createReferencedNode}
               onDeleteNodes={deleteNodes}
               onEditNode={editNode}
               onLayoutChange={updateLayout}

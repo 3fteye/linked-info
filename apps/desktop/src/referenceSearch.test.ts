@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   appendNodeReference,
   availableReferenceTargets,
+  referenceTargetCreationName,
   referenceSearchCommand,
 } from "./referenceSearch";
 import type { InformationNode, NodeReference } from "./workspaceStore";
@@ -65,5 +66,15 @@ describe("referenceSearchCommand", () => {
     expect(referenceSearchCommand("ArrowUp")).toBe("move-previous");
     expect(referenceSearchCommand("Escape")).toBe("close");
     expect(referenceSearchCommand("a")).toBeNull();
+  });
+});
+
+describe("referenceTargetCreationName", () => {
+  it("returns a trimmed unique name and rejects blank or existing names", () => {
+    expect(referenceTargetCreationName(nodes, "  New service  ")).toBe(
+      "New service",
+    );
+    expect(referenceTargetCreationName(nodes, "   ")).toBeNull();
+    expect(referenceTargetCreationName(nodes, " openai ")).toBeNull();
   });
 });

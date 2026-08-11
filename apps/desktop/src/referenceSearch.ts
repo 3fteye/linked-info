@@ -53,6 +53,23 @@ export function appendNodeReference(
   return [...references, { sourceNodeId, targetNodeId }];
 }
 
+export function referenceTargetCreationName(
+  nodes: InformationNode[],
+  query: string,
+): string | null {
+  const name = query.trim();
+  const normalizedName = normalizeNodeName(name);
+  if (
+    normalizedName.length === 0 ||
+    nodes.some(
+      (node) => normalizeNodeName(node.name ?? "") === normalizedName,
+    )
+  ) {
+    return null;
+  }
+  return name;
+}
+
 export function referenceSearchCommand(key: string): ReferenceSearchCommand | null {
   switch (key) {
     case " ":
