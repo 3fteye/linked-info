@@ -1,5 +1,6 @@
 use std::{
     collections::HashSet,
+    error::Error as StdError,
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     net::{Ipv4Addr, SocketAddrV4, TcpListener},
@@ -12,7 +13,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use reqwest::{StatusCode, header::RANGE};
+use reqwest::{
+    StatusCode,
+    header::{CONTENT_RANGE, RANGE},
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -24,6 +28,7 @@ const LOCAL_LLM_DOWNLOAD_CANCELLED: &str = "local LLM download cancelled";
 const MAXIMUM_CANDIDATE_COUNT: usize = 24;
 const MAXIMUM_EXISTING_REFERENCE_COUNT: usize = 12;
 const MAXIMUM_EXAMPLE_COUNT: usize = 2;
+const MAXIMUM_DOWNLOAD_RETRIES: usize = 5;
 const MODEL_SHA256: &str = "061b54daade076b5d3362dac252678d17da8c68f07560be70818cace6590cb1a";
 
 struct LocalLlmModelSpec {
@@ -49,6 +54,7 @@ static LOCAL_LLM_MODELS: &[LocalLlmModelSpec] = &[LocalLlmModelSpec {
 enum LocalLlmPhase {
     Checking,
     Downloading,
+    Retrying,
     Verifying,
     Loading,
     Inferencing,
@@ -212,8 +218,22 @@ impl From<std::io::Error> for PrepareLlmError {
 
 impl From<reqwest::Error> for PrepareLlmError {
     fn from(error: reqwest::Error) -> Self {
-        Self::Message(error.to_string())
+        Self::Message(reqwest_error_details(&error))
     }
+}
+
+fn reqwest_error_details(error: &reqwest::Error) -> String {
+    let mut details = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        let message = cause.to_string();
+        if !message.is_empty() && !details.contains(&message) {
+            details.push_str(": ");
+            details.push_str(&message);
+        }
+        source = cause.source();
+    }
+    details
 }
 
 fn local_llm_model_spec(model_id: &str) -> Result<&'static LocalLlmModelSpec, String> {
@@ -348,6 +368,57 @@ async fn send_download_request(
     }
 }
 
+fn content_range_starts_at(value: &str, expected_start: u64) -> bool {
+    value
+        .strip_prefix("bytes ")
+        .and_then(|range| range.split_once('-'))
+        .and_then(|(start, _)| start.parse::<u64>().ok())
+        == Some(expected_start)
+}
+
+fn validate_download_response(
+    response: &reqwest::Response,
+    start: u64,
+) -> Result<(), PrepareLlmError> {
+    if !response.status().is_success() {
+        return Err(PrepareLlmError::Message(format!(
+            "local LLM download returned HTTP {}",
+            response.status()
+        )));
+    }
+    if start == 0 {
+        return Ok(());
+    }
+    if response.status() != StatusCode::PARTIAL_CONTENT {
+        return Err(PrepareLlmError::Message(format!(
+            "local LLM resume request at byte {start} returned HTTP {} instead of partial content; the saved partial file was kept",
+            response.status()
+        )));
+    }
+    let range_valid = response
+        .headers()
+        .get(CONTENT_RANGE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| content_range_starts_at(value, start));
+    if !range_valid {
+        return Err(PrepareLlmError::Message(format!(
+            "local LLM resume response did not start at the requested byte {start}; the saved partial file was kept"
+        )));
+    }
+    Ok(())
+}
+
+async fn wait_before_download_retry(
+    attempt: usize,
+    cancel: Arc<AtomicBool>,
+) -> Result<(), PrepareLlmError> {
+    let delay = Duration::from_secs(1_u64 << attempt.saturating_sub(1).min(4));
+    tokio::select! {
+        _ = tokio::time::sleep(delay) => Ok(()),
+        _ = wait_for_cancellation(cancel) => Err(PrepareLlmError::Cancelled),
+    }
+}
+
 fn verify_sha256(path: &Path, expected: &str) -> Result<(), String> {
     let mut file = File::open(path).map_err(|error| error.to_string())?;
     let mut digest = Sha256::new();
@@ -411,23 +482,6 @@ async fn ensure_local_llm_model(
         "https://huggingface.co/{}/resolve/{}/{}",
         spec.repository, spec.revision, spec.file_name
     );
-    let mut response =
-        send_download_request(&client, &url, partial_bytes, Arc::clone(&cancel)).await?;
-    if partial_bytes > 0 && response.status() != StatusCode::PARTIAL_CONTENT {
-        OpenOptions::new()
-            .write(true)
-            .open(&partial_path)?
-            .set_len(0)?;
-        partial_bytes = 0;
-        response = send_download_request(&client, &url, 0, Arc::clone(&cancel)).await?;
-    }
-    if !response.status().is_success() {
-        return Err(PrepareLlmError::Message(format!(
-            "local LLM download returned HTTP {}",
-            response.status()
-        )));
-    }
-
     let mut output = OpenOptions::new()
         .create(true)
         .append(true)
@@ -436,40 +490,104 @@ async fn ensure_local_llm_model(
     let mut downloaded = partial_bytes;
     let mut session_downloaded = 0_u64;
     let mut last_emitted = Instant::now() - Duration::from_secs(1);
+    let mut retry_attempt = 0_usize;
     emit_local_llm_progress(app, spec, LocalLlmPhase::Downloading, downloaded, None);
-    loop {
-        let next = tokio::select! {
-            chunk = tokio::time::timeout(Duration::from_secs(60), response.chunk()) => {
-                match chunk {
-                    Ok(chunk) => chunk?,
-                    Err(_) => {
-                        output.flush()?;
-                        return Err(PrepareLlmError::Message("local LLM download stopped receiving data".to_owned()));
-                    }
-                }
-            },
-            _ = wait_for_cancellation(Arc::clone(&cancel)) => {
+    while downloaded < spec.size {
+        let response_start = downloaded;
+        let response_result =
+            send_download_request(&client, &url, downloaded, Arc::clone(&cancel)).await;
+        let mut response = match response_result {
+            Ok(response) => {
+                validate_download_response(&response, downloaded)?;
+                emit_local_llm_progress(app, spec, LocalLlmPhase::Downloading, downloaded, None);
+                response
+            }
+            Err(PrepareLlmError::Cancelled) => {
                 output.flush()?;
                 return Err(PrepareLlmError::Cancelled);
-            },
+            }
+            Err(PrepareLlmError::Message(message)) => {
+                retry_attempt += 1;
+                if retry_attempt > MAXIMUM_DOWNLOAD_RETRIES {
+                    output.flush()?;
+                    return Err(PrepareLlmError::Message(format!(
+                        "local LLM download could not reconnect after {MAXIMUM_DOWNLOAD_RETRIES} retries at byte {downloaded}: {message}"
+                    )));
+                }
+                emit_local_llm_progress(app, spec, LocalLlmPhase::Retrying, downloaded, None);
+                wait_before_download_retry(retry_attempt, Arc::clone(&cancel)).await?;
+                continue;
+            }
         };
-        let Some(chunk) = next else {
+
+        let interruption = loop {
+            let next = tokio::select! {
+                chunk = tokio::time::timeout(Duration::from_secs(60), response.chunk()) => {
+                    match chunk {
+                        Ok(Ok(chunk)) => Ok(chunk),
+                        Ok(Err(error)) => Err(reqwest_error_details(&error)),
+                        Err(_) => Err("local LLM download stopped receiving data for 60 seconds".to_owned()),
+                    }
+                },
+                _ = wait_for_cancellation(Arc::clone(&cancel)) => {
+                    output.flush()?;
+                    return Err(PrepareLlmError::Cancelled);
+                },
+            };
+            match next {
+                Ok(Some(chunk)) => {
+                    if downloaded + chunk.len() as u64 > spec.size {
+                        return Err(PrepareLlmError::Message(
+                            "local LLM download exceeded the expected size".to_owned(),
+                        ));
+                    }
+                    output.write_all(&chunk)?;
+                    downloaded += chunk.len() as u64;
+                    session_downloaded += chunk.len() as u64;
+                    if last_emitted.elapsed() >= Duration::from_millis(120)
+                        || downloaded == spec.size
+                    {
+                        let elapsed = started.elapsed().as_secs_f64();
+                        let speed =
+                            (elapsed > 0.0).then(|| (session_downloaded as f64 / elapsed) as u64);
+                        emit_local_llm_progress(
+                            app,
+                            spec,
+                            LocalLlmPhase::Downloading,
+                            downloaded,
+                            speed,
+                        );
+                        last_emitted = Instant::now();
+                    }
+                    if downloaded == spec.size {
+                        break None;
+                    }
+                }
+                Ok(None) if downloaded == spec.size => break None,
+                Ok(None) => {
+                    break Some(format!(
+                        "local LLM download stream ended early at byte {downloaded}"
+                    ));
+                }
+                Err(message) => break Some(message),
+            }
+        };
+        let Some(message) = interruption else {
             break;
         };
-        if downloaded + chunk.len() as u64 > spec.size {
-            return Err(PrepareLlmError::Message(
-                "local LLM download exceeded the expected size".to_owned(),
-            ));
+        output.flush()?;
+        if downloaded.saturating_sub(response_start) >= 1024 * 1024 {
+            retry_attempt = 0;
         }
-        output.write_all(&chunk)?;
-        downloaded += chunk.len() as u64;
-        session_downloaded += chunk.len() as u64;
-        if last_emitted.elapsed() >= Duration::from_millis(120) || downloaded == spec.size {
-            let elapsed = started.elapsed().as_secs_f64();
-            let speed = (elapsed > 0.0).then(|| (session_downloaded as f64 / elapsed) as u64);
-            emit_local_llm_progress(app, spec, LocalLlmPhase::Downloading, downloaded, speed);
-            last_emitted = Instant::now();
+        retry_attempt += 1;
+        if retry_attempt > MAXIMUM_DOWNLOAD_RETRIES {
+            return Err(PrepareLlmError::Message(format!(
+                "local LLM download was interrupted {MAXIMUM_DOWNLOAD_RETRIES} times at byte {downloaded}: {message}"
+            )));
         }
+        emit_local_llm_progress(app, spec, LocalLlmPhase::Retrying, downloaded, None);
+        wait_before_download_retry(retry_attempt, Arc::clone(&cancel)).await?;
+        emit_local_llm_progress(app, spec, LocalLlmPhase::Downloading, downloaded, None);
     }
     output.flush()?;
     drop(output);
@@ -1039,5 +1157,18 @@ mod tests {
     #[test]
     fn thread_count_keeps_system_capacity_available() {
         assert!((1..=4).contains(&inference_thread_count()));
+    }
+
+    #[test]
+    fn resume_range_must_start_at_the_saved_byte() {
+        assert!(content_range_starts_at(
+            "bytes 1201294591-1201295614/1834426016",
+            1_201_294_591,
+        ));
+        assert!(!content_range_starts_at(
+            "bytes 0-1023/1834426016",
+            1_201_294_591,
+        ));
+        assert!(!content_range_starts_at("invalid", 0));
     }
 }

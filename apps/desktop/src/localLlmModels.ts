@@ -18,6 +18,7 @@ export interface LocalLlmModelDefinition {
 export type LocalLlmPhase =
   | "checking"
   | "downloading"
+  | "retrying"
   | "verifying"
   | "loading"
   | "inferencing"

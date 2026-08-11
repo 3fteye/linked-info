@@ -110,6 +110,7 @@ export const resources = {
             phases: {
               checking: "正在检查 {{model}} 的本地缓存…",
               downloading: "正在下载 {{model}}",
+              retrying: "下载连接中断，正在从已保存进度续传 {{model}}…",
               verifying: "正在校验 {{model}}",
               loading: "正在把 {{model}} 加载到内存…",
               inferencing: "{{model}} 正在复核候选…",
@@ -394,6 +395,7 @@ export const resources = {
             phases: {
               checking: "Checking the local cache for {{model}}…",
               downloading: "Downloading {{model}}",
+              retrying: "The download was interrupted. Resuming {{model}} from the saved progress…",
               verifying: "Verifying {{model}}",
               loading: "Loading {{model}} into memory…",
               inferencing: "{{model}} is reviewing candidates…",
