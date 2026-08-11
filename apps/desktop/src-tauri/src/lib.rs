@@ -1,3 +1,4 @@
+mod embedding;
 mod workspace_file;
 
 #[cfg(desktop)]
@@ -24,9 +25,12 @@ pub fn run() {
     }
 
     builder
+        .manage(embedding::EmbeddingState::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .invoke_handler(tauri::generate_handler![
+            embedding::embed_local_texts,
+            embedding::embed_remote_texts,
             exit_application,
             workspace_file::read_workspace_file,
             workspace_file::write_workspace_file

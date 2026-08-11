@@ -2,6 +2,9 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   ArchiveRestore,
+  BrainCircuit,
+  Cloud,
+  Cpu,
   Database,
   Download,
   FileText,
@@ -12,6 +15,7 @@ import {
   Plus,
   Search,
   Settings,
+  Sparkles,
   Trash2,
   Upload,
   X,
@@ -53,6 +57,18 @@ import {
   type WorkspaceHistoryState,
 } from "./workspaceHistory";
 import { appendNodeReference } from "./referenceSearch";
+import {
+  EmbeddingAnalysisFailure,
+  EmbeddingAnalyzer,
+  type EmbeddingCandidate,
+  type EmbeddingGateway,
+} from "./embeddingService";
+import {
+  embeddingSettingsFingerprint,
+  updateEmbeddingSettings,
+  type EmbeddingSettings,
+  type EmbeddingSettingsStore,
+} from "./embeddingSettings";
 import "./App.css";
 
 type ViewId = "canvas" | "nodes" | "settings";
@@ -64,8 +80,18 @@ interface PendingWorkspaceReplacement {
 }
 
 interface AppProps {
+  embeddingGateway: EmbeddingGateway;
+  embeddingSettingsStore: EmbeddingSettingsStore;
   lifecycle: WorkspaceLifecycle;
   persistence: WorkspacePersistence;
+}
+
+interface SmartReferenceResult {
+  acceptedNodeIds: string[];
+  automaticallyAddedNodeIds: string[];
+  candidates: EmbeddingCandidate[];
+  sourceNodeId: string;
+  truncatedNodeCount: number;
 }
 
 interface WorkspaceUpdateOptions {
@@ -128,7 +154,12 @@ function nodeFilterLabel(
   return `${unnamedLabel} · ${summary || noContentLabel}`;
 }
 
-function App({ lifecycle, persistence }: AppProps) {
+function App({
+  embeddingGateway,
+  embeddingSettingsStore,
+  lifecycle,
+  persistence,
+}: AppProps) {
   const { t, i18n } = useTranslation();
   const [activeView, setActiveView] = useState<ViewId>("canvas");
   const [workspace, setWorkspace] = useState(emptyWorkspace);
@@ -155,6 +186,18 @@ function App({ lifecycle, persistence }: AppProps) {
     useState<PendingWorkspaceReplacement | null>(null);
   const [backupStatus, setBackupStatus] = useState<string | null>(null);
   const [recoveryAvailable, setRecoveryAvailable] = useState(false);
+  const embeddingAnalyzer = useMemo(
+    () => new EmbeddingAnalyzer(embeddingGateway),
+    [embeddingGateway],
+  );
+  const [embeddingSettings, setEmbeddingSettings] = useState<EmbeddingSettings>(() =>
+    embeddingSettingsStore.load(),
+  );
+  const [remoteEmbeddingToken, setRemoteEmbeddingToken] = useState("");
+  const [analyzingNodeId, setAnalyzingNodeId] = useState<string | null>(null);
+  const [smartReferenceResult, setSmartReferenceResult] =
+    useState<SmartReferenceResult | null>(null);
+  const [smartReferenceStatus, setSmartReferenceStatus] = useState<string | null>(null);
   const currentView = views.find((view) => view.id === activeView) ?? views[0];
   const activeLanguage = i18n.resolvedLanguage ?? i18n.language;
   const normalizedSearch = normalizeNodeName(searchTerm);
@@ -319,6 +362,121 @@ function App({ lifecycle, persistence }: AppProps) {
 
   function changeLanguage(language: SupportedLanguage) {
     void i18n.changeLanguage(language);
+  }
+
+  function changeEmbeddingConfiguration(patch: Partial<EmbeddingSettings>) {
+    const next = updateEmbeddingSettings(embeddingSettings, patch);
+    const fingerprintChanged =
+      embeddingSettingsFingerprint(next) !==
+      embeddingSettingsFingerprint(embeddingSettings);
+    if (fingerprintChanged) {
+      embeddingAnalyzer.clearCache();
+      setRemoteEmbeddingToken("");
+      setSmartReferenceResult(null);
+    }
+    setEmbeddingSettings(next);
+    try {
+      embeddingSettingsStore.save(next);
+      setSmartReferenceStatus(null);
+    } catch {
+      setSmartReferenceStatus(t("smartReference.errors.settingsSaveFailed"));
+    }
+  }
+
+  async function analyzeNodeReferences(nodeId: string) {
+    if (analyzingNodeId !== null) {
+      return;
+    }
+    setAnalyzingNodeId(nodeId);
+    setSmartReferenceStatus(null);
+    try {
+      const currentWorkspace = workspaceRef.current;
+      const analysis = await embeddingAnalyzer.analyze(
+        nodeId,
+        currentWorkspace.nodes,
+        currentWorkspace.references,
+        embeddingSettings,
+        remoteEmbeddingToken,
+      );
+      const automaticCandidateIds =
+        embeddingSettings.autoReferenceEnabled &&
+        embeddingSettings.thresholdFingerprint ===
+          embeddingSettingsFingerprint(embeddingSettings)
+          ? analysis.candidates
+              .filter(
+                (candidate) =>
+                  candidate.score >= embeddingSettings.autoReferenceThreshold,
+              )
+              .map((candidate) => candidate.nodeId)
+          : [];
+      const automaticallyAddedNodeIds: string[] = [];
+      if (automaticCandidateIds.length > 0) {
+        updateWorkspace(
+          (current) => {
+            let nextReferences = current.references;
+            for (const targetNodeId of automaticCandidateIds) {
+              const appended = appendNodeReference(
+                nextReferences,
+                nodeId,
+                targetNodeId,
+              );
+              if (appended !== nextReferences) {
+                automaticallyAddedNodeIds.push(targetNodeId);
+                nextReferences = appended;
+              }
+            }
+            return nextReferences === current.references
+              ? current
+              : { ...current, references: nextReferences };
+          },
+          { flushImmediately: true, recordHistory: true },
+        );
+      }
+      setSmartReferenceResult({
+        acceptedNodeIds: [...automaticallyAddedNodeIds],
+        automaticallyAddedNodeIds,
+        candidates: analysis.candidates,
+        sourceNodeId: nodeId,
+        truncatedNodeCount: analysis.truncatedNodeCount,
+      });
+    } catch (error) {
+      if (error instanceof EmbeddingAnalysisFailure) {
+        setSmartReferenceStatus(t(`smartReference.errors.${error.reason}`));
+      } else {
+        const reason = error instanceof Error ? error.message : String(error);
+        setSmartReferenceStatus(t("smartReference.errors.failed", { reason }));
+      }
+    } finally {
+      setAnalyzingNodeId(null);
+    }
+  }
+
+  function acceptSmartReference(targetNodeId: string) {
+    const result = smartReferenceResult;
+    if (result === null) {
+      return;
+    }
+    updateWorkspace(
+      (current) => {
+        const references = appendNodeReference(
+          current.references,
+          result.sourceNodeId,
+          targetNodeId,
+        );
+        return references === current.references
+          ? current
+          : { ...current, references };
+      },
+      { flushImmediately: true, recordHistory: true },
+    );
+    setSmartReferenceResult((current) =>
+      current === null || current.acceptedNodeIds.includes(targetNodeId)
+        ? current
+        : {
+            ...current,
+            acceptedNodeIds: [...current.acceptedNodeIds, targetNodeId],
+          },
+    );
   }
 
   function updateWorkspace(
@@ -979,6 +1137,133 @@ function App({ lifecycle, persistence }: AppProps) {
                   ))}
                 </div>
               </div>
+              <div className="setting-row data-setting-row smart-reference-setting-row">
+                <div className="setting-label">
+                  <BrainCircuit size={18} />
+                  <div className="setting-label-copy">
+                    <span>{t("smartReference.settings.provider")}</span>
+                    <small>{t("smartReference.settings.providerDescription")}</small>
+                  </div>
+                </div>
+                <div className="smart-reference-settings">
+                  <div className="segmented-control">
+                    <button
+                      data-active={embeddingSettings.provider === "local"}
+                      onClick={() =>
+                        changeEmbeddingConfiguration({ provider: "local" })
+                      }
+                      type="button"
+                    >
+                      <Cpu aria-hidden="true" size={14} />
+                      {t("smartReference.settings.local")}
+                    </button>
+                    <button
+                      data-active={embeddingSettings.provider === "remote"}
+                      onClick={() =>
+                        changeEmbeddingConfiguration({ provider: "remote" })
+                      }
+                      type="button"
+                    >
+                      <Cloud aria-hidden="true" size={14} />
+                      {t("smartReference.settings.remote")}
+                    </button>
+                  </div>
+                  {embeddingSettings.provider === "local" ? (
+                    <div className="embedding-model-note">
+                      <strong>{embeddingSettings.localModel}</strong>
+                      <span>{t("smartReference.settings.localDescription")}</span>
+                    </div>
+                  ) : (
+                    <div className="remote-embedding-fields">
+                      <label>
+                        <span>{t("smartReference.settings.endpoint")}</span>
+                        <input
+                          onChange={(event) =>
+                            changeEmbeddingConfiguration({
+                              remoteEndpoint: event.target.value,
+                            })
+                          }
+                          placeholder={t("smartReference.settings.endpointPlaceholder")}
+                          spellCheck={false}
+                          type="url"
+                          value={embeddingSettings.remoteEndpoint}
+                        />
+                      </label>
+                      <label>
+                        <span>{t("smartReference.settings.model")}</span>
+                        <input
+                          onChange={(event) =>
+                            changeEmbeddingConfiguration({
+                              remoteModel: event.target.value,
+                            })
+                          }
+                          placeholder={t("smartReference.settings.modelPlaceholder")}
+                          spellCheck={false}
+                          type="text"
+                          value={embeddingSettings.remoteModel}
+                        />
+                      </label>
+                      <label>
+                        <span>{t("smartReference.settings.sessionToken")}</span>
+                        <input
+                          autoComplete="off"
+                          onChange={(event) =>
+                            setRemoteEmbeddingToken(event.target.value)
+                          }
+                          placeholder={t("smartReference.settings.tokenPlaceholder")}
+                          spellCheck={false}
+                          type="password"
+                          value={remoteEmbeddingToken}
+                        />
+                      </label>
+                      <small>{t("smartReference.settings.tokenDescription")}</small>
+                    </div>
+                  )}
+                </div>
+              </div>
+              <div className="setting-row data-setting-row smart-reference-setting-row">
+                <div className="setting-label">
+                  <Sparkles size={18} />
+                  <div className="setting-label-copy">
+                    <span>{t("smartReference.settings.automatic")}</span>
+                    <small>{t("smartReference.settings.automaticDescription")}</small>
+                  </div>
+                </div>
+                <div className="automatic-reference-settings">
+                  <label className="switch-setting">
+                    <input
+                      checked={embeddingSettings.autoReferenceEnabled}
+                      onChange={(event) =>
+                        changeEmbeddingConfiguration({
+                          autoReferenceEnabled: event.target.checked,
+                        })
+                      }
+                      type="checkbox"
+                    />
+                    <span>{t("smartReference.settings.enableAutomatic")}</span>
+                  </label>
+                  <label className="threshold-setting">
+                    <span>{t("smartReference.settings.threshold")}</span>
+                    <input
+                      aria-label={t("smartReference.settings.threshold")}
+                      max="1"
+                      min="0"
+                      onChange={(event) => {
+                        if (Number.isFinite(event.target.valueAsNumber)) {
+                          changeEmbeddingConfiguration({
+                            autoReferenceThreshold: event.target.valueAsNumber,
+                          });
+                        }
+                      }}
+                      step="0.01"
+                      type="range"
+                      value={embeddingSettings.autoReferenceThreshold}
+                    />
+                    <output>{embeddingSettings.autoReferenceThreshold.toFixed(2)}</output>
+                  </label>
+                  <small>{t("smartReference.settings.thresholdDescription")}</small>
+                </div>
+              </div>
               <div className="setting-row data-setting-row">
                 <div className="setting-label">
                   <ArchiveRestore size={18} />
@@ -1036,11 +1321,13 @@ function App({ lifecycle, persistence }: AppProps) {
             </section>
           ) : activeView === "canvas" ? (
             <GraphCanvas
+              analyzingNodeId={analyzingNodeId}
               canRedo={historyAvailability.canRedo}
               canUndo={historyAvailability.canUndo}
               editingNodeId={editingNodeId}
               historyBlocked={editingNodeId !== null}
               labels={{
+                analyzingNode: t("smartReference.analyzing"),
                 cancel: t("actions.cancel"),
                 confirmDeleteNode: (count) =>
                   count === 1
@@ -1076,6 +1363,7 @@ function App({ lifecycle, persistence }: AppProps) {
                 redo: t("actions.redo"),
                 removeNodeFilter: t("filters.removeNodeFilter"),
                 sourceHandle: t("references.sourceHandle"),
+                smartReference: t("smartReference.action"),
                 targetHandle: t("references.targetHandle"),
                 undo: t("actions.undo"),
                 unnamed: t("nodes.unnamed"),
@@ -1083,6 +1371,7 @@ function App({ lifecycle, persistence }: AppProps) {
               layout={workspace.layout}
               nameConflictNodeIds={nameConflictNodeIds}
               nodes={workspace.nodes}
+              onAnalyzeNode={(nodeId) => void analyzeNodeReferences(nodeId)}
               onCreateNode={createNode}
               onCreateReferencedNode={createReferencedNode}
               onDeleteNodes={deleteNodes}
@@ -1129,6 +1418,151 @@ function App({ lifecycle, persistence }: AppProps) {
 
         </div>
       </main>
+
+      {analyzingNodeId !== null && (
+        <div className="smart-reference-progress" role="status">
+          <BrainCircuit aria-hidden="true" size={17} />
+          <div>
+            <strong>{t("smartReference.analyzing")}</strong>
+            <span>
+              {embeddingSettings.provider === "local"
+                ? t("smartReference.analyzingLocalDescription")
+                : t("smartReference.analyzingRemoteDescription")}
+            </span>
+          </div>
+        </div>
+      )}
+
+      {smartReferenceStatus !== null && (
+        <div className="smart-reference-status" role="alert">
+          <span>{smartReferenceStatus}</span>
+          <button
+            aria-label={t("smartReference.close")}
+            onClick={() => setSmartReferenceStatus(null)}
+            type="button"
+          >
+            <X aria-hidden="true" size={14} />
+          </button>
+        </div>
+      )}
+
+      {smartReferenceResult !== null && (
+        <div className="modal-backdrop" role="presentation">
+          <section
+            aria-labelledby="smart-reference-dialog-title"
+            aria-modal="true"
+            className="smart-reference-dialog"
+            role="dialog"
+          >
+            <header>
+              <div>
+                <p className="section-label">{t("smartReference.resultLabel")}</p>
+                <h2 id="smart-reference-dialog-title">
+                  {t("smartReference.resultTitle", {
+                    name: (() => {
+                      const source = workspace.nodes.find(
+                        (node) => node.id === smartReferenceResult.sourceNodeId,
+                      );
+                      return source === undefined
+                        ? t("nodes.unnamed")
+                        : nodeFilterLabel(
+                            source,
+                            t("nodes.unnamed"),
+                            t("nodes.noContent"),
+                          );
+                    })(),
+                  })}
+                </h2>
+              </div>
+              <button
+                aria-label={t("smartReference.close")}
+                className="icon-button"
+                onClick={() => setSmartReferenceResult(null)}
+                type="button"
+              >
+                <X aria-hidden="true" size={16} />
+              </button>
+            </header>
+            {smartReferenceResult.automaticallyAddedNodeIds.length > 0 && (
+              <p className="smart-reference-summary">
+                {t("smartReference.automaticAdded", {
+                  count: smartReferenceResult.automaticallyAddedNodeIds.length,
+                  threshold: embeddingSettings.autoReferenceThreshold.toFixed(2),
+                })}
+              </p>
+            )}
+            {smartReferenceResult.truncatedNodeCount > 0 && (
+              <p className="smart-reference-warning">
+                {t("smartReference.truncated", {
+                  count: smartReferenceResult.truncatedNodeCount,
+                })}
+              </p>
+            )}
+            {smartReferenceResult.candidates.length === 0 ? (
+              <p className="smart-reference-empty">{t("smartReference.empty")}</p>
+            ) : (
+              <div className="smart-reference-results">
+                {smartReferenceResult.candidates.slice(0, 24).map((candidate) => {
+                  const candidateNode = workspace.nodes.find(
+                    (node) => node.id === candidate.nodeId,
+                  );
+                  if (candidateNode === undefined) {
+                    return null;
+                  }
+                  const accepted = smartReferenceResult.acceptedNodeIds.includes(
+                    candidate.nodeId,
+                  );
+                  return (
+                    <div className="smart-reference-candidate" key={candidate.nodeId}>
+                      <div>
+                        <strong>
+                          {nodeFilterLabel(
+                            candidateNode,
+                            t("nodes.unnamed"),
+                            t("nodes.noContent"),
+                          )}
+                        </strong>
+                        <span>
+                          {t("smartReference.similarity", {
+                            score: candidate.score.toFixed(3),
+                          })}
+                        </span>
+                      </div>
+                      <button
+                        className="secondary-button"
+                        disabled={accepted}
+                        onClick={() => acceptSmartReference(candidate.nodeId)}
+                        type="button"
+                      >
+                        {accepted
+                          ? t("smartReference.referenced")
+                          : t("smartReference.addReference")}
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+            {smartReferenceResult.candidates.length > 24 && (
+              <p className="smart-reference-limit">
+                {t("smartReference.resultLimit", {
+                  count: smartReferenceResult.candidates.length,
+                })}
+              </p>
+            )}
+            <footer>
+              <small>{t("smartReference.scoreDescription")}</small>
+              <button
+                className="primary-button"
+                onClick={() => setSmartReferenceResult(null)}
+                type="button"
+              >
+                {t("smartReference.close")}
+              </button>
+            </footer>
+          </section>
+        </div>
+      )}
 
       {pendingWorkspaceReplacement !== null && (
         <div className="modal-backdrop" role="presentation">

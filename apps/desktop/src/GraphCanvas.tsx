@@ -28,6 +28,7 @@ import {
   Plus,
   Redo2,
   Search,
+  Sparkles,
   Trash2,
   Undo2,
 } from "lucide-react";
@@ -84,6 +85,7 @@ interface InformationNodeData extends Record<string, unknown> {
 type InformationFlowNode = Node<InformationNodeData, "information">;
 
 interface GraphLabels {
+  analyzingNode: string;
   cancel: string;
   confirmDeleteNode: (count: number) => string;
   createNode: string;
@@ -109,12 +111,14 @@ interface GraphLabels {
   redo: string;
   removeNodeFilter: string;
   sourceHandle: string;
+  smartReference: string;
   targetHandle: string;
   undo: string;
   unnamed: string;
 }
 
 interface GraphCanvasProps {
+  analyzingNodeId: string | null;
   nodes: InformationNode[];
   layout: NodeLayout[];
   references: NodeReference[];
@@ -128,6 +132,7 @@ interface GraphCanvasProps {
   searchTerm: string;
   unnamedOnly: boolean;
   labels: GraphLabels;
+  onAnalyzeNode: (nodeId: string) => void;
   onCreateNode: (position: { x: number; y: number }) => void;
   onCreateReferencedNode: (
     sourceNodeId: string,
@@ -382,6 +387,7 @@ function referencedNodeLabel(
 }
 
 export default function GraphCanvas({
+  analyzingNodeId,
   nodes,
   layout,
   references,
@@ -395,6 +401,7 @@ export default function GraphCanvas({
   searchTerm,
   unnamedOnly,
   labels,
+  onAnalyzeNode,
   onCreateNode,
   onCreateReferencedNode,
   onDeleteNodes,
@@ -1246,6 +1253,21 @@ export default function GraphCanvas({
               >
                 <Pencil size={16} />
                 <span>{labels.editNode}</span>
+              </button>
+              <button
+                disabled={analyzingNodeId !== null}
+                onClick={() => {
+                  onAnalyzeNode(contextMenu.nodeId);
+                  setContextMenu(null);
+                }}
+                type="button"
+              >
+                <Sparkles size={16} />
+                <span>
+                  {analyzingNodeId === contextMenu.nodeId
+                    ? labels.analyzingNode
+                    : labels.smartReference}
+                </span>
               </button>
               <button
                 className="danger-menu-item"

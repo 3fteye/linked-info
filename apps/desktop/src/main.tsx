@@ -10,6 +10,11 @@ import {
   browserWorkspaceLifecycle,
   createTauriWorkspaceLifecycle,
 } from "./workspaceLifecycle";
+import {
+  tauriEmbeddingGateway,
+  unavailableEmbeddingGateway,
+} from "./embeddingBridge";
+import { localEmbeddingSettingsStore } from "./embeddingSettings";
 
 document.addEventListener(
   "contextmenu",
@@ -31,9 +36,17 @@ const lifecycle = runningInTauri
       },
     })
   : browserWorkspaceLifecycle;
+const embeddingGateway = runningInTauri
+  ? tauriEmbeddingGateway
+  : unavailableEmbeddingGateway;
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
-    <App lifecycle={lifecycle} persistence={persistence} />
+    <App
+      embeddingGateway={embeddingGateway}
+      embeddingSettingsStore={localEmbeddingSettingsStore}
+      lifecycle={lifecycle}
+      persistence={persistence}
+    />
   </React.StrictMode>,
 );
