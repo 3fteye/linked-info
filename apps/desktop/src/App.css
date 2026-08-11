@@ -996,7 +996,8 @@ h1 {
 }
 
 .smart-reference-settings,
-.automatic-reference-settings {
+.automatic-reference-settings,
+.vector-cache-settings {
   display: grid;
   width: min(430px, 100%);
   gap: 12px;
@@ -1029,10 +1030,21 @@ h1 {
 
 .embedding-model-note span,
 .remote-embedding-fields small,
-.automatic-reference-settings > small {
+.automatic-reference-settings > small,
+.vector-cache-settings small {
   color: #747b75;
   font-size: 11px;
   line-height: 1.5;
+}
+
+.vector-cache-settings > span {
+  color: #3d463f;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.vector-cache-settings .secondary-button {
+  justify-self: start;
 }
 
 .local-model-settings,
@@ -1591,7 +1603,8 @@ h1 {
   }
 
   .smart-reference-settings,
-  .automatic-reference-settings {
+  .automatic-reference-settings,
+  .vector-cache-settings {
     width: 100%;
   }
 }

@@ -36,4 +36,10 @@ describe("embedding settings", () => {
       defaultEmbeddingSettings.localModel,
     );
   });
+
+  it("includes the pinned local model revision in its fingerprint", () => {
+    expect(embeddingSettingsFingerprint(defaultEmbeddingSettings)).toContain(
+      "75c43b069aac4d136ba6bc1122f995fedcfd2781",
+    );
+  });
 });

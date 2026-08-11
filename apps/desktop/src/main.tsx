@@ -12,10 +12,12 @@ import {
 } from "./workspaceLifecycle";
 import {
   tauriEmbeddingGateway,
+  tauriEmbeddingVectorCache,
   tauriLocalEmbeddingRuntime,
   unavailableEmbeddingGateway,
   unavailableLocalEmbeddingRuntime,
 } from "./embeddingBridge";
+import { unavailableEmbeddingVectorCache } from "./embeddingCache";
 import { localEmbeddingSettingsStore } from "./embeddingSettings";
 
 document.addEventListener(
@@ -41,6 +43,9 @@ const lifecycle = runningInTauri
 const embeddingGateway = runningInTauri
   ? tauriEmbeddingGateway
   : unavailableEmbeddingGateway;
+const embeddingVectorCache = runningInTauri
+  ? tauriEmbeddingVectorCache
+  : unavailableEmbeddingVectorCache;
 const localEmbeddingRuntime = runningInTauri
   ? tauriLocalEmbeddingRuntime
   : unavailableLocalEmbeddingRuntime;
@@ -49,6 +54,7 @@ ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
     <App
       embeddingGateway={embeddingGateway}
+      embeddingVectorCache={embeddingVectorCache}
       embeddingSettingsStore={localEmbeddingSettingsStore}
       localEmbeddingRuntime={localEmbeddingRuntime}
       lifecycle={lifecycle}

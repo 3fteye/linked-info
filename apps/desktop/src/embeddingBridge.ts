@@ -6,6 +6,10 @@ import type {
   RemoteEmbeddingConfiguration,
 } from "./embeddingService";
 import type {
+  EmbeddingVectorCache,
+  EmbeddingVectorCacheStatus,
+} from "./embeddingCache";
+import type {
   LocalEmbeddingModelId,
   LocalEmbeddingModelStatus,
   LocalEmbeddingProgress,
@@ -27,6 +31,21 @@ export const tauriEmbeddingGateway: EmbeddingGateway = {
         inputs: inputs.map((input) => input.text),
       },
     });
+  },
+};
+
+export const tauriEmbeddingVectorCache: EmbeddingVectorCache = {
+  read(keys) {
+    return invoke<Array<number[] | null>>("read_embedding_vector_cache", { keys });
+  },
+  write(entries) {
+    return invoke<void>("write_embedding_vector_cache", { entries });
+  },
+  inspect() {
+    return invoke<EmbeddingVectorCacheStatus>("inspect_embedding_vector_cache");
+  },
+  clear() {
+    return invoke<EmbeddingVectorCacheStatus>("clear_embedding_vector_cache");
   },
 };
 

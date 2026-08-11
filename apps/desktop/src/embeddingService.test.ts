@@ -10,6 +10,11 @@ import {
   type EmbeddingInput,
 } from "./embeddingService";
 import { defaultEmbeddingSettings } from "./embeddingSettings";
+import type {
+  EmbeddingVectorCache,
+  EmbeddingVectorCacheEntry,
+  EmbeddingVectorCacheKey,
+} from "./embeddingCache";
 
 function node(id: string, name: string | null, content: string | null): InformationNode {
   return { id, name, content };
@@ -30,6 +35,39 @@ const gateway: EmbeddingGateway = {
     return inputs.map(vectorFor);
   },
 };
+
+function persistentCache(): {
+  cache: EmbeddingVectorCache;
+  entries: Map<string, number[]>;
+} {
+  const entries = new Map<string, number[]>();
+  const id = (key: EmbeddingVectorCacheKey) =>
+    `${key.fingerprint}:${key.role}:${key.contentHash}`;
+  return {
+    entries,
+    cache: {
+      read(keys) {
+        return Promise.resolve(keys.map((key) => entries.get(id(key)) ?? null));
+      },
+      write(nextEntries: EmbeddingVectorCacheEntry[]) {
+        nextEntries.forEach((entry) => entries.set(id(entry), entry.vector));
+        return Promise.resolve();
+      },
+      inspect() {
+        return Promise.resolve({
+          persistent: true,
+          entryCount: entries.size,
+          diskBytes: 0,
+          maxBytes: 512 * 1024 * 1024,
+        });
+      },
+      clear() {
+        entries.clear();
+        return this.inspect();
+      },
+    },
+  };
+}
 
 describe("embedding analysis", () => {
   it("combines name and content but excludes an empty node", () => {
@@ -82,5 +120,44 @@ describe("embedding analysis", () => {
         "",
       ),
     ).rejects.toMatchObject({ reason: "sourceEmpty" });
+  });
+
+  it("reuses persisted role-specific vectors after creating a new analyzer", async () => {
+    const storage = persistentCache();
+    let gatewayCalls = 0;
+    const countingGateway: EmbeddingGateway = {
+      async embedLocal(_modelId, inputs) {
+        gatewayCalls += 1;
+        return inputs.map(vectorFor);
+      },
+      async embedRemote(_configuration, inputs) {
+        gatewayCalls += 1;
+        return inputs.map(vectorFor);
+      },
+    };
+    const nodes = [
+      node("source", "OpenAI", null),
+      node("candidate", "OpenAI", null),
+    ];
+    await new EmbeddingAnalyzer(countingGateway, storage.cache).analyze(
+      "source",
+      nodes,
+      [],
+      defaultEmbeddingSettings,
+      "",
+    );
+    expect(gatewayCalls).toBe(2);
+    expect(storage.entries.size).toBe(2);
+
+    const result = await new EmbeddingAnalyzer(countingGateway, storage.cache).analyze(
+      "source",
+      nodes,
+      [],
+      defaultEmbeddingSettings,
+      "",
+    );
+
+    expect(gatewayCalls).toBe(2);
+    expect(result.candidates[0]).toMatchObject({ nodeId: "candidate", score: 1 });
   });
 });

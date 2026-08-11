@@ -1,5 +1,6 @@
 import {
   isLocalEmbeddingModelId,
+  localEmbeddingModelDefinition,
   type LocalEmbeddingModelId,
 } from "./localEmbeddingModels";
 
@@ -37,13 +38,22 @@ function validThreshold(value: unknown): value is number {
 }
 
 export function embeddingSettingsFingerprint(settings: EmbeddingSettings): string {
-  return settings.provider === "local"
-    ? JSON.stringify(["local", settings.localModel, 1])
-    : JSON.stringify([
-        "remote",
-        settings.remoteEndpoint.trim(),
-        settings.remoteModel.trim(),
-      ]);
+  if (settings.provider === "local") {
+    const model = localEmbeddingModelDefinition(settings.localModel);
+    return JSON.stringify([
+      "local",
+      model.id,
+      model.repository,
+      model.revision,
+      "embedding-input-v1",
+    ]);
+  }
+  return JSON.stringify([
+    "remote",
+    settings.remoteEndpoint.trim(),
+    settings.remoteModel.trim(),
+    "embedding-input-v1",
+  ]);
 }
 
 export function parseEmbeddingSettings(value: unknown): EmbeddingSettings {

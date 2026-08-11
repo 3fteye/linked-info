@@ -4,8 +4,16 @@ import {
   type EmbeddingSettings,
 } from "./embeddingSettings";
 import type { LocalEmbeddingModelId } from "./localEmbeddingModels";
+import {
+  EmbeddingMemoryLru,
+  unavailableEmbeddingVectorCache,
+  type EmbeddingVectorCache,
+  type EmbeddingVectorCacheEntry,
+  type EmbeddingVectorCacheKey,
+  type EmbeddingVectorRole,
+} from "./embeddingCache";
 
-export type EmbeddingInputRole = "query" | "document";
+export type EmbeddingInputRole = EmbeddingVectorRole;
 
 export interface EmbeddingInput {
   role: EmbeddingInputRole;
@@ -60,14 +68,33 @@ interface NodeChunks {
   truncated: boolean;
 }
 
-interface CachedEmbedding {
-  vector: number[];
-}
-
 const chunkLength = 360;
 const chunkOverlap = 60;
 const maximumChunksPerNode = 8;
 const maximumEmbeddingBatchSize = 64;
+const maximumPersistentCacheBatchSize = 256;
+const textEncoder = new TextEncoder();
+
+function bytesToHex(bytes: Uint8Array): string {
+  return Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("");
+}
+
+export async function sha256Text(text: string): Promise<string> {
+  const digest = await globalThis.crypto.subtle.digest("SHA-256", textEncoder.encode(text));
+  return bytesToHex(new Uint8Array(digest));
+}
+
+function memoryCacheKey(key: EmbeddingVectorCacheKey): string {
+  return `${key.fingerprint}:${key.role}:${key.contentHash}`;
+}
+
+function validVector(vector: number[]): Float32Array | null {
+  if (vector.length === 0 || vector.some((value) => !Number.isFinite(value))) {
+    return null;
+  }
+  const compact = Float32Array.from(vector);
+  return compact.some((value) => !Number.isFinite(value)) ? null : compact;
+}
 
 export function nodeEmbeddingText(node: InformationNode): string | null {
   const name = node.name?.trim() ?? "";
@@ -111,7 +138,7 @@ export function chunkEmbeddingText(text: string): { chunks: string[]; truncated:
   return { chunks, truncated: true };
 }
 
-export function cosineSimilarity(left: number[], right: number[]): number {
+export function cosineSimilarity(left: ArrayLike<number>, right: ArrayLike<number>): number {
   if (left.length === 0 || left.length !== right.length) {
     throw new EmbeddingAnalysisFailure("invalidEmbeddingResponse");
   }
@@ -146,9 +173,16 @@ function chunksForNode(node: InformationNode): NodeChunks | null {
 }
 
 export class EmbeddingAnalyzer {
-  private readonly cache = new Map<string, CachedEmbedding>();
+  private readonly memoryCache: EmbeddingMemoryLru;
 
-  constructor(private readonly gateway: EmbeddingGateway) {}
+  constructor(
+    private readonly gateway: EmbeddingGateway,
+    private readonly persistentCache: EmbeddingVectorCache =
+      unavailableEmbeddingVectorCache,
+    memoryCacheBytes?: number,
+  ) {
+    this.memoryCache = new EmbeddingMemoryLru(memoryCacheBytes);
+  }
 
   async analyze(
     sourceNodeId: string,
@@ -212,63 +246,135 @@ export class EmbeddingAnalyzer {
   }
 
   clearCache(): void {
-    this.cache.clear();
+    this.memoryCache.clear();
   }
 
   private async embeddingsFor(
     inputs: EmbeddingInput[],
     settings: EmbeddingSettings,
     remoteToken: string,
-  ): Promise<number[][]> {
-    const fingerprint = embeddingSettingsFingerprint(settings);
-    const keys = inputs.map(
-      (input) => `${fingerprint}:${input.role}:${input.text}`,
-    );
-    const missingInputs: EmbeddingInput[] = [];
-    const missingKeys: string[] = [];
-    keys.forEach((key, index) => {
-      if (!this.cache.has(key)) {
-        missingKeys.push(key);
-        missingInputs.push(inputs[index]);
+  ): Promise<Float32Array[]> {
+    const fingerprint = await sha256Text(embeddingSettingsFingerprint(settings));
+    const hashes: string[] = [];
+    for (let start = 0; start < inputs.length; start += maximumPersistentCacheBatchSize) {
+      hashes.push(
+        ...(await Promise.all(
+          inputs
+            .slice(start, start + maximumPersistentCacheBatchSize)
+            .map((input) => sha256Text(input.text)),
+        )),
+      );
+    }
+    const persistentKeys = inputs.map<EmbeddingVectorCacheKey>((input, index) => ({
+      fingerprint,
+      role: input.role,
+      contentHash: hashes[index],
+    }));
+    const cacheKeys = persistentKeys.map(memoryCacheKey);
+    const resolvedVectors = new Array<Float32Array | undefined>(inputs.length);
+    const indexesByCacheKey = new Map<string, number[]>();
+    cacheKeys.forEach((key, index) => {
+      const cached = this.memoryCache.get(key);
+      if (cached !== undefined) {
+        resolvedVectors[index] = cached;
+        return;
       }
+      const indexes = indexesByCacheKey.get(key) ?? [];
+      indexes.push(index);
+      indexesByCacheKey.set(key, indexes);
     });
 
-    if (missingInputs.length > 0) {
-      for (let start = 0; start < missingInputs.length; start += maximumEmbeddingBatchSize) {
-        const batchInputs = missingInputs.slice(start, start + maximumEmbeddingBatchSize);
-        const batchKeys = missingKeys.slice(start, start + maximumEmbeddingBatchSize);
-        let vectors: number[][];
+    const uniqueMissing = [...indexesByCacheKey.entries()].map(([cacheKey, indexes]) => ({
+      cacheKey,
+      indexes,
+      input: inputs[indexes[0]],
+      persistentKey: persistentKeys[indexes[0]],
+    }));
+    for (let start = 0; start < uniqueMissing.length; start += maximumPersistentCacheBatchSize) {
+      const batch = uniqueMissing.slice(start, start + maximumPersistentCacheBatchSize);
+      let cachedVectors: Array<number[] | null> | null = null;
+      try {
+        const result = await this.persistentCache.read(
+          batch.map((item) => item.persistentKey),
+        );
+        if (result.length === batch.length) {
+          cachedVectors = result;
+        }
+      } catch {
+        cachedVectors = null;
+      }
+      if (cachedVectors === null) {
+        continue;
+      }
+      cachedVectors.forEach((vector, index) => {
+        if (vector === null) {
+          return;
+        }
+        const compact = validVector(vector);
+        if (compact === null) {
+          return;
+        }
+        const item = batch[index];
+        this.memoryCache.set(item.cacheKey, compact);
+        item.indexes.forEach((inputIndex) => {
+          resolvedVectors[inputIndex] = compact;
+        });
+      });
+    }
+
+    const stillMissing = uniqueMissing.filter(({ indexes }) =>
+      indexes.some((index) => resolvedVectors[index] === undefined),
+    );
+    if (stillMissing.length > 0) {
+      for (let start = 0; start < stillMissing.length; start += maximumEmbeddingBatchSize) {
+        const batch = stillMissing.slice(start, start + maximumEmbeddingBatchSize);
+        const batchInputs = batch.map((item) => item.input);
+        let responseVectors: number[][];
         if (settings.provider === "local") {
-          vectors = await this.gateway.embedLocal(settings.localModel, batchInputs);
+          responseVectors = await this.gateway.embedLocal(settings.localModel, batchInputs);
         } else {
           const endpoint = settings.remoteEndpoint.trim();
           const model = settings.remoteModel.trim();
           if (endpoint.length === 0 || model.length === 0) {
             throw new EmbeddingAnalysisFailure("remoteConfigurationMissing");
           }
-          vectors = await this.gateway.embedRemote(
+          responseVectors = await this.gateway.embedRemote(
             { endpoint, model, token: remoteToken.trim() },
             batchInputs,
           );
         }
-        if (vectors.length !== batchInputs.length) {
+        if (responseVectors.length !== batchInputs.length) {
           throw new EmbeddingAnalysisFailure("invalidEmbeddingResponse");
         }
-        vectors.forEach((vector, index) => {
-          if (vector.length === 0 || vector.some((value) => !Number.isFinite(value))) {
+        const persistentEntries: EmbeddingVectorCacheEntry[] = [];
+        responseVectors.forEach((vector, index) => {
+          const compact = validVector(vector);
+          if (compact === null) {
             throw new EmbeddingAnalysisFailure("invalidEmbeddingResponse");
           }
-          this.cache.set(batchKeys[index], { vector });
+          const item = batch[index];
+          this.memoryCache.set(item.cacheKey, compact);
+          item.indexes.forEach((inputIndex) => {
+            resolvedVectors[inputIndex] = compact;
+          });
+          persistentEntries.push({
+            ...item.persistentKey,
+            vector: Array.from(compact),
+          });
         });
+        try {
+          await this.persistentCache.write(persistentEntries);
+        } catch {
+          // The cache is derived data. A write failure must not discard a valid analysis.
+        }
       }
     }
 
-    return keys.map((key) => {
-      const cached = this.cache.get(key);
-      if (cached === undefined) {
+    return resolvedVectors.map((vector) => {
+      if (vector === undefined) {
         throw new EmbeddingAnalysisFailure("invalidEmbeddingResponse");
       }
-      return cached.vector;
+      return vector;
     });
   }
 }

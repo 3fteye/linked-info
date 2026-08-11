@@ -1,4 +1,5 @@
 mod embedding;
+mod vector_cache;
 mod workspace_file;
 
 #[cfg(desktop)]
@@ -26,6 +27,7 @@ pub fn run() {
 
     builder
         .manage(embedding::EmbeddingState::default())
+        .manage(vector_cache::VectorCacheState::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .invoke_handler(tauri::generate_handler![
@@ -34,6 +36,10 @@ pub fn run() {
             embedding::embed_remote_texts,
             embedding::inspect_local_embedding_models,
             embedding::prepare_local_embedding_model,
+            vector_cache::clear_embedding_vector_cache,
+            vector_cache::inspect_embedding_vector_cache,
+            vector_cache::read_embedding_vector_cache,
+            vector_cache::write_embedding_vector_cache,
             exit_application,
             workspace_file::read_workspace_file,
             workspace_file::write_workspace_file

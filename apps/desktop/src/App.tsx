@@ -63,6 +63,10 @@ import {
   type EmbeddingCandidate,
   type EmbeddingGateway,
 } from "./embeddingService";
+import type {
+  EmbeddingVectorCache,
+  EmbeddingVectorCacheStatus,
+} from "./embeddingCache";
 import {
   embeddingSettingsFingerprint,
   updateEmbeddingSettings,
@@ -89,6 +93,7 @@ interface PendingWorkspaceReplacement {
 
 interface AppProps {
   embeddingGateway: EmbeddingGateway;
+  embeddingVectorCache: EmbeddingVectorCache;
   embeddingSettingsStore: EmbeddingSettingsStore;
   localEmbeddingRuntime: LocalEmbeddingRuntime;
   lifecycle: WorkspaceLifecycle;
@@ -187,6 +192,7 @@ function nodeFilterLabel(
 
 function App({
   embeddingGateway,
+  embeddingVectorCache,
   embeddingSettingsStore,
   localEmbeddingRuntime,
   lifecycle,
@@ -219,8 +225,8 @@ function App({
   const [backupStatus, setBackupStatus] = useState<string | null>(null);
   const [recoveryAvailable, setRecoveryAvailable] = useState(false);
   const embeddingAnalyzer = useMemo(
-    () => new EmbeddingAnalyzer(embeddingGateway),
-    [embeddingGateway],
+    () => new EmbeddingAnalyzer(embeddingGateway, embeddingVectorCache),
+    [embeddingGateway, embeddingVectorCache],
   );
   const [embeddingSettings, setEmbeddingSettings] = useState<EmbeddingSettings>(() =>
     embeddingSettingsStore.load(),
@@ -238,6 +244,10 @@ function App({
   const [preparingLocalModelId, setPreparingLocalModelId] =
     useState<LocalEmbeddingModelId | null>(null);
   const [cancellingLocalDownload, setCancellingLocalDownload] = useState(false);
+  const [vectorCacheStatus, setVectorCacheStatus] =
+    useState<EmbeddingVectorCacheStatus | null>(null);
+  const [vectorCacheBusy, setVectorCacheBusy] = useState(false);
+  const [vectorCacheMessage, setVectorCacheMessage] = useState<string | null>(null);
   const currentView = views.find((view) => view.id === activeView) ?? views[0];
   const activeLanguage = i18n.resolvedLanguage ?? i18n.language;
   const normalizedSearch = normalizeNodeName(searchTerm);
@@ -287,6 +297,32 @@ function App({
       unsubscribe?.();
     };
   }, [localEmbeddingRuntime]);
+
+  useEffect(() => {
+    if (activeView !== "settings") {
+      return;
+    }
+    let active = true;
+    void embeddingVectorCache
+      .inspect()
+      .then((status) => {
+        if (active) {
+          setVectorCacheStatus(status);
+          setVectorCacheMessage(null);
+        }
+      })
+      .catch((error) => {
+        if (active) {
+          const reason = error instanceof Error ? error.message : String(error);
+          setVectorCacheMessage(
+            t("smartReference.settings.vectorCache.inspectFailed", { reason }),
+          );
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [activeView, embeddingVectorCache, t]);
 
   useEffect(() => {
     let active = true;
@@ -456,7 +492,6 @@ function App({
       embeddingSettingsFingerprint(next) !==
       embeddingSettingsFingerprint(embeddingSettings);
     if (fingerprintChanged) {
-      embeddingAnalyzer.clearCache();
       setRemoteEmbeddingToken("");
       setSmartReferenceResult(null);
       setLocalEmbeddingProgress(null);
@@ -467,6 +502,27 @@ function App({
       setSmartReferenceStatus(null);
     } catch {
       setSmartReferenceStatus(t("smartReference.errors.settingsSaveFailed"));
+    }
+  }
+
+  async function clearVectorCache() {
+    if (vectorCacheBusy) {
+      return;
+    }
+    setVectorCacheBusy(true);
+    setVectorCacheMessage(null);
+    try {
+      const status = await embeddingVectorCache.clear();
+      embeddingAnalyzer.clearCache();
+      setVectorCacheStatus(status);
+      setVectorCacheMessage(t("smartReference.settings.vectorCache.clearSuccess"));
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      setVectorCacheMessage(
+        t("smartReference.settings.vectorCache.clearFailed", { reason }),
+      );
+    } finally {
+      setVectorCacheBusy(false);
     }
   }
 
@@ -1501,6 +1557,45 @@ function App({
                     <output>{embeddingSettings.autoReferenceThreshold.toFixed(2)}</output>
                   </label>
                   <small>{t("smartReference.settings.thresholdDescription")}</small>
+                </div>
+              </div>
+              <div className="setting-row data-setting-row smart-reference-setting-row">
+                <div className="setting-label">
+                  <Database size={18} />
+                  <div className="setting-label-copy">
+                    <span>{t("smartReference.settings.vectorCache.title")}</span>
+                    <small>{t("smartReference.settings.vectorCache.description")}</small>
+                  </div>
+                </div>
+                <div className="vector-cache-settings">
+                  {vectorCacheStatus === null ? (
+                    <span>{t("smartReference.settings.vectorCache.loading")}</span>
+                  ) : vectorCacheStatus.persistent ? (
+                    <span>
+                      {t("smartReference.settings.vectorCache.usage", {
+                        used: formatByteCount(vectorCacheStatus.diskBytes),
+                        limit: formatByteCount(vectorCacheStatus.maxBytes),
+                        count: vectorCacheStatus.entryCount,
+                      })}
+                    </span>
+                  ) : (
+                    <span>{t("smartReference.settings.vectorCache.desktopOnly")}</span>
+                  )}
+                  <small>{t("smartReference.settings.vectorCache.memoryLimit")}</small>
+                  <button
+                    className="secondary-button"
+                    disabled={
+                      vectorCacheBusy || vectorCacheStatus?.persistent !== true
+                    }
+                    onClick={() => void clearVectorCache()}
+                    type="button"
+                  >
+                    <Trash2 aria-hidden="true" size={15} />
+                    {vectorCacheBusy
+                      ? t("smartReference.settings.vectorCache.clearing")
+                      : t("smartReference.settings.vectorCache.clear")}
+                  </button>
+                  {vectorCacheMessage !== null && <small>{vectorCacheMessage}</small>}
                 </div>
               </div>
               <div className="setting-row data-setting-row">

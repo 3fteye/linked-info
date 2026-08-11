@@ -28,6 +28,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 hf-hub = { version = "0.5.0", default-features = false }
 sha2 = "0.10"
 tokio = { version = "1", features = ["fs", "io-util", "macros", "time"] }
+rusqlite = { version = "0.40.2", default-features = false, features = ["bundled"] }
 
 [target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
 tauri-plugin-single-instance = "2"
