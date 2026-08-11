@@ -27,7 +27,7 @@
     "active": true,
     "targets": "all",
     "resources": [
-      "resources/llama-runtime/**"
+      "resources/llama-runtime/*"
     ],
     "icon": [
       "icons/32x32.png",
