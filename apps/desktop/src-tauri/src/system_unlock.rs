@@ -160,7 +160,7 @@ mod windows_user_verification {
         ) -> WindowsResult<IAsyncOperation<UserConsentVerificationResult>> {
             unsafe {
                 let mut operation = core::mem::zeroed();
-                (Interface::vtable(self).RequestVerificationForWindowAsync)(
+                (Interface::vtable(self).request_verification_for_window_async)(
                     Interface::as_raw(self),
                     hwnd,
                     core::mem::transmute_copy(message),
@@ -173,9 +173,10 @@ mod windows_user_verification {
     }
 
     #[repr(C)]
-    struct IUserConsentVerifierInterop_Vtbl {
+    #[doc(hidden)]
+    pub struct IUserConsentVerifierInterop_Vtbl {
         base__: IInspectable_Vtbl,
-        RequestVerificationForWindowAsync: unsafe extern "system" fn(
+        request_verification_for_window_async: unsafe extern "system" fn(
             *mut core::ffi::c_void,
             HWND,
             *mut core::ffi::c_void,
