@@ -69,6 +69,11 @@ export interface EmbeddingAnalysis {
   truncatedNodeCount: number;
 }
 
+export interface EmbeddingTransmissionEstimate {
+  nodeCount: number;
+  segmentCount: number;
+}
+
 interface NodeChunks {
   nodeId: string;
   chunks: string[];
@@ -179,6 +184,18 @@ function chunksForNode(node: InformationNode): NodeChunks | null {
   }
   const chunked = chunkEmbeddingText(text);
   return { nodeId: node.id, ...chunked };
+}
+
+export function embeddingTransmissionEstimate(
+  nodes: InformationNode[],
+): EmbeddingTransmissionEstimate {
+  const chunkedNodes = nodes
+    .map(chunksForNode)
+    .filter((node): node is NodeChunks => node !== null);
+  return {
+    nodeCount: chunkedNodes.length,
+    segmentCount: chunkedNodes.reduce((total, node) => total + node.chunks.length, 0),
+  };
 }
 
 export function propagateReferenceCandidates(

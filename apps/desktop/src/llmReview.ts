@@ -60,6 +60,55 @@ const maximumGraphCandidates = 16;
 const maximumCandidateCount = 24;
 const maximumExamplesPerCandidate = 2;
 const maximumExistingReferences = 12;
+export const maximumEstimatedLlmRequestTokens = 3_000;
+
+export function estimatedLlmReviewRequestTokens(request: LlmReviewRequest): number {
+  let estimated = 0;
+  for (const character of JSON.stringify(request)) {
+    estimated += (character.codePointAt(0) ?? 0) <= 0x7f ? 0.25 : 1;
+  }
+  return Math.ceil(estimated);
+}
+
+function fitRequestToContextBudget(
+  source: LlmReviewNodeSummary,
+  existingReferences: LlmReviewNodeSummary[],
+  candidates: LlmReviewCandidateInput[],
+): LlmReviewRequest | null {
+  const request: LlmReviewRequest = { source, existingReferences, candidates };
+  while (estimatedLlmReviewRequestTokens(request) > maximumEstimatedLlmRequestTokens) {
+    const candidateWithExample = [...request.candidates]
+      .reverse()
+      .find((candidate) => candidate.examples.length > 0);
+    if (candidateWithExample !== undefined) {
+      candidateWithExample.examples.pop();
+      continue;
+    }
+    const candidateWithOptionalContent = [...request.candidates]
+      .reverse()
+      .find((candidate) => candidate.name !== null && candidate.content !== null);
+    if (candidateWithOptionalContent !== undefined) {
+      candidateWithOptionalContent.content = null;
+      continue;
+    }
+    const referenceWithOptionalContent = [...request.existingReferences]
+      .reverse()
+      .find((reference) => reference.name !== null && reference.content !== null);
+    if (referenceWithOptionalContent !== undefined) {
+      referenceWithOptionalContent.content = null;
+      continue;
+    }
+    if (request.existingReferences.length > 0) {
+      request.existingReferences.pop();
+      continue;
+    }
+    request.candidates.pop();
+    if (request.candidates.length === 0) {
+      return null;
+    }
+  }
+  return request;
+}
 
 function boundedText(value: string | null, maximumCharacters: number): string | null {
   const trimmed = value?.trim() ?? "";
@@ -205,13 +254,24 @@ export function prepareLlmReview(
     .filter((summary): summary is LlmReviewNodeSummary => summary !== null)
     .slice(0, maximumExistingReferences);
 
+  const request = fitRequestToContextBudget(
+    sourceSummary,
+    existingReferences,
+    candidates,
+  );
+  if (request === null) {
+    return null;
+  }
+  const retainedAliases = new Set(request.candidates.map((candidate) => candidate.alias));
+  for (const alias of aliasesToNodeIds.keys()) {
+    if (!retainedAliases.has(alias)) {
+      aliasesToNodeIds.delete(alias);
+    }
+  }
+
   return {
     aliasesToNodeIds,
-    request: {
-      source: sourceSummary,
-      existingReferences,
-      candidates,
-    },
+    request,
   };
 }
 

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  appendExistingNodeReference,
   appendNodeReference,
   availableReferenceTargets,
   referenceTargetCreationName,
@@ -56,6 +57,21 @@ describe("appendNodeReference", () => {
     ]);
     expect(appendNodeReference(appended, sourceId, availableId)).toBe(appended);
     expect(appendNodeReference(appended, sourceId, sourceId)).toBe(appended);
+  });
+
+  it("refuses a reference whose source or target is absent", () => {
+    expect(
+      appendExistingNodeReference(nodes, references, sourceId, availableId),
+    ).toEqual([
+      ...references,
+      { sourceNodeId: sourceId, targetNodeId: availableId },
+    ]);
+    expect(
+      appendExistingNodeReference(nodes, references, "missing", availableId),
+    ).toBe(references);
+    expect(
+      appendExistingNodeReference(nodes, references, sourceId, "missing"),
+    ).toBe(references);
   });
 });
 

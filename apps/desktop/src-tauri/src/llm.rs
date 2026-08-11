@@ -10,7 +10,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
-    time::{Duration, Instant},
+    time::{Duration, Instant, UNIX_EPOCH},
 };
 
 use reqwest::{
@@ -23,11 +23,15 @@ use sha2::{Digest, Sha256};
 use tauri::{Emitter, Manager};
 use uuid::Uuid;
 
+#[cfg(windows)]
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+
 const LOCAL_LLM_PROGRESS_EVENT: &str = "linked-info://local-llm-progress";
 const LOCAL_LLM_DOWNLOAD_CANCELLED: &str = "local LLM download cancelled";
 const MAXIMUM_CANDIDATE_COUNT: usize = 24;
 const MAXIMUM_EXISTING_REFERENCE_COUNT: usize = 12;
 const MAXIMUM_EXAMPLE_COUNT: usize = 2;
+const MAXIMUM_ESTIMATED_REQUEST_TOKENS: usize = 3_000;
 const MAXIMUM_DOWNLOAD_RETRIES: usize = 5;
 const MODEL_SHA256: &str = "061b54daade076b5d3362dac252678d17da8c68f07560be70818cace6590cb1a";
 
@@ -82,8 +86,16 @@ pub struct LocalLlmModelStatus {
     cached_bytes: u64,
     total_bytes: u64,
     ready: bool,
+    verification_required: bool,
     loaded: bool,
     runtime_available: bool,
+}
+
+#[derive(Deserialize, Serialize)]
+struct VerifiedModelMarker {
+    sha256: String,
+    size: u64,
+    modified_ns: u64,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -168,6 +180,8 @@ struct RunningLocalLlm {
     model_id: String,
     child: Child,
     connection: LocalLlmConnection,
+    #[cfg(windows)]
+    _job: OwnedHandle,
 }
 
 pub struct LlmState {
@@ -270,6 +284,67 @@ fn local_llm_partial_path(cache_dir: &Path, spec: &LocalLlmModelSpec) -> PathBuf
     local_llm_model_path(cache_dir, spec).with_extension("gguf.part")
 }
 
+fn local_llm_verification_path(cache_dir: &Path, spec: &LocalLlmModelSpec) -> PathBuf {
+    local_llm_model_path(cache_dir, spec).with_extension("gguf.verified.json")
+}
+
+fn model_file_fingerprint(path: &Path) -> Option<(u64, u64)> {
+    let metadata = path.metadata().ok()?;
+    let modified_ns = metadata
+        .modified()
+        .ok()?
+        .duration_since(UNIX_EPOCH)
+        .ok()?
+        .as_nanos()
+        .try_into()
+        .ok()?;
+    Some((metadata.len(), modified_ns))
+}
+
+fn marker_matches_fingerprint(
+    marker: &VerifiedModelMarker,
+    spec: &LocalLlmModelSpec,
+    size: u64,
+    modified_ns: u64,
+) -> bool {
+    marker.sha256 == spec.sha256 && marker.size == size && marker.modified_ns == modified_ns
+}
+
+fn verified_model_marker_matches(cache_dir: &Path, spec: &LocalLlmModelSpec) -> bool {
+    let Some((size, modified_ns)) = model_file_fingerprint(&local_llm_model_path(cache_dir, spec))
+    else {
+        return false;
+    };
+    let marker = fs::read(local_llm_verification_path(cache_dir, spec))
+        .ok()
+        .and_then(|contents| serde_json::from_slice::<VerifiedModelMarker>(&contents).ok());
+    marker
+        .as_ref()
+        .is_some_and(|marker| marker_matches_fingerprint(marker, spec, size, modified_ns))
+}
+
+fn write_verified_model_marker(
+    cache_dir: &Path,
+    spec: &LocalLlmModelSpec,
+) -> Result<(), PrepareLlmError> {
+    let (size, modified_ns) = model_file_fingerprint(&local_llm_model_path(cache_dir, spec))
+        .ok_or_else(|| {
+            PrepareLlmError::Message("cannot inspect verified local LLM model".to_owned())
+        })?;
+    let marker = serde_json::to_vec(&VerifiedModelMarker {
+        sha256: spec.sha256.to_owned(),
+        size,
+        modified_ns,
+    })
+    .map_err(|error| PrepareLlmError::Message(error.to_string()))?;
+    fs::write(local_llm_verification_path(cache_dir, spec), marker)?;
+    Ok(())
+}
+
+fn remove_verified_model_marker(cache_dir: &Path, spec: &LocalLlmModelSpec) {
+    let _ = fs::remove_file(local_llm_verification_path(cache_dir, spec));
+}
+
 fn existing_file_bytes(path: &Path, maximum: u64) -> u64 {
     path.metadata()
         .map(|metadata| metadata.len().min(maximum))
@@ -283,11 +358,12 @@ fn local_llm_model_status(
     runtime_available: bool,
 ) -> LocalLlmModelStatus {
     let final_path = local_llm_model_path(cache_dir, spec);
-    let ready = final_path
+    let complete = final_path
         .metadata()
         .map(|metadata| metadata.len() == spec.size)
         .unwrap_or(false);
-    let cached_bytes = if ready {
+    let ready = complete && verified_model_marker_matches(cache_dir, spec);
+    let cached_bytes = if complete {
         spec.size
     } else {
         existing_file_bytes(&local_llm_partial_path(cache_dir, spec), spec.size)
@@ -297,6 +373,7 @@ fn local_llm_model_status(
         cached_bytes,
         total_bytes: spec.size,
         ready,
+        verification_required: complete && !ready,
         loaded,
         runtime_available,
     }
@@ -453,13 +530,33 @@ async fn ensure_local_llm_model(
 ) -> Result<(), PrepareLlmError> {
     fs::create_dir_all(cache_dir)?;
     let final_path = local_llm_model_path(cache_dir, spec);
-    if final_path
+    let complete = final_path
         .metadata()
         .map(|metadata| metadata.len() == spec.size)
-        .unwrap_or(false)
-    {
-        emit_local_llm_progress(app, spec, LocalLlmPhase::Ready, spec.size, None);
-        return Ok(());
+        .unwrap_or(false);
+    if complete {
+        if verified_model_marker_matches(cache_dir, spec) {
+            emit_local_llm_progress(app, spec, LocalLlmPhase::Ready, spec.size, None);
+            return Ok(());
+        }
+        emit_local_llm_progress(app, spec, LocalLlmPhase::Verifying, spec.size, None);
+        let verification_path = final_path.clone();
+        let expected = spec.sha256;
+        let verification = tauri::async_runtime::spawn_blocking(move || {
+            verify_sha256(&verification_path, expected)
+        })
+        .await
+        .map_err(|error| PrepareLlmError::Message(error.to_string()))?;
+        if verification.is_ok() {
+            write_verified_model_marker(cache_dir, spec)?;
+            emit_local_llm_progress(app, spec, LocalLlmPhase::Ready, spec.size, None);
+            return Ok(());
+        }
+        remove_verified_model_marker(cache_dir, spec);
+        fs::remove_file(&final_path)?;
+    } else if final_path.exists() {
+        remove_verified_model_marker(cache_dir, spec);
+        fs::remove_file(&final_path)?;
     }
 
     let partial_path = local_llm_partial_path(cache_dir, spec);
@@ -629,6 +726,7 @@ async fn ensure_local_llm_model(
         fs::remove_file(&final_path)?;
     }
     fs::rename(&partial_path, &final_path)?;
+    write_verified_model_marker(cache_dir, spec)?;
     emit_local_llm_progress(app, spec, LocalLlmPhase::Ready, spec.size, None);
     Ok(())
 }
@@ -724,6 +822,48 @@ fn inference_thread_count() -> usize {
     available.saturating_sub(1).clamp(1, 4)
 }
 
+#[cfg(windows)]
+fn assign_child_to_kill_on_close_job(child: &Child) -> Result<OwnedHandle, String> {
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+        SetInformationJobObject,
+    };
+
+    let raw_job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+    if raw_job.is_null() {
+        return Err(format!(
+            "cannot create local LLM Windows job object: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let job = unsafe { OwnedHandle::from_raw_handle(raw_job) };
+    let mut information = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+    information.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    let configured = unsafe {
+        SetInformationJobObject(
+            job.as_raw_handle(),
+            JobObjectExtendedLimitInformation,
+            std::ptr::from_ref(&information).cast(),
+            std::mem::size_of_val(&information) as u32,
+        )
+    };
+    if configured == 0 {
+        return Err(format!(
+            "cannot configure local LLM Windows job object: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let assigned = unsafe { AssignProcessToJobObject(job.as_raw_handle(), child.as_raw_handle()) };
+    if assigned == 0 {
+        return Err(format!(
+            "cannot assign local LLM runtime to its Windows job object: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(job)
+}
+
 fn start_local_llm_server(
     app: &tauri::AppHandle,
     state: &LlmState,
@@ -780,9 +920,15 @@ fn start_local_llm_server(
         use std::os::windows::process::CommandExt;
         command.creation_flags(0x0800_0000);
     }
-    let child = command
+    let mut child = command
         .spawn()
         .map_err(|error| format!("cannot start bundled llama.cpp runtime: {error}"))?;
+    #[cfg(windows)]
+    let job = assign_child_to_kill_on_close_job(&child).map_err(|error| {
+        let _ = child.kill();
+        let _ = child.wait();
+        error
+    })?;
     let connection = LocalLlmConnection {
         endpoint: format!("http://127.0.0.1:{port}"),
         api_key,
@@ -795,6 +941,8 @@ fn start_local_llm_server(
         model_id: spec.id.to_owned(),
         child,
         connection: connection.clone(),
+        #[cfg(windows)]
+        _job: job,
     });
     Ok(connection)
 }
@@ -850,6 +998,15 @@ fn summary_valid(summary: &LlmNodeSummary, content_limit: usize) -> bool {
     (name_length > 0 || content_length > 0) && name_length <= 160 && content_length <= content_limit
 }
 
+fn estimated_review_request_tokens(request: &LocalLlmReviewRequest) -> usize {
+    serde_json::to_string(request)
+        .expect("local LLM request types are serializable")
+        .chars()
+        .map(|character| if character.is_ascii() { 0.25_f64 } else { 1.0 })
+        .sum::<f64>()
+        .ceil() as usize
+}
+
 fn validate_review_request(request: &LocalLlmReviewRequest) -> Result<(), String> {
     if !summary_valid(&request.source, 1_600)
         || request.existing_references.len() > MAXIMUM_EXISTING_REFERENCE_COUNT
@@ -891,6 +1048,9 @@ fn validate_review_request(request: &LocalLlmReviewRequest) -> Result<(), String
         {
             return Err("local LLM review candidate is invalid".to_owned());
         }
+    }
+    if estimated_review_request_tokens(request) > MAXIMUM_ESTIMATED_REQUEST_TOKENS {
+        return Err("local LLM review request exceeds the context budget".to_owned());
     }
     Ok(())
 }
@@ -1188,6 +1348,56 @@ mod tests {
             uncertain_aliases: vec!["C01".to_owned()],
         });
         assert!(!uncertain.no_match);
+    }
+
+    #[test]
+    fn review_request_rejects_a_valid_shape_that_exceeds_the_total_budget() {
+        let mut request = valid_request();
+        request.source.content = Some("源".repeat(1_600));
+        request.candidates = (0..MAXIMUM_CANDIDATE_COUNT)
+            .map(|index| LlmCandidateInput {
+                alias: format!("C{index:02}"),
+                name: Some("候选".repeat(40)),
+                content: Some("正文".repeat(160)),
+                examples: vec![
+                    LlmNodeSummary {
+                        name: Some("示例".repeat(40)),
+                        content: Some("内容".repeat(110)),
+                    },
+                    LlmNodeSummary {
+                        name: Some("示例".repeat(40)),
+                        content: Some("内容".repeat(110)),
+                    },
+                ],
+                graph_score: Some(0.8),
+                similarity: Some(0.7),
+            })
+            .collect();
+
+        assert!(estimated_review_request_tokens(&request) > MAXIMUM_ESTIMATED_REQUEST_TOKENS);
+        assert_eq!(
+            validate_review_request(&request),
+            Err("local LLM review request exceeds the context budget".to_owned())
+        );
+    }
+
+    #[test]
+    fn verified_marker_is_bound_to_hash_size_and_modified_time() {
+        let spec = &LOCAL_LLM_MODELS[0];
+        let marker = VerifiedModelMarker {
+            sha256: spec.sha256.to_owned(),
+            size: spec.size,
+            modified_ns: 42,
+        };
+
+        assert!(marker_matches_fingerprint(&marker, spec, spec.size, 42));
+        assert!(!marker_matches_fingerprint(&marker, spec, spec.size, 43));
+        assert!(!marker_matches_fingerprint(
+            &marker,
+            spec,
+            spec.size - 1,
+            42
+        ));
     }
 
     #[test]

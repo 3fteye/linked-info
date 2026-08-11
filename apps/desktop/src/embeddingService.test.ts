@@ -5,6 +5,7 @@ import {
   cosineSimilarity,
   EmbeddingAnalysisFailure,
   EmbeddingAnalyzer,
+  embeddingTransmissionEstimate,
   nodeEmbeddingText,
   propagateReferenceCandidates,
   type EmbeddingGateway,
@@ -71,6 +72,16 @@ function persistentCache(): {
 }
 
 describe("embedding analysis", () => {
+  it("reports the maximum remote text scope before cache lookup", () => {
+    expect(
+      embeddingTransmissionEstimate([
+        node("empty", null, null),
+        node("short", "OpenAI", null),
+        node("long", null, "内容".repeat(500)),
+      ]),
+    ).toEqual({ nodeCount: 2, segmentCount: 5 });
+  });
+
   it("combines name and content but excludes an empty node", () => {
     expect(nodeEmbeddingText(node("1", " OpenAI ", " 模型服务 "))).toBe(
       "OpenAI\n模型服务",

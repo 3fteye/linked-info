@@ -60,3 +60,4 @@ jobs:
             target/release/linked-info-desktop.exe
             target/release/llama-runtime/**
           if-no-files-found: error
+          retention-days: 3

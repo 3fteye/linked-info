@@ -41,6 +41,7 @@ export interface LocalLlmModelStatus {
   cachedBytes: number;
   totalBytes: number;
   ready: boolean;
+  verificationRequired: boolean;
   loaded: boolean;
   runtimeAvailable: boolean;
 }

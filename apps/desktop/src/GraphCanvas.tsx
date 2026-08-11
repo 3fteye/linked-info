@@ -50,6 +50,7 @@ import type {
 } from "./workspaceStore";
 import { updateNodeLayoutPositions } from "./workspaceStore";
 import {
+  appendExistingNodeReference,
   appendNodeReference,
   availableReferenceTargets,
   referenceSearchCommand,
@@ -769,7 +770,8 @@ export default function GraphCanvas({
       }
 
       const currentReferences = referencesRef.current;
-      const nextReferences = appendNodeReference(
+      const nextReferences = appendExistingNodeReference(
+        nodes,
         currentReferences,
         connection.source,
         connection.target,
@@ -779,13 +781,14 @@ export default function GraphCanvas({
         onReferencesChange(nextReferences);
       }
     },
-    [onReferencesChange],
+    [nodes, onReferencesChange],
   );
 
   const appendReference = useCallback(
     (sourceNodeId: string, targetNodeId: string) => {
       const currentReferences = referencesRef.current;
-      const nextReferences = appendNodeReference(
+      const nextReferences = appendExistingNodeReference(
+        nodes,
         currentReferences,
         sourceNodeId,
         targetNodeId,
@@ -795,7 +798,7 @@ export default function GraphCanvas({
         onReferencesChange(nextReferences);
       }
     },
-    [onReferencesChange],
+    [nodes, onReferencesChange],
   );
 
   const chooseReferenceSearchTarget = useCallback(

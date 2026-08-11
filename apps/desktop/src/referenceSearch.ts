@@ -53,6 +53,18 @@ export function appendNodeReference(
   return [...references, { sourceNodeId, targetNodeId }];
 }
 
+export function appendExistingNodeReference(
+  nodes: InformationNode[],
+  references: NodeReference[],
+  sourceNodeId: string,
+  targetNodeId: string,
+): NodeReference[] {
+  const nodeIds = new Set(nodes.map((node) => node.id));
+  return nodeIds.has(sourceNodeId) && nodeIds.has(targetNodeId)
+    ? appendNodeReference(references, sourceNodeId, targetNodeId)
+    : references;
+}
+
 export function referenceTargetCreationName(
   nodes: InformationNode[],
   query: string,

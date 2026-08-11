@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  estimatedLlmReviewRequestTokens,
+  maximumEstimatedLlmRequestTokens,
   prepareLlmReview,
   validateLlmReviewResponse,
 } from "./llmReview";
@@ -111,5 +113,43 @@ describe("local LLM review preparation", () => {
         noMatch: false,
       }),
     ).toThrow(/no-match/);
+  });
+
+  it("fits worst-case candidates into the shared context budget", () => {
+    const manyNodes: InformationNode[] = [
+      node("source", "源".repeat(160), "正文".repeat(800)),
+    ];
+    const manyReferences: NodeReference[] = [];
+    const candidates: EmbeddingAnalysis["candidates"] = [];
+    const relatedNodes: EmbeddingAnalysis["relatedNodes"] = [];
+    for (let index = 0; index < 24; index += 1) {
+      const targetId = `target-${index}`;
+      const exampleA = `example-${index}-a`;
+      const exampleB = `example-${index}-b`;
+      manyNodes.push(
+        node(targetId, "候选".repeat(80), "候选正文".repeat(100)),
+        node(exampleA, "示例甲".repeat(50), "示例正文".repeat(60)),
+        node(exampleB, "示例乙".repeat(50), "示例正文".repeat(60)),
+      );
+      manyReferences.push(
+        { sourceNodeId: exampleA, targetNodeId: targetId },
+        { sourceNodeId: exampleB, targetNodeId: targetId },
+      );
+      candidates.push({ nodeId: targetId, score: 0.9, supportingNodeIds: [] });
+      relatedNodes.push({ nodeId: targetId, similarity: 0.8 });
+    }
+
+    const prepared = prepareLlmReview("source", manyNodes, manyReferences, {
+      candidates,
+      relatedNodes,
+      truncatedNodeCount: 0,
+    });
+
+    expect(prepared).not.toBeNull();
+    expect(estimatedLlmReviewRequestTokens(prepared!.request)).toBeLessThanOrEqual(
+      maximumEstimatedLlmRequestTokens,
+    );
+    expect(prepared!.request.candidates.length).toBeGreaterThan(0);
+    expect(prepared!.aliasesToNodeIds.size).toBe(prepared!.request.candidates.length);
   });
 });

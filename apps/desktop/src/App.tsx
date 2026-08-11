@@ -56,10 +56,14 @@ import {
   stepWorkspaceHistoryForward,
   type WorkspaceHistoryState,
 } from "./workspaceHistory";
-import { appendNodeReference } from "./referenceSearch";
+import {
+  appendExistingNodeReference,
+  appendNodeReference,
+} from "./referenceSearch";
 import {
   EmbeddingAnalysisFailure,
   EmbeddingAnalyzer,
+  embeddingTransmissionEstimate,
   type EmbeddingCandidate,
   type EmbeddingGateway,
   type EmbeddingRelatedNode,
@@ -233,6 +237,7 @@ function App({
   const [activeView, setActiveView] = useState<ViewId>("canvas");
   const [workspace, setWorkspace] = useState(emptyWorkspace);
   const workspaceRef = useRef(workspace);
+  const workspaceReplacementGenerationRef = useRef(0);
   const [persistenceReady, setPersistenceReady] = useState(false);
   const [primaryStorageProblem, setPrimaryStorageProblem] = useState<string | null>(null);
   const [recoveryStorageProblem, setRecoveryStorageProblem] = useState<string | null>(null);
@@ -294,6 +299,10 @@ function App({
   const currentView = views.find((view) => view.id === activeView) ?? views[0];
   const activeLanguage = i18n.resolvedLanguage ?? i18n.language;
   const normalizedSearch = normalizeNodeName(searchTerm);
+  const remoteEmbeddingScope = useMemo(
+    () => embeddingTransmissionEstimate(workspace.nodes),
+    [workspace.nodes],
+  );
 
   useEffect(() => {
     let active = true;
@@ -645,6 +654,7 @@ function App({
     setSmartReferenceStatus(null);
     try {
       const currentWorkspace = workspaceRef.current;
+      const replacementGeneration = workspaceReplacementGenerationRef.current;
       const analysis = await embeddingAnalyzer.analyze(
         nodeId,
         currentWorkspace.nodes,
@@ -688,12 +698,17 @@ function App({
               .map((candidate) => candidate.nodeId)
           : [];
       const automaticallyAddedNodeIds: string[] = [];
+      if (replacementGeneration !== workspaceReplacementGenerationRef.current) {
+        setSmartReferenceStatus(t("smartReference.errors.analysisOutdated"));
+        return;
+      }
       if (automaticCandidateIds.length > 0) {
         updateWorkspace(
           (current) => {
             let nextReferences = current.references;
             for (const targetNodeId of automaticCandidateIds) {
-              const appended = appendNodeReference(
+              const appended = appendExistingNodeReference(
+                current.nodes,
                 nextReferences,
                 nodeId,
                 targetNodeId,
@@ -710,15 +725,37 @@ function App({
           { flushImmediately: true, recordHistory: true },
         );
       }
+      const currentNodeIds = new Set(
+        workspaceRef.current.nodes.map((node) => node.id),
+      );
+      if (!currentNodeIds.has(nodeId)) {
+        setSmartReferenceStatus(t("smartReference.errors.analysisOutdated"));
+        return;
+      }
+      const currentCandidates = analysis.candidates.filter((candidate) =>
+        currentNodeIds.has(candidate.nodeId),
+      );
+      const currentRelatedNodes = analysis.relatedNodes.filter((related) =>
+        currentNodeIds.has(related.nodeId),
+      );
+      const currentLlmSelectedNodeIds = llmSelectedNodeIds.filter((candidateId) =>
+        currentNodeIds.has(candidateId),
+      );
+      const currentLlmUncertainNodeIds = llmUncertainNodeIds.filter(
+        (candidateId) => currentNodeIds.has(candidateId),
+      );
       setSmartReferenceResult({
         acceptedNodeIds: [...automaticallyAddedNodeIds],
         automaticallyAddedNodeIds,
-        candidates: analysis.candidates,
+        candidates: currentCandidates,
         llmEnabled: llmSettings.enabled,
-        llmNoMatch,
-        llmSelectedNodeIds,
-        llmUncertainNodeIds,
-        relatedNodes: analysis.relatedNodes,
+        llmNoMatch:
+          llmNoMatch ||
+          (currentLlmSelectedNodeIds.length === 0 &&
+            currentLlmUncertainNodeIds.length === 0),
+        llmSelectedNodeIds: currentLlmSelectedNodeIds,
+        llmUncertainNodeIds: currentLlmUncertainNodeIds,
+        relatedNodes: currentRelatedNodes,
         sourceNodeId: nodeId,
         truncatedNodeCount: analysis.truncatedNodeCount,
       });
@@ -829,9 +866,21 @@ function App({
     if (result === null) {
       return;
     }
+    const currentNodeIds = new Set(
+      workspaceRef.current.nodes.map((node) => node.id),
+    );
+    if (
+      !currentNodeIds.has(result.sourceNodeId) ||
+      !currentNodeIds.has(targetNodeId)
+    ) {
+      setSmartReferenceStatus(t("smartReference.errors.analysisOutdated"));
+      setSmartReferenceResult(null);
+      return;
+    }
     updateWorkspace(
       (current) => {
-        const references = appendNodeReference(
+        const references = appendExistingNodeReference(
+          current.nodes,
           current.references,
           result.sourceNodeId,
           targetNodeId,
@@ -1044,6 +1093,21 @@ function App({
     setReferenceFilterNodeIds((current) =>
       current.filter((currentNodeId) => !deletedNodeIds.has(currentNodeId)),
     );
+    setSmartReferenceResult((current) => {
+      if (current === null || deletedNodeIds.has(current.sourceNodeId)) {
+        return null;
+      }
+      const keep = (nodeId: string) => !deletedNodeIds.has(nodeId);
+      return {
+        ...current,
+        acceptedNodeIds: current.acceptedNodeIds.filter(keep),
+        automaticallyAddedNodeIds: current.automaticallyAddedNodeIds.filter(keep),
+        candidates: current.candidates.filter((candidate) => keep(candidate.nodeId)),
+        llmSelectedNodeIds: current.llmSelectedNodeIds.filter(keep),
+        llmUncertainNodeIds: current.llmUncertainNodeIds.filter(keep),
+        relatedNodes: current.relatedNodes.filter((related) => keep(related.nodeId)),
+      };
+    });
   }
 
   function updateNodeName(nodeId: string, name: string): boolean {
@@ -1206,6 +1270,7 @@ function App({
     try {
       await persistence.preserveForRecovery(workspaceRef.current);
       await persistence.save(pendingWorkspaceReplacement.workspace);
+      workspaceReplacementGenerationRef.current += 1;
       workspaceRef.current = pendingWorkspaceReplacement.workspace;
       setWorkspace(pendingWorkspaceReplacement.workspace);
       clearHistory();
@@ -1213,6 +1278,7 @@ function App({
       setSearchTerm("");
       setUnnamedOnly(false);
       setReferenceFilterNodeIds([]);
+      setSmartReferenceResult(null);
       setRecoveryAvailable(true);
       setRecoveryStorageProblem(null);
       setActiveView("canvas");
@@ -1255,6 +1321,7 @@ function App({
     const initialWorkspace = emptyWorkspace();
     try {
       await persistence.save(initialWorkspace);
+      workspaceReplacementGenerationRef.current += 1;
       workspaceRef.current = initialWorkspace;
       setWorkspace(initialWorkspace);
       clearHistory();
@@ -1678,6 +1745,12 @@ function App({
                     </div>
                   ) : (
                     <div className="remote-embedding-fields">
+                      <small>
+                        {t("smartReference.settings.remotePrivacyDescription", {
+                          nodes: remoteEmbeddingScope.nodeCount,
+                          segments: remoteEmbeddingScope.segmentCount,
+                        })}
+                      </small>
                       <label>
                         <span>{t("smartReference.settings.endpoint")}</span>
                         <input
@@ -1825,12 +1898,16 @@ function App({
                                   ? t("smartReference.llm.settings.modelLoaded")
                                   : status?.ready
                                     ? t("smartReference.settings.modelReady")
-                                    : status !== undefined && status.cachedBytes > 0
-                                      ? t("smartReference.settings.modelPartial", {
-                                          cached: formatByteCount(status.cachedBytes),
-                                          total: formatByteCount(status.totalBytes),
-                                        })
-                                      : t("smartReference.settings.modelNotDownloaded")}
+                                    : status?.verificationRequired
+                                      ? t(
+                                          "smartReference.llm.settings.modelNeedsVerification",
+                                        )
+                                      : status !== undefined && status.cachedBytes > 0
+                                        ? t("smartReference.settings.modelPartial", {
+                                            cached: formatByteCount(status.cachedBytes),
+                                            total: formatByteCount(status.totalBytes),
+                                          })
+                                        : t("smartReference.settings.modelNotDownloaded")}
                               </small>
                             </span>
                             <span className="local-model-description">
@@ -1873,10 +1950,12 @@ function App({
                       <Download aria-hidden="true" size={15} />
                       {selectedLocalLlmModelStatus?.ready
                         ? t("smartReference.settings.modelReady")
-                        : selectedLocalLlmModelStatus !== undefined &&
-                            selectedLocalLlmModelStatus.cachedBytes > 0
-                          ? t("smartReference.settings.continueDownload")
-                          : t("smartReference.settings.downloadModel")}
+                        : selectedLocalLlmModelStatus?.verificationRequired
+                          ? t("smartReference.llm.settings.verifyModel")
+                          : selectedLocalLlmModelStatus !== undefined &&
+                              selectedLocalLlmModelStatus.cachedBytes > 0
+                            ? t("smartReference.settings.continueDownload")
+                            : t("smartReference.settings.downloadModel")}
                     </button>
                     <small>
                       {t("smartReference.settings.modelSource", {
@@ -2244,7 +2323,12 @@ function App({
           <Cloud aria-hidden="true" size={17} />
           <div>
             <strong>{t("smartReference.analyzing")}</strong>
-            <span>{t("smartReference.analyzingRemoteDescription")}</span>
+            <span>
+              {t("smartReference.analyzingRemoteDescription", {
+                nodes: remoteEmbeddingScope.nodeCount,
+                segments: remoteEmbeddingScope.segmentCount,
+              })}
+            </span>
           </div>
         </div>
       )}

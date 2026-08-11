@@ -86,6 +86,10 @@ flowchart LR
 - 本地模型固定为 `Qwen/Qwen3-1.7B-GGUF` revision `90862c4b9d2787eaed51d12237eafdfe7c5f6077` 的 `Qwen3-1.7B-Q8_0.gguf`。Rust 按固定大小和 SHA-256 校验下载，模型只进入系统应用缓存。
 - llama.cpp 只监听 `127.0.0.1`，使用每次启动随机生成的 API key，关闭 Web UI、思考模式和上下文滚动；推理线程最多为 4，并至少给系统保留一个逻辑核心。
 - 同一时间只允许一个本地 LLM 下载、加载或推理任务。禁用功能与正常退出都必须结束 sidecar，不能遗留后台进程。
+- 智能引用写回时必须重新验证当前工作区中的源节点和目标节点；异步分析使用的旧快照不能直接越过当前数据边界。
+- 本地 LLM 请求使用统一的保守 token 估算预算，并由 TypeScript 组装层和 Rust 命令边界双重约束。
+- 已下载 GGUF 的就绪状态由绑定哈希、大小和修改时间的校验标记决定；Windows sidecar 还必须加入带 `KILL_ON_JOB_CLOSE` 的 Job Object，覆盖主进程异常退出。
+- 远端向量提供者在缓存未命中时可能接收工作区全部非空节点的有界文本分段；任何 UI 和文档披露都必须按这个真实边界描述。
 
 ## 开发环境
 
@@ -146,7 +150,7 @@ cd apps/desktop
 pnpm tauri build
 ```
 
-仓库的 `Desktop packages` GitHub Actions 工作流当前只生成 Windows 便携版 EXE，并打包本地 LLM 运行时。构建目前没有商业代码签名。
+仓库的 `Desktop packages` GitHub Actions 工作流当前只生成 Windows 便携版 EXE，并打包本地 LLM 运行时；开发产物保留 3 天。使用时必须完整解压产物并保持 `linked-info-desktop.exe` 与 `llama-runtime` 的相对位置。构建目前没有商业代码签名。
 
 ## Cloudflare 适配器
 
