@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 #[cfg(windows)]
-use tauri::{Manager, WindowExtWindows};
+use tauri::Manager;
 
 const KEYRING_SERVICE: &str = "com.linkedinfo.desktop.workspace-unlock";
 
