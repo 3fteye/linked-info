@@ -68,6 +68,74 @@ button:disabled {
   background: #eef1ee;
 }
 
+.security-gate {
+  display: grid;
+  width: 100%;
+  height: 100%;
+  place-content: center;
+  justify-items: center;
+  padding: 28px;
+  color: #28332c;
+  background: #eef1ee;
+}
+
+.security-gate h1 {
+  margin: 16px 0 0;
+  font-size: 21px;
+}
+
+.security-gate > p {
+  max-width: 460px;
+  margin: 10px 0 0;
+  color: #626c65;
+  font-size: 13px;
+  line-height: 1.55;
+  text-align: center;
+}
+
+.security-unlock-form {
+  display: grid;
+  width: min(360px, calc(100vw - 48px));
+  margin-top: 20px;
+  gap: 9px;
+}
+
+.security-unlock-form label,
+.security-dialog-form label {
+  color: #49524c;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.security-password-input {
+  display: flex;
+  align-items: center;
+  min-height: 38px;
+  padding: 0 11px;
+  gap: 8px;
+  border: 1px solid #cdd4ce;
+  border-radius: 6px;
+  background: #ffffff;
+}
+
+.security-password-input:focus-within {
+  border-color: #428064;
+  box-shadow: 0 0 0 2px rgb(48 116 80 / 12%);
+}
+
+.security-password-input input {
+  min-width: 0;
+  flex: 1;
+  padding: 8px 0;
+  border: 0;
+  outline: 0;
+}
+
+.security-error {
+  color: #933f35 !important;
+  font-size: 12px !important;
+}
+
 .storage-problem-card {
   width: min(560px, 100%);
   padding: 28px;
@@ -1227,6 +1295,21 @@ h1 {
   gap: 7px;
 }
 
+.security-settings-actions {
+  display: flex;
+  width: min(430px, 100%);
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.security-settings-actions small {
+  width: 100%;
+  color: #5e6a62;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
 .backup-status {
   width: 100%;
   margin: -2px 0 0;
@@ -1273,6 +1356,26 @@ h1 {
   justify-content: flex-end;
   margin-top: 20px;
   gap: 8px;
+}
+
+.security-dialog-form {
+  display: grid;
+  margin-top: 18px;
+  gap: 8px;
+}
+
+.security-dialog-form input {
+  width: 100%;
+  min-height: 38px;
+  padding: 8px 10px;
+  border: 1px solid #cdd4ce;
+  border-radius: 6px;
+  outline: 0;
+}
+
+.security-dialog-form input:focus {
+  border-color: #428064;
+  box-shadow: 0 0 0 2px rgb(48 116 80 / 12%);
 }
 
 .smart-reference-status,
@@ -1633,7 +1736,8 @@ h1 {
 
   .smart-reference-settings,
   .automatic-reference-settings,
-  .vector-cache-settings {
+  .vector-cache-settings,
+  .security-settings-actions {
     width: 100%;
   }
 }

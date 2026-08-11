@@ -349,6 +349,15 @@ fn empty_status() -> VectorCacheStatus {
     }
 }
 
+fn disabled_status() -> VectorCacheStatus {
+    VectorCacheStatus {
+        persistent: false,
+        entry_count: 0,
+        disk_bytes: 0,
+        max_bytes: 0,
+    }
+}
+
 fn sidecar_path(database_path: &Path, suffix: &str) -> PathBuf {
     let mut path = database_path.as_os_str().to_os_string();
     path.push(suffix);
@@ -384,8 +393,38 @@ fn vector_cache_store(app: &AppHandle) -> Result<VectorCacheStore, String> {
         .map_err(|error| format!("cannot resolve vector cache directory: {error}"))
 }
 
-fn operation_lock(state: &tauri::State<'_, VectorCacheState>) -> Arc<Mutex<()>> {
+fn operation_lock(state: &VectorCacheState) -> Arc<Mutex<()>> {
     Arc::clone(&state.operation_lock)
+}
+
+fn validate_keys(keys: &[VectorCacheKey]) -> Result<(), String> {
+    validate_batch_size(keys.len()).map_err(|error| error.to_string())?;
+    for key in keys {
+        validate_key(&key.fingerprint, &key.content_hash).map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+fn validate_entries(entries: &[VectorCacheEntry]) -> Result<(), String> {
+    validate_batch_size(entries.len()).map_err(|error| error.to_string())?;
+    for entry in entries {
+        validate_key(&entry.fingerprint, &entry.content_hash).map_err(|error| error.to_string())?;
+        validate_vector(&entry.vector).map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+pub async fn purge_for_encryption(app: &AppHandle, state: &VectorCacheState) -> Result<(), String> {
+    let store = vector_cache_store(app)?;
+    let lock = operation_lock(state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = lock
+            .lock()
+            .map_err(|_| "vector cache operation lock is unavailable".to_owned())?;
+        store.clear().map(|_| ()).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -394,6 +433,10 @@ pub async fn read_embedding_vector_cache(
     state: tauri::State<'_, VectorCacheState>,
     keys: Vec<VectorCacheKey>,
 ) -> Result<Vec<Option<Vec<f32>>>, String> {
+    if crate::workspace_file::workspace_encryption_configured(&app) {
+        validate_keys(&keys)?;
+        return Ok(keys.iter().map(|_| None).collect());
+    }
     let store = vector_cache_store(&app)?;
     let lock = operation_lock(&state);
     tauri::async_runtime::spawn_blocking(move || {
@@ -412,6 +455,10 @@ pub async fn write_embedding_vector_cache(
     state: tauri::State<'_, VectorCacheState>,
     entries: Vec<VectorCacheEntry>,
 ) -> Result<(), String> {
+    if crate::workspace_file::workspace_encryption_configured(&app) {
+        validate_entries(&entries)?;
+        return Ok(());
+    }
     let store = vector_cache_store(&app)?;
     let lock = operation_lock(&state);
     tauri::async_runtime::spawn_blocking(move || {
@@ -429,6 +476,9 @@ pub async fn inspect_embedding_vector_cache(
     app: AppHandle,
     state: tauri::State<'_, VectorCacheState>,
 ) -> Result<VectorCacheStatus, String> {
+    if crate::workspace_file::workspace_encryption_configured(&app) {
+        return Ok(disabled_status());
+    }
     let store = vector_cache_store(&app)?;
     let lock = operation_lock(&state);
     tauri::async_runtime::spawn_blocking(move || {
@@ -447,12 +497,16 @@ pub async fn clear_embedding_vector_cache(
     state: tauri::State<'_, VectorCacheState>,
 ) -> Result<VectorCacheStatus, String> {
     let store = vector_cache_store(&app)?;
+    let encrypted = crate::workspace_file::workspace_encryption_configured(&app);
     let lock = operation_lock(&state);
     tauri::async_runtime::spawn_blocking(move || {
         let _guard = lock
             .lock()
             .map_err(|_| "vector cache operation lock is unavailable".to_owned())?;
-        store.clear().map_err(|error| error.to_string())
+        store
+            .clear()
+            .map(|status| if encrypted { disabled_status() } else { status })
+            .map_err(|error| error.to_string())
     })
     .await
     .map_err(|error| error.to_string())?

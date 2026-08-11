@@ -1,20 +1,52 @@
-use serde::Deserialize;
+use argon2::{Algorithm, Argon2, Params, Version};
+use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
+use chacha20poly1305::{
+    KeyInit, XChaCha20Poly1305, XNonce,
+    aead::{Aead, Payload},
+};
+use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, OpenOptions},
     io::{self, Write},
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 use tauri::{AppHandle, Manager};
+use zeroize::{Zeroize, Zeroizing};
 
 #[cfg(unix)]
 use std::fs::File;
 
 const PRIMARY_FILE_NAME: &str = "workspace.v1.json";
 const RECOVERY_FILE_NAME: &str = "workspace.recovery.v1.json";
+const VAULT_FILE_NAME: &str = "workspace.vault.v1.json";
+const VAULT_PENDING_FILE_NAME: &str = ".workspace.vault.v1.pending.json";
+const ENCRYPTED_WORKSPACE_FORMAT: &str = "linked-info-encrypted-workspace";
+const ENCRYPTED_EXPORT_FORMAT: &str = "linked-info-encrypted-workspace-export";
+const VAULT_FORMAT: &str = "linked-info-workspace-vault";
+const CRYPTO_VERSION: u32 = 1;
+const DATA_KEY_BYTES: usize = 32;
+const SALT_BYTES: usize = 16;
+const NONCE_BYTES: usize = 24;
+const MINIMUM_PASSWORD_CHARACTERS: usize = 10;
+const MAXIMUM_PASSWORD_BYTES: usize = 1_024;
+#[cfg(not(test))]
+const ARGON2_MEMORY_KIB: u32 = 64 * 1_024;
+#[cfg(test)]
+const ARGON2_MEMORY_KIB: u32 = 8 * 1_024;
+#[cfg(not(test))]
+const ARGON2_ITERATIONS: u32 = 3;
+#[cfg(test)]
+const ARGON2_ITERATIONS: u32 = 1;
+const ARGON2_PARALLELISM: u32 = 1;
+const VAULT_KEY_AAD: &[u8] = b"linked-info-workspace-vault-key-v1";
+const EXPORT_PAYLOAD_AAD: &[u8] = b"linked-info-workspace-export-v1";
 static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-#[derive(Clone, Copy, Debug, Deserialize)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum WorkspaceFileSlot {
     Primary,
@@ -27,6 +59,124 @@ impl WorkspaceFileSlot {
             Self::Primary => PRIMARY_FILE_NAME,
             Self::Recovery => RECOVERY_FILE_NAME,
         }
+    }
+
+    fn pending_file_name(self) -> String {
+        format!(".{}.vault.pending", self.file_name())
+    }
+
+    fn aad(self) -> &'static [u8] {
+        match self {
+            Self::Primary => b"linked-info-workspace-primary-v1",
+            Self::Recovery => b"linked-info-workspace-recovery-v1",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct KdfEnvelope {
+    algorithm: String,
+    memory_kib: u32,
+    iterations: u32,
+    parallelism: u32,
+    salt: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CipherEnvelope {
+    algorithm: String,
+    nonce: String,
+    ciphertext: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VaultMetadata {
+    format: String,
+    version: u32,
+    kdf: KdfEnvelope,
+    wrapped_data_key: CipherEnvelope,
+    migrated_slots: Vec<WorkspaceFileSlot>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EncryptedWorkspaceEnvelope {
+    format: String,
+    version: u32,
+    slot: WorkspaceFileSlot,
+    payload: CipherEnvelope,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EncryptedExportEnvelope {
+    format: String,
+    version: u32,
+    kdf: KdfEnvelope,
+    wrapped_data_key: CipherEnvelope,
+    payload: CipherEnvelope,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceSecurityStatus {
+    encrypted: bool,
+    locked: bool,
+}
+
+#[derive(Default)]
+pub struct WorkspaceVaultState {
+    data_key: Arc<Mutex<Option<Zeroizing<[u8; DATA_KEY_BYTES]>>>>,
+    operation_lock: Arc<Mutex<()>>,
+}
+
+impl WorkspaceVaultState {
+    fn data_key(&self) -> Result<Zeroizing<[u8; DATA_KEY_BYTES]>, String> {
+        self.data_key
+            .lock()
+            .map_err(|_| "workspace_vault_state_unavailable".to_owned())?
+            .as_ref()
+            .map(|key| Zeroizing::new(**key))
+            .ok_or_else(|| "workspace_vault_locked".to_owned())
+    }
+
+    fn replace_data_key(&self, key: [u8; DATA_KEY_BYTES]) -> Result<(), String> {
+        let mut slot = self
+            .data_key
+            .lock()
+            .map_err(|_| "workspace_vault_state_unavailable".to_owned())?;
+        *slot = Some(Zeroizing::new(key));
+        Ok(())
+    }
+
+    fn optional_data_key(&self) -> Result<Option<Zeroizing<[u8; DATA_KEY_BYTES]>>, String> {
+        self.data_key
+            .lock()
+            .map_err(|_| "workspace_vault_state_unavailable".to_owned())
+            .map(|slot| slot.as_ref().map(|key| Zeroizing::new(**key)))
+    }
+
+    fn clear_data_key(&self) -> Result<(), String> {
+        let mut slot = self
+            .data_key
+            .lock()
+            .map_err(|_| "workspace_vault_state_unavailable".to_owned())?;
+        *slot = None;
+        Ok(())
+    }
+
+    fn is_unlocked(&self) -> Result<bool, String> {
+        self.data_key
+            .lock()
+            .map(|slot| slot.is_some())
+            .map_err(|_| "workspace_vault_state_unavailable".to_owned())
+    }
+
+    pub fn shutdown(&self) {
+        let _ = self.clear_data_key();
     }
 }
 
@@ -43,44 +193,297 @@ impl WorkspaceFileStore {
         self.base_directory.join(slot.file_name())
     }
 
-    fn read(&self, slot: WorkspaceFileSlot) -> io::Result<Option<String>> {
-        match fs::read_to_string(self.path(slot)) {
+    fn pending_path(&self, slot: WorkspaceFileSlot) -> PathBuf {
+        self.base_directory.join(slot.pending_file_name())
+    }
+
+    fn vault_path(&self) -> PathBuf {
+        self.base_directory.join(VAULT_FILE_NAME)
+    }
+
+    fn pending_vault_path(&self) -> PathBuf {
+        self.base_directory.join(VAULT_PENDING_FILE_NAME)
+    }
+
+    fn read_text_path(path: &Path) -> io::Result<Option<String>> {
+        match fs::read_to_string(path) {
             Ok(contents) => Ok(Some(contents)),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(error),
         }
     }
 
-    fn write(&self, slot: WorkspaceFileSlot, contents: &str) -> io::Result<()> {
+    fn read_plaintext(&self, slot: WorkspaceFileSlot) -> io::Result<Option<String>> {
+        Self::read_text_path(&self.path(slot))
+    }
+
+    fn read(
+        &self,
+        slot: WorkspaceFileSlot,
+        data_key: Option<&[u8; DATA_KEY_BYTES]>,
+    ) -> Result<Option<String>, String> {
+        let Some(contents) = Self::read_text_path(&self.path(slot)).map_err(|e| e.to_string())?
+        else {
+            return Ok(None);
+        };
+        match data_key {
+            Some(key) => decrypt_workspace_file(&contents, slot, key).map(Some),
+            None => Ok(Some(contents)),
+        }
+    }
+
+    fn write_plaintext(&self, slot: WorkspaceFileSlot, contents: &str) -> io::Result<()> {
         validate_storage_envelope(contents)?;
         fs::create_dir_all(&self.base_directory)?;
         write_atomically(&self.path(slot), contents.as_bytes())
+    }
+
+    fn write(
+        &self,
+        slot: WorkspaceFileSlot,
+        contents: &str,
+        data_key: Option<&[u8; DATA_KEY_BYTES]>,
+    ) -> Result<(), String> {
+        validate_storage_envelope(contents).map_err(|error| error.to_string())?;
+        fs::create_dir_all(&self.base_directory).map_err(|error| error.to_string())?;
+        let serialized = match data_key {
+            Some(key) => encrypt_workspace_file(contents, slot, key)?,
+            None => contents.to_owned(),
+        };
+        write_atomically(&self.path(slot), serialized.as_bytes()).map_err(|e| e.to_string())
+    }
+
+    fn read_vault_metadata(&self) -> Result<Option<VaultMetadata>, String> {
+        let Some(contents) = Self::read_text_path(&self.vault_path()).map_err(|e| e.to_string())?
+        else {
+            return Ok(None);
+        };
+        parse_vault_metadata(&contents).map(Some)
+    }
+
+    fn encryption_configured(&self) -> bool {
+        self.vault_path().is_file()
     }
 }
 
 #[tauri::command]
 pub async fn read_workspace_file(
     app: AppHandle,
+    state: tauri::State<'_, WorkspaceVaultState>,
     slot: WorkspaceFileSlot,
 ) -> Result<Option<String>, String> {
     let store = workspace_store(&app).map_err(|error| error.to_string())?;
-    tauri::async_runtime::spawn_blocking(move || store.read(slot))
-        .await
-        .map_err(|error| error.to_string())?
-        .map_err(|error| error.to_string())
+    let operation_lock = Arc::clone(&state.operation_lock);
+    let data_key = state.optional_data_key()?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = operation_lock
+            .lock()
+            .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
+        recover_pending_migration(&store)?;
+        let active_key = match store.encryption_configured() {
+            true => Some(
+                data_key
+                    .as_deref()
+                    .ok_or_else(|| "workspace_vault_locked".to_owned())?,
+            ),
+            false => None,
+        };
+        store.read(slot, active_key)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
 pub async fn write_workspace_file(
     app: AppHandle,
+    state: tauri::State<'_, WorkspaceVaultState>,
     slot: WorkspaceFileSlot,
     contents: String,
 ) -> Result<(), String> {
     let store = workspace_store(&app).map_err(|error| error.to_string())?;
-    tauri::async_runtime::spawn_blocking(move || store.write(slot, &contents))
+    let operation_lock = Arc::clone(&state.operation_lock);
+    let data_key = state.optional_data_key()?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = operation_lock
+            .lock()
+            .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
+        recover_pending_migration(&store)?;
+        let active_key = match store.encryption_configured() {
+            true => Some(
+                data_key
+                    .as_deref()
+                    .ok_or_else(|| "workspace_vault_locked".to_owned())?,
+            ),
+            false => None,
+        };
+        store.write(slot, &contents, active_key)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn inspect_workspace_security(
+    app: AppHandle,
+    state: tauri::State<'_, WorkspaceVaultState>,
+) -> Result<WorkspaceSecurityStatus, String> {
+    let store = workspace_store(&app).map_err(|error| error.to_string())?;
+    let operation_lock = Arc::clone(&state.operation_lock);
+    let encrypted = tauri::async_runtime::spawn_blocking(move || {
+        let _guard = operation_lock
+            .lock()
+            .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
+        recover_pending_migration(&store)?;
+        Ok::<bool, String>(store.encryption_configured())
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+    Ok(WorkspaceSecurityStatus {
+        encrypted,
+        locked: encrypted && !state.is_unlocked()?,
+    })
+}
+
+#[tauri::command]
+pub async fn unlock_workspace(
+    app: AppHandle,
+    state: tauri::State<'_, WorkspaceVaultState>,
+    password: String,
+) -> Result<WorkspaceSecurityStatus, String> {
+    let store = workspace_store(&app).map_err(|error| error.to_string())?;
+    let operation_lock = Arc::clone(&state.operation_lock);
+    let password = Zeroizing::new(password);
+    let data_key = tauri::async_runtime::spawn_blocking(move || {
+        let _guard = operation_lock
+            .lock()
+            .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
+        recover_pending_migration(&store)?;
+        let metadata = store
+            .read_vault_metadata()?
+            .ok_or_else(|| "workspace_vault_not_configured".to_owned())?;
+        let data_key = unwrap_data_key(&metadata, &password)?;
+        verify_encrypted_store(&store, &data_key)?;
+        Ok(data_key)
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+    state.replace_data_key(data_key)?;
+    Ok(WorkspaceSecurityStatus {
+        encrypted: true,
+        locked: false,
+    })
+}
+
+#[tauri::command]
+pub async fn enable_workspace_encryption(
+    app: AppHandle,
+    state: tauri::State<'_, WorkspaceVaultState>,
+    vector_cache_state: tauri::State<'_, crate::vector_cache::VectorCacheState>,
+    embedding_state: tauri::State<'_, crate::embedding::EmbeddingState>,
+    llm_state: tauri::State<'_, crate::llm::LlmState>,
+    password: String,
+) -> Result<WorkspaceSecurityStatus, String> {
+    validate_new_password(&password)?;
+    crate::vector_cache::purge_for_encryption(&app, &vector_cache_state).await?;
+    let store = workspace_store(&app).map_err(|error| error.to_string())?;
+    let operation_lock = Arc::clone(&state.operation_lock);
+    let password = Zeroizing::new(password);
+    let data_key = tauri::async_runtime::spawn_blocking(move || {
+        let _guard = operation_lock
+            .lock()
+            .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
+        recover_pending_migration(&store)?;
+        if store.encryption_configured() {
+            return Err("workspace_vault_already_configured".to_owned());
+        }
+        migrate_plaintext_store(&store, &password)
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+    state.replace_data_key(data_key)?;
+    crate::vector_cache::purge_for_encryption(&app, &vector_cache_state).await?;
+    let _ = embedding_state.shutdown();
+    llm_state.shutdown();
+    Ok(WorkspaceSecurityStatus {
+        encrypted: true,
+        locked: false,
+    })
+}
+
+#[tauri::command]
+pub async fn change_workspace_password(
+    app: AppHandle,
+    state: tauri::State<'_, WorkspaceVaultState>,
+    password: String,
+) -> Result<(), String> {
+    validate_new_password(&password)?;
+    let store = workspace_store(&app).map_err(|error| error.to_string())?;
+    let operation_lock = Arc::clone(&state.operation_lock);
+    let data_key = state.data_key()?;
+    let password = Zeroizing::new(password);
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = operation_lock
+            .lock()
+            .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
+        recover_pending_migration(&store)?;
+        let previous = store
+            .read_vault_metadata()?
+            .ok_or_else(|| "workspace_vault_not_configured".to_owned())?;
+        let metadata = create_vault_metadata(&password, &data_key, previous.migrated_slots)?;
+        let serialized = serde_json::to_vec(&metadata).map_err(|error| error.to_string())?;
+        write_atomically(&store.vault_path(), &serialized).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn lock_workspace(
+    state: tauri::State<'_, WorkspaceVaultState>,
+    embedding_state: tauri::State<'_, crate::embedding::EmbeddingState>,
+    llm_state: tauri::State<'_, crate::llm::LlmState>,
+) -> Result<WorkspaceSecurityStatus, String> {
+    let _ = embedding_state.shutdown();
+    llm_state.shutdown();
+    state.shutdown();
+    Ok(WorkspaceSecurityStatus {
+        encrypted: true,
+        locked: true,
+    })
+}
+
+#[tauri::command]
+pub async fn encrypt_workspace_export(
+    app: AppHandle,
+    state: tauri::State<'_, WorkspaceVaultState>,
+    contents: String,
+) -> Result<String, String> {
+    let store = workspace_store(&app).map_err(|error| error.to_string())?;
+    let operation_lock = Arc::clone(&state.operation_lock);
+    let data_key = state.data_key()?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = operation_lock
+            .lock()
+            .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
+        let metadata = store
+            .read_vault_metadata()?
+            .ok_or_else(|| "workspace_vault_not_configured".to_owned())?;
+        encrypt_export(&contents, &metadata, &data_key)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn decrypt_workspace_export(
+    contents: String,
+    password: String,
+) -> Result<String, String> {
+    let password = Zeroizing::new(password);
+    tauri::async_runtime::spawn_blocking(move || decrypt_export(&contents, &password))
         .await
         .map_err(|error| error.to_string())?
-        .map_err(|error| error.to_string())
 }
 
 fn workspace_store(app: &AppHandle) -> io::Result<WorkspaceFileStore> {
@@ -88,6 +491,377 @@ fn workspace_store(app: &AppHandle) -> io::Result<WorkspaceFileStore> {
         .app_data_dir()
         .map(WorkspaceFileStore::new)
         .map_err(io::Error::other)
+}
+
+pub fn workspace_encryption_configured(app: &AppHandle) -> bool {
+    workspace_store(app)
+        .map(|store| store.encryption_configured())
+        .unwrap_or(false)
+}
+
+pub fn require_workspace_unlocked(
+    app: &AppHandle,
+    state: &WorkspaceVaultState,
+) -> Result<(), String> {
+    if workspace_encryption_configured(app) && !state.is_unlocked()? {
+        return Err("workspace_vault_locked".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_new_password(password: &str) -> Result<(), String> {
+    if password.chars().count() < MINIMUM_PASSWORD_CHARACTERS {
+        return Err("workspace_vault_password_too_short".to_owned());
+    }
+    if password.len() > MAXIMUM_PASSWORD_BYTES {
+        return Err("workspace_vault_password_too_long".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_unlock_password(password: &str) -> Result<(), String> {
+    if password.is_empty() || password.len() > MAXIMUM_PASSWORD_BYTES {
+        return Err("workspace_vault_invalid_password".to_owned());
+    }
+    Ok(())
+}
+
+fn random_array<const N: usize>() -> Result<[u8; N], String> {
+    let mut value = [0_u8; N];
+    getrandom::fill(&mut value)
+        .map_err(|error| format!("workspace_vault_random_failed:{error}"))?;
+    Ok(value)
+}
+
+fn encode_bytes(bytes: &[u8]) -> String {
+    STANDARD_NO_PAD.encode(bytes)
+}
+
+fn decode_bytes(value: &str, field: &str) -> Result<Vec<u8>, String> {
+    STANDARD_NO_PAD
+        .decode(value)
+        .map_err(|_| format!("workspace_vault_invalid_{field}"))
+}
+
+fn decode_fixed<const N: usize>(value: &str, field: &str) -> Result<[u8; N], String> {
+    let decoded = decode_bytes(value, field)?;
+    decoded
+        .try_into()
+        .map_err(|_| format!("workspace_vault_invalid_{field}"))
+}
+
+fn derive_password_key(
+    password: &str,
+    kdf: &KdfEnvelope,
+) -> Result<Zeroizing<[u8; DATA_KEY_BYTES]>, String> {
+    validate_unlock_password(password)?;
+    validate_kdf_envelope(kdf)?;
+    let salt = decode_fixed::<SALT_BYTES>(&kdf.salt, "salt")?;
+    let params = Params::new(
+        kdf.memory_kib,
+        kdf.iterations,
+        kdf.parallelism,
+        Some(DATA_KEY_BYTES),
+    )
+    .map_err(|_| "workspace_vault_invalid_kdf".to_owned())?;
+    let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+    let mut key = Zeroizing::new([0_u8; DATA_KEY_BYTES]);
+    argon2
+        .hash_password_into(password.as_bytes(), &salt, &mut *key)
+        .map_err(|_| "workspace_vault_key_derivation_failed".to_owned())?;
+    Ok(key)
+}
+
+fn validate_kdf_envelope(kdf: &KdfEnvelope) -> Result<(), String> {
+    if kdf.algorithm != "argon2id"
+        || !(8 * 1_024..=256 * 1_024).contains(&kdf.memory_kib)
+        || !(1..=10).contains(&kdf.iterations)
+        || !(1..=16).contains(&kdf.parallelism)
+    {
+        return Err("workspace_vault_invalid_kdf".to_owned());
+    }
+    let _ = decode_fixed::<SALT_BYTES>(&kdf.salt, "salt")?;
+    Params::new(
+        kdf.memory_kib,
+        kdf.iterations,
+        kdf.parallelism,
+        Some(DATA_KEY_BYTES),
+    )
+    .map_err(|_| "workspace_vault_invalid_kdf".to_owned())?;
+    Ok(())
+}
+
+fn encrypt_bytes(
+    plaintext: &[u8],
+    key: &[u8; DATA_KEY_BYTES],
+    aad: &[u8],
+) -> Result<CipherEnvelope, String> {
+    let nonce = random_array::<NONCE_BYTES>()?;
+    let cipher = XChaCha20Poly1305::new_from_slice(key)
+        .map_err(|_| "workspace_vault_invalid_key".to_owned())?;
+    let ciphertext = cipher
+        .encrypt(
+            XNonce::from_slice(&nonce),
+            Payload {
+                msg: plaintext,
+                aad,
+            },
+        )
+        .map_err(|_| "workspace_vault_encryption_failed".to_owned())?;
+    Ok(CipherEnvelope {
+        algorithm: "xchacha20poly1305".to_owned(),
+        nonce: encode_bytes(&nonce),
+        ciphertext: encode_bytes(&ciphertext),
+    })
+}
+
+fn decrypt_bytes(
+    envelope: &CipherEnvelope,
+    key: &[u8; DATA_KEY_BYTES],
+    aad: &[u8],
+) -> Result<Vec<u8>, String> {
+    if envelope.algorithm != "xchacha20poly1305" {
+        return Err("workspace_vault_invalid_cipher".to_owned());
+    }
+    let nonce = decode_fixed::<NONCE_BYTES>(&envelope.nonce, "nonce")?;
+    let ciphertext = decode_bytes(&envelope.ciphertext, "ciphertext")?;
+    let cipher = XChaCha20Poly1305::new_from_slice(key)
+        .map_err(|_| "workspace_vault_invalid_key".to_owned())?;
+    cipher
+        .decrypt(
+            XNonce::from_slice(&nonce),
+            Payload {
+                msg: &ciphertext,
+                aad,
+            },
+        )
+        .map_err(|_| "workspace_vault_authentication_failed".to_owned())
+}
+
+fn create_vault_metadata(
+    password: &str,
+    data_key: &[u8; DATA_KEY_BYTES],
+    migrated_slots: Vec<WorkspaceFileSlot>,
+) -> Result<VaultMetadata, String> {
+    validate_new_password(password)?;
+    let salt = random_array::<SALT_BYTES>()?;
+    let kdf = KdfEnvelope {
+        algorithm: "argon2id".to_owned(),
+        memory_kib: ARGON2_MEMORY_KIB,
+        iterations: ARGON2_ITERATIONS,
+        parallelism: ARGON2_PARALLELISM,
+        salt: encode_bytes(&salt),
+    };
+    let wrapping_key = derive_password_key(password, &kdf)?;
+    let wrapped_data_key = encrypt_bytes(data_key, &wrapping_key, VAULT_KEY_AAD)?;
+    Ok(VaultMetadata {
+        format: VAULT_FORMAT.to_owned(),
+        version: CRYPTO_VERSION,
+        kdf,
+        wrapped_data_key,
+        migrated_slots,
+    })
+}
+
+fn parse_vault_metadata(contents: &str) -> Result<VaultMetadata, String> {
+    let metadata: VaultMetadata = serde_json::from_str(contents)
+        .map_err(|_| "workspace_vault_invalid_metadata".to_owned())?;
+    if metadata.format != VAULT_FORMAT || metadata.version != CRYPTO_VERSION {
+        return Err("workspace_vault_unsupported_metadata".to_owned());
+    }
+    validate_kdf_envelope(&metadata.kdf)?;
+    let _ = decode_fixed::<NONCE_BYTES>(&metadata.wrapped_data_key.nonce, "nonce")?;
+    if metadata.wrapped_data_key.algorithm != "xchacha20poly1305"
+        || decode_bytes(&metadata.wrapped_data_key.ciphertext, "ciphertext")?.len()
+            != DATA_KEY_BYTES + 16
+    {
+        return Err("workspace_vault_invalid_wrapped_key".to_owned());
+    }
+    if metadata.migrated_slots.len() > 2
+        || metadata
+            .migrated_slots
+            .iter()
+            .enumerate()
+            .any(|(index, slot)| metadata.migrated_slots[..index].contains(slot))
+    {
+        return Err("workspace_vault_invalid_slots".to_owned());
+    }
+    Ok(metadata)
+}
+
+fn unwrap_data_key(
+    metadata: &VaultMetadata,
+    password: &str,
+) -> Result<[u8; DATA_KEY_BYTES], String> {
+    let wrapping_key = derive_password_key(password, &metadata.kdf)
+        .map_err(|_| "workspace_vault_invalid_password".to_owned())?;
+    let mut plaintext = decrypt_bytes(&metadata.wrapped_data_key, &wrapping_key, VAULT_KEY_AAD)
+        .map_err(|error| {
+            if error == "workspace_vault_authentication_failed" {
+                "workspace_vault_invalid_password".to_owned()
+            } else {
+                error
+            }
+        })?;
+    let key: [u8; DATA_KEY_BYTES] = plaintext
+        .as_slice()
+        .try_into()
+        .map_err(|_| "workspace_vault_invalid_wrapped_key".to_owned())?;
+    plaintext.zeroize();
+    Ok(key)
+}
+
+fn encrypt_workspace_file(
+    contents: &str,
+    slot: WorkspaceFileSlot,
+    data_key: &[u8; DATA_KEY_BYTES],
+) -> Result<String, String> {
+    let envelope = EncryptedWorkspaceEnvelope {
+        format: ENCRYPTED_WORKSPACE_FORMAT.to_owned(),
+        version: CRYPTO_VERSION,
+        slot,
+        payload: encrypt_bytes(contents.as_bytes(), data_key, slot.aad())?,
+    };
+    serde_json::to_string(&envelope).map_err(|error| error.to_string())
+}
+
+fn decrypt_workspace_file(
+    contents: &str,
+    slot: WorkspaceFileSlot,
+    data_key: &[u8; DATA_KEY_BYTES],
+) -> Result<String, String> {
+    let envelope: EncryptedWorkspaceEnvelope = serde_json::from_str(contents)
+        .map_err(|_| "workspace_vault_invalid_workspace_envelope".to_owned())?;
+    if envelope.format != ENCRYPTED_WORKSPACE_FORMAT
+        || envelope.version != CRYPTO_VERSION
+        || envelope.slot != slot
+    {
+        return Err("workspace_vault_invalid_workspace_envelope".to_owned());
+    }
+    let plaintext = decrypt_bytes(&envelope.payload, data_key, slot.aad())?;
+    String::from_utf8(plaintext).map_err(|_| "workspace_vault_invalid_plaintext".to_owned())
+}
+
+fn verify_encrypted_store(
+    store: &WorkspaceFileStore,
+    data_key: &[u8; DATA_KEY_BYTES],
+) -> Result<(), String> {
+    for slot in [WorkspaceFileSlot::Primary, WorkspaceFileSlot::Recovery] {
+        if let Some(contents) = store.read(slot, Some(data_key))? {
+            validate_storage_envelope(&contents)
+                .map_err(|error| format!("workspace_vault_invalid_decrypted_workspace:{error}"))?;
+        }
+    }
+    Ok(())
+}
+
+fn migrate_plaintext_store(
+    store: &WorkspaceFileStore,
+    password: &str,
+) -> Result<[u8; DATA_KEY_BYTES], String> {
+    fs::create_dir_all(&store.base_directory).map_err(|error| error.to_string())?;
+    let data_key = random_array::<DATA_KEY_BYTES>()?;
+    let mut migrated_slots = Vec::new();
+    for slot in [WorkspaceFileSlot::Primary, WorkspaceFileSlot::Recovery] {
+        if let Some(contents) = store
+            .read_plaintext(slot)
+            .map_err(|error| error.to_string())?
+        {
+            validate_storage_envelope(&contents).map_err(|error| error.to_string())?;
+            let encrypted = encrypt_workspace_file(&contents, slot, &data_key)?;
+            write_atomically(&store.pending_path(slot), encrypted.as_bytes())
+                .map_err(|error| error.to_string())?;
+            let verified = decrypt_workspace_file(&encrypted, slot, &data_key)?;
+            if verified != contents {
+                return Err("workspace_vault_migration_verification_failed".to_owned());
+            }
+            migrated_slots.push(slot);
+        }
+    }
+    let metadata = create_vault_metadata(password, &data_key, migrated_slots)?;
+    let serialized = serde_json::to_vec(&metadata).map_err(|error| error.to_string())?;
+    write_atomically(&store.pending_vault_path(), &serialized)
+        .map_err(|error| error.to_string())?;
+    finish_pending_migration(store, &metadata)?;
+    Ok(data_key)
+}
+
+fn finish_pending_migration(
+    store: &WorkspaceFileStore,
+    metadata: &VaultMetadata,
+) -> Result<(), String> {
+    for slot in metadata.migrated_slots.iter().copied() {
+        let pending = store.pending_path(slot);
+        if pending.is_file() {
+            replace_file(&pending, &store.path(slot)).map_err(|error| error.to_string())?;
+        } else {
+            let current = store
+                .read_plaintext(slot)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "workspace_vault_pending_workspace_missing".to_owned())?;
+            let envelope: EncryptedWorkspaceEnvelope = serde_json::from_str(&current)
+                .map_err(|_| "workspace_vault_pending_workspace_missing".to_owned())?;
+            if envelope.format != ENCRYPTED_WORKSPACE_FORMAT
+                || envelope.version != CRYPTO_VERSION
+                || envelope.slot != slot
+            {
+                return Err("workspace_vault_pending_workspace_missing".to_owned());
+            }
+        }
+    }
+    if store.pending_vault_path().is_file() {
+        replace_file(&store.pending_vault_path(), &store.vault_path())
+            .map_err(|error| error.to_string())?;
+    }
+    sync_parent_directory(&store.base_directory).map_err(|error| error.to_string())
+}
+
+fn recover_pending_migration(store: &WorkspaceFileStore) -> Result<(), String> {
+    if store.encryption_configured() {
+        return Ok(());
+    }
+    let Some(contents) = WorkspaceFileStore::read_text_path(&store.pending_vault_path())
+        .map_err(|error| error.to_string())?
+    else {
+        return Ok(());
+    };
+    let metadata = parse_vault_metadata(&contents)?;
+    finish_pending_migration(store, &metadata)
+}
+
+fn encrypt_export(
+    contents: &str,
+    metadata: &VaultMetadata,
+    data_key: &[u8; DATA_KEY_BYTES],
+) -> Result<String, String> {
+    let envelope = EncryptedExportEnvelope {
+        format: ENCRYPTED_EXPORT_FORMAT.to_owned(),
+        version: CRYPTO_VERSION,
+        kdf: metadata.kdf.clone(),
+        wrapped_data_key: metadata.wrapped_data_key.clone(),
+        payload: encrypt_bytes(contents.as_bytes(), data_key, EXPORT_PAYLOAD_AAD)?,
+    };
+    serde_json::to_string_pretty(&envelope).map_err(|error| error.to_string())
+}
+
+fn decrypt_export(contents: &str, password: &str) -> Result<String, String> {
+    let envelope: EncryptedExportEnvelope = serde_json::from_str(contents)
+        .map_err(|_| "workspace_export_invalid_encrypted_envelope".to_owned())?;
+    if envelope.format != ENCRYPTED_EXPORT_FORMAT || envelope.version != CRYPTO_VERSION {
+        return Err("workspace_export_invalid_encrypted_envelope".to_owned());
+    }
+    let metadata = VaultMetadata {
+        format: VAULT_FORMAT.to_owned(),
+        version: CRYPTO_VERSION,
+        kdf: envelope.kdf,
+        wrapped_data_key: envelope.wrapped_data_key,
+        migrated_slots: Vec::new(),
+    };
+    let data_key = Zeroizing::new(unwrap_data_key(&metadata, password)?);
+    let plaintext = decrypt_bytes(&envelope.payload, &data_key, EXPORT_PAYLOAD_AAD)?;
+    let text = String::from_utf8(plaintext)
+        .map_err(|_| "workspace_export_invalid_plaintext".to_owned())?;
+    Ok(text)
 }
 
 fn validate_storage_envelope(contents: &str) -> io::Result<()> {
@@ -216,11 +990,15 @@ mod tests {
         let first = workspace("First");
         let second = workspace("Second");
 
-        store.write(WorkspaceFileSlot::Primary, &first).unwrap();
-        store.write(WorkspaceFileSlot::Primary, &second).unwrap();
+        store
+            .write_plaintext(WorkspaceFileSlot::Primary, &first)
+            .unwrap();
+        store
+            .write_plaintext(WorkspaceFileSlot::Primary, &second)
+            .unwrap();
 
         assert_eq!(
-            store.read(WorkspaceFileSlot::Primary).unwrap(),
+            store.read_plaintext(WorkspaceFileSlot::Primary).unwrap(),
             Some(second)
         );
         fs::remove_dir_all(directory).unwrap();
@@ -231,15 +1009,17 @@ mod tests {
         let directory = test_directory();
         let store = WorkspaceFileStore::new(directory.clone());
         let original = workspace("Original");
-        store.write(WorkspaceFileSlot::Primary, &original).unwrap();
+        store
+            .write_plaintext(WorkspaceFileSlot::Primary, &original)
+            .unwrap();
 
         let error = store
-            .write(WorkspaceFileSlot::Primary, r#"{"version":2}"#)
+            .write_plaintext(WorkspaceFileSlot::Primary, r#"{"version":2}"#)
             .unwrap_err();
 
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         assert_eq!(
-            store.read(WorkspaceFileSlot::Primary).unwrap(),
+            store.read_plaintext(WorkspaceFileSlot::Primary).unwrap(),
             Some(original)
         );
         fs::remove_dir_all(directory).unwrap();
@@ -252,17 +1032,206 @@ mod tests {
         let primary = workspace("Primary");
         let recovery = workspace("Recovery");
 
-        store.write(WorkspaceFileSlot::Primary, &primary).unwrap();
-        store.write(WorkspaceFileSlot::Recovery, &recovery).unwrap();
+        store
+            .write_plaintext(WorkspaceFileSlot::Primary, &primary)
+            .unwrap();
+        store
+            .write_plaintext(WorkspaceFileSlot::Recovery, &recovery)
+            .unwrap();
 
         assert_eq!(
-            store.read(WorkspaceFileSlot::Primary).unwrap(),
+            store.read_plaintext(WorkspaceFileSlot::Primary).unwrap(),
             Some(primary)
         );
         assert_eq!(
-            store.read(WorkspaceFileSlot::Recovery).unwrap(),
+            store.read_plaintext(WorkspaceFileSlot::Recovery).unwrap(),
             Some(recovery)
         );
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn migrates_plaintext_slots_without_leaving_node_text_visible() {
+        let directory = test_directory();
+        let store = WorkspaceFileStore::new(directory.clone());
+        let primary = workspace("secret-account-token");
+        let recovery = workspace("secret-recovery-code");
+        store
+            .write_plaintext(WorkspaceFileSlot::Primary, &primary)
+            .unwrap();
+        store
+            .write_plaintext(WorkspaceFileSlot::Recovery, &recovery)
+            .unwrap();
+
+        let data_key = migrate_plaintext_store(&store, "correct horse battery").unwrap();
+
+        let raw_primary = store
+            .read_plaintext(WorkspaceFileSlot::Primary)
+            .unwrap()
+            .unwrap();
+        let raw_recovery = store
+            .read_plaintext(WorkspaceFileSlot::Recovery)
+            .unwrap()
+            .unwrap();
+        assert!(!raw_primary.contains("secret-account-token"));
+        assert!(!raw_recovery.contains("secret-recovery-code"));
+        assert_eq!(
+            store
+                .read(WorkspaceFileSlot::Primary, Some(&data_key))
+                .unwrap(),
+            Some(primary)
+        );
+        assert_eq!(
+            store
+                .read(WorkspaceFileSlot::Recovery, Some(&data_key))
+                .unwrap(),
+            Some(recovery)
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn rejects_wrong_password_and_modified_ciphertext() {
+        let data_key = random_array::<DATA_KEY_BYTES>().unwrap();
+        let metadata =
+            create_vault_metadata("correct horse battery", &data_key, Vec::new()).unwrap();
+        assert_eq!(
+            unwrap_data_key(&metadata, "correct horse battery").unwrap(),
+            data_key
+        );
+        assert_eq!(
+            unwrap_data_key(&metadata, "incorrect password").unwrap_err(),
+            "workspace_vault_invalid_password"
+        );
+        let changed_metadata =
+            create_vault_metadata("replacement password", &data_key, Vec::new()).unwrap();
+        assert_eq!(
+            unwrap_data_key(&changed_metadata, "replacement password").unwrap(),
+            data_key
+        );
+        assert_eq!(
+            unwrap_data_key(&changed_metadata, "correct horse battery").unwrap_err(),
+            "workspace_vault_invalid_password"
+        );
+
+        let mut encrypted = encrypt_workspace_file(
+            &workspace("tamper-check"),
+            WorkspaceFileSlot::Primary,
+            &data_key,
+        )
+        .unwrap();
+        let mut envelope: EncryptedWorkspaceEnvelope = serde_json::from_str(&encrypted).unwrap();
+        let mut ciphertext = decode_bytes(&envelope.payload.ciphertext, "ciphertext").unwrap();
+        ciphertext[0] ^= 1;
+        envelope.payload.ciphertext = encode_bytes(&ciphertext);
+        encrypted = serde_json::to_string(&envelope).unwrap();
+        assert_eq!(
+            decrypt_workspace_file(&encrypted, WorkspaceFileSlot::Primary, &data_key).unwrap_err(),
+            "workspace_vault_authentication_failed"
+        );
+    }
+
+    #[test]
+    fn rejects_unsupported_crypto_versions_before_unlocking() {
+        let data_key = random_array::<DATA_KEY_BYTES>().unwrap();
+        let metadata =
+            create_vault_metadata("correct horse battery", &data_key, Vec::new()).unwrap();
+        let mut value = serde_json::to_value(metadata).unwrap();
+        value["version"] = serde_json::json!(2);
+
+        assert_eq!(
+            parse_vault_metadata(&value.to_string()).unwrap_err(),
+            "workspace_vault_unsupported_metadata"
+        );
+
+        let mut encrypted: serde_json::Value = serde_json::from_str(
+            &encrypt_workspace_file(
+                &workspace("unsupported-version"),
+                WorkspaceFileSlot::Primary,
+                &data_key,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        encrypted["version"] = serde_json::json!(2);
+        assert_eq!(
+            decrypt_workspace_file(
+                &encrypted.to_string(),
+                WorkspaceFileSlot::Primary,
+                &data_key,
+            )
+            .unwrap_err(),
+            "workspace_vault_invalid_workspace_envelope"
+        );
+    }
+
+    #[test]
+    fn completes_a_committed_pending_migration_after_restart() {
+        let directory = test_directory();
+        let store = WorkspaceFileStore::new(directory.clone());
+        let primary = workspace("pending-migration");
+        store
+            .write_plaintext(WorkspaceFileSlot::Primary, &primary)
+            .unwrap();
+        let data_key = random_array::<DATA_KEY_BYTES>().unwrap();
+        let encrypted =
+            encrypt_workspace_file(&primary, WorkspaceFileSlot::Primary, &data_key).unwrap();
+        write_atomically(
+            &store.pending_path(WorkspaceFileSlot::Primary),
+            encrypted.as_bytes(),
+        )
+        .unwrap();
+        let metadata = create_vault_metadata(
+            "correct horse battery",
+            &data_key,
+            vec![WorkspaceFileSlot::Primary],
+        )
+        .unwrap();
+        write_atomically(
+            &store.pending_vault_path(),
+            &serde_json::to_vec(&metadata).unwrap(),
+        )
+        .unwrap();
+
+        recover_pending_migration(&store).unwrap();
+
+        assert!(store.encryption_configured());
+        let unlocked = unwrap_data_key(
+            &store.read_vault_metadata().unwrap().unwrap(),
+            "correct horse battery",
+        )
+        .unwrap();
+        assert_eq!(
+            store
+                .read(WorkspaceFileSlot::Primary, Some(&unlocked))
+                .unwrap(),
+            Some(primary)
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn encrypts_exports_with_an_independent_authenticated_envelope() {
+        let data_key = random_array::<DATA_KEY_BYTES>().unwrap();
+        let metadata =
+            create_vault_metadata("correct horse battery", &data_key, Vec::new()).unwrap();
+        let export = serde_json::json!({
+            "format": "linked-info-workspace",
+            "version": 1,
+            "workspace": { "version": 1 }
+        })
+        .to_string();
+
+        let encrypted = encrypt_export(&export, &metadata, &data_key).unwrap();
+
+        assert!(!encrypted.contains("linked-info-workspace\""));
+        assert_eq!(
+            decrypt_export(&encrypted, "correct horse battery").unwrap(),
+            export
+        );
+        assert_eq!(
+            decrypt_export(&encrypted, "incorrect password").unwrap_err(),
+            "workspace_vault_invalid_password"
+        );
     }
 }

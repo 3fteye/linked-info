@@ -7,8 +7,15 @@ mod workspace_file;
 use tauri::Manager;
 
 #[tauri::command]
-fn exit_application(app: tauri::AppHandle, state: tauri::State<'_, llm::LlmState>) {
-    state.shutdown();
+fn exit_application(
+    app: tauri::AppHandle,
+    embedding_state: tauri::State<'_, embedding::EmbeddingState>,
+    llm_state: tauri::State<'_, llm::LlmState>,
+    vault_state: tauri::State<'_, workspace_file::WorkspaceVaultState>,
+) {
+    let _ = embedding_state.shutdown();
+    llm_state.shutdown();
+    vault_state.shutdown();
     app.exit(0);
 }
 
@@ -31,6 +38,7 @@ pub fn run() {
         .manage(embedding::EmbeddingState::default())
         .manage(llm::LlmState::default())
         .manage(vector_cache::VectorCacheState::default())
+        .manage(workspace_file::WorkspaceVaultState::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .invoke_handler(tauri::generate_handler![
@@ -49,7 +57,14 @@ pub fn run() {
             vector_cache::read_embedding_vector_cache,
             vector_cache::write_embedding_vector_cache,
             exit_application,
+            workspace_file::change_workspace_password,
+            workspace_file::decrypt_workspace_export,
+            workspace_file::enable_workspace_encryption,
+            workspace_file::encrypt_workspace_export,
+            workspace_file::inspect_workspace_security,
+            workspace_file::lock_workspace,
             workspace_file::read_workspace_file,
+            workspace_file::unlock_workspace,
             workspace_file::write_workspace_file
         ])
         .run(tauri::generate_context!())

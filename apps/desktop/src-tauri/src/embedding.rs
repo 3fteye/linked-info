@@ -174,6 +174,26 @@ impl Default for EmbeddingState {
     }
 }
 
+impl EmbeddingState {
+    pub fn shutdown(&self) -> Result<(), String> {
+        if let Ok(slot) = self.local_download_cancel.lock() {
+            if let Some(cancel) = slot.as_ref() {
+                cancel.store(true, Ordering::Release);
+            }
+        }
+        match self.local_model.try_lock() {
+            Ok(mut model) => {
+                *model = None;
+                Ok(())
+            }
+            Err(std::sync::TryLockError::WouldBlock) => Ok(()),
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                Err("local embedding model lock is unavailable".to_owned())
+            }
+        }
+    }
+}
+
 struct LocalTaskGuard {
     active: Arc<AtomicBool>,
     cancel_slot: Arc<Mutex<Option<Arc<AtomicBool>>>>,
@@ -810,9 +830,11 @@ pub async fn prepare_local_embedding_model(
 pub async fn embed_local_texts(
     app: tauri::AppHandle,
     state: tauri::State<'_, EmbeddingState>,
+    vault_state: tauri::State<'_, crate::workspace_file::WorkspaceVaultState>,
     model_id: String,
     inputs: Vec<LocalEmbeddingInput>,
 ) -> Result<Vec<Vec<f32>>, String> {
+    crate::workspace_file::require_workspace_unlocked(&app, &vault_state)?;
     let spec = local_model_spec(&model_id)?;
     let texts = inputs
         .into_iter()
@@ -904,7 +926,13 @@ pub async fn embed_local_texts(
 }
 
 #[tauri::command]
-pub async fn embed_remote_texts(request: RemoteEmbeddingRequest) -> Result<Vec<Vec<f32>>, String> {
+pub async fn embed_remote_texts(
+    app: tauri::AppHandle,
+    request: RemoteEmbeddingRequest,
+) -> Result<Vec<Vec<f32>>, String> {
+    if crate::workspace_file::workspace_encryption_configured(&app) {
+        return Err("remote_embedding_blocked_for_encrypted_workspace".to_owned());
+    }
     if request.endpoint.len() > 2_048
         || request.model.trim().is_empty()
         || request.model.len() > 256

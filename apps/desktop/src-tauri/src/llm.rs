@@ -1253,9 +1253,11 @@ pub fn stop_local_llm(state: tauri::State<'_, LlmState>) -> Result<(), String> {
 pub async fn review_local_references(
     app: tauri::AppHandle,
     state: tauri::State<'_, LlmState>,
+    vault_state: tauri::State<'_, crate::workspace_file::WorkspaceVaultState>,
     model_id: String,
     request: LocalLlmReviewRequest,
 ) -> Result<LocalLlmReviewResponse, String> {
+    crate::workspace_file::require_workspace_unlocked(&app, &vault_state)?;
     validate_review_request(&request)?;
     let spec = local_llm_model_spec(&model_id)?;
     let (cancel, _guard) = begin_llm_task(&state)?;

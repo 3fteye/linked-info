@@ -3,6 +3,7 @@ import ReactDOM from "react-dom/client";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import App from "./App";
+import WorkspaceSecurityGate from "./WorkspaceSecurityGate";
 import "./i18n";
 import { localWorkspacePersistence } from "./workspaceStore";
 import { tauriWorkspacePersistence } from "./workspaceTauriPersistence";
@@ -26,6 +27,10 @@ import {
   unavailableLocalLlmRuntime,
 } from "./llmBridge";
 import { localLlmSettingsStore } from "./llmSettings";
+import {
+  tauriWorkspaceSecurity,
+  unavailableWorkspaceSecurity,
+} from "./workspaceSecurity";
 
 document.addEventListener(
   "contextmenu",
@@ -60,19 +65,29 @@ const llmGateway = runningInTauri ? tauriLlmGateway : unavailableLlmGateway;
 const localLlmRuntime = runningInTauri
   ? tauriLocalLlmRuntime
   : unavailableLocalLlmRuntime;
+const workspaceSecurity = runningInTauri
+  ? tauriWorkspaceSecurity
+  : unavailableWorkspaceSecurity;
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
-    <App
-      embeddingGateway={embeddingGateway}
-      embeddingVectorCache={embeddingVectorCache}
-      embeddingSettingsStore={localEmbeddingSettingsStore}
-      llmGateway={llmGateway}
-      llmSettingsStore={localLlmSettingsStore}
-      localEmbeddingRuntime={localEmbeddingRuntime}
-      localLlmRuntime={localLlmRuntime}
-      lifecycle={lifecycle}
-      persistence={persistence}
-    />
+    <WorkspaceSecurityGate security={workspaceSecurity}>
+      {(workspaceSecurityStatus, updateWorkspaceSecurityStatus) => (
+        <App
+          embeddingGateway={embeddingGateway}
+          embeddingVectorCache={embeddingVectorCache}
+          embeddingSettingsStore={localEmbeddingSettingsStore}
+          llmGateway={llmGateway}
+          llmSettingsStore={localLlmSettingsStore}
+          localEmbeddingRuntime={localEmbeddingRuntime}
+          localLlmRuntime={localLlmRuntime}
+          lifecycle={lifecycle}
+          persistence={persistence}
+          updateWorkspaceSecurityStatus={updateWorkspaceSecurityStatus}
+          workspaceSecurity={workspaceSecurity}
+          workspaceSecurityStatus={workspaceSecurityStatus}
+        />
+      )}
+    </WorkspaceSecurityGate>
   </React.StrictMode>,
 );

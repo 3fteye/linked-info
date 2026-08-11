@@ -9,13 +9,16 @@ import {
   Download,
   FileText,
   Filter,
+  KeyRound,
   Languages,
   Link2,
+  LockKeyhole,
   Network,
   Plus,
   Search,
   Settings,
   Sparkles,
+  ShieldCheck,
   Trash2,
   Upload,
   X,
@@ -45,7 +48,13 @@ import {
 import {
   exportWorkspaceFile,
   importWorkspaceFile,
+  type ImportedWorkspaceFile,
 } from "./workspaceFileBridge";
+import {
+  isEncryptedWorkspaceExport,
+  type WorkspaceSecurity,
+  type WorkspaceSecurityStatus,
+} from "./workspaceSecurity";
 import type { WorkspaceLifecycle } from "./workspaceLifecycle";
 import {
   appendWorkspaceHistory,
@@ -125,6 +134,9 @@ interface AppProps {
   localLlmRuntime: LocalLlmRuntime;
   lifecycle: WorkspaceLifecycle;
   persistence: WorkspacePersistence;
+  updateWorkspaceSecurityStatus: (status: WorkspaceSecurityStatus) => void;
+  workspaceSecurity: WorkspaceSecurity;
+  workspaceSecurityStatus: WorkspaceSecurityStatus;
 }
 
 interface SmartReferenceResult {
@@ -146,6 +158,10 @@ interface WorkspaceUpdateOptions {
 }
 
 const workspaceHistoryLimit = 100;
+
+function errorReason(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
 
 function formatByteCount(bytes: number): string {
   if (bytes < 1024) {
@@ -232,11 +248,15 @@ function App({
   localLlmRuntime,
   lifecycle,
   persistence,
+  updateWorkspaceSecurityStatus,
+  workspaceSecurity,
+  workspaceSecurityStatus,
 }: AppProps) {
   const { t, i18n } = useTranslation();
   const [activeView, setActiveView] = useState<ViewId>("canvas");
   const [workspace, setWorkspace] = useState(emptyWorkspace);
   const workspaceRef = useRef(workspace);
+  const skipUnmountFlushRef = useRef(false);
   const workspaceReplacementGenerationRef = useRef(0);
   const [persistenceReady, setPersistenceReady] = useState(false);
   const [primaryStorageProblem, setPrimaryStorageProblem] = useState<string | null>(null);
@@ -260,13 +280,38 @@ function App({
     useState<PendingWorkspaceReplacement | null>(null);
   const [backupStatus, setBackupStatus] = useState<string | null>(null);
   const [recoveryAvailable, setRecoveryAvailable] = useState(false);
+  const [securityDialog, setSecurityDialog] = useState<"enable" | "change" | null>(
+    null,
+  );
+  const [securityPassword, setSecurityPassword] = useState("");
+  const [securityPasswordConfirmation, setSecurityPasswordConfirmation] =
+    useState("");
+  const [securityBusy, setSecurityBusy] = useState(false);
+  const [securityMessage, setSecurityMessage] = useState<string | null>(null);
+  const [pendingEncryptedImport, setPendingEncryptedImport] =
+    useState<ImportedWorkspaceFile | null>(null);
+  const [encryptedImportPassword, setEncryptedImportPassword] = useState("");
+  const [encryptedImportBusy, setEncryptedImportBusy] = useState(false);
+  const [encryptedImportError, setEncryptedImportError] = useState<string | null>(
+    null,
+  );
   const embeddingAnalyzer = useMemo(
     () => new EmbeddingAnalyzer(embeddingGateway, embeddingVectorCache),
     [embeddingGateway, embeddingVectorCache],
   );
-  const [embeddingSettings, setEmbeddingSettings] = useState<EmbeddingSettings>(() =>
-    embeddingSettingsStore.load(),
-  );
+  const [embeddingSettings, setEmbeddingSettings] = useState<EmbeddingSettings>(() => {
+    const loaded = embeddingSettingsStore.load();
+    if (!workspaceSecurityStatus.encrypted || loaded.provider === "local") {
+      return loaded;
+    }
+    const localOnly = updateEmbeddingSettings(loaded, { provider: "local" });
+    try {
+      embeddingSettingsStore.save(localOnly);
+    } catch {
+      // The runtime guard still prevents remote transmission for encrypted data.
+    }
+    return localOnly;
+  });
   const [llmSettings, setLlmSettings] = useState<LlmSettings>(() =>
     llmSettingsStore.load(),
   );
@@ -576,12 +621,93 @@ function App({
     return () => {
       active = false;
       unregister?.();
-      void flushLocalWorkspace();
+      if (!skipUnmountFlushRef.current) {
+        void flushLocalWorkspace();
+      }
     };
   }, [lifecycle, persistence, persistenceReady, t]);
 
   function changeLanguage(language: SupportedLanguage) {
     void i18n.changeLanguage(language);
+  }
+
+  function closeSecurityDialog() {
+    if (securityBusy) {
+      return;
+    }
+    setSecurityDialog(null);
+    setSecurityPassword("");
+    setSecurityPasswordConfirmation("");
+  }
+
+  async function submitSecurityDialog() {
+    if (securityDialog === null || securityBusy) {
+      return;
+    }
+    if (securityPassword !== securityPasswordConfirmation) {
+      setSecurityMessage(t("security.passwordMismatch"));
+      return;
+    }
+    if (Array.from(securityPassword).length < 10) {
+      setSecurityMessage(t("security.passwordTooShort"));
+      return;
+    }
+    setSecurityBusy(true);
+    setSecurityMessage(null);
+    try {
+      await persistence.save(workspaceRef.current);
+      if (securityDialog === "enable") {
+        if (embeddingSettings.provider === "remote") {
+          const localOnly = updateEmbeddingSettings(embeddingSettings, {
+            provider: "local",
+          });
+          embeddingSettingsStore.save(localOnly);
+          setEmbeddingSettings(localOnly);
+          setRemoteEmbeddingToken("");
+        }
+        const status = await workspaceSecurity.enable(securityPassword);
+        embeddingAnalyzer.clearCache();
+        setVectorCacheStatus(await embeddingVectorCache.inspect());
+        updateWorkspaceSecurityStatus(status);
+        setSecurityMessage(t("security.enableSuccess"));
+      } else {
+        await workspaceSecurity.changePassword(securityPassword);
+        setSecurityMessage(t("security.changeSuccess"));
+      }
+      setSecurityDialog(null);
+      setSecurityPassword("");
+      setSecurityPasswordConfirmation("");
+    } catch (error) {
+      setSecurityMessage(
+        t("security.operationFailed", { reason: errorReason(error) }),
+      );
+      try {
+        updateWorkspaceSecurityStatus(await workspaceSecurity.inspect());
+      } catch {
+        // Keep the previous status when even the status probe fails.
+      }
+    } finally {
+      setSecurityBusy(false);
+    }
+  }
+
+  async function lockEncryptedWorkspace() {
+    if (securityBusy) {
+      return;
+    }
+    setSecurityBusy(true);
+    setSecurityMessage(null);
+    try {
+      await persistence.save(workspaceRef.current);
+      embeddingAnalyzer.clearCache();
+      setRemoteEmbeddingToken("");
+      skipUnmountFlushRef.current = true;
+      updateWorkspaceSecurityStatus(await workspaceSecurity.lock());
+    } catch (error) {
+      skipUnmountFlushRef.current = false;
+      setSecurityMessage(t("security.lockFailed", { reason: errorReason(error) }));
+      setSecurityBusy(false);
+    }
   }
 
   function changeEmbeddingConfiguration(patch: Partial<EmbeddingSettings>) {
@@ -646,6 +772,13 @@ function App({
       preparingLocalModelId !== null ||
       preparingLocalLlmModelId !== null
     ) {
+      return;
+    }
+    if (
+      workspaceSecurityStatus.encrypted &&
+      embeddingSettings.provider === "remote"
+    ) {
+      setSmartReferenceStatus(t("smartReference.errors.remoteBlockedByEncryption"));
       return;
     }
     setAnalyzingNodeId(nodeId);
@@ -1201,9 +1334,15 @@ function App({
     setBackupStatus(null);
     try {
       const date = new Date().toISOString().slice(0, 10);
+      const plaintext = serializeWorkspaceExport(workspaceRef.current);
+      const contents = workspaceSecurityStatus.encrypted
+        ? await workspaceSecurity.encryptExport(plaintext)
+        : plaintext;
       const exported = await exportWorkspaceFile(
-        serializeWorkspaceExport(workspaceRef.current),
-        `linked-info-${date}.json`,
+        contents,
+        workspaceSecurityStatus.encrypted
+          ? `linked-info-${date}.encrypted.json`
+          : `linked-info-${date}.json`,
       );
       if (exported) {
         setBackupStatus(t("backup.exportSuccess"));
@@ -1213,6 +1352,19 @@ function App({
     }
   }
 
+  function queueWorkspaceImport(file: ImportedWorkspaceFile, text = file.text) {
+    const result = parseWorkspaceExport(text);
+    if (!result.ok) {
+      setBackupStatus(t(importFailureTranslationKeys[result.reason]));
+      return;
+    }
+    setPendingWorkspaceReplacement({
+      kind: "import",
+      sourceName: file.name,
+      workspace: result.workspace,
+    });
+  }
+
   async function chooseWorkspaceImport() {
     setBackupStatus(null);
     try {
@@ -1220,18 +1372,50 @@ function App({
       if (file === null) {
         return;
       }
-      const result = parseWorkspaceExport(file.text);
-      if (!result.ok) {
-        setBackupStatus(t(importFailureTranslationKeys[result.reason]));
+      if (isEncryptedWorkspaceExport(file.text)) {
+        if (!workspaceSecurityStatus.encrypted) {
+          setBackupStatus(t("backup.encryptedImportRequiresEncryption"));
+          return;
+        }
+        setPendingEncryptedImport(file);
+        setEncryptedImportPassword("");
+        setEncryptedImportError(null);
         return;
       }
-      setPendingWorkspaceReplacement({
-        kind: "import",
-        sourceName: file.name,
-        workspace: result.workspace,
-      });
+      queueWorkspaceImport(file);
     } catch {
       setBackupStatus(t("backup.importFailed"));
+    }
+  }
+
+  async function decryptPendingWorkspaceImport() {
+    if (
+      pendingEncryptedImport === null ||
+      encryptedImportBusy ||
+      encryptedImportPassword.length === 0
+    ) {
+      return;
+    }
+    setEncryptedImportBusy(true);
+    setEncryptedImportError(null);
+    try {
+      const plaintext = await workspaceSecurity.decryptExport(
+        pendingEncryptedImport.text,
+        encryptedImportPassword,
+      );
+      const file = pendingEncryptedImport;
+      setPendingEncryptedImport(null);
+      setEncryptedImportPassword("");
+      queueWorkspaceImport(file, plaintext);
+    } catch (error) {
+      const reason = errorReason(error);
+      setEncryptedImportError(
+        reason === "workspace_vault_invalid_password"
+          ? t("security.invalidPassword")
+          : t("backup.encryptedImportFailed", { reason }),
+      );
+    } finally {
+      setEncryptedImportBusy(false);
     }
   }
 
@@ -1297,9 +1481,14 @@ function App({
     setStorageProblemStatus(null);
     try {
       const date = new Date().toISOString().slice(0, 10);
+      const contents = workspaceSecurityStatus.encrypted
+        ? await workspaceSecurity.encryptExport(raw)
+        : raw;
       const exported = await exportWorkspaceFile(
-        raw,
-        `linked-info-unreadable-${source}-${date}.json`,
+        contents,
+        workspaceSecurityStatus.encrypted
+          ? `linked-info-unreadable-${source}-${date}.encrypted.json`
+          : `linked-info-unreadable-${source}-${date}.json`,
       );
       if (exported) {
         const message = t("storageProblem.exportSuccess");
@@ -1643,7 +1832,11 @@ function App({
                     </button>
                     <button
                       data-active={embeddingSettings.provider === "remote"}
-                      disabled={localModelTaskRunning || analyzingNodeId !== null}
+                      disabled={
+                        workspaceSecurityStatus.encrypted ||
+                        localModelTaskRunning ||
+                        analyzingNodeId !== null
+                      }
                       onClick={() =>
                         changeEmbeddingConfiguration({ provider: "remote" })
                       }
@@ -1653,6 +1846,9 @@ function App({
                       {t("smartReference.settings.remote")}
                     </button>
                   </div>
+                  {workspaceSecurityStatus.encrypted && (
+                    <small>{t("security.remoteAiBlocked")}</small>
+                  )}
                   {embeddingSettings.provider === "local" ? (
                     <div className="local-model-settings">
                       <div
@@ -1794,6 +1990,66 @@ function App({
                       </label>
                       <small>{t("smartReference.settings.tokenDescription")}</small>
                     </div>
+                  )}
+                </div>
+              </div>
+              <div className="setting-row data-setting-row">
+                <div className="setting-label">
+                  {workspaceSecurityStatus.encrypted ? (
+                    <ShieldCheck size={18} />
+                  ) : (
+                    <LockKeyhole size={18} />
+                  )}
+                  <div className="setting-label-copy">
+                    <span>{t("security.settingsTitle")}</span>
+                    <small>
+                      {workspaceSecurityStatus.encrypted
+                        ? t("security.encryptedDescription")
+                        : t("security.plaintextDescription")}
+                    </small>
+                  </div>
+                </div>
+                <div className="security-settings-actions">
+                  {workspaceSecurityStatus.encrypted ? (
+                    <>
+                      <button
+                        className="secondary-button"
+                        disabled={securityBusy}
+                        onClick={() => {
+                          setSecurityMessage(null);
+                          setSecurityDialog("change");
+                        }}
+                        type="button"
+                      >
+                        <KeyRound aria-hidden="true" size={15} />
+                        {t("security.changePassword")}
+                      </button>
+                      <button
+                        className="secondary-button"
+                        disabled={securityBusy}
+                        onClick={() => void lockEncryptedWorkspace()}
+                        type="button"
+                      >
+                        <LockKeyhole aria-hidden="true" size={15} />
+                        {t("security.lockNow")}
+                      </button>
+                    </>
+                  ) : (
+                    <button
+                      className="primary-button"
+                      disabled={!workspaceSecurity.available || securityBusy}
+                      onClick={() => {
+                        setSecurityMessage(null);
+                        setSecurityDialog("enable");
+                      }}
+                      type="button"
+                    >
+                      <LockKeyhole aria-hidden="true" size={15} />
+                      {t("security.enable")}
+                    </button>
+                  )}
+                  {securityMessage !== null && (
+                    <small role="status">{securityMessage}</small>
                   )}
                 </div>
               </div>
@@ -1987,7 +2243,11 @@ function App({
                       })}
                     </span>
                   ) : (
-                    <span>{t("smartReference.settings.vectorCache.desktopOnly")}</span>
+                    <span>
+                      {workspaceSecurityStatus.encrypted
+                        ? t("security.vectorCacheMemoryOnly")
+                        : t("smartReference.settings.vectorCache.desktopOnly")}
+                    </span>
                   )}
                   <small>{t("smartReference.settings.vectorCache.memoryLimit")}</small>
                   <button
@@ -2621,6 +2881,154 @@ function App({
                 {t("smartReference.close")}
               </button>
             </footer>
+          </section>
+        </div>
+      )}
+
+      {securityDialog !== null && (
+        <div className="modal-backdrop" role="presentation">
+          <section
+            aria-labelledby="workspace-security-dialog-title"
+            aria-modal="true"
+            className="confirmation-dialog security-dialog"
+            role="dialog"
+          >
+            <h2 id="workspace-security-dialog-title">
+              {securityDialog === "enable"
+                ? t("security.enableTitle")
+                : t("security.changeTitle")}
+            </h2>
+            <p>
+              {securityDialog === "enable"
+                ? t("security.enableWarning")
+                : t("security.changeDescription")}
+            </p>
+            <form
+              className="security-dialog-form"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void submitSecurityDialog();
+              }}
+            >
+              <label htmlFor="workspace-security-password">
+                {t("security.newPassword")}
+              </label>
+              <input
+                autoComplete="new-password"
+                autoFocus
+                id="workspace-security-password"
+                onChange={(event) => setSecurityPassword(event.target.value)}
+                type="password"
+                value={securityPassword}
+              />
+              <label htmlFor="workspace-security-password-confirmation">
+                {t("security.confirmPassword")}
+              </label>
+              <input
+                autoComplete="new-password"
+                id="workspace-security-password-confirmation"
+                onChange={(event) =>
+                  setSecurityPasswordConfirmation(event.target.value)
+                }
+                type="password"
+                value={securityPasswordConfirmation}
+              />
+              {securityMessage !== null && (
+                <p className="security-error" role="alert">
+                  {securityMessage}
+                </p>
+              )}
+              <div className="confirmation-dialog-actions">
+                <button
+                  className="secondary-button"
+                  disabled={securityBusy}
+                  onClick={closeSecurityDialog}
+                  type="button"
+                >
+                  {t("actions.cancel")}
+                </button>
+                <button
+                  className="primary-button"
+                  disabled={securityBusy}
+                  type="submit"
+                >
+                  {securityBusy
+                    ? t("security.processing")
+                    : securityDialog === "enable"
+                      ? t("security.enable")
+                      : t("security.changePassword")}
+                </button>
+              </div>
+            </form>
+          </section>
+        </div>
+      )}
+
+      {pendingEncryptedImport !== null && (
+        <div className="modal-backdrop" role="presentation">
+          <section
+            aria-labelledby="encrypted-import-dialog-title"
+            aria-modal="true"
+            className="confirmation-dialog security-dialog"
+            role="dialog"
+          >
+            <h2 id="encrypted-import-dialog-title">
+              {t("backup.encryptedImportTitle")}
+            </h2>
+            <p>
+              {t("backup.encryptedImportDescription", {
+                name: pendingEncryptedImport.name,
+              })}
+            </p>
+            <form
+              className="security-dialog-form"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void decryptPendingWorkspaceImport();
+              }}
+            >
+              <label htmlFor="encrypted-import-password">
+                {t("security.password")}
+              </label>
+              <input
+                autoComplete="current-password"
+                autoFocus
+                id="encrypted-import-password"
+                onChange={(event) => setEncryptedImportPassword(event.target.value)}
+                type="password"
+                value={encryptedImportPassword}
+              />
+              {encryptedImportError !== null && (
+                <p className="security-error" role="alert">
+                  {encryptedImportError}
+                </p>
+              )}
+              <div className="confirmation-dialog-actions">
+                <button
+                  className="secondary-button"
+                  disabled={encryptedImportBusy}
+                  onClick={() => {
+                    setPendingEncryptedImport(null);
+                    setEncryptedImportPassword("");
+                    setEncryptedImportError(null);
+                  }}
+                  type="button"
+                >
+                  {t("actions.cancel")}
+                </button>
+                <button
+                  className="primary-button"
+                  disabled={
+                    encryptedImportBusy || encryptedImportPassword.length === 0
+                  }
+                  type="submit"
+                >
+                  {encryptedImportBusy
+                    ? t("security.unlocking")
+                    : t("backup.decryptImport")}
+                </button>
+              </div>
+            </form>
           </section>
         </div>
       )}
