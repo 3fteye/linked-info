@@ -2,12 +2,12 @@ import { describe, expect, it, vi } from "vitest";
 import {
   createTauriWorkspaceLifecycle,
   type CloseRequestEvent,
-  type CloseWindowBridge,
+  type CloseApplicationBridge,
 } from "./workspaceLifecycle";
 
-class MemoryCloseWindow implements CloseWindowBridge {
+class MemoryCloseApplication implements CloseApplicationBridge {
   handler: ((event: CloseRequestEvent) => void | Promise<void>) | null = null;
-  readonly destroy = vi.fn(async () => undefined);
+  readonly exit = vi.fn(async () => undefined);
 
   async onCloseRequested(
     handler: (event: CloseRequestEvent) => void | Promise<void>,
@@ -24,37 +24,37 @@ class MemoryCloseWindow implements CloseWindowBridge {
 }
 
 describe("createTauriWorkspaceLifecycle", () => {
-  it("flushes the latest workspace before destroying the window", async () => {
-    const appWindow = new MemoryCloseWindow();
+  it("flushes the latest workspace before exiting the application", async () => {
+    const application = new MemoryCloseApplication();
     const flush = vi.fn(async () => undefined);
     const onFailure = vi.fn();
     const preventDefault = vi.fn();
-    const lifecycle = createTauriWorkspaceLifecycle(appWindow);
+    const lifecycle = createTauriWorkspaceLifecycle(application);
     await lifecycle.registerCloseFlush(flush, onFailure);
 
-    await appWindow.requestClose({ preventDefault });
+    await application.requestClose({ preventDefault });
 
     expect(preventDefault).toHaveBeenCalledOnce();
     expect(flush).toHaveBeenCalledOnce();
-    expect(appWindow.destroy).toHaveBeenCalledOnce();
+    expect(application.exit).toHaveBeenCalledOnce();
     expect(flush.mock.invocationCallOrder[0]).toBeLessThan(
-      appWindow.destroy.mock.invocationCallOrder[0],
+      application.exit.mock.invocationCallOrder[0],
     );
     expect(onFailure).not.toHaveBeenCalled();
   });
 
   it("keeps the window open and reports a failed flush", async () => {
-    const appWindow = new MemoryCloseWindow();
+    const application = new MemoryCloseApplication();
     const flush = vi.fn(async () => {
       throw new Error("disk full");
     });
     const onFailure = vi.fn();
-    const lifecycle = createTauriWorkspaceLifecycle(appWindow);
+    const lifecycle = createTauriWorkspaceLifecycle(application);
     await lifecycle.registerCloseFlush(flush, onFailure);
 
-    await appWindow.requestClose({ preventDefault: vi.fn() });
+    await application.requestClose({ preventDefault: vi.fn() });
 
-    expect(appWindow.destroy).not.toHaveBeenCalled();
+    expect(application.exit).not.toHaveBeenCalled();
     expect(onFailure).toHaveBeenCalledOnce();
   });
 });

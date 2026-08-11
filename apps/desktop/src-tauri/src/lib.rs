@@ -3,6 +3,11 @@ mod workspace_file;
 #[cfg(desktop)]
 use tauri::Manager;
 
+#[tauri::command]
+fn exit_application(app: tauri::AppHandle) {
+    app.exit(0);
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let mut builder = tauri::Builder::default();
@@ -22,6 +27,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .invoke_handler(tauri::generate_handler![
+            exit_application,
             workspace_file::read_workspace_file,
             workspace_file::write_workspace_file
         ])

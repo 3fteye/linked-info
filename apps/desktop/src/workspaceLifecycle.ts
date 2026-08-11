@@ -9,20 +9,20 @@ export interface CloseRequestEvent {
   preventDefault(): void;
 }
 
-export interface CloseWindowBridge {
-  destroy(): Promise<void>;
+export interface CloseApplicationBridge {
+  exit(): Promise<void>;
   onCloseRequested(
     handler: (event: CloseRequestEvent) => void | Promise<void>,
   ): Promise<() => void>;
 }
 
 export function createTauriWorkspaceLifecycle(
-  appWindow: CloseWindowBridge,
+  application: CloseApplicationBridge,
 ): WorkspaceLifecycle {
   return {
     registerCloseFlush(flush, onFailure) {
       let closeInProgress = false;
-      return appWindow.onCloseRequested(async (event) => {
+      return application.onCloseRequested(async (event) => {
         event.preventDefault();
         if (closeInProgress) {
           return;
@@ -31,7 +31,7 @@ export function createTauriWorkspaceLifecycle(
         closeInProgress = true;
         try {
           await flush();
-          await appWindow.destroy();
+          await application.exit();
         } catch {
           closeInProgress = false;
           onFailure();

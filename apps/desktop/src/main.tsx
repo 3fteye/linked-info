@@ -1,6 +1,6 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
-import { isTauri } from "@tauri-apps/api/core";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import App from "./App";
 import "./i18n";
@@ -22,7 +22,14 @@ const persistence = runningInTauri
   ? tauriWorkspacePersistence
   : localWorkspacePersistence;
 const lifecycle = runningInTauri
-  ? createTauriWorkspaceLifecycle(getCurrentWindow())
+  ? createTauriWorkspaceLifecycle({
+      exit() {
+        return invoke<void>("exit_application");
+      },
+      onCloseRequested(handler) {
+        return getCurrentWindow().onCloseRequested(handler);
+      },
+    })
   : browserWorkspaceLifecycle;
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
