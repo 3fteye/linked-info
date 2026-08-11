@@ -13,7 +13,7 @@ env:
 
 jobs:
   quality:
-    name: Windows project check
+    name: Windows core, frontend and Worker
     runs-on: windows-latest
     steps:
       - name: Check out repository
@@ -77,6 +77,19 @@ jobs:
       - name: Build frontend
         working-directory: apps/desktop
         run: pnpm build
+
+  desktop-windows:
+    name: Windows desktop check
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build data
+        uses: Swatinem/rust-cache@v2
 
       - name: Check Windows desktop target
         run: cargo check -p linked-info-desktop
