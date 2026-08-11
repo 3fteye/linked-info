@@ -10,6 +10,7 @@ import {
   type Connection,
   type Edge,
   type EdgeChange,
+  type FinalConnectionState,
   type Node,
   type NodeChange,
   type NodeMouseHandler,
@@ -26,6 +27,7 @@ import {
   Pencil,
   Plus,
   Redo2,
+  Search,
   Trash2,
   Undo2,
 } from "lucide-react";
@@ -46,6 +48,11 @@ import type {
   NodeReference,
 } from "./workspaceStore";
 import { updateNodeLayoutPositions } from "./workspaceStore";
+import {
+  appendNodeReference,
+  availableReferenceTargets,
+  referenceSearchCommand,
+} from "./referenceSearch";
 import "@xyflow/react/dist/style.css";
 
 interface InformationNodeData extends Record<string, unknown> {
@@ -91,6 +98,10 @@ interface GraphLabels {
   namePlaceholder: string;
   noContent: string;
   references: string;
+  referenceSearchEmpty: string;
+  referenceSearchHint: string;
+  referenceSearchLabel: string;
+  referenceSearchPlaceholder: string;
   redo: string;
   removeNodeFilter: string;
   sourceHandle: string;
@@ -141,6 +152,15 @@ type ContextMenuState =
       top: number;
       nodeId: string;
     };
+
+interface ReferenceSearchState {
+  activeIndex: number;
+  left: number;
+  query: string;
+  selectedTargetNodeIds: string[];
+  sourceNodeId: string;
+  top: number;
+}
 
 function InformationNodeCard({ id, data, selected }: NodeProps<InformationFlowNode>) {
   const nodeRef = useRef<HTMLElement>(null);
@@ -380,15 +400,58 @@ export default function GraphCanvas({
   onViewportChange,
 }: GraphCanvasProps) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const referenceSearchInputRef = useRef<HTMLInputElement>(null);
+  const referenceSearchPopoverRef = useRef<HTMLDivElement>(null);
+  const shiftConnectionSourceRef = useRef<string | null>(null);
+  const referencesRef = useRef(references);
   const [flowInstance, setFlowInstance] =
     useState<ReactFlowInstance<InformationFlowNode, Edge> | null>(null);
   const lastWorkspaceViewportRef = useRef<CanvasViewport | null>(viewport);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [pendingDeletionNodeIds, setPendingDeletionNodeIds] = useState<string[]>([]);
+  const [referenceSearch, setReferenceSearch] =
+    useState<ReferenceSearchState | null>(null);
   const [flowNodes, setFlowNodes, applyNodeChanges] =
     useNodesState<InformationFlowNode>([]);
   const [flowEdges, setFlowEdges, applyEdgeChanges] = useEdgesState<Edge>([]);
   const normalizedSearch = searchTerm.trim().toLowerCase();
+
+  useEffect(() => {
+    referencesRef.current = references;
+  }, [references]);
+
+  useLayoutEffect(() => {
+    if (referenceSearch === null) {
+      return;
+    }
+    referenceSearchInputRef.current?.focus({ preventScroll: true });
+  }, [referenceSearch?.selectedTargetNodeIds.length, referenceSearch?.sourceNodeId]);
+
+  useEffect(() => {
+    if (
+      referenceSearch !== null &&
+      !nodes.some((node) => node.id === referenceSearch.sourceNodeId)
+    ) {
+      setReferenceSearch(null);
+    }
+  }, [nodes, referenceSearch]);
+
+  useEffect(() => {
+    if (referenceSearch === null) {
+      return;
+    }
+
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      if (
+        event.target instanceof globalThis.Node &&
+        !referenceSearchPopoverRef.current?.contains(event.target)
+      ) {
+        setReferenceSearch(null);
+      }
+    };
+    window.addEventListener("pointerdown", closeOnOutsidePointer);
+    return () => window.removeEventListener("pointerdown", closeOnOutsidePointer);
+  }, [referenceSearch]);
 
   useEffect(() => {
     if (flowInstance === null) {
@@ -442,6 +505,23 @@ export default function GraphCanvas({
     }
     return result;
   }, [nodes, references]);
+
+  const referenceSearchCandidates = useMemo(() => {
+    if (referenceSearch === null) {
+      return [];
+    }
+    return availableReferenceTargets(
+      nodes,
+      references,
+      referenceSearch.sourceNodeId,
+      referenceSearch.selectedTargetNodeIds,
+      referenceSearch.query,
+    ).sort((left, right) =>
+      referencedNodeLabel(left, labels.unnamed, labels.noContent).localeCompare(
+        referencedNodeLabel(right, labels.unnamed, labels.noContent),
+      ),
+    );
+  }, [labels.noContent, labels.unnamed, nodes, referenceSearch, references]);
 
   useEffect(() => {
     setFlowNodes((current) => {
@@ -663,22 +743,103 @@ export default function GraphCanvas({
         return;
       }
 
-      const exists = references.some(
-        (reference) =>
-          reference.sourceNodeId === connection.source &&
-          reference.targetNodeId === connection.target,
+      const currentReferences = referencesRef.current;
+      const nextReferences = appendNodeReference(
+        currentReferences,
+        connection.source,
+        connection.target,
       );
-      if (!exists) {
-        onReferencesChange([
-          ...references,
-          {
-            sourceNodeId: connection.source,
-            targetNodeId: connection.target,
-          },
-        ]);
+      if (nextReferences !== currentReferences) {
+        referencesRef.current = nextReferences;
+        onReferencesChange(nextReferences);
       }
     },
-    [onReferencesChange, references],
+    [onReferencesChange],
+  );
+
+  const appendReference = useCallback(
+    (sourceNodeId: string, targetNodeId: string) => {
+      const currentReferences = referencesRef.current;
+      const nextReferences = appendNodeReference(
+        currentReferences,
+        sourceNodeId,
+        targetNodeId,
+      );
+      if (nextReferences !== currentReferences) {
+        referencesRef.current = nextReferences;
+        onReferencesChange(nextReferences);
+      }
+    },
+    [onReferencesChange],
+  );
+
+  const chooseReferenceSearchTarget = useCallback(
+    (targetNodeId: string, closeAfterSelection: boolean) => {
+      if (referenceSearch === null) {
+        return;
+      }
+      appendReference(referenceSearch.sourceNodeId, targetNodeId);
+      if (closeAfterSelection) {
+        setReferenceSearch(null);
+        return;
+      }
+      setReferenceSearch({
+        ...referenceSearch,
+        activeIndex: 0,
+        query: "",
+        selectedTargetNodeIds: [
+          ...referenceSearch.selectedTargetNodeIds,
+          targetNodeId,
+        ],
+      });
+    },
+    [appendReference, referenceSearch],
+  );
+
+  const handleConnectEnd = useCallback(
+    (
+      event: MouseEvent | TouchEvent,
+      connectionState: FinalConnectionState,
+    ) => {
+      const sourceNodeId = shiftConnectionSourceRef.current;
+      shiftConnectionSourceRef.current = null;
+      const targetElement = event.target instanceof Element ? event.target : null;
+      const droppedOnEmptyCanvas =
+        targetElement !== null &&
+        (targetElement.classList.contains("react-flow__pane") ||
+          targetElement.closest(".react-flow__background") !== null);
+      if (
+        sourceNodeId === null ||
+        connectionState.isValid === true ||
+        connectionState.toNode !== null ||
+        !droppedOnEmptyCanvas ||
+        !(event instanceof MouseEvent)
+      ) {
+        return;
+      }
+
+      const bounds = containerRef.current?.getBoundingClientRect();
+      if (bounds === undefined) {
+        return;
+      }
+      const popoverWidth = 300;
+      const popoverHeight = 330;
+      setReferenceSearch({
+        activeIndex: 0,
+        left: Math.min(
+          Math.max(8, event.clientX - bounds.left),
+          Math.max(8, bounds.width - popoverWidth - 8),
+        ),
+        query: "",
+        selectedTargetNodeIds: [],
+        sourceNodeId,
+        top: Math.min(
+          Math.max(8, event.clientY - bounds.top),
+          Math.max(8, bounds.height - popoverHeight - 8),
+        ),
+      });
+    },
+    [],
   );
 
   const handleNodeDragStop = useCallback(
@@ -788,6 +949,15 @@ export default function GraphCanvas({
         nodeTypes={nodeTypes}
         nodes={flowNodes}
         onConnect={handleConnect}
+        onConnectEnd={handleConnectEnd}
+        onConnectStart={(event, params) => {
+          shiftConnectionSourceRef.current =
+            event instanceof MouseEvent &&
+            event.shiftKey &&
+            params.handleType === "source"
+              ? params.nodeId
+              : null;
+        }}
         onEdgesChange={handleEdgesChange}
         onInit={setFlowInstance}
         onNodeContextMenu={handleNodeContextMenu}
@@ -860,6 +1030,119 @@ export default function GraphCanvas({
           </button>
         </Panel>
       </ReactFlow>
+
+      {referenceSearch !== null && (
+        <div
+          className="reference-search-popover"
+          onPointerDown={(event) => event.stopPropagation()}
+          ref={referenceSearchPopoverRef}
+          style={{ left: referenceSearch.left, top: referenceSearch.top }}
+        >
+          <label className="reference-search-input-shell">
+            <Search aria-hidden="true" size={15} />
+            <input
+              aria-activedescendant={
+                referenceSearchCandidates[referenceSearch.activeIndex] === undefined
+                  ? undefined
+                  : `reference-search-option-${referenceSearchCandidates[referenceSearch.activeIndex].id}`
+              }
+              aria-autocomplete="list"
+              aria-controls="reference-search-results"
+              aria-expanded="true"
+              aria-label={labels.referenceSearchLabel}
+              onChange={(event) =>
+                setReferenceSearch((current) =>
+                  current === null
+                    ? null
+                    : { ...current, activeIndex: 0, query: event.target.value },
+                )
+              }
+              onKeyDown={(event) => {
+                if (event.nativeEvent.isComposing) {
+                  return;
+                }
+                const command = referenceSearchCommand(event.key);
+                if (command === null) {
+                  return;
+                }
+                event.preventDefault();
+                event.stopPropagation();
+                if (command === "close") {
+                  setReferenceSearch(null);
+                  return;
+                }
+                if (command === "move-next" || command === "move-previous") {
+                  if (referenceSearchCandidates.length === 0) {
+                    return;
+                  }
+                  const offset = command === "move-next" ? 1 : -1;
+                  setReferenceSearch((current) =>
+                    current === null
+                      ? null
+                      : {
+                          ...current,
+                          activeIndex:
+                            (current.activeIndex +
+                              offset +
+                              referenceSearchCandidates.length) %
+                            referenceSearchCandidates.length,
+                        },
+                  );
+                  return;
+                }
+                const candidate =
+                  referenceSearchCandidates[referenceSearch.activeIndex];
+                if (candidate !== undefined) {
+                  chooseReferenceSearchTarget(
+                    candidate.id,
+                    command === "select-and-close",
+                  );
+                } else if (command === "select-and-close") {
+                  setReferenceSearch(null);
+                }
+              }}
+              placeholder={labels.referenceSearchPlaceholder}
+              ref={referenceSearchInputRef}
+              role="combobox"
+              value={referenceSearch.query}
+            />
+          </label>
+          <div
+            aria-label={labels.referenceSearchLabel}
+            className="reference-search-results"
+            id="reference-search-results"
+            role="listbox"
+          >
+            {referenceSearchCandidates.length === 0 ? (
+              <p className="reference-search-empty">{labels.referenceSearchEmpty}</p>
+            ) : (
+              referenceSearchCandidates.map((node, index) => (
+                <button
+                  aria-selected={index === referenceSearch.activeIndex}
+                  className="reference-search-option"
+                  data-active={index === referenceSearch.activeIndex}
+                  id={`reference-search-option-${node.id}`}
+                  key={node.id}
+                  onClick={() => chooseReferenceSearchTarget(node.id, false)}
+                  onMouseEnter={() =>
+                    setReferenceSearch((current) =>
+                      current === null ? null : { ...current, activeIndex: index },
+                    )
+                  }
+                  role="option"
+                  type="button"
+                >
+                  <strong>{node.name ?? labels.unnamed}</strong>
+                  {node.name === null && (
+                    <span>{compactNodeContent(node.content) || labels.noContent}</span>
+                  )}
+                </button>
+              ))
+            )}
+          </div>
+          <p className="reference-search-hint">{labels.referenceSearchHint}</p>
+        </div>
+      )}
 
       {visibleNodeCount === 0 && (
         <div className="graph-empty" aria-live="polite">
