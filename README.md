@@ -40,11 +40,9 @@
 
 ## 获取应用
 
-项目目前还没有正式 Release 和签名安装包。可以在仓库的 **Actions → Desktop packages** 中打开最近一次成功运行，下载对应平台的构建产物：
+项目目前还没有正式 Release 和签名安装包。开发阶段只验证和生成实际使用的 Windows 版本；可以在仓库的 **Actions → Desktop packages** 中打开最近一次成功运行，下载构建产物：
 
 - `linked-info-windows`：Windows 便携版可执行文件。
-- `linked-info-macos`：macOS 打包产物。
-- `linked-info-linux`：Linux 打包产物。
 
 Windows 便携版尚未进行商业代码签名，系统可能显示 SmartScreen 提示。只应从本仓库对应提交的 Actions 产物获取程序。
 

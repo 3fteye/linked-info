@@ -376,7 +376,6 @@ crates/
 
 - 实现带版本格式的完整导出、严格校验导入、覆盖确认和导入前本地恢复副本。
 - 生成 Windows 安装包。
-- 在 macOS 和 Linux CI 环境完成编译检查和安装包构建。
 - 验证升级后的数据迁移和旧备份兼容性。
 
 完成标准：新安装环境可以从导出包恢复全部节点、引用和布局，Windows 安装包可完成核心工作流。
@@ -415,8 +414,8 @@ crates/
 - 分层的领域层、应用层和异步存储接口。
 - 内存存储实现、供应商无关的 HTTP/JSON 与 OpenAPI 契约，以及 Rust Cloudflare Worker。
 - Cloudflare D1 初始迁移和独立 `storage-d1` 适配器。
-- GitHub Actions 的核心 Rust、Worker Wasm、前端和 Windows Tauri 检查。
-- 手动触发的 Windows、macOS 和 Linux 安装包构建工作流。
+- GitHub Actions 在 Windows 环境完成核心 Rust、Worker Wasm、前端和 Tauri 检查。
+- 手动触发的 Windows 便携版构建工作流。
 
 领域代码已经替换为 `Node` 与 `Reference` 模型；名称已经改为可空，并由存储保存边界只对非空名称原子保证唯一。内存适配器和应用用例覆盖名称搜索、多个未命名节点、直接引用者筛选以及改名后引用稳定。旧的“信息类型、自定义字段、固定上下文、关系类型”模型已移除。
 
@@ -443,8 +442,8 @@ crates/
 编译与验证策略：
 
 - 默认不在本机执行 Cargo、Worker 或 Tauri 编译。
-- 日常检查和编译交给 GitHub Actions。
-- Windows、macOS 和 Linux 安装包使用手动触发的 GitHub Actions 工作流生成。
+- 日常检查和编译交给 Windows GitHub Actions，与当前实际使用环境保持一致。
+- Windows 便携版使用手动触发的 GitHub Actions 工作流生成；macOS 和 Linux 仅在正式支持对应平台时恢复验证与打包。
 - 只有必须依赖本机窗口的交互调试或用户明确要求时，才进行本地编译。
 
 ## 12. 待讨论事项

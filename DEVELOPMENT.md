@@ -96,7 +96,7 @@ CI 当前使用：
 - pnpm 11.16.0。
 - Worker 检查需要 `wasm32-unknown-unknown` target。
 
-Tauri 在 Linux 上还需要 WebKitGTK、AppIndicator、librsvg 和 patchelf 等系统依赖；准确列表见 [.github/workflows/desktop-packages.yml](.github/workflows/desktop-packages.yml)。
+开发阶段的自动检查和打包统一在 `windows-latest` 运行，与当前实际使用环境一致。源码继续保持供应商与视图边界解耦；macOS、Linux 构建在正式支持对应平台时恢复。
 
 ### 桌面前端
 
@@ -146,7 +146,7 @@ cd apps/desktop
 pnpm tauri build
 ```
 
-仓库的 `Desktop packages` GitHub Actions 工作流可以手动生成 Windows、macOS 和 Linux 产物。Windows 当前使用 `--no-bundle` 生成便携版 EXE，其他平台生成 Tauri bundle。构建目前没有商业代码签名。
+仓库的 `Desktop packages` GitHub Actions 工作流当前只生成 Windows 便携版 EXE，并打包本地 LLM 运行时。构建目前没有商业代码签名。
 
 ## Cloudflare 适配器
 

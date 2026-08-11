@@ -11,31 +11,11 @@ env:
 
 jobs:
   package:
-    name: Package ${{ matrix.platform }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: windows
-            os: windows-latest
-          - platform: macos
-            os: macos-latest
-          - platform: linux
-            os: ubuntu-24.04
-    runs-on: ${{ matrix.os }}
+    name: Package Windows
+    runs-on: windows-latest
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
-
-      - name: Install Linux system dependencies
-        if: matrix.platform == 'linux'
-        run: >-
-          sudo apt-get update &&
-          sudo apt-get install -y
-          libwebkit2gtk-4.1-dev
-          libappindicator3-dev
-          librsvg2-dev
-          patchelf
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -61,36 +41,22 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Prepare Windows local LLM runtime
-        if: matrix.platform == 'windows'
         shell: pwsh
         run: ./.github/scripts/prepare-llama-runtime.ps1
 
-      - name: Prepare Unix local LLM runtime
-        if: matrix.platform != 'windows'
-        shell: bash
-        run: bash ./.github/scripts/prepare-llama-runtime.sh
-
-      - name: Build desktop package
-        if: matrix.platform != 'windows'
-        working-directory: apps/desktop
-        run: pnpm tauri build
-
       - name: Build Windows portable executable
-        if: matrix.platform == 'windows'
         working-directory: apps/desktop
         run: pnpm tauri build --no-bundle
 
       - name: Assemble Windows portable runtime
-        if: matrix.platform == 'windows'
         shell: pwsh
         run: Copy-Item -LiteralPath apps/desktop/src-tauri/resources/llama-runtime -Destination target/release/llama-runtime -Recurse -Force
 
       - name: Upload desktop package
         uses: actions/upload-artifact@v7
         with:
-          name: linked-info-${{ matrix.platform }}
+          name: linked-info-windows
           path: |
-            target/release/bundle/**
             target/release/linked-info-desktop.exe
             target/release/llama-runtime/**
           if-no-files-found: error
