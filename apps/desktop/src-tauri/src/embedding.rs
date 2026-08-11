@@ -241,7 +241,7 @@ enum LocalEmbeddingPhase {
     Failed,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct LocalEmbeddingProgress<'a> {
     model_id: &'a str,
@@ -693,7 +693,7 @@ async fn ensure_model_files(
 
 fn emit_prepare_failure(
     app: &tauri::AppHandle,
-    spec: &LocalModelSpec,
+    spec: &'static LocalModelSpec,
     error: PrepareModelError,
 ) -> String {
     let status = model_status(
