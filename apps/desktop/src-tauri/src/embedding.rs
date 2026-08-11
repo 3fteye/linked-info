@@ -991,7 +991,7 @@ mod tests {
             assert!(model.files.iter().all(|file| file.size > 0));
             assert_eq!(
                 model_total_bytes(model),
-                model.files.iter().map(|file| file.size).sum()
+                model.files.iter().map(|file| file.size).sum::<u64>()
             );
         }
     }
