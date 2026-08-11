@@ -29,15 +29,16 @@ export interface WorkspacePersistence {
   save(workspace: WorkspaceSnapshot): Promise<void>;
 }
 
+export type WorkspaceStorageSlot = "primary" | "recovery";
+
 const workspaceStorageKey = "linked-info.workspace.v1";
 const workspaceRecoveryStorageKey = "linked-info.workspace.recovery.v1";
 
-function loadStoredWorkspace(key: string): WorkspaceLoadResult {
-  const raw = localStorage.getItem(key);
-  if (raw === null) {
-    return { status: "missing" };
-  }
+function storageKey(slot: WorkspaceStorageSlot): string {
+  return slot === "primary" ? workspaceStorageKey : workspaceRecoveryStorageKey;
+}
 
+export function parseStoredWorkspaceText(raw: string): WorkspaceLoadResult {
   let stored: unknown;
   try {
     stored = JSON.parse(raw) as unknown;
@@ -60,25 +61,46 @@ function loadStoredWorkspace(key: string): WorkspaceLoadResult {
     : { status: "ready", workspace };
 }
 
-function saveStoredWorkspace(key: string, workspace: WorkspaceSnapshot): void {
+export function serializeStoredWorkspace(workspace: WorkspaceSnapshot): string {
   const validated = parseWorkspaceSnapshot(workspace);
   if (validated === null) {
     throw new Error("refusing to persist an invalid workspace snapshot");
   }
-  localStorage.setItem(key, JSON.stringify({ version: 1, ...validated }));
+  return JSON.stringify({ version: 1, ...validated });
+}
+
+export function loadLegacyBrowserWorkspace(
+  slot: WorkspaceStorageSlot,
+): WorkspaceLoadResult {
+  const raw = localStorage.getItem(storageKey(slot));
+  if (raw === null) {
+    return { status: "missing" };
+  }
+  return parseStoredWorkspaceText(raw);
+}
+
+export function removeLegacyBrowserWorkspace(slot: WorkspaceStorageSlot): void {
+  localStorage.removeItem(storageKey(slot));
+}
+
+function saveLegacyBrowserWorkspace(
+  slot: WorkspaceStorageSlot,
+  workspace: WorkspaceSnapshot,
+): void {
+  localStorage.setItem(storageKey(slot), serializeStoredWorkspace(workspace));
 }
 
 export const localWorkspacePersistence: WorkspacePersistence = {
   async load() {
-    return loadStoredWorkspace(workspaceStorageKey);
+    return loadLegacyBrowserWorkspace("primary");
   },
   async loadRecovery() {
-    return loadStoredWorkspace(workspaceRecoveryStorageKey);
+    return loadLegacyBrowserWorkspace("recovery");
   },
   async preserveForRecovery(workspace) {
-    saveStoredWorkspace(workspaceRecoveryStorageKey, workspace);
+    saveLegacyBrowserWorkspace("recovery", workspace);
   },
   async save(workspace) {
-    saveStoredWorkspace(workspaceStorageKey, workspace);
+    saveLegacyBrowserWorkspace("primary", workspace);
   },
 };

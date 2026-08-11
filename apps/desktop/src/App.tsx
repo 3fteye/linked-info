@@ -42,6 +42,7 @@ import {
   exportWorkspaceFile,
   importWorkspaceFile,
 } from "./workspaceFileBridge";
+import type { WorkspaceLifecycle } from "./workspaceLifecycle";
 import {
   appendWorkspaceHistory,
   captureWorkspaceHistory,
@@ -63,6 +64,7 @@ interface PendingWorkspaceReplacement {
 }
 
 interface AppProps {
+  lifecycle: WorkspaceLifecycle;
   persistence: WorkspacePersistence;
 }
 
@@ -126,7 +128,7 @@ function nodeFilterLabel(
   return `${unnamedLabel} · ${summary || noContentLabel}`;
 }
 
-function App({ persistence }: AppProps) {
+function App({ lifecycle, persistence }: AppProps) {
   const { t, i18n } = useTranslation();
   const [activeView, setActiveView] = useState<ViewId>("canvas");
   const [workspace, setWorkspace] = useState(emptyWorkspace);
@@ -285,15 +287,35 @@ function App({ persistence }: AppProps) {
     if (!persistenceReady) {
       return;
     }
-    const flushLocalWorkspace = () => {
-      void persistence.save(workspaceRef.current);
-    };
-    window.addEventListener("beforeunload", flushLocalWorkspace);
+
+    let active = true;
+    let unregister: (() => void) | null = null;
+    const flushLocalWorkspace = () => persistence.save(workspaceRef.current);
+    void lifecycle
+      .registerCloseFlush(flushLocalWorkspace, () => {
+        if (active) {
+          setBackupStatus(t("storage.saveFailed"));
+        }
+      })
+      .then((nextUnregister) => {
+        if (active) {
+          unregister = nextUnregister;
+        } else {
+          nextUnregister();
+        }
+      })
+      .catch(() => {
+        if (active) {
+          setBackupStatus(t("storage.saveFailed"));
+        }
+      });
+
     return () => {
-      window.removeEventListener("beforeunload", flushLocalWorkspace);
-      flushLocalWorkspace();
+      active = false;
+      unregister?.();
+      void flushLocalWorkspace();
     };
-  }, [persistence, persistenceReady]);
+  }, [lifecycle, persistence, persistenceReady, t]);
 
   function changeLanguage(language: SupportedLanguage) {
     void i18n.changeLanguage(language);

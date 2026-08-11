@@ -93,3 +93,6 @@ jobs:
 
       - name: Check Windows desktop target
         run: cargo check -p linked-info-desktop
+
+      - name: Test Windows desktop lifecycle
+        run: cargo test -p linked-info-desktop --lib
