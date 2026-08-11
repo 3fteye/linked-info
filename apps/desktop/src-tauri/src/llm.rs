@@ -899,14 +899,17 @@ pub fn inspect_local_llm_models(
             .server
             .lock()
             .map_err(|_| "local LLM server state is unavailable".to_owned())?;
-        slot.as_mut()
-            .and_then(|running| match running.child.try_wait() {
-                Ok(None) => Some(running.model_id.clone()),
-                Ok(Some(_)) | Err(_) => {
-                    *slot = None;
-                    None
-                }
-            })
+        let process_status = slot
+            .as_mut()
+            .map(|running| (running.model_id.clone(), running.child.try_wait()));
+        match process_status {
+            Some((model_id, Ok(None))) => Some(model_id),
+            Some(_) => {
+                *slot = None;
+                None
+            }
+            None => None,
+        }
     };
     let runtime_available = local_llm_runtime_path(&app).is_ok();
     Ok(LOCAL_LLM_MODELS
