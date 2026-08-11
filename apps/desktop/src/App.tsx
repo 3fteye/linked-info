@@ -1046,6 +1046,7 @@ function App({ persistence }: AppProps) {
                 references: t("references.list"),
                 referenceSearchCreate: (name) =>
                   t("references.searchCreate", { name }),
+                referenceSearchCreateHint: t("references.searchCreateHint"),
                 referenceSearchEmpty: t("references.searchEmpty"),
                 referenceSearchHint: t("references.searchHint"),
                 referenceSearchLabel: t("references.searchLabel"),

@@ -4,6 +4,7 @@ import {
   availableReferenceTargets,
   referenceTargetCreationName,
   referenceSearchCommand,
+  shouldCreateMissingReferenceTarget,
 } from "./referenceSearch";
 import type { InformationNode, NodeReference } from "./workspaceStore";
 
@@ -76,5 +77,12 @@ describe("referenceTargetCreationName", () => {
     );
     expect(referenceTargetCreationName(nodes, "   ")).toBeNull();
     expect(referenceTargetCreationName(nodes, " openai ")).toBeNull();
+  });
+});
+
+describe("shouldCreateMissingReferenceTarget", () => {
+  it("allows Enter confirmation but not Space continuation", () => {
+    expect(shouldCreateMissingReferenceTarget("select-and-close")).toBe(true);
+    expect(shouldCreateMissingReferenceTarget("select-and-continue")).toBe(false);
   });
 });

@@ -63,6 +63,7 @@ export const resources = {
       references: {
         list: "引用",
         searchCreate: "新建并引用“{{name}}”",
+        searchCreateHint: "回车：新建并引用　空格：保持搜索",
         searchEmpty: "没有可引用的节点",
         searchHint: "空格：引用并继续　回车：引用并关闭　Esc：取消",
         searchLabel: "搜索要引用的节点",
@@ -186,6 +187,7 @@ export const resources = {
       references: {
         list: "References",
         searchCreate: "Create and reference “{{name}}”",
+        searchCreateHint: "Enter: create and link · Space: keep searching",
         searchEmpty: "No available nodes to reference",
         searchHint: "Space: link and continue · Enter: link and close · Esc: cancel",
         searchLabel: "Search nodes to reference",

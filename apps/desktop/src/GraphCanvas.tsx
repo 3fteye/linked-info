@@ -53,6 +53,7 @@ import {
   availableReferenceTargets,
   referenceSearchCommand,
   referenceTargetCreationName,
+  shouldCreateMissingReferenceTarget,
 } from "./referenceSearch";
 import "@xyflow/react/dist/style.css";
 
@@ -101,6 +102,7 @@ interface GraphLabels {
   references: string;
   referenceSearchEmpty: string;
   referenceSearchCreate: (name: string) => string;
+  referenceSearchCreateHint: string;
   referenceSearchHint: string;
   referenceSearchLabel: string;
   referenceSearchPlaceholder: string;
@@ -162,7 +164,6 @@ type ContextMenuState =
 
 interface ReferenceSearchState {
   activeIndex: number;
-  createdNodeCount: number;
   dropPosition: { x: number; y: number };
   left: number;
   query: string;
@@ -814,18 +815,14 @@ export default function GraphCanvas({
   );
 
   const createReferenceSearchTarget = useCallback(
-    (closeAfterSelection: boolean) => {
+    () => {
       if (referenceSearch === null || referenceSearchCreationName === null) {
         return;
       }
-      const offset = referenceSearch.createdNodeCount * 36;
       const nodeId = onCreateReferencedNode(
         referenceSearch.sourceNodeId,
         referenceSearchCreationName,
-        {
-          x: referenceSearch.dropPosition.x + offset,
-          y: referenceSearch.dropPosition.y + offset,
-        },
+        referenceSearch.dropPosition,
       );
       if (nodeId === null) {
         return;
@@ -835,20 +832,7 @@ export default function GraphCanvas({
         referenceSearch.sourceNodeId,
         nodeId,
       );
-      if (closeAfterSelection) {
-        setReferenceSearch(null);
-        return;
-      }
-      setReferenceSearch({
-        ...referenceSearch,
-        activeIndex: 0,
-        createdNodeCount: referenceSearch.createdNodeCount + 1,
-        query: "",
-        selectedTargetNodeIds: [
-          ...referenceSearch.selectedTargetNodeIds,
-          nodeId,
-        ],
-      });
+      setReferenceSearch(null);
     },
     [onCreateReferencedNode, referenceSearch, referenceSearchCreationName],
   );
@@ -883,7 +867,6 @@ export default function GraphCanvas({
       const popoverHeight = 330;
       setReferenceSearch({
         activeIndex: 0,
-        createdNodeCount: 0,
         dropPosition: flowInstance.screenToFlowPosition({
           x: event.clientX,
           y: event.clientY,
@@ -1162,7 +1145,9 @@ export default function GraphCanvas({
                     command === "select-and-close",
                   );
                 } else if (referenceSearchCreationName !== null) {
-                  createReferenceSearchTarget(command === "select-and-close");
+                  if (shouldCreateMissingReferenceTarget(command)) {
+                    createReferenceSearchTarget();
+                  }
                 } else if (command === "select-and-close") {
                   setReferenceSearch(null);
                 }
@@ -1188,7 +1173,7 @@ export default function GraphCanvas({
                   className="reference-search-option reference-search-create-option"
                   data-active="true"
                   id="reference-search-create-option"
-                  onClick={() => createReferenceSearchTarget(false)}
+                  onClick={createReferenceSearchTarget}
                   role="option"
                   type="button"
                 >
@@ -1223,7 +1208,11 @@ export default function GraphCanvas({
               ))
             )}
           </div>
-          <p className="reference-search-hint">{labels.referenceSearchHint}</p>
+          <p className="reference-search-hint">
+            {referenceSearchCreationName === null
+              ? labels.referenceSearchHint
+              : labels.referenceSearchCreateHint}
+          </p>
         </div>
       )}
 

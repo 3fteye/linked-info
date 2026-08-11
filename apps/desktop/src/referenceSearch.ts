@@ -86,3 +86,9 @@ export function referenceSearchCommand(key: string): ReferenceSearchCommand | nu
       return null;
   }
 }
+
+export function shouldCreateMissingReferenceTarget(
+  command: ReferenceSearchCommand,
+): boolean {
+  return command === "select-and-close";
+}
