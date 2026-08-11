@@ -68,7 +68,7 @@ jobs:
       - name: Prepare Unix local LLM runtime
         if: matrix.platform != 'windows'
         shell: bash
-        run: ./.github/scripts/prepare-llama-runtime.sh
+        run: bash ./.github/scripts/prepare-llama-runtime.sh
 
       - name: Build desktop package
         if: matrix.platform != 'windows'
