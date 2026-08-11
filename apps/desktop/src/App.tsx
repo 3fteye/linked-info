@@ -83,6 +83,24 @@ import {
   type LocalEmbeddingProgress,
   type LocalEmbeddingRuntime,
 } from "./localEmbeddingModels";
+import {
+  prepareLlmReview,
+  validateLlmReviewResponse,
+  type LlmGateway,
+} from "./llmReview";
+import {
+  updateLlmSettings,
+  type LlmSettings,
+  type LlmSettingsStore,
+} from "./llmSettings";
+import {
+  localLlmModelDefinition,
+  localLlmModels,
+  type LocalLlmModelId,
+  type LocalLlmModelStatus,
+  type LocalLlmProgress,
+  type LocalLlmRuntime,
+} from "./localLlmModels";
 import "./App.css";
 
 type ViewId = "canvas" | "nodes" | "settings";
@@ -97,7 +115,10 @@ interface AppProps {
   embeddingGateway: EmbeddingGateway;
   embeddingVectorCache: EmbeddingVectorCache;
   embeddingSettingsStore: EmbeddingSettingsStore;
+  llmGateway: LlmGateway;
+  llmSettingsStore: LlmSettingsStore;
   localEmbeddingRuntime: LocalEmbeddingRuntime;
+  localLlmRuntime: LocalLlmRuntime;
   lifecycle: WorkspaceLifecycle;
   persistence: WorkspacePersistence;
 }
@@ -106,6 +127,10 @@ interface SmartReferenceResult {
   acceptedNodeIds: string[];
   automaticallyAddedNodeIds: string[];
   candidates: EmbeddingCandidate[];
+  llmEnabled: boolean;
+  llmNoMatch: boolean;
+  llmSelectedNodeIds: string[];
+  llmUncertainNodeIds: string[];
   relatedNodes: EmbeddingRelatedNode[];
   sourceNodeId: string;
   truncatedNodeCount: number;
@@ -197,7 +222,10 @@ function App({
   embeddingGateway,
   embeddingVectorCache,
   embeddingSettingsStore,
+  llmGateway,
+  llmSettingsStore,
   localEmbeddingRuntime,
+  localLlmRuntime,
   lifecycle,
   persistence,
 }: AppProps) {
@@ -234,6 +262,9 @@ function App({
   const [embeddingSettings, setEmbeddingSettings] = useState<EmbeddingSettings>(() =>
     embeddingSettingsStore.load(),
   );
+  const [llmSettings, setLlmSettings] = useState<LlmSettings>(() =>
+    llmSettingsStore.load(),
+  );
   const [remoteEmbeddingToken, setRemoteEmbeddingToken] = useState("");
   const [analyzingNodeId, setAnalyzingNodeId] = useState<string | null>(null);
   const [smartReferenceResult, setSmartReferenceResult] =
@@ -247,6 +278,15 @@ function App({
   const [preparingLocalModelId, setPreparingLocalModelId] =
     useState<LocalEmbeddingModelId | null>(null);
   const [cancellingLocalDownload, setCancellingLocalDownload] = useState(false);
+  const [localLlmProgress, setLocalLlmProgress] =
+    useState<LocalLlmProgress | null>(null);
+  const [localLlmModelStatuses, setLocalLlmModelStatuses] = useState<
+    LocalLlmModelStatus[]
+  >([]);
+  const [preparingLocalLlmModelId, setPreparingLocalLlmModelId] =
+    useState<LocalLlmModelId | null>(null);
+  const [cancellingLocalLlmDownload, setCancellingLocalLlmDownload] =
+    useState(false);
   const [vectorCacheStatus, setVectorCacheStatus] =
     useState<EmbeddingVectorCacheStatus | null>(null);
   const [vectorCacheBusy, setVectorCacheBusy] = useState(false);
@@ -300,6 +340,52 @@ function App({
       unsubscribe?.();
     };
   }, [localEmbeddingRuntime]);
+
+  useEffect(() => {
+    let active = true;
+    let unsubscribe: (() => void) | undefined;
+
+    function refreshModelStatuses() {
+      void localLlmRuntime
+        .inspectModels()
+        .then((statuses) => {
+          if (active) {
+            setLocalLlmModelStatuses(statuses);
+          }
+        })
+        .catch(() => undefined);
+    }
+
+    refreshModelStatuses();
+    void localLlmRuntime
+      .subscribe((progress) => {
+        if (!active) {
+          return;
+        }
+        setLocalLlmProgress(progress);
+        if (
+          progress.phase === "ready" ||
+          progress.phase === "cancelled" ||
+          progress.phase === "failed"
+        ) {
+          setCancellingLocalLlmDownload(false);
+          refreshModelStatuses();
+        }
+      })
+      .then((nextUnsubscribe) => {
+        if (active) {
+          unsubscribe = nextUnsubscribe;
+        } else {
+          nextUnsubscribe();
+        }
+      })
+      .catch(() => undefined);
+
+    return () => {
+      active = false;
+      unsubscribe?.();
+    };
+  }, [localLlmRuntime]);
 
   useEffect(() => {
     if (activeView !== "settings") {
@@ -508,6 +594,22 @@ function App({
     }
   }
 
+  function changeLlmConfiguration(patch: Partial<LlmSettings>) {
+    const next = updateLlmSettings(llmSettings, patch);
+    setLlmSettings(next);
+    setSmartReferenceResult(null);
+    setLocalLlmProgress(null);
+    if (!next.enabled) {
+      void localLlmRuntime.stop();
+    }
+    try {
+      llmSettingsStore.save(next);
+      setSmartReferenceStatus(null);
+    } catch {
+      setSmartReferenceStatus(t("smartReference.errors.settingsSaveFailed"));
+    }
+  }
+
   async function clearVectorCache() {
     if (vectorCacheBusy) {
       return;
@@ -530,7 +632,11 @@ function App({
   }
 
   async function analyzeNodeReferences(nodeId: string) {
-    if (analyzingNodeId !== null || preparingLocalModelId !== null) {
+    if (
+      analyzingNodeId !== null ||
+      preparingLocalModelId !== null ||
+      preparingLocalLlmModelId !== null
+    ) {
       return;
     }
     setAnalyzingNodeId(nodeId);
@@ -546,7 +652,31 @@ function App({
         embeddingSettings,
         remoteEmbeddingToken,
       );
+      let llmSelectedNodeIds: string[] = [];
+      let llmUncertainNodeIds: string[] = [];
+      let llmNoMatch = false;
+      if (llmSettings.enabled) {
+        const prepared = prepareLlmReview(
+          nodeId,
+          currentWorkspace.nodes,
+          currentWorkspace.references,
+          analysis,
+        );
+        if (prepared === null) {
+          llmNoMatch = true;
+        } else {
+          const response = await llmGateway.review(
+            { kind: "local", modelId: llmSettings.localModel },
+            prepared.request,
+          );
+          const decision = validateLlmReviewResponse(prepared, response);
+          llmSelectedNodeIds = decision.selectedNodeIds;
+          llmUncertainNodeIds = decision.uncertainNodeIds;
+          llmNoMatch = decision.noMatch;
+        }
+      }
       const automaticCandidateIds =
+        !llmSettings.enabled &&
         embeddingSettings.autoReferenceEnabled &&
         embeddingSettings.thresholdFingerprint ===
           smartReferenceScoringFingerprint(embeddingSettings)
@@ -584,6 +714,10 @@ function App({
         acceptedNodeIds: [...automaticallyAddedNodeIds],
         automaticallyAddedNodeIds,
         candidates: analysis.candidates,
+        llmEnabled: llmSettings.enabled,
+        llmNoMatch,
+        llmSelectedNodeIds,
+        llmUncertainNodeIds,
         relatedNodes: analysis.relatedNodes,
         sourceNodeId: nodeId,
         truncatedNodeCount: analysis.truncatedNodeCount,
@@ -596,7 +730,9 @@ function App({
         setSmartReferenceStatus(
           reason.includes("local embedding download cancelled")
             ? t("smartReference.download.cancelled")
-            : t("smartReference.errors.failed", { reason }),
+            : reason.includes("local LLM download cancelled")
+              ? t("smartReference.llm.download.cancelled")
+              : t("smartReference.errors.failed", { reason }),
         );
       }
     } finally {
@@ -605,7 +741,11 @@ function App({
   }
 
   async function prepareLocalEmbeddingModel(modelId: LocalEmbeddingModelId) {
-    if (analyzingNodeId !== null || preparingLocalModelId !== null) {
+    if (
+      analyzingNodeId !== null ||
+      preparingLocalModelId !== null ||
+      preparingLocalLlmModelId !== null
+    ) {
       return;
     }
     setPreparingLocalModelId(modelId);
@@ -623,6 +763,48 @@ function App({
       );
     } finally {
       setPreparingLocalModelId(null);
+    }
+  }
+
+  async function prepareLocalLlmModel(modelId: LocalLlmModelId) {
+    if (
+      analyzingNodeId !== null ||
+      preparingLocalModelId !== null ||
+      preparingLocalLlmModelId !== null
+    ) {
+      return;
+    }
+    setPreparingLocalLlmModelId(modelId);
+    setLocalLlmProgress(null);
+    setCancellingLocalLlmDownload(false);
+    setSmartReferenceStatus(null);
+    try {
+      await localLlmRuntime.prepareModel(modelId);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      setSmartReferenceStatus(
+        reason.includes("local LLM download cancelled")
+          ? t("smartReference.llm.download.cancelled")
+          : t("smartReference.llm.errors.modelPreparationFailed", { reason }),
+      );
+    } finally {
+      setPreparingLocalLlmModelId(null);
+    }
+  }
+
+  async function cancelLocalLlmDownload() {
+    if (cancellingLocalLlmDownload) {
+      return;
+    }
+    setCancellingLocalLlmDownload(true);
+    try {
+      await localLlmRuntime.cancelDownload();
+    } catch (error) {
+      setCancellingLocalLlmDownload(false);
+      const reason = error instanceof Error ? error.message : String(error);
+      setSmartReferenceStatus(
+        t("smartReference.llm.errors.cancelDownloadFailed", { reason }),
+      );
     }
   }
 
@@ -1166,11 +1348,19 @@ function App({
   const selectedLocalModelStatus = localModelStatuses.find(
     (status) => status.modelId === embeddingSettings.localModel,
   );
-  const localModelTaskRunning =
+  const localEmbeddingTaskRunning =
     preparingLocalModelId !== null ||
     (analyzingNodeId !== null && embeddingSettings.provider === "local");
+  const localLlmTaskRunning =
+    preparingLocalLlmModelId !== null ||
+    (analyzingNodeId !== null &&
+      llmSettings.enabled &&
+      localLlmProgress !== null &&
+      !["ready", "cancelled", "failed"].includes(localLlmProgress.phase));
+  const localModelTaskRunning =
+    localEmbeddingTaskRunning || localLlmTaskRunning;
   const localDownloadCancellable =
-    localModelTaskRunning && localEmbeddingProgress?.phase === "downloading";
+    localEmbeddingTaskRunning && localEmbeddingProgress?.phase === "downloading";
   const progressModel =
     localEmbeddingProgress === null
       ? selectedLocalModel
@@ -1179,6 +1369,20 @@ function App({
         ) ?? selectedLocalModel;
   const progressModelName = t(
     `smartReference.settings.models.${progressModel.translationKey}.name`,
+  );
+  const selectedLocalLlmModel = localLlmModelDefinition(llmSettings.localModel);
+  const selectedLocalLlmModelStatus = localLlmModelStatuses.find(
+    (status) => status.modelId === llmSettings.localModel,
+  );
+  const localLlmDownloadCancellable =
+    localLlmTaskRunning && localLlmProgress?.phase === "downloading";
+  const progressLlmModel =
+    localLlmProgress === null
+      ? selectedLocalLlmModel
+      : localLlmModels.find((model) => model.id === localLlmProgress.modelId) ??
+        selectedLocalLlmModel;
+  const progressLlmModelName = t(
+    `smartReference.llm.settings.models.${progressLlmModel.translationKey}.name`,
   );
 
   return (
@@ -1561,6 +1765,127 @@ function App({
                     <output>{embeddingSettings.autoReferenceThreshold.toFixed(2)}</output>
                   </label>
                   <small>{t("smartReference.settings.thresholdDescription")}</small>
+                  {llmSettings.enabled && (
+                    <small>{t("smartReference.llm.settings.automaticPaused")}</small>
+                  )}
+                </div>
+              </div>
+              <div className="setting-row data-setting-row smart-reference-setting-row">
+                <div className="setting-label">
+                  <BrainCircuit size={18} />
+                  <div className="setting-label-copy">
+                    <span>{t("smartReference.llm.settings.title")}</span>
+                    <small>{t("smartReference.llm.settings.description")}</small>
+                  </div>
+                </div>
+                <div className="automatic-reference-settings">
+                  <label className="switch-setting">
+                    <input
+                      checked={llmSettings.enabled}
+                      disabled={localModelTaskRunning || analyzingNodeId !== null}
+                      onChange={(event) =>
+                        changeLlmConfiguration({ enabled: event.target.checked })
+                      }
+                      type="checkbox"
+                    />
+                    <span>{t("smartReference.llm.settings.enable")}</span>
+                  </label>
+                  <div
+                    aria-label={t("smartReference.llm.settings.localModelChoice")}
+                    className="local-model-list"
+                    role="radiogroup"
+                  >
+                    {localLlmModels.map((model) => {
+                      const status = localLlmModelStatuses.find(
+                        (candidate) => candidate.modelId === model.id,
+                      );
+                      const translationBase = `smartReference.llm.settings.models.${model.translationKey}`;
+                      return (
+                        <label
+                          className="local-model-card"
+                          data-selected={llmSettings.localModel === model.id}
+                          key={model.id}
+                        >
+                          <input
+                            checked={llmSettings.localModel === model.id}
+                            disabled={localModelTaskRunning || analyzingNodeId !== null}
+                            name="local-llm-model"
+                            onChange={() =>
+                              changeLlmConfiguration({ localModel: model.id })
+                            }
+                            type="radio"
+                            value={model.id}
+                          />
+                          <span className="local-model-card-body">
+                            <span className="local-model-card-heading">
+                              <strong>{t(`${translationBase}.name`)}</strong>
+                              <em>{t("smartReference.settings.recommended")}</em>
+                              <small>
+                                {status?.loaded
+                                  ? t("smartReference.llm.settings.modelLoaded")
+                                  : status?.ready
+                                    ? t("smartReference.settings.modelReady")
+                                    : status !== undefined && status.cachedBytes > 0
+                                      ? t("smartReference.settings.modelPartial", {
+                                          cached: formatByteCount(status.cachedBytes),
+                                          total: formatByteCount(status.totalBytes),
+                                        })
+                                      : t("smartReference.settings.modelNotDownloaded")}
+                              </small>
+                            </span>
+                            <span className="local-model-description">
+                              {t(`${translationBase}.description`)}
+                            </span>
+                            <span className="local-model-metadata">
+                              {t("smartReference.llm.settings.modelMetadata", {
+                                size: formatByteCount(model.downloadBytes),
+                                quantization: model.quantization,
+                                tokens: model.contextTokens,
+                                license: model.license,
+                                runtime: model.runtime,
+                              })}
+                            </span>
+                            <span className="local-model-limitation">
+                              {t(`${translationBase}.limitation`)}
+                            </span>
+                          </span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                  {selectedLocalLlmModelStatus?.runtimeAvailable === false && (
+                    <small>{t("smartReference.llm.settings.runtimeUnavailable")}</small>
+                  )}
+                  <div className="local-model-actions">
+                    <button
+                      className="secondary-button"
+                      disabled={
+                        localModelTaskRunning ||
+                        analyzingNodeId !== null ||
+                        selectedLocalLlmModelStatus?.ready === true ||
+                        selectedLocalLlmModelStatus?.runtimeAvailable === false
+                      }
+                      onClick={() =>
+                        void prepareLocalLlmModel(llmSettings.localModel)
+                      }
+                      type="button"
+                    >
+                      <Download aria-hidden="true" size={15} />
+                      {selectedLocalLlmModelStatus?.ready
+                        ? t("smartReference.settings.modelReady")
+                        : selectedLocalLlmModelStatus !== undefined &&
+                            selectedLocalLlmModelStatus.cachedBytes > 0
+                          ? t("smartReference.settings.continueDownload")
+                          : t("smartReference.settings.downloadModel")}
+                    </button>
+                    <small>
+                      {t("smartReference.settings.modelSource", {
+                        repository: selectedLocalLlmModel.repository,
+                        revision: selectedLocalLlmModel.revision.slice(0, 8),
+                      })}
+                    </small>
+                  </div>
+                  <small>{t("smartReference.llm.settings.confirmationRequired")}</small>
                 </div>
               </div>
               <div className="setting-row data-setting-row smart-reference-setting-row">
@@ -1757,7 +2082,7 @@ function App({
         </div>
       </main>
 
-      {localModelTaskRunning && (
+      {localEmbeddingTaskRunning && !localLlmTaskRunning && (
         <div className="smart-reference-progress" role="status">
           <BrainCircuit aria-hidden="true" size={17} />
           <div className="smart-reference-progress-copy">
@@ -1839,7 +2164,82 @@ function App({
         </div>
       )}
 
-      {analyzingNodeId !== null && embeddingSettings.provider === "remote" && (
+      {localLlmTaskRunning && (
+        <div className="smart-reference-progress" role="status">
+          <BrainCircuit aria-hidden="true" size={17} />
+          <div className="smart-reference-progress-copy">
+            <strong>
+              {localLlmProgress === null
+                ? t("smartReference.llm.download.preparing", {
+                    model: progressLlmModelName,
+                  })
+                : t(
+                    `smartReference.llm.download.phases.${localLlmProgress.phase}`,
+                    { model: progressLlmModelName },
+                  )}
+            </strong>
+            {localLlmProgress?.fileName !== null &&
+              localLlmProgress?.fileName !== undefined && (
+                <span>{localLlmProgress.fileName}</span>
+              )}
+            {localLlmProgress !== null && localLlmProgress.totalBytes > 0 && (
+              <>
+                <progress
+                  aria-label={t("smartReference.download.progressLabel")}
+                  max={localLlmProgress.totalBytes}
+                  value={localLlmProgress.downloadedBytes}
+                />
+                <span className="smart-reference-progress-metrics">
+                  {t("smartReference.download.bytes", {
+                    downloaded: formatByteCount(localLlmProgress.downloadedBytes),
+                    total: formatByteCount(localLlmProgress.totalBytes),
+                    percent: Math.min(
+                      100,
+                      Math.floor(
+                        (localLlmProgress.downloadedBytes /
+                          localLlmProgress.totalBytes) *
+                          100,
+                      ),
+                    ),
+                  })}
+                  {localLlmProgress.bytesPerSecond !== null && (
+                    <>
+                      {" · "}
+                      {t("smartReference.download.speed", {
+                        speed: formatByteCount(localLlmProgress.bytesPerSecond),
+                      })}
+                    </>
+                  )}
+                  {localLlmProgress.etaSeconds !== null && (
+                    <>
+                      {" · "}
+                      {t("smartReference.download.eta", {
+                        eta: formatDuration(localLlmProgress.etaSeconds),
+                      })}
+                    </>
+                  )}
+                </span>
+              </>
+            )}
+          </div>
+          {localLlmDownloadCancellable && (
+            <button
+              className="secondary-button smart-reference-cancel-download"
+              disabled={cancellingLocalLlmDownload}
+              onClick={() => void cancelLocalLlmDownload()}
+              type="button"
+            >
+              {cancellingLocalLlmDownload
+                ? t("smartReference.download.cancelling")
+                : t("smartReference.download.cancel")}
+            </button>
+          )}
+        </div>
+      )}
+
+      {analyzingNodeId !== null &&
+        embeddingSettings.provider === "remote" &&
+        !localLlmTaskRunning && (
         <div className="smart-reference-progress" role="status">
           <Cloud aria-hidden="true" size={17} />
           <div>
@@ -1915,9 +2315,116 @@ function App({
               </p>
             )}
             <div className="smart-reference-scroll">
+              {smartReferenceResult.llmEnabled && (
+                <section className="smart-reference-result-section">
+                  <h3>{t("smartReference.llm.selectedTitle")}</h3>
+                  <p>{t("smartReference.llm.selectedDescription")}</p>
+                  {smartReferenceResult.llmNoMatch ? (
+                    <p className="smart-reference-section-empty">
+                      {t("smartReference.llm.noMatch")}
+                    </p>
+                  ) : smartReferenceResult.llmSelectedNodeIds.length === 0 ? (
+                    <p className="smart-reference-section-empty">
+                      {t("smartReference.llm.selectedEmpty")}
+                    </p>
+                  ) : (
+                    <div className="smart-reference-results">
+                      {smartReferenceResult.llmSelectedNodeIds.map((nodeId) => {
+                        const node = workspace.nodes.find(
+                          (candidate) => candidate.id === nodeId,
+                        );
+                        if (node === undefined) {
+                          return null;
+                        }
+                        const accepted =
+                          smartReferenceResult.acceptedNodeIds.includes(nodeId);
+                        return (
+                          <div className="smart-reference-candidate" key={nodeId}>
+                            <div>
+                              <strong>
+                                {nodeFilterLabel(
+                                  node,
+                                  t("nodes.unnamed"),
+                                  t("nodes.noContent"),
+                                )}
+                              </strong>
+                              <span>{t("smartReference.llm.selectedByModel")}</span>
+                            </div>
+                            <button
+                              className="secondary-button"
+                              disabled={accepted}
+                              onClick={() => acceptSmartReference(nodeId)}
+                              type="button"
+                            >
+                              {accepted
+                                ? t("smartReference.referenced")
+                                : t("smartReference.addReference")}
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </section>
+              )}
+              {smartReferenceResult.llmEnabled &&
+                smartReferenceResult.llmUncertainNodeIds.length > 0 && (
+                  <section className="smart-reference-result-section">
+                    <h3>{t("smartReference.llm.uncertainTitle")}</h3>
+                    <p>{t("smartReference.llm.uncertainDescription")}</p>
+                    <div className="smart-reference-results">
+                      {smartReferenceResult.llmUncertainNodeIds.map((nodeId) => {
+                        const node = workspace.nodes.find(
+                          (candidate) => candidate.id === nodeId,
+                        );
+                        if (node === undefined) {
+                          return null;
+                        }
+                        const accepted =
+                          smartReferenceResult.acceptedNodeIds.includes(nodeId);
+                        return (
+                          <div className="smart-reference-candidate" key={nodeId}>
+                            <div>
+                              <strong>
+                                {nodeFilterLabel(
+                                  node,
+                                  t("nodes.unnamed"),
+                                  t("nodes.noContent"),
+                                )}
+                              </strong>
+                              <span>{t("smartReference.llm.uncertainByModel")}</span>
+                            </div>
+                            <button
+                              className="secondary-button"
+                              disabled={accepted}
+                              onClick={() => acceptSmartReference(nodeId)}
+                              type="button"
+                            >
+                              {accepted
+                                ? t("smartReference.referenced")
+                                : t("smartReference.addReference")}
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </section>
+                )}
               <section className="smart-reference-result-section">
-                <h3>{t("smartReference.recommendationsTitle")}</h3>
-                <p>{t("smartReference.recommendationsDescription")}</p>
+                <h3>
+                  {t(
+                    smartReferenceResult.llmEnabled
+                      ? "smartReference.llm.baseCandidatesTitle"
+                      : "smartReference.recommendationsTitle",
+                  )}
+                </h3>
+                <p>
+                  {t(
+                    smartReferenceResult.llmEnabled
+                      ? "smartReference.llm.baseCandidatesDescription"
+                      : "smartReference.recommendationsDescription",
+                  )}
+                </p>
                 {smartReferenceResult.candidates.length === 0 ? (
                   <p className="smart-reference-section-empty">
                     {t("smartReference.empty")}

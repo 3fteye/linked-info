@@ -60,6 +60,16 @@ jobs:
         working-directory: apps/desktop
         run: pnpm install --frozen-lockfile
 
+      - name: Prepare Windows local LLM runtime
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: ./.github/scripts/prepare-llama-runtime.ps1
+
+      - name: Prepare Unix local LLM runtime
+        if: matrix.platform != 'windows'
+        shell: bash
+        run: ./.github/scripts/prepare-llama-runtime.sh
+
       - name: Build desktop package
         if: matrix.platform != 'windows'
         working-directory: apps/desktop
@@ -70,6 +80,11 @@ jobs:
         working-directory: apps/desktop
         run: pnpm tauri build --no-bundle
 
+      - name: Assemble Windows portable runtime
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: Copy-Item -LiteralPath apps/desktop/src-tauri/resources/llama-runtime -Destination target/release/llama-runtime -Recurse -Force
+
       - name: Upload desktop package
         uses: actions/upload-artifact@v7
         with:
@@ -77,4 +92,5 @@ jobs:
           path: |
             target/release/bundle/**
             target/release/linked-info-desktop.exe
+            target/release/llama-runtime/**
           if-no-files-found: error

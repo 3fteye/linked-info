@@ -19,6 +19,13 @@ import {
 } from "./embeddingBridge";
 import { unavailableEmbeddingVectorCache } from "./embeddingCache";
 import { localEmbeddingSettingsStore } from "./embeddingSettings";
+import {
+  tauriLlmGateway,
+  tauriLocalLlmRuntime,
+  unavailableLlmGateway,
+  unavailableLocalLlmRuntime,
+} from "./llmBridge";
+import { localLlmSettingsStore } from "./llmSettings";
 
 document.addEventListener(
   "contextmenu",
@@ -49,6 +56,10 @@ const embeddingVectorCache = runningInTauri
 const localEmbeddingRuntime = runningInTauri
   ? tauriLocalEmbeddingRuntime
   : unavailableLocalEmbeddingRuntime;
+const llmGateway = runningInTauri ? tauriLlmGateway : unavailableLlmGateway;
+const localLlmRuntime = runningInTauri
+  ? tauriLocalLlmRuntime
+  : unavailableLocalLlmRuntime;
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
@@ -56,7 +67,10 @@ ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
       embeddingGateway={embeddingGateway}
       embeddingVectorCache={embeddingVectorCache}
       embeddingSettingsStore={localEmbeddingSettingsStore}
+      llmGateway={llmGateway}
+      llmSettingsStore={localLlmSettingsStore}
       localEmbeddingRuntime={localEmbeddingRuntime}
+      localLlmRuntime={localLlmRuntime}
       lifecycle={lifecycle}
       persistence={persistence}
     />

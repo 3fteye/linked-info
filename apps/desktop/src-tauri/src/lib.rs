@@ -1,4 +1,5 @@
 mod embedding;
+mod llm;
 mod vector_cache;
 mod workspace_file;
 
@@ -6,7 +7,8 @@ mod workspace_file;
 use tauri::Manager;
 
 #[tauri::command]
-fn exit_application(app: tauri::AppHandle) {
+fn exit_application(app: tauri::AppHandle, state: tauri::State<'_, llm::LlmState>) {
+    state.shutdown();
     app.exit(0);
 }
 
@@ -27,6 +29,7 @@ pub fn run() {
 
     builder
         .manage(embedding::EmbeddingState::default())
+        .manage(llm::LlmState::default())
         .manage(vector_cache::VectorCacheState::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
@@ -36,6 +39,11 @@ pub fn run() {
             embedding::embed_remote_texts,
             embedding::inspect_local_embedding_models,
             embedding::prepare_local_embedding_model,
+            llm::cancel_local_llm_download,
+            llm::inspect_local_llm_models,
+            llm::prepare_local_llm_model,
+            llm::review_local_references,
+            llm::stop_local_llm,
             vector_cache::clear_embedding_vector_cache,
             vector_cache::inspect_embedding_vector_cache,
             vector_cache::read_embedding_vector_cache,

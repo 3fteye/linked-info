@@ -1,0 +1,22 @@
+{
+  "release": "b10344",
+  "source": "https://github.com/ggml-org/llama.cpp/releases/tag/b10344",
+  "assets": {
+    "windows-x64": {
+      "name": "llama-b10344-bin-win-cpu-x64.zip",
+      "sha256": "c0cec8825843957cae6620f927eb6eb9f7f4680da3206910932ea9075f91b405"
+    },
+    "macos-arm64": {
+      "name": "llama-b10344-bin-macos-arm64.tar.gz",
+      "sha256": "24bf4348ddc6d1d9b465105ed8ae371e326c576623ac612fbff73532181c8f13"
+    },
+    "macos-x64": {
+      "name": "llama-b10344-bin-macos-x64.tar.gz",
+      "sha256": "4df4fe900423ec147552724ad4ebbbbd03c8991dcd8f32c1ea20446c5d942c13"
+    },
+    "linux-x64": {
+      "name": "llama-b10344-bin-ubuntu-x64.tar.gz",
+      "sha256": "01b90b0764821d0e53b985730eea3837e29a976ee00e783e18837937b93fc3f1"
+    }
+  }
+}
