@@ -62,6 +62,7 @@ import {
   EmbeddingAnalyzer,
   type EmbeddingCandidate,
   type EmbeddingGateway,
+  type EmbeddingRelatedNode,
 } from "./embeddingService";
 import type {
   EmbeddingVectorCache,
@@ -69,6 +70,7 @@ import type {
 } from "./embeddingCache";
 import {
   embeddingSettingsFingerprint,
+  smartReferenceScoringFingerprint,
   updateEmbeddingSettings,
   type EmbeddingSettings,
   type EmbeddingSettingsStore,
@@ -104,6 +106,7 @@ interface SmartReferenceResult {
   acceptedNodeIds: string[];
   automaticallyAddedNodeIds: string[];
   candidates: EmbeddingCandidate[];
+  relatedNodes: EmbeddingRelatedNode[];
   sourceNodeId: string;
   truncatedNodeCount: number;
 }
@@ -546,7 +549,7 @@ function App({
       const automaticCandidateIds =
         embeddingSettings.autoReferenceEnabled &&
         embeddingSettings.thresholdFingerprint ===
-          embeddingSettingsFingerprint(embeddingSettings)
+          smartReferenceScoringFingerprint(embeddingSettings)
           ? analysis.candidates
               .filter(
                 (candidate) =>
@@ -581,6 +584,7 @@ function App({
         acceptedNodeIds: [...automaticallyAddedNodeIds],
         automaticallyAddedNodeIds,
         candidates: analysis.candidates,
+        relatedNodes: analysis.relatedNodes,
         sourceNodeId: nodeId,
         truncatedNodeCount: analysis.truncatedNodeCount,
       });
@@ -1910,58 +1914,112 @@ function App({
                 })}
               </p>
             )}
-            {smartReferenceResult.candidates.length === 0 ? (
-              <p className="smart-reference-empty">{t("smartReference.empty")}</p>
-            ) : (
-              <div className="smart-reference-results">
-                {smartReferenceResult.candidates.slice(0, 24).map((candidate) => {
-                  const candidateNode = workspace.nodes.find(
-                    (node) => node.id === candidate.nodeId,
-                  );
-                  if (candidateNode === undefined) {
-                    return null;
-                  }
-                  const accepted = smartReferenceResult.acceptedNodeIds.includes(
-                    candidate.nodeId,
-                  );
-                  return (
-                    <div className="smart-reference-candidate" key={candidate.nodeId}>
-                      <div>
-                        <strong>
-                          {nodeFilterLabel(
-                            candidateNode,
-                            t("nodes.unnamed"),
-                            t("nodes.noContent"),
-                          )}
-                        </strong>
-                        <span>
-                          {t("smartReference.similarity", {
-                            score: candidate.score.toFixed(3),
-                          })}
-                        </span>
-                      </div>
-                      <button
-                        className="secondary-button"
-                        disabled={accepted}
-                        onClick={() => acceptSmartReference(candidate.nodeId)}
-                        type="button"
-                      >
-                        {accepted
-                          ? t("smartReference.referenced")
-                          : t("smartReference.addReference")}
-                      </button>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-            {smartReferenceResult.candidates.length > 24 && (
-              <p className="smart-reference-limit">
-                {t("smartReference.resultLimit", {
-                  count: smartReferenceResult.candidates.length,
-                })}
-              </p>
-            )}
+            <div className="smart-reference-scroll">
+              <section className="smart-reference-result-section">
+                <h3>{t("smartReference.recommendationsTitle")}</h3>
+                <p>{t("smartReference.recommendationsDescription")}</p>
+                {smartReferenceResult.candidates.length === 0 ? (
+                  <p className="smart-reference-section-empty">
+                    {t("smartReference.empty")}
+                  </p>
+                ) : (
+                  <div className="smart-reference-results">
+                    {smartReferenceResult.candidates.slice(0, 24).map((candidate) => {
+                      const candidateNode = workspace.nodes.find(
+                        (node) => node.id === candidate.nodeId,
+                      );
+                      if (candidateNode === undefined) {
+                        return null;
+                      }
+                      const accepted = smartReferenceResult.acceptedNodeIds.includes(
+                        candidate.nodeId,
+                      );
+                      return (
+                        <div className="smart-reference-candidate" key={candidate.nodeId}>
+                          <div>
+                            <strong>
+                              {nodeFilterLabel(
+                                candidateNode,
+                                t("nodes.unnamed"),
+                                t("nodes.noContent"),
+                              )}
+                            </strong>
+                            <span>
+                              {t("smartReference.recommendationScore", {
+                                score: candidate.score.toFixed(3),
+                                count: candidate.supportingNodeIds.length,
+                              })}
+                            </span>
+                          </div>
+                          <button
+                            className="secondary-button"
+                            disabled={accepted}
+                            onClick={() => acceptSmartReference(candidate.nodeId)}
+                            type="button"
+                          >
+                            {accepted
+                              ? t("smartReference.referenced")
+                              : t("smartReference.addReference")}
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+                {smartReferenceResult.candidates.length > 24 && (
+                  <p className="smart-reference-limit">
+                    {t("smartReference.resultLimit", {
+                      count: smartReferenceResult.candidates.length,
+                    })}
+                  </p>
+                )}
+              </section>
+              <section className="smart-reference-result-section">
+                <h3>{t("smartReference.relatedTitle")}</h3>
+                <p>{t("smartReference.relatedDescription")}</p>
+                {smartReferenceResult.relatedNodes.length === 0 ? (
+                  <p className="smart-reference-section-empty">
+                    {t("smartReference.relatedEmpty")}
+                  </p>
+                ) : (
+                  <div className="smart-reference-results smart-reference-related-results">
+                    {smartReferenceResult.relatedNodes.slice(0, 8).map((related) => {
+                      const relatedNode = workspace.nodes.find(
+                        (node) => node.id === related.nodeId,
+                      );
+                      if (relatedNode === undefined) {
+                        return null;
+                      }
+                      return (
+                        <div className="smart-reference-candidate" key={related.nodeId}>
+                          <div>
+                            <strong>
+                              {nodeFilterLabel(
+                                relatedNode,
+                                t("nodes.unnamed"),
+                                t("nodes.noContent"),
+                              )}
+                            </strong>
+                            <span>
+                              {t("smartReference.similarity", {
+                                score: related.similarity.toFixed(3),
+                              })}
+                            </span>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+                {smartReferenceResult.relatedNodes.length > 8 && (
+                  <p className="smart-reference-limit">
+                    {t("smartReference.relatedLimit", {
+                      count: smartReferenceResult.relatedNodes.length,
+                    })}
+                  </p>
+                )}
+              </section>
+            </div>
             <footer>
               <small>{t("smartReference.scoreDescription")}</small>
               <button

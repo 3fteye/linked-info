@@ -55,10 +55,17 @@ export class EmbeddingAnalysisFailure extends Error {
 export interface EmbeddingCandidate {
   nodeId: string;
   score: number;
+  supportingNodeIds: string[];
+}
+
+export interface EmbeddingRelatedNode {
+  nodeId: string;
+  similarity: number;
 }
 
 export interface EmbeddingAnalysis {
   candidates: EmbeddingCandidate[];
+  relatedNodes: EmbeddingRelatedNode[];
   truncatedNodeCount: number;
 }
 
@@ -73,6 +80,8 @@ const chunkOverlap = 60;
 const maximumChunksPerNode = 8;
 const maximumEmbeddingBatchSize = 64;
 const maximumPersistentCacheBatchSize = 256;
+const maximumReferenceEvidenceNodes = 8;
+const referenceEvidenceTemperature = 0.05;
 const textEncoder = new TextEncoder();
 
 function bytesToHex(bytes: Uint8Array): string {
@@ -172,6 +181,107 @@ function chunksForNode(node: InformationNode): NodeChunks | null {
   return { nodeId: node.id, ...chunked };
 }
 
+export function propagateReferenceCandidates(
+  sourceNodeId: string,
+  relatedNodes: EmbeddingRelatedNode[],
+  references: NodeReference[],
+  validNodeIds: ReadonlySet<string>,
+): EmbeddingCandidate[] {
+  const outgoingTargets = new Map<string, Set<string>>();
+  for (const reference of references) {
+    if (!validNodeIds.has(reference.sourceNodeId) || !validNodeIds.has(reference.targetNodeId)) {
+      continue;
+    }
+    const targets = outgoingTargets.get(reference.sourceNodeId) ?? new Set<string>();
+    targets.add(reference.targetNodeId);
+    outgoingTargets.set(reference.sourceNodeId, targets);
+  }
+  const existingTargets = outgoingTargets.get(sourceNodeId) ?? new Set<string>();
+  const eligibleEvidence = relatedNodes
+    .filter(
+      (related) =>
+        !existingTargets.has(related.nodeId) &&
+        (outgoingTargets.get(related.nodeId)?.size ?? 0) > 0,
+    );
+  const seed = eligibleEvidence[0];
+  if (seed === undefined) {
+    return [];
+  }
+
+  const evidence = [seed];
+  const evidenceTargets = new Set(outgoingTargets.get(seed.nodeId));
+  for (const related of eligibleEvidence.slice(1)) {
+    if (evidence.length >= maximumReferenceEvidenceNodes) {
+      break;
+    }
+    const targets = outgoingTargets.get(related.nodeId) ?? new Set<string>();
+    if (![...targets].some((targetNodeId) => evidenceTargets.has(targetNodeId))) {
+      continue;
+    }
+    evidence.push(related);
+    targets.forEach((targetNodeId) => evidenceTargets.add(targetNodeId));
+  }
+
+  const bestSimilarity = evidence[0].similarity;
+  const weightedEvidence = evidence.map((related) => ({
+    ...related,
+    weight: Math.exp(
+      (related.similarity - bestSimilarity) / referenceEvidenceTemperature,
+    ),
+  }));
+  const totalWeight = weightedEvidence.reduce(
+    (sum, related) => sum + related.weight,
+    0,
+  );
+  if (!Number.isFinite(totalWeight) || totalWeight <= 0) {
+    throw new EmbeddingAnalysisFailure("invalidEmbeddingResponse");
+  }
+
+  const votes = new Map<
+    string,
+    { supportingNodeIds: string[]; weight: number }
+  >();
+  for (const related of weightedEvidence) {
+    for (const targetNodeId of outgoingTargets.get(related.nodeId) ?? []) {
+      if (
+        targetNodeId === sourceNodeId ||
+        existingTargets.has(targetNodeId)
+      ) {
+        continue;
+      }
+      const vote = votes.get(targetNodeId) ?? {
+        supportingNodeIds: [],
+        weight: 0,
+      };
+      vote.weight += related.weight;
+      vote.supportingNodeIds.push(related.nodeId);
+      votes.set(targetNodeId, vote);
+    }
+  }
+
+  const candidates = [...votes.entries()].map(([nodeId, vote]) => {
+    const repeatedSupportReliability = Math.min(
+      1,
+      vote.supportingNodeIds.length / 2,
+    );
+    return {
+      nodeId,
+      score: Math.min(
+        1,
+        Math.max(0, (vote.weight / totalWeight) * repeatedSupportReliability),
+      ),
+      supportingNodeIds: vote.supportingNodeIds,
+    };
+  });
+  candidates.sort(
+    (left, right) =>
+      right.score - left.score ||
+      right.supportingNodeIds.length - left.supportingNodeIds.length ||
+      left.nodeId.localeCompare(right.nodeId),
+  );
+  return candidates;
+}
+
 export class EmbeddingAnalyzer {
   private readonly memoryCache: EmbeddingMemoryLru;
 
@@ -197,17 +307,16 @@ export class EmbeddingAnalyzer {
       throw new EmbeddingAnalysisFailure("sourceEmpty");
     }
 
-    const existingTargets = new Set(
-      references
-        .filter((reference) => reference.sourceNodeId === sourceNodeId)
-        .map((reference) => reference.targetNodeId),
-    );
-    const candidates = nodes
-      .filter((node) => node.id !== sourceNodeId && !existingTargets.has(node.id))
+    const comparableNodes = nodes
+      .filter((node) => node.id !== sourceNodeId)
       .map(chunksForNode)
       .filter((node): node is NodeChunks => node !== null);
-    if (candidates.length === 0) {
-      return { candidates: [], truncatedNodeCount: source.truncated ? 1 : 0 };
+    if (comparableNodes.length === 0) {
+      return {
+        candidates: [],
+        relatedNodes: [],
+        truncatedNodeCount: source.truncated ? 1 : 0,
+      };
     }
 
     const sourceVectors = await this.embeddingsFor(
@@ -215,8 +324,8 @@ export class EmbeddingAnalyzer {
       settings,
       remoteToken,
     );
-    const documentInputs = candidates.flatMap((candidate) =>
-      candidate.chunks.map((text) => ({ role: "document" as const, text })),
+    const documentInputs = comparableNodes.flatMap((node) =>
+      node.chunks.map((text) => ({ role: "document" as const, text })),
     );
     const documentVectors = await this.embeddingsFor(
       documentInputs,
@@ -225,23 +334,34 @@ export class EmbeddingAnalyzer {
     );
 
     let documentIndex = 0;
-    const ranked = candidates.map((candidate) => {
+    const relatedNodes = comparableNodes.map<EmbeddingRelatedNode>((node) => {
       let bestScore = -1;
-      for (let chunkIndex = 0; chunkIndex < candidate.chunks.length; chunkIndex += 1) {
+      for (let chunkIndex = 0; chunkIndex < node.chunks.length; chunkIndex += 1) {
         const documentVector = documentVectors[documentIndex];
         documentIndex += 1;
         for (const sourceVector of sourceVectors) {
           bestScore = Math.max(bestScore, cosineSimilarity(sourceVector, documentVector));
         }
       }
-      return { nodeId: candidate.nodeId, score: bestScore };
+      return { nodeId: node.nodeId, similarity: bestScore };
     });
 
-    ranked.sort((left, right) => right.score - left.score || left.nodeId.localeCompare(right.nodeId));
+    relatedNodes.sort(
+      (left, right) =>
+        right.similarity - left.similarity ||
+        left.nodeId.localeCompare(right.nodeId),
+    );
     return {
-      candidates: ranked,
+      candidates: propagateReferenceCandidates(
+        sourceNodeId,
+        relatedNodes,
+        references,
+        new Set(nodes.map((node) => node.id)),
+      ),
+      relatedNodes,
       truncatedNodeCount:
-        Number(source.truncated) + candidates.filter((candidate) => candidate.truncated).length,
+        Number(source.truncated) +
+        comparableNodes.filter((node) => node.truncated).length,
     };
   }
 

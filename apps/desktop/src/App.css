@@ -1395,7 +1395,6 @@ h1 {
 
 .smart-reference-summary,
 .smart-reference-warning,
-.smart-reference-empty,
 .smart-reference-limit {
   margin-top: 12px;
   font-size: 12px;
@@ -1411,18 +1410,44 @@ h1 {
   color: #76613f;
 }
 
-.smart-reference-empty {
-  min-height: 100px;
+.smart-reference-scroll {
+  max-height: min(500px, calc(100vh - 260px));
+  margin-top: 14px;
+  padding-right: 2px;
+  overflow: auto;
+}
+
+.smart-reference-result-section + .smart-reference-result-section {
+  margin-top: 18px;
+}
+
+.smart-reference-result-section h3 {
+  margin: 0;
+  color: #303632;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.smart-reference-result-section > p {
+  margin-top: 5px;
+  color: #68716b;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.smart-reference-section-empty {
+  min-height: 54px;
   display: grid;
   place-items: center;
+  padding: 12px;
+  border-top: 1px solid #ecefeb;
   color: #747b75;
+  text-align: center;
 }
 
 .smart-reference-results {
   display: grid;
-  max-height: min(500px, calc(100vh - 260px));
-  margin-top: 14px;
-  overflow: auto;
+  margin-top: 8px;
   border-top: 1px solid #ecefeb;
 }
 
@@ -1458,6 +1483,10 @@ h1 {
 
 .smart-reference-candidate button {
   flex: none;
+}
+
+.smart-reference-related-results .smart-reference-candidate {
+  min-height: 50px;
 }
 
 .smart-reference-dialog > footer {

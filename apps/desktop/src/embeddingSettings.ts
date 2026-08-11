@@ -27,7 +27,7 @@ export const defaultEmbeddingSettings: EmbeddingSettings = {
   remoteEndpoint: "",
   remoteModel: "",
   autoReferenceEnabled: false,
-  autoReferenceThreshold: 0.86,
+  autoReferenceThreshold: 0.6,
   thresholdFingerprint: null,
 };
 
@@ -56,6 +56,15 @@ export function embeddingSettingsFingerprint(settings: EmbeddingSettings): strin
   ]);
 }
 
+export function smartReferenceScoringFingerprint(
+  settings: EmbeddingSettings,
+): string {
+  return JSON.stringify([
+    embeddingSettingsFingerprint(settings),
+    "graph-reference-propagation-v1",
+  ]);
+}
+
 export function parseEmbeddingSettings(value: unknown): EmbeddingSettings {
   if (typeof value !== "object" || value === null) {
     return { ...defaultEmbeddingSettings };
@@ -63,7 +72,7 @@ export function parseEmbeddingSettings(value: unknown): EmbeddingSettings {
 
   const candidate = value as Partial<EmbeddingSettings>;
   const provider = candidate.provider === "remote" ? "remote" : "local";
-  return {
+  const parsed: EmbeddingSettings = {
     provider,
     localModel: isLocalEmbeddingModelId(candidate.localModel)
       ? candidate.localModel
@@ -83,6 +92,18 @@ export function parseEmbeddingSettings(value: unknown): EmbeddingSettings {
         ? candidate.thresholdFingerprint.slice(0, 2560)
         : null,
   };
+  if (
+    (parsed.autoReferenceEnabled || parsed.thresholdFingerprint !== null) &&
+    parsed.thresholdFingerprint !== smartReferenceScoringFingerprint(parsed)
+  ) {
+    return {
+      ...parsed,
+      autoReferenceEnabled: false,
+      autoReferenceThreshold: defaultEmbeddingSettings.autoReferenceThreshold,
+      thresholdFingerprint: null,
+    };
+  }
+  return parsed;
 }
 
 export function updateEmbeddingSettings(
@@ -102,10 +123,10 @@ export function updateEmbeddingSettings(
   }
 
   if (patch.autoReferenceThreshold !== undefined) {
-    next.thresholdFingerprint = embeddingSettingsFingerprint(next);
+    next.thresholdFingerprint = smartReferenceScoringFingerprint(next);
   }
   if (next.autoReferenceEnabled && next.thresholdFingerprint === null) {
-    next.thresholdFingerprint = embeddingSettingsFingerprint(next);
+    next.thresholdFingerprint = smartReferenceScoringFingerprint(next);
   }
   return next;
 }

@@ -6,6 +6,7 @@ import {
   EmbeddingAnalysisFailure,
   EmbeddingAnalyzer,
   nodeEmbeddingText,
+  propagateReferenceCandidates,
   type EmbeddingGateway,
   type EmbeddingInput,
 } from "./embeddingService";
@@ -84,28 +85,132 @@ describe("embedding analysis", () => {
     expect(result.chunks[result.chunks.length - 1]).toContain("尾部");
   });
 
-  it("ranks semantic candidates and excludes existing references", async () => {
-    const analyzer = new EmbeddingAnalyzer(gateway);
+  it("uses similar records as evidence and recommends their references", async () => {
+    const accountGateway: EmbeddingGateway = {
+      async embedLocal(_modelId, inputs) {
+        return inputs.map((input) =>
+          input.text.includes("账号") ? [1, 0] : [0, 1],
+        );
+      },
+      async embedRemote(_configuration, inputs) {
+        return inputs.map((input) =>
+          input.text.includes("账号") ? [1, 0] : [0, 1],
+        );
+      },
+    };
+    const analyzer = new EmbeddingAnalyzer(accountGateway);
     const result = await analyzer.analyze(
       "source",
       [
-        node("source", "OpenAI 账号", null),
-        node("related", "模型订阅", null),
-        node("unrelated", "购物清单", null),
-        node("existing", "OpenAI", null),
-        node("empty", null, null),
+        node("source", "新账号", null),
+        node("account-a", "账号 A", null),
+        node("account-b", "账号 B", null),
+        node("shopping-record", "购物清单", null),
+        node("gmail", "Gmail", null),
+        node("openai", "OpenAI", null),
+        node("shopping", "购物", null),
       ],
-      [{ sourceNodeId: "source", targetNodeId: "existing" }],
+      [
+        { sourceNodeId: "account-a", targetNodeId: "gmail" },
+        { sourceNodeId: "account-a", targetNodeId: "openai" },
+        { sourceNodeId: "account-b", targetNodeId: "gmail" },
+        { sourceNodeId: "account-b", targetNodeId: "openai" },
+        { sourceNodeId: "shopping-record", targetNodeId: "shopping" },
+      ],
       defaultEmbeddingSettings,
       "",
     );
 
-    expect(result.candidates.map((candidate) => candidate.nodeId)).toEqual([
-      "related",
-      "unrelated",
+    expect(result.relatedNodes.slice(0, 2).map((related) => related.nodeId)).toEqual([
+      "account-a",
+      "account-b",
     ]);
-    expect(result.candidates[0].score).toBe(1);
-    expect(result.candidates[1].score).toBe(0);
+    expect(result.candidates.slice(0, 2).map((candidate) => candidate.nodeId)).toEqual([
+      "gmail",
+      "openai",
+    ]);
+    expect(result.candidates[0].supportingNodeIds).toEqual([
+      "account-a",
+      "account-b",
+    ]);
+    expect(result.candidates.every((candidate) => !candidate.nodeId.startsWith("account")))
+      .toBe(true);
+    expect(result.candidates[0].score).toBeGreaterThan(0.99);
+  });
+
+  it("does not recommend the source or an existing reference", () => {
+    const candidates = propagateReferenceCandidates(
+      "source",
+      [
+        { nodeId: "record-a", similarity: 0.95 },
+        { nodeId: "record-b", similarity: 0.9 },
+      ],
+      [
+        { sourceNodeId: "source", targetNodeId: "existing" },
+        { sourceNodeId: "record-a", targetNodeId: "existing" },
+        { sourceNodeId: "record-a", targetNodeId: "source" },
+        { sourceNodeId: "record-a", targetNodeId: "new-tag" },
+        { sourceNodeId: "record-b", targetNodeId: "new-tag" },
+      ],
+      new Set(["source", "record-a", "record-b", "existing", "new-tag"]),
+    );
+
+    expect(candidates.map((candidate) => candidate.nodeId)).toEqual(["new-tag"]);
+    expect(candidates[0].supportingNodeIds).toEqual(["record-a", "record-b"]);
+  });
+
+  it("keeps evidence inside the nearest connected reference cluster", () => {
+    const candidates = propagateReferenceCandidates(
+      "source",
+      [
+        { nodeId: "server-script-a", similarity: 0.95 },
+        { nodeId: "server-script-b", similarity: 0.91 },
+        { nodeId: "account-a", similarity: 0.9 },
+        { nodeId: "account-b", similarity: 0.89 },
+        { nodeId: "account-c", similarity: 0.88 },
+      ],
+      [
+        { sourceNodeId: "server-script-a", targetNodeId: "network" },
+        { sourceNodeId: "server-script-b", targetNodeId: "network" },
+        { sourceNodeId: "server-script-b", targetNodeId: "server" },
+        { sourceNodeId: "account-a", targetNodeId: "chatgpt" },
+        { sourceNodeId: "account-b", targetNodeId: "chatgpt" },
+        { sourceNodeId: "account-c", targetNodeId: "chatgpt" },
+      ],
+      new Set([
+        "source",
+        "server-script-a",
+        "server-script-b",
+        "account-a",
+        "account-b",
+        "account-c",
+        "network",
+        "server",
+        "chatgpt",
+      ]),
+    );
+
+    expect(candidates.map((candidate) => candidate.nodeId)).toEqual([
+      "network",
+      "server",
+    ]);
+    expect(candidates[0].score).toBe(1);
+    expect(candidates[1].score).toBeLessThan(0.5);
+  });
+
+  it("does not give a single historical record an automatic-grade score", () => {
+    const candidates = propagateReferenceCandidates(
+      "source",
+      [{ nodeId: "only-record", similarity: 0.95 }],
+      [{ sourceNodeId: "only-record", targetNodeId: "tag" }],
+      new Set(["source", "only-record", "tag"]),
+    );
+
+    expect(candidates[0]).toMatchObject({
+      nodeId: "tag",
+      score: 0.5,
+      supportingNodeIds: ["only-record"],
+    });
   });
 
   it("rejects invalid vectors and empty source text", async () => {
@@ -158,6 +263,10 @@ describe("embedding analysis", () => {
     );
 
     expect(gatewayCalls).toBe(2);
-    expect(result.candidates[0]).toMatchObject({ nodeId: "candidate", score: 1 });
+    expect(result.candidates).toEqual([]);
+    expect(result.relatedNodes[0]).toMatchObject({
+      nodeId: "candidate",
+      similarity: 1,
+    });
   });
 });
