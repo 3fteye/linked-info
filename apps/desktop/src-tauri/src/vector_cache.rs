@@ -141,7 +141,7 @@ impl VectorCacheStore {
         let transaction = connection.transaction()?;
         let accessed_at = unix_time_micros()?;
         {
-            let mut statement = transaction.prepare_cached(
+            let mut statement = transaction.prepare(
                 "INSERT INTO embedding_vector_cache
                    (fingerprint, role, content_hash, dimensions, vector, last_accessed)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)
@@ -173,11 +173,11 @@ impl VectorCacheStore {
         let connection = self.open()?;
         let entry_count =
             connection.query_row("SELECT COUNT(*) FROM embedding_vector_cache", [], |row| {
-                row.get::<_, u64>(0)
+                row.get::<_, i64>(0)
             })?;
         Ok(VectorCacheStatus {
             persistent: true,
-            entry_count,
+            entry_count: nonnegative_sqlite_integer(entry_count, "vector cache entry count")?,
             disk_bytes: cache_disk_bytes(&self.database_path)?,
             max_bytes: DEFAULT_MAX_BYTES,
         })
@@ -318,12 +318,19 @@ fn enforce_capacity(connection: &Connection) -> StoreResult<()> {
 }
 
 fn active_database_bytes(connection: &Connection) -> StoreResult<u64> {
-    let page_size = connection.pragma_query_value(None, "page_size", |row| row.get::<_, u64>(0))?;
+    let page_size = connection.pragma_query_value(None, "page_size", |row| row.get::<_, i64>(0))?;
     let page_count =
-        connection.pragma_query_value(None, "page_count", |row| row.get::<_, u64>(0))?;
+        connection.pragma_query_value(None, "page_count", |row| row.get::<_, i64>(0))?;
     let free_pages =
-        connection.pragma_query_value(None, "freelist_count", |row| row.get::<_, u64>(0))?;
+        connection.pragma_query_value(None, "freelist_count", |row| row.get::<_, i64>(0))?;
+    let page_size = nonnegative_sqlite_integer(page_size, "SQLite page size")?;
+    let page_count = nonnegative_sqlite_integer(page_count, "SQLite page count")?;
+    let free_pages = nonnegative_sqlite_integer(free_pages, "SQLite free page count")?;
     Ok(page_count.saturating_sub(free_pages) * page_size)
+}
+
+fn nonnegative_sqlite_integer(value: i64, name: &str) -> StoreResult<u64> {
+    u64::try_from(value).map_err(|_| io::Error::other(format!("{name} is negative")).into())
 }
 
 fn unix_time_micros() -> StoreResult<i64> {
