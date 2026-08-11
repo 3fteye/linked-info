@@ -413,7 +413,7 @@ export default function GraphCanvas({
   const containerRef = useRef<HTMLDivElement>(null);
   const referenceSearchInputRef = useRef<HTMLInputElement>(null);
   const referenceSearchPopoverRef = useRef<HTMLDivElement>(null);
-  const shiftConnectionSourceRef = useRef<string | null>(null);
+  const connectionSourceRef = useRef<string | null>(null);
   const referencesRef = useRef(references);
   const [flowInstance, setFlowInstance] =
     useState<ReactFlowInstance<InformationFlowNode, Edge> | null>(null);
@@ -842,8 +842,8 @@ export default function GraphCanvas({
       event: MouseEvent | TouchEvent,
       connectionState: FinalConnectionState,
     ) => {
-      const sourceNodeId = shiftConnectionSourceRef.current;
-      shiftConnectionSourceRef.current = null;
+      const sourceNodeId = connectionSourceRef.current;
+      connectionSourceRef.current = null;
       const targetElement = event.target instanceof Element ? event.target : null;
       const droppedOnEmptyCanvas =
         targetElement !== null &&
@@ -995,13 +995,9 @@ export default function GraphCanvas({
         nodes={flowNodes}
         onConnect={handleConnect}
         onConnectEnd={handleConnectEnd}
-        onConnectStart={(event, params) => {
-          shiftConnectionSourceRef.current =
-            event instanceof MouseEvent &&
-            event.shiftKey &&
-            params.handleType === "source"
-              ? params.nodeId
-              : null;
+        onConnectStart={(_event, params) => {
+          connectionSourceRef.current =
+            params.handleType === "source" ? params.nodeId : null;
         }}
         onEdgesChange={handleEdgesChange}
         onInit={setFlowInstance}
