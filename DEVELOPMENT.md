@@ -74,6 +74,8 @@ flowchart LR
 
 桌面端现已在 `WorkspacePersistence` 与文件适配器之间实现 Rust 可选加密封装：随机数据密钥加密工作区，Argon2id 从用户密码派生密钥来保护数据密钥，XChaCha20-Poly1305 提供保密性和认证。未启用加密的工作区仍以明文保存；启用后，正式工作区、恢复副本、正常导出和不可读数据导出都写成版本化密文。React 会在解锁表单中短暂持有密码字符串，但不把密码或数据密钥持久化。桌面端仍未连接任何远端同步后端；现有 Worker/D1 节点 API 不能直接承载密码保护工作区的同步，后续需要独立的密文封装契约。
 
+解锁方式限定为主密码与可选的“系统快速解锁”。主密码封装始终保留并随加密导出提供跨设备恢复；系统快速解锁通过 Rust `SystemUnlockProvider` 使用 Windows Credential Manager、macOS Keychain 或 Linux Secret Service 保存独立随机设备密钥，只对当前设备有效。两者采用 OR 语义。系统快速解锁不保存主密码、不进入导出或同步，也不被描述为第二因素；同一登录用户会话已经被恶意程序控制时，平台安全存储不能替代系统隔离。
+
 ## 智能引用边界
 
 - `embeddingService.ts` 负责文本组装、有界分段、内存派生缓存、余弦相似度和候选排序，只依赖 `EmbeddingGateway`。

@@ -3,13 +3,18 @@ import { invoke } from "@tauri-apps/api/core";
 export interface WorkspaceSecurityStatus {
   encrypted: boolean;
   locked: boolean;
+  systemUnlockAvailable: boolean;
+  systemUnlockEnabled: boolean;
 }
 
 export interface WorkspaceSecurity {
   readonly available: boolean;
   inspect(): Promise<WorkspaceSecurityStatus>;
   unlock(password: string): Promise<WorkspaceSecurityStatus>;
+  unlockWithSystem(): Promise<WorkspaceSecurityStatus>;
   enable(password: string): Promise<WorkspaceSecurityStatus>;
+  enableSystemUnlock(): Promise<WorkspaceSecurityStatus>;
+  disableSystemUnlock(): Promise<WorkspaceSecurityStatus>;
   changePassword(password: string): Promise<void>;
   lock(): Promise<WorkspaceSecurityStatus>;
   encryptExport(contents: string): Promise<string>;
@@ -19,6 +24,8 @@ export interface WorkspaceSecurity {
 const plaintextStatus: WorkspaceSecurityStatus = {
   encrypted: false,
   locked: false,
+  systemUnlockAvailable: false,
+  systemUnlockEnabled: false,
 };
 
 export const tauriWorkspaceSecurity: WorkspaceSecurity = {
@@ -29,10 +36,19 @@ export const tauriWorkspaceSecurity: WorkspaceSecurity = {
   unlock(password) {
     return invoke<WorkspaceSecurityStatus>("unlock_workspace", { password });
   },
+  unlockWithSystem() {
+    return invoke<WorkspaceSecurityStatus>("unlock_workspace_with_system");
+  },
   enable(password) {
     return invoke<WorkspaceSecurityStatus>("enable_workspace_encryption", {
       password,
     });
+  },
+  enableSystemUnlock() {
+    return invoke<WorkspaceSecurityStatus>("enable_system_unlock");
+  },
+  disableSystemUnlock() {
+    return invoke<WorkspaceSecurityStatus>("disable_system_unlock");
   },
   changePassword(password) {
     return invoke<void>("change_workspace_password", { password });
@@ -59,7 +75,16 @@ export const unavailableWorkspaceSecurity: WorkspaceSecurity = {
   async unlock() {
     throw new Error("workspace encryption is unavailable outside the desktop app");
   },
+  async unlockWithSystem() {
+    throw new Error("workspace encryption is unavailable outside the desktop app");
+  },
   async enable() {
+    throw new Error("workspace encryption is unavailable outside the desktop app");
+  },
+  async enableSystemUnlock() {
+    throw new Error("workspace encryption is unavailable outside the desktop app");
+  },
+  async disableSystemUnlock() {
     throw new Error("workspace encryption is unavailable outside the desktop app");
   },
   async changePassword() {

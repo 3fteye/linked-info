@@ -17,6 +17,8 @@ use std::{
 use tauri::{AppHandle, Manager};
 use zeroize::{Zeroize, Zeroizing};
 
+use crate::system_unlock::{SystemUnlockProvider, SystemUnlockState};
+
 #[cfg(unix)]
 use std::fs::File;
 
@@ -43,6 +45,7 @@ const ARGON2_ITERATIONS: u32 = 3;
 const ARGON2_ITERATIONS: u32 = 1;
 const ARGON2_PARALLELISM: u32 = 1;
 const VAULT_KEY_AAD: &[u8] = b"linked-info-workspace-vault-key-v1";
+const SYSTEM_UNLOCK_KEY_AAD_PREFIX: &[u8] = b"linked-info-system-unlock-v1\0";
 const EXPORT_PAYLOAD_AAD: &[u8] = b"linked-info-workspace-export-v1";
 static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -99,6 +102,16 @@ struct VaultMetadata {
     kdf: KdfEnvelope,
     wrapped_data_key: CipherEnvelope,
     migrated_slots: Vec<WorkspaceFileSlot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    system_unlock: Option<SystemUnlockEnvelope>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SystemUnlockEnvelope {
+    provider: String,
+    credential_id: String,
+    wrapped_data_key: CipherEnvelope,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -125,6 +138,8 @@ struct EncryptedExportEnvelope {
 pub struct WorkspaceSecurityStatus {
     encrypted: bool,
     locked: bool,
+    system_unlock_available: bool,
+    system_unlock_enabled: bool,
 }
 
 #[derive(Default)]
@@ -327,21 +342,26 @@ pub async fn write_workspace_file(
 pub async fn inspect_workspace_security(
     app: AppHandle,
     state: tauri::State<'_, WorkspaceVaultState>,
+    system_unlock_state: tauri::State<'_, SystemUnlockState>,
 ) -> Result<WorkspaceSecurityStatus, String> {
     let store = workspace_store(&app).map_err(|error| error.to_string())?;
     let operation_lock = Arc::clone(&state.operation_lock);
-    let encrypted = tauri::async_runtime::spawn_blocking(move || {
+    let provider = system_unlock_state.provider();
+    let metadata = tauri::async_runtime::spawn_blocking(move || {
         let _guard = operation_lock
             .lock()
             .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
         recover_pending_migration(&store)?;
-        Ok::<bool, String>(store.encryption_configured())
+        store.read_vault_metadata()
     })
     .await
     .map_err(|error| error.to_string())??;
+    let encrypted = metadata.is_some();
     Ok(WorkspaceSecurityStatus {
         encrypted,
         locked: encrypted && !state.is_unlocked()?,
+        system_unlock_available: provider.available(),
+        system_unlock_enabled: system_unlock_enabled(metadata.as_ref(), provider.as_ref()),
     })
 }
 
@@ -349,12 +369,15 @@ pub async fn inspect_workspace_security(
 pub async fn unlock_workspace(
     app: AppHandle,
     state: tauri::State<'_, WorkspaceVaultState>,
+    system_unlock_state: tauri::State<'_, SystemUnlockState>,
     password: String,
 ) -> Result<WorkspaceSecurityStatus, String> {
     let store = workspace_store(&app).map_err(|error| error.to_string())?;
     let operation_lock = Arc::clone(&state.operation_lock);
     let password = Zeroizing::new(password);
-    let data_key = tauri::async_runtime::spawn_blocking(move || {
+    let provider = system_unlock_state.provider();
+    let provider_for_unlock = Arc::clone(&provider);
+    let (data_key, system_unlock_enabled) = tauri::async_runtime::spawn_blocking(move || {
         let _guard = operation_lock
             .lock()
             .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
@@ -364,6 +387,44 @@ pub async fn unlock_workspace(
             .ok_or_else(|| "workspace_vault_not_configured".to_owned())?;
         let data_key = unwrap_data_key(&metadata, &password)?;
         verify_encrypted_store(&store, &data_key)?;
+        let system_unlock_enabled =
+            system_unlock_enabled(Some(&metadata), provider_for_unlock.as_ref());
+        Ok::<([u8; DATA_KEY_BYTES], bool), String>((data_key, system_unlock_enabled))
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+    state.replace_data_key(data_key)?;
+    Ok(WorkspaceSecurityStatus {
+        encrypted: true,
+        locked: false,
+        system_unlock_available: provider.available(),
+        system_unlock_enabled,
+    })
+}
+
+#[tauri::command]
+pub async fn unlock_workspace_with_system(
+    app: AppHandle,
+    state: tauri::State<'_, WorkspaceVaultState>,
+    system_unlock_state: tauri::State<'_, SystemUnlockState>,
+) -> Result<WorkspaceSecurityStatus, String> {
+    let store = workspace_store(&app).map_err(|error| error.to_string())?;
+    let operation_lock = Arc::clone(&state.operation_lock);
+    let provider = system_unlock_state.provider();
+    if !provider.available() {
+        return Err("system_unlock_unavailable".to_owned());
+    }
+    let provider_for_unlock = Arc::clone(&provider);
+    let data_key = tauri::async_runtime::spawn_blocking(move || {
+        let _guard = operation_lock
+            .lock()
+            .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
+        recover_pending_migration(&store)?;
+        let metadata = store
+            .read_vault_metadata()?
+            .ok_or_else(|| "workspace_vault_not_configured".to_owned())?;
+        let data_key = unwrap_data_key_with_system(&metadata, provider_for_unlock.as_ref())?;
+        verify_encrypted_store(&store, &data_key)?;
         Ok::<[u8; DATA_KEY_BYTES], String>(data_key)
     })
     .await
@@ -372,6 +433,8 @@ pub async fn unlock_workspace(
     Ok(WorkspaceSecurityStatus {
         encrypted: true,
         locked: false,
+        system_unlock_available: true,
+        system_unlock_enabled: true,
     })
 }
 
@@ -382,6 +445,7 @@ pub async fn enable_workspace_encryption(
     vector_cache_state: tauri::State<'_, crate::vector_cache::VectorCacheState>,
     embedding_state: tauri::State<'_, crate::embedding::EmbeddingState>,
     llm_state: tauri::State<'_, crate::llm::LlmState>,
+    system_unlock_state: tauri::State<'_, SystemUnlockState>,
     password: String,
 ) -> Result<WorkspaceSecurityStatus, String> {
     validate_new_password(&password)?;
@@ -408,6 +472,8 @@ pub async fn enable_workspace_encryption(
     Ok(WorkspaceSecurityStatus {
         encrypted: true,
         locked: false,
+        system_unlock_available: system_unlock_state.provider().available(),
+        system_unlock_enabled: false,
     })
 }
 
@@ -430,7 +496,7 @@ pub async fn change_workspace_password(
         let previous = store
             .read_vault_metadata()?
             .ok_or_else(|| "workspace_vault_not_configured".to_owned())?;
-        let metadata = create_vault_metadata(&password, &data_key, previous.migrated_slots)?;
+        let metadata = rewrap_vault_metadata(previous, &password, &data_key)?;
         let serialized = serde_json::to_vec(&metadata).map_err(|error| error.to_string())?;
         write_atomically(&store.vault_path(), &serialized).map_err(|error| error.to_string())
     })
@@ -439,18 +505,115 @@ pub async fn change_workspace_password(
 }
 
 #[tauri::command]
-pub async fn lock_workspace(
+pub async fn enable_system_unlock(
+    app: AppHandle,
     state: tauri::State<'_, WorkspaceVaultState>,
+    system_unlock_state: tauri::State<'_, SystemUnlockState>,
+) -> Result<WorkspaceSecurityStatus, String> {
+    let provider = system_unlock_state.provider();
+    if !provider.available() {
+        return Err("system_unlock_unavailable".to_owned());
+    }
+    let store = workspace_store(&app).map_err(|error| error.to_string())?;
+    let operation_lock = Arc::clone(&state.operation_lock);
+    let data_key = state.data_key()?;
+    let provider_for_enable = Arc::clone(&provider);
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = operation_lock
+            .lock()
+            .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
+        recover_pending_migration(&store)?;
+        let mut metadata = store
+            .read_vault_metadata()?
+            .ok_or_else(|| "workspace_vault_not_configured".to_owned())?;
+        let previous = metadata.system_unlock.take();
+        let device_key = Zeroizing::new(random_array::<DATA_KEY_BYTES>()?);
+        let credential_id = uuid::Uuid::new_v4().to_string();
+        provider_for_enable.store(&credential_id, device_key.as_slice())?;
+        metadata.system_unlock = Some(create_system_unlock_envelope(
+            provider_for_enable.provider_id(),
+            &credential_id,
+            &data_key,
+            &device_key,
+        )?);
+        let write_result = serde_json::to_vec(&metadata)
+            .map_err(|error| error.to_string())
+            .and_then(|serialized| {
+                write_atomically(&store.vault_path(), &serialized)
+                    .map_err(|error| error.to_string())
+            });
+        if let Err(error) = write_result {
+            let _ = provider_for_enable.delete(&credential_id);
+            return Err(error);
+        }
+        if let Some(previous) = previous {
+            if previous.provider == provider_for_enable.provider_id() {
+                let _ = provider_for_enable.delete(&previous.credential_id);
+            }
+        }
+        Ok::<(), String>(())
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+    Ok(WorkspaceSecurityStatus {
+        encrypted: true,
+        locked: false,
+        system_unlock_available: true,
+        system_unlock_enabled: true,
+    })
+}
+
+#[tauri::command]
+pub async fn disable_system_unlock(
+    app: AppHandle,
+    state: tauri::State<'_, WorkspaceVaultState>,
+    system_unlock_state: tauri::State<'_, SystemUnlockState>,
+) -> Result<WorkspaceSecurityStatus, String> {
+    let _ = state.data_key()?;
+    let provider = system_unlock_state.provider();
+    let store = workspace_store(&app).map_err(|error| error.to_string())?;
+    let operation_lock = Arc::clone(&state.operation_lock);
+    let provider_for_disable = Arc::clone(&provider);
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = operation_lock
+            .lock()
+            .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
+        recover_pending_migration(&store)?;
+        let mut metadata = store
+            .read_vault_metadata()?
+            .ok_or_else(|| "workspace_vault_not_configured".to_owned())?;
+        let previous = metadata.system_unlock.take();
+        let serialized = serde_json::to_vec(&metadata).map_err(|error| error.to_string())?;
+        write_atomically(&store.vault_path(), &serialized).map_err(|error| error.to_string())?;
+        if let Some(previous) = previous {
+            if previous.provider == provider_for_disable.provider_id() {
+                let _ = provider_for_disable.delete(&previous.credential_id);
+            }
+        }
+        Ok::<(), String>(())
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+    Ok(WorkspaceSecurityStatus {
+        encrypted: true,
+        locked: false,
+        system_unlock_available: provider.available(),
+        system_unlock_enabled: false,
+    })
+}
+
+#[tauri::command]
+pub async fn lock_workspace(
+    app: AppHandle,
+    state: tauri::State<'_, WorkspaceVaultState>,
+    system_unlock_state: tauri::State<'_, SystemUnlockState>,
     embedding_state: tauri::State<'_, crate::embedding::EmbeddingState>,
     llm_state: tauri::State<'_, crate::llm::LlmState>,
 ) -> Result<WorkspaceSecurityStatus, String> {
     let _ = embedding_state.shutdown();
     llm_state.shutdown();
     state.shutdown();
-    Ok(WorkspaceSecurityStatus {
-        encrypted: true,
-        locked: true,
-    })
+    inspect_workspace_security(app, state, system_unlock_state).await
 }
 
 #[tauri::command]
@@ -660,7 +823,56 @@ fn create_vault_metadata(
         kdf,
         wrapped_data_key,
         migrated_slots,
+        system_unlock: None,
     })
+}
+
+fn rewrap_vault_metadata(
+    previous: VaultMetadata,
+    password: &str,
+    data_key: &[u8; DATA_KEY_BYTES],
+) -> Result<VaultMetadata, String> {
+    let mut metadata = create_vault_metadata(password, data_key, previous.migrated_slots)?;
+    metadata.system_unlock = previous.system_unlock;
+    Ok(metadata)
+}
+
+fn create_system_unlock_envelope(
+    provider: &str,
+    credential_id: &str,
+    data_key: &[u8; DATA_KEY_BYTES],
+    device_key: &[u8; DATA_KEY_BYTES],
+) -> Result<SystemUnlockEnvelope, String> {
+    Ok(SystemUnlockEnvelope {
+        provider: provider.to_owned(),
+        credential_id: credential_id.to_owned(),
+        wrapped_data_key: encrypt_bytes(
+            data_key,
+            device_key,
+            &system_unlock_aad(provider, credential_id),
+        )?,
+    })
+}
+
+fn system_unlock_aad(provider: &str, credential_id: &str) -> Vec<u8> {
+    let mut aad = Vec::with_capacity(
+        SYSTEM_UNLOCK_KEY_AAD_PREFIX.len() + provider.len() + credential_id.len() + 1,
+    );
+    aad.extend_from_slice(SYSTEM_UNLOCK_KEY_AAD_PREFIX);
+    aad.extend_from_slice(provider.as_bytes());
+    aad.push(0);
+    aad.extend_from_slice(credential_id.as_bytes());
+    aad
+}
+
+fn system_unlock_enabled(
+    metadata: Option<&VaultMetadata>,
+    provider: &dyn SystemUnlockProvider,
+) -> bool {
+    provider.available()
+        && metadata
+            .and_then(|metadata| metadata.system_unlock.as_ref())
+            .is_some_and(|envelope| envelope.provider == provider.provider_id())
 }
 
 fn parse_vault_metadata(contents: &str) -> Result<VaultMetadata, String> {
@@ -686,6 +898,24 @@ fn parse_vault_metadata(contents: &str) -> Result<VaultMetadata, String> {
     {
         return Err("workspace_vault_invalid_slots".to_owned());
     }
+    if let Some(system_unlock) = metadata.system_unlock.as_ref() {
+        if system_unlock.provider.is_empty()
+            || system_unlock.provider.len() > 128
+            || system_unlock.credential_id.is_empty()
+            || system_unlock.credential_id.len() > 256
+            || system_unlock.provider.as_bytes().contains(&0)
+            || system_unlock.credential_id.as_bytes().contains(&0)
+        {
+            return Err("workspace_vault_invalid_system_unlock".to_owned());
+        }
+        let _ = decode_fixed::<NONCE_BYTES>(&system_unlock.wrapped_data_key.nonce, "nonce")?;
+        if system_unlock.wrapped_data_key.algorithm != "xchacha20poly1305"
+            || decode_bytes(&system_unlock.wrapped_data_key.ciphertext, "ciphertext")?.len()
+                != DATA_KEY_BYTES + 16
+        {
+            return Err("workspace_vault_invalid_system_unlock".to_owned());
+        }
+    }
     Ok(metadata)
 }
 
@@ -703,6 +933,45 @@ fn unwrap_data_key(
                 error
             }
         })?;
+    let key: [u8; DATA_KEY_BYTES] = plaintext
+        .as_slice()
+        .try_into()
+        .map_err(|_| "workspace_vault_invalid_wrapped_key".to_owned())?;
+    plaintext.zeroize();
+    Ok(key)
+}
+
+fn unwrap_data_key_with_system(
+    metadata: &VaultMetadata,
+    provider: &dyn SystemUnlockProvider,
+) -> Result<[u8; DATA_KEY_BYTES], String> {
+    let envelope = metadata
+        .system_unlock
+        .as_ref()
+        .ok_or_else(|| "system_unlock_not_enabled".to_owned())?;
+    if envelope.provider != provider.provider_id() {
+        return Err("system_unlock_not_enabled_on_device".to_owned());
+    }
+    let mut stored_key = Zeroizing::new(provider.load(&envelope.credential_id)?);
+    let device_key = Zeroizing::new(
+        stored_key
+            .as_slice()
+            .try_into()
+            .map_err(|_| "system_unlock_invalid_credential".to_owned())?,
+    );
+    stored_key.zeroize();
+    let mut plaintext = decrypt_bytes(
+        &envelope.wrapped_data_key,
+        &device_key,
+        &system_unlock_aad(&envelope.provider, &envelope.credential_id),
+    )
+    .map_err(|error| {
+        if error == "workspace_vault_authentication_failed" {
+            "system_unlock_invalid_credential".to_owned()
+        } else {
+            error
+        }
+    })?;
     let key: [u8; DATA_KEY_BYTES] = plaintext
         .as_slice()
         .try_into()
@@ -856,6 +1125,7 @@ fn decrypt_export(contents: &str, password: &str) -> Result<String, String> {
         kdf: envelope.kdf,
         wrapped_data_key: envelope.wrapped_data_key,
         migrated_slots: Vec::new(),
+        system_unlock: None,
     };
     let data_key = Zeroizing::new(unwrap_data_key(&metadata, password)?);
     let plaintext = decrypt_bytes(&envelope.payload, &data_key, EXPORT_PAYLOAD_AAD)?;
@@ -955,6 +1225,44 @@ fn sync_parent_directory(_parent: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+
+    #[derive(Default)]
+    struct FakeSystemUnlockProvider {
+        secrets: Mutex<HashMap<String, Vec<u8>>>,
+    }
+
+    impl SystemUnlockProvider for FakeSystemUnlockProvider {
+        fn provider_id(&self) -> &'static str {
+            "test-system-store"
+        }
+
+        fn available(&self) -> bool {
+            true
+        }
+
+        fn store(&self, credential_id: &str, secret: &[u8]) -> Result<(), String> {
+            self.secrets
+                .lock()
+                .unwrap()
+                .insert(credential_id.to_owned(), secret.to_vec());
+            Ok(())
+        }
+
+        fn load(&self, credential_id: &str) -> Result<Vec<u8>, String> {
+            self.secrets
+                .lock()
+                .unwrap()
+                .get(credential_id)
+                .cloned()
+                .ok_or_else(|| "system_unlock_credential_missing".to_owned())
+        }
+
+        fn delete(&self, credential_id: &str) -> Result<(), String> {
+            self.secrets.lock().unwrap().remove(credential_id);
+            Ok(())
+        }
+    }
 
     fn test_directory() -> PathBuf {
         let sequence = TEMP_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
@@ -1232,6 +1540,152 @@ mod tests {
         assert_eq!(
             decrypt_export(&encrypted, "incorrect password").unwrap_err(),
             "workspace_vault_invalid_password"
+        );
+    }
+
+    #[test]
+    fn reads_vault_metadata_created_before_system_unlock_support() {
+        let data_key = random_array::<DATA_KEY_BYTES>().unwrap();
+        let metadata =
+            create_vault_metadata("correct horse battery", &data_key, Vec::new()).unwrap();
+        let mut value = serde_json::to_value(metadata).unwrap();
+        value.as_object_mut().unwrap().remove("systemUnlock");
+
+        let parsed = parse_vault_metadata(&value.to_string()).unwrap();
+
+        assert!(parsed.system_unlock.is_none());
+        assert_eq!(
+            unwrap_data_key(&parsed, "correct horse battery").unwrap(),
+            data_key
+        );
+    }
+
+    #[test]
+    fn system_unlock_uses_an_independent_device_key() {
+        let provider = FakeSystemUnlockProvider::default();
+        let data_key = random_array::<DATA_KEY_BYTES>().unwrap();
+        let device_key = random_array::<DATA_KEY_BYTES>().unwrap();
+        let credential_id = "device-credential";
+        provider.store(credential_id, &device_key).unwrap();
+        let mut metadata =
+            create_vault_metadata("correct horse battery", &data_key, Vec::new()).unwrap();
+        metadata.system_unlock = Some(
+            create_system_unlock_envelope(
+                provider.provider_id(),
+                credential_id,
+                &data_key,
+                &device_key,
+            )
+            .unwrap(),
+        );
+
+        assert_eq!(
+            unwrap_data_key_with_system(&metadata, &provider).unwrap(),
+            data_key
+        );
+        provider.delete(credential_id).unwrap();
+        assert_eq!(
+            unwrap_data_key_with_system(&metadata, &provider).unwrap_err(),
+            "system_unlock_credential_missing"
+        );
+        assert_eq!(
+            unwrap_data_key(&metadata, "correct horse battery").unwrap(),
+            data_key
+        );
+    }
+
+    #[test]
+    fn rejects_a_wrong_system_unlock_secret_without_affecting_password_unlock() {
+        let provider = FakeSystemUnlockProvider::default();
+        let data_key = random_array::<DATA_KEY_BYTES>().unwrap();
+        let device_key = random_array::<DATA_KEY_BYTES>().unwrap();
+        let credential_id = "wrong-device-credential";
+        let mut metadata =
+            create_vault_metadata("correct horse battery", &data_key, Vec::new()).unwrap();
+        metadata.system_unlock = Some(
+            create_system_unlock_envelope(
+                provider.provider_id(),
+                credential_id,
+                &data_key,
+                &device_key,
+            )
+            .unwrap(),
+        );
+        provider
+            .store(credential_id, &random_array::<DATA_KEY_BYTES>().unwrap())
+            .unwrap();
+
+        assert_eq!(
+            unwrap_data_key_with_system(&metadata, &provider).unwrap_err(),
+            "system_unlock_invalid_credential"
+        );
+        assert_eq!(
+            unwrap_data_key(&metadata, "correct horse battery").unwrap(),
+            data_key
+        );
+    }
+
+    #[test]
+    fn changing_the_master_password_preserves_system_unlock() {
+        let provider = FakeSystemUnlockProvider::default();
+        let data_key = random_array::<DATA_KEY_BYTES>().unwrap();
+        let device_key = random_array::<DATA_KEY_BYTES>().unwrap();
+        let credential_id = "preserved-device-credential";
+        provider.store(credential_id, &device_key).unwrap();
+        let mut original =
+            create_vault_metadata("correct horse battery", &data_key, Vec::new()).unwrap();
+        original.system_unlock = Some(
+            create_system_unlock_envelope(
+                provider.provider_id(),
+                credential_id,
+                &data_key,
+                &device_key,
+            )
+            .unwrap(),
+        );
+
+        let changed =
+            rewrap_vault_metadata(original, "replacement master password", &data_key).unwrap();
+
+        assert_eq!(
+            unwrap_data_key(&changed, "correct horse battery").unwrap_err(),
+            "workspace_vault_invalid_password"
+        );
+        assert_eq!(
+            unwrap_data_key(&changed, "replacement master password").unwrap(),
+            data_key
+        );
+        assert_eq!(
+            unwrap_data_key_with_system(&changed, &provider).unwrap(),
+            data_key
+        );
+    }
+
+    #[test]
+    fn encrypted_exports_never_include_system_unlock_metadata() {
+        let provider = FakeSystemUnlockProvider::default();
+        let data_key = random_array::<DATA_KEY_BYTES>().unwrap();
+        let device_key = random_array::<DATA_KEY_BYTES>().unwrap();
+        let mut metadata =
+            create_vault_metadata("correct horse battery", &data_key, Vec::new()).unwrap();
+        metadata.system_unlock = Some(
+            create_system_unlock_envelope(
+                provider.provider_id(),
+                "must-not-be-exported",
+                &data_key,
+                &device_key,
+            )
+            .unwrap(),
+        );
+
+        let encrypted = encrypt_export("exported contents", &metadata, &data_key).unwrap();
+
+        assert!(!encrypted.contains("systemUnlock"));
+        assert!(!encrypted.contains("test-system-store"));
+        assert!(!encrypted.contains("must-not-be-exported"));
+        assert_eq!(
+            decrypt_export(&encrypted, "correct horse battery").unwrap(),
+            "exported contents"
         );
     }
 }

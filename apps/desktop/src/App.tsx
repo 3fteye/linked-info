@@ -9,6 +9,7 @@ import {
   Download,
   FileText,
   Filter,
+  Fingerprint,
   KeyRound,
   Languages,
   Link2,
@@ -706,6 +707,38 @@ function App({
     } catch (error) {
       skipUnmountFlushRef.current = false;
       setSecurityMessage(t("security.lockFailed", { reason: errorReason(error) }));
+      setSecurityBusy(false);
+    }
+  }
+
+  async function toggleSystemUnlock(enable: boolean) {
+    if (securityBusy) {
+      return;
+    }
+    setSecurityBusy(true);
+    setSecurityMessage(null);
+    try {
+      const status = enable
+        ? await workspaceSecurity.enableSystemUnlock()
+        : await workspaceSecurity.disableSystemUnlock();
+      updateWorkspaceSecurityStatus(status);
+      setSecurityMessage(
+        enable
+          ? t("security.systemUnlockEnableSuccess")
+          : t("security.systemUnlockDisableSuccess"),
+      );
+    } catch (error) {
+      setSecurityMessage(
+        t("security.systemUnlockOperationFailed", {
+          reason: errorReason(error),
+        }),
+      );
+      try {
+        updateWorkspaceSecurityStatus(await workspaceSecurity.inspect());
+      } catch {
+        // Keep the previous status when even the status probe fails.
+      }
+    } finally {
       setSecurityBusy(false);
     }
   }
@@ -2014,6 +2047,24 @@ function App({
                     <>
                       <button
                         className="secondary-button"
+                        disabled={
+                          securityBusy ||
+                          !workspaceSecurityStatus.systemUnlockAvailable
+                        }
+                        onClick={() =>
+                          void toggleSystemUnlock(
+                            !workspaceSecurityStatus.systemUnlockEnabled,
+                          )
+                        }
+                        type="button"
+                      >
+                        <Fingerprint aria-hidden="true" size={15} />
+                        {workspaceSecurityStatus.systemUnlockEnabled
+                          ? t("security.disableSystemUnlock")
+                          : t("security.enableSystemUnlock")}
+                      </button>
+                      <button
+                        className="secondary-button"
                         disabled={securityBusy}
                         onClick={() => {
                           setSecurityMessage(null);
@@ -2033,6 +2084,13 @@ function App({
                         <LockKeyhole aria-hidden="true" size={15} />
                         {t("security.lockNow")}
                       </button>
+                      <small>
+                        {!workspaceSecurityStatus.systemUnlockAvailable
+                          ? t("security.systemUnlockUnavailable")
+                          : workspaceSecurityStatus.systemUnlockEnabled
+                            ? t("security.systemUnlockEnabledDescription")
+                            : t("security.systemUnlockDisabledDescription")}
+                      </small>
                     </>
                   ) : (
                     <button

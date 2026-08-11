@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { KeyRound, LockKeyhole, RotateCcw } from "lucide-react";
+import { Fingerprint, KeyRound, LockKeyhole, RotateCcw } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type {
   WorkspaceSecurity,
@@ -66,6 +66,21 @@ export default function WorkspaceSecurityGate({
     }
   }
 
+  async function unlockWithSystem() {
+    if (busy) {
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      setStatus(await security.unlockWithSystem());
+    } catch (reason) {
+      setError(errorReason(reason));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   if (status !== null && !status.locked) {
     return <>{children(status, setStatus)}</>;
   }
@@ -104,6 +119,24 @@ export default function WorkspaceSecurityGate({
       <LockKeyhole aria-hidden="true" size={34} />
       <h1>{t("security.unlockTitle")}</h1>
       <p>{t("security.unlockDescription")}</p>
+      {status.systemUnlockAvailable && status.systemUnlockEnabled && (
+        <div className="security-system-unlock">
+          <button
+            autoFocus
+            className="primary-button"
+            disabled={busy}
+            onClick={() => void unlockWithSystem()}
+            type="button"
+          >
+            <Fingerprint aria-hidden="true" size={17} />
+            {busy ? t("security.unlocking") : t("security.systemUnlockAction")}
+          </button>
+          <small>{t("security.systemUnlockDeviceOnly")}</small>
+          <div className="security-unlock-divider">
+            <span>{t("security.orUsePassword")}</span>
+          </div>
+        </div>
+      )}
       <form
         className="security-unlock-form"
         onSubmit={(event) => {
@@ -116,7 +149,7 @@ export default function WorkspaceSecurityGate({
           <KeyRound aria-hidden="true" size={16} />
           <input
             autoComplete="current-password"
-            autoFocus
+            autoFocus={!(status.systemUnlockAvailable && status.systemUnlockEnabled)}
             id="workspace-unlock-password"
             onChange={(event) => setPassword(event.target.value)}
             type="password"

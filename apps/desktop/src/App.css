@@ -100,6 +100,41 @@ button:disabled {
   gap: 9px;
 }
 
+.security-system-unlock {
+  display: grid;
+  width: min(360px, calc(100vw - 48px));
+  margin-top: 20px;
+  gap: 8px;
+}
+
+.security-system-unlock > button {
+  justify-content: center;
+}
+
+.security-system-unlock > small {
+  color: #68716b;
+  font-size: 11px;
+  line-height: 1.45;
+  text-align: center;
+}
+
+.security-unlock-divider {
+  display: flex;
+  align-items: center;
+  margin: 4px 0 -8px;
+  gap: 10px;
+  color: #7b847e;
+  font-size: 11px;
+}
+
+.security-unlock-divider::before,
+.security-unlock-divider::after {
+  height: 1px;
+  flex: 1;
+  background: #d7ddd8;
+  content: "";
+}
+
 .security-unlock-form label,
 .security-dialog-form label {
   color: #49524c;
