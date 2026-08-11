@@ -1056,6 +1056,7 @@ h1 {
 
 .settings-panel {
   display: grid;
+  grid-auto-rows: max-content;
   align-content: start;
   justify-items: start;
   min-width: 0;
@@ -1093,6 +1094,7 @@ h1 {
   grid-template-columns: minmax(220px, 0.8fr) minmax(320px, 1.2fr);
   align-items: start;
   width: min(920px, 100%);
+  height: max-content;
   min-height: 68px;
   padding: 18px 20px;
   gap: 28px;
@@ -1359,7 +1361,7 @@ h1 {
 }
 
 .data-setting-row {
-  min-height: 0;
+  min-height: 88px;
 }
 
 .backup-actions {
