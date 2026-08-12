@@ -204,7 +204,7 @@ Cloudflare 不是桌面端的固定依赖。`apps/cloudflare-worker` 通过供�
 
 真实恢复演练使用手动 `Cloudflare backup recovery drill` 工作流，不允许绑定正式备份桶。`wrangler.jsonc` 的 `drill` 环境部署为独立 Worker，并显式把非继承的 `BACKUP_BUCKET` 绑定到隔离预览桶；该 Worker 还必须使用独立的 `BACKUP_AUTH_TOKEN` Secret。GitHub Environment `cloudflare-backup-drill` 保存同一份令牌 `LINKED_INFO_BACKUP_DRILL_TOKEN` 和非秘密端点变量 `LINKED_INFO_BACKUP_DRILL_ENDPOINT`。工作流使用合成节点、引用和布局生成客户端密文，走正式 `BackupTarget` 上传、完整下载和哈希验证，再在随机临时目录建立全新 vault、用主密码重新解锁并核对工作区；最后删除 R2 测试对象并确认其不存在。任一阶段失败都会让工作流失败，令牌和测试明文不得打印或写入产物。
 
-设置页还提供针对实际已配置目标的恢复演练。它与“恢复预览”不同：恢复预览用于有意替换当前工作区；恢复演练只在 Rust 临时目录中证明选定快照可建立全新配置，并在成功清理临时数据后写入该目标的 `lastRestoreTestAtMs`。不能用对象列表成功、HTTP 200 或仅比较服务端元数据代替这项验证。
+设置页还提供针对实际已配置目标的恢复演练。它与“恢复预览”不同：恢复预览用于有意替换当前工作区；恢复演练只在 Rust 临时目录中证明选定快照可建立全新配置，并在成功清理临时数据后写入该目标的 `lastRestoreTestAtMs`。成功结果必须继续留在当前对话框中，直到用户确认关闭；不能用对话框直接消失或设置页视野外的一行状态文字暗示成功。不能用对象列表成功、HTTP 200 或仅比较服务端元数据代替这项验证。
 
 仓库没有包含远程数据库 ID、API 令牌或已部署地址。`wrangler.jsonc` 中的 D1 `database_id` 保持为 `local`，只有实际创建远程资源时才由部署者在自己的环境中配置。不要提交 `.env`、Wrangler 登录状态、令牌或数据库导出。
 

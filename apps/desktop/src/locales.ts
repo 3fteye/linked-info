@@ -15,6 +15,7 @@ export const resources = {
       },
       actions: {
         cancel: "取消",
+        close: "关闭",
         confirmDeleteNode: "删除节点",
         confirmDeleteNodes: "删除所选节点",
         deleteNode: "删除节点",
@@ -428,6 +429,7 @@ export const resources = {
         uploadSuccess: "密文快照已上传，并已从远端重新读取列表。",
         verifySuccess: "已完整下载并在本机重新计算哈希，共 {{size}}。",
         restoreDrillTitle: "验证这个快照真的可以恢复",
+        restoreDrillSuccessTitle: "恢复演练通过",
         restoreDrillDescription: "将完整下载 {{time}} 的密文快照，并在独立临时目录中建立全新加密工作区、用主密码重新解锁并核对节点、引用和布局。不会替换当前工作区，成功后临时数据会被删除。请输入创建该快照时使用的主密码。",
         restoreDrillConfirm: "开始恢复演练",
         restoreDrillRunning: "正在恢复演练…",
@@ -487,6 +489,7 @@ export const resources = {
       },
       actions: {
         cancel: "Cancel",
+        close: "Close",
         confirmDeleteNode: "Delete node",
         confirmDeleteNodes: "Delete selected nodes",
         deleteNode: "Delete node",
@@ -900,6 +903,7 @@ export const resources = {
         uploadSuccess: "Encrypted snapshot uploaded and the remote list was read back.",
         verifySuccess: "The complete snapshot was downloaded and hashed locally ({{size}}).",
         restoreDrillTitle: "Prove that this snapshot can be restored",
+        restoreDrillSuccessTitle: "Recovery drill passed",
         restoreDrillDescription: "The encrypted snapshot from {{time}} will be downloaded in full, installed as a new encrypted workspace in an isolated temporary directory, unlocked again with its master password, and checked for nodes, references, and layout. The current workspace will not be replaced, and temporary data is deleted after success. Enter the master password used when this snapshot was created.",
         restoreDrillConfirm: "Run recovery drill",
         restoreDrillRunning: "Running recovery drill…",

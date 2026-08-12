@@ -387,6 +387,8 @@ function App({
   const [offsiteRestoreDrillError, setOffsiteRestoreDrillError] = useState<
     string | null
   >(null);
+  const [offsiteRestoreDrillSucceeded, setOffsiteRestoreDrillSucceeded] =
+    useState(false);
   const embeddingAnalyzer = useMemo(
     () => new EmbeddingAnalyzer(embeddingGateway, embeddingVectorCache),
     [embeddingGateway, embeddingVectorCache],
@@ -2118,6 +2120,7 @@ function App({
     });
     setOffsiteRestoreDrillPassword("");
     setOffsiteRestoreDrillError(null);
+    setOffsiteRestoreDrillSucceeded(false);
   }
 
   function closeOffsiteRestoreDrill() {
@@ -2127,6 +2130,7 @@ function App({
     setOffsiteRestoreDrill(null);
     setOffsiteRestoreDrillPassword("");
     setOffsiteRestoreDrillError(null);
+    setOffsiteRestoreDrillSucceeded(false);
   }
 
   async function runOffsiteRestoreDrill() {
@@ -2148,8 +2152,8 @@ function App({
       setOffsiteTargets((targets) =>
         targets.map((target) => (target.id === updated.id ? updated : target)),
       );
-      setOffsiteRestoreDrill(null);
       setOffsiteRestoreDrillPassword("");
+      setOffsiteRestoreDrillSucceeded(true);
       setOffsiteMessage(t("offsiteBackup.restoreDrillSuccess"));
     } catch (error) {
       const reason = errorReason(error);
@@ -4578,61 +4582,85 @@ function App({
             role="dialog"
           >
             <h2 id="offsite-restore-drill-dialog-title">
-              {t("offsiteBackup.restoreDrillTitle")}
+              {offsiteRestoreDrillSucceeded
+                ? t("offsiteBackup.restoreDrillSuccessTitle")
+                : t("offsiteBackup.restoreDrillTitle")}
             </h2>
-            <p>
-              {t("offsiteBackup.restoreDrillDescription", {
-                time: formatBackupDate(
-                  offsiteRestoreDrill.createdAtMs,
-                  activeLanguage,
-                ),
-              })}
-            </p>
-            <form
-              className="security-dialog-form"
-              onSubmit={(event) => {
-                event.preventDefault();
-                void runOffsiteRestoreDrill();
-              }}
-            >
-              <label htmlFor="offsite-restore-drill-password">
-                {t("security.password")}
-              </label>
-              <input
-                autoComplete="current-password"
-                autoFocus
-                id="offsite-restore-drill-password"
-                onChange={(event) =>
-                  setOffsiteRestoreDrillPassword(event.target.value)
-                }
-                type="password"
-                value={offsiteRestoreDrillPassword}
-              />
-              {offsiteRestoreDrillError !== null && (
-                <p className="security-error" role="alert">
-                  {offsiteRestoreDrillError}
+            {offsiteRestoreDrillSucceeded ? (
+              <>
+                <p className="security-notice" role="status">
+                  {t("offsiteBackup.restoreDrillSuccess")}
                 </p>
-              )}
-              <div className="confirmation-dialog-actions">
-                <button
-                  className="secondary-button"
-                  disabled={offsiteBusy}
-                  onClick={closeOffsiteRestoreDrill}
-                  type="button"
+                <div className="confirmation-dialog-actions">
+                  <button
+                    autoFocus
+                    className="primary-button"
+                    onClick={closeOffsiteRestoreDrill}
+                    type="button"
+                  >
+                    {t("actions.close")}
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <p>
+                  {t("offsiteBackup.restoreDrillDescription", {
+                    time: formatBackupDate(
+                      offsiteRestoreDrill.createdAtMs,
+                      activeLanguage,
+                    ),
+                  })}
+                </p>
+                <form
+                  className="security-dialog-form"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    void runOffsiteRestoreDrill();
+                  }}
                 >
-                  {t("actions.cancel")}
-                </button>
-                <button
-                  className="primary-button"
-                  disabled={offsiteBusy || offsiteRestoreDrillPassword.length === 0}
-                  type="submit"
-                >
-                  {offsiteBusy
-                    ? t("offsiteBackup.restoreDrillRunning")
-                    : t("offsiteBackup.restoreDrillConfirm")}
-                </button>
-              </div>
-            </form>
+                  <label htmlFor="offsite-restore-drill-password">
+                    {t("security.password")}
+                  </label>
+                  <input
+                    autoComplete="current-password"
+                    autoFocus
+                    id="offsite-restore-drill-password"
+                    onChange={(event) =>
+                      setOffsiteRestoreDrillPassword(event.target.value)
+                    }
+                    type="password"
+                    value={offsiteRestoreDrillPassword}
+                  />
+                  {offsiteRestoreDrillError !== null && (
+                    <p className="security-error" role="alert">
+                      {offsiteRestoreDrillError}
+                    </p>
+                  )}
+                  <div className="confirmation-dialog-actions">
+                    <button
+                      className="secondary-button"
+                      disabled={offsiteBusy}
+                      onClick={closeOffsiteRestoreDrill}
+                      type="button"
+                    >
+                      {t("actions.cancel")}
+                    </button>
+                    <button
+                      className="primary-button"
+                      disabled={
+                        offsiteBusy || offsiteRestoreDrillPassword.length === 0
+                      }
+                      type="submit"
+                    >
+                      {offsiteBusy
+                        ? t("offsiteBackup.restoreDrillRunning")
+                        : t("offsiteBackup.restoreDrillConfirm")}
+                    </button>
+                  </div>
+                </form>
+              </>
+            )}
           </section>
         </div>
       )}
