@@ -322,6 +322,10 @@ function App({
   const [securityMessage, setSecurityMessage] = useState<string | null>(null);
   const [recoveryClearDialog, setRecoveryClearDialog] = useState(false);
   const [recoveryClearPassword, setRecoveryClearPassword] = useState("");
+  const [destroyWorkspaceDialog, setDestroyWorkspaceDialog] = useState(false);
+  const [destroyWorkspacePassword, setDestroyWorkspacePassword] = useState("");
+  const [destroyWorkspaceConfirmation, setDestroyWorkspaceConfirmation] =
+    useState("");
   const [pendingEncryptedImport, setPendingEncryptedImport] =
     useState<ImportedWorkspaceFile | null>(null);
   const [encryptedImportPassword, setEncryptedImportPassword] = useState("");
@@ -944,6 +948,38 @@ function App({
         t("security.clearRecoveryFailed", { reason: errorReason(error) }),
       );
     } finally {
+      setSecurityBusy(false);
+    }
+  }
+
+  async function destroyEncryptedWorkspace(
+    authenticationMethod: "password" | "system" = "password",
+  ) {
+    if (
+      securityBusy ||
+      destroyWorkspaceConfirmation !== t("security.destroyConfirmationPhrase")
+    ) {
+      return;
+    }
+    setSecurityBusy(true);
+    setSecurityMessage(null);
+    skipUnmountFlushRef.current = true;
+    try {
+      const authorization = await workspaceSecurity.authorizeSensitiveOperation(
+        "destroyWorkspace",
+        authenticationMethod === "system"
+          ? {
+              method: "system",
+              message: t("security.destroyPrompt"),
+            }
+          : { method: "password", password: destroyWorkspacePassword },
+      );
+      await workspaceSecurity.destroyWorkspace(authorization);
+    } catch (error) {
+      skipUnmountFlushRef.current = false;
+      setSecurityMessage(
+        t("security.destroyFailed", { reason: errorReason(error) }),
+      );
       setSecurityBusy(false);
     }
   }
@@ -2635,6 +2671,20 @@ function App({
                           <option value="off">{t("security.idleTimeoutOff")}</option>
                         </select>
                       </label>
+                      <button
+                        className="danger-button"
+                        disabled={securityBusy}
+                        onClick={() => {
+                          setSecurityMessage(null);
+                          setDestroyWorkspacePassword("");
+                          setDestroyWorkspaceConfirmation("");
+                          setDestroyWorkspaceDialog(true);
+                        }}
+                        type="button"
+                      >
+                        <Trash2 aria-hidden="true" size={15} />
+                        {t("security.destroyWorkspace")}
+                      </button>
                       <small>
                         {!workspaceSecurityStatus.systemUnlockAvailable
                           ? t("security.systemUnlockUnavailable")
@@ -3559,6 +3609,97 @@ function App({
                     className="secondary-button security-system-reauth-button"
                     disabled={securityBusy}
                     onClick={() => void clearRecoveryData("system")}
+                    type="button"
+                  >
+                    <Fingerprint aria-hidden="true" size={15} />
+                    {t("security.useSystemVerification")}
+                  </button>
+                )}
+            </form>
+          </section>
+        </div>
+      )}
+
+      {destroyWorkspaceDialog && (
+        <div className="modal-backdrop" role="presentation">
+          <section
+            aria-labelledby="destroy-workspace-dialog-title"
+            aria-modal="true"
+            className="confirmation-dialog security-dialog"
+            role="dialog"
+          >
+            <h2 id="destroy-workspace-dialog-title">
+              {t("security.destroyTitle")}
+            </h2>
+            <p>{t("security.destroyDescription")}</p>
+            <form
+              className="security-dialog-form"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void destroyEncryptedWorkspace();
+              }}
+            >
+              <label htmlFor="destroy-workspace-password">
+                {t("security.currentPassword")}
+              </label>
+              <input
+                autoComplete="current-password"
+                autoFocus
+                id="destroy-workspace-password"
+                onChange={(event) => setDestroyWorkspacePassword(event.target.value)}
+                type="password"
+                value={destroyWorkspacePassword}
+              />
+              <label htmlFor="destroy-workspace-confirmation">
+                {t("security.destroyConfirmationLabel", {
+                  phrase: t("security.destroyConfirmationPhrase"),
+                })}
+              </label>
+              <input
+                autoComplete="off"
+                id="destroy-workspace-confirmation"
+                onChange={(event) =>
+                  setDestroyWorkspaceConfirmation(event.target.value)
+                }
+                value={destroyWorkspaceConfirmation}
+              />
+              {securityMessage !== null && (
+                <p className="security-error" role="alert">
+                  {securityMessage}
+                </p>
+              )}
+              <div className="confirmation-dialog-actions">
+                <button
+                  className="secondary-button"
+                  disabled={securityBusy}
+                  onClick={() => setDestroyWorkspaceDialog(false)}
+                  type="button"
+                >
+                  {t("actions.cancel")}
+                </button>
+                <button
+                  className="danger-button"
+                  disabled={
+                    securityBusy ||
+                    destroyWorkspacePassword.length === 0 ||
+                    destroyWorkspaceConfirmation !==
+                      t("security.destroyConfirmationPhrase")
+                  }
+                  type="submit"
+                >
+                  {t("security.destroyConfirm")}
+                </button>
+              </div>
+              {workspaceSecurityStatus.systemUnlockAvailable &&
+                workspaceSecurityStatus.systemUnlockEnabled && (
+                  <button
+                    className="secondary-button security-system-reauth-button"
+                    disabled={
+                      securityBusy ||
+                      destroyWorkspaceConfirmation !==
+                        t("security.destroyConfirmationPhrase")
+                    }
+                    onClick={() => void destroyEncryptedWorkspace("system")}
                     type="button"
                   >
                     <Fingerprint aria-hidden="true" size={15} />

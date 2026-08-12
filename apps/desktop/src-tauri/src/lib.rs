@@ -85,6 +85,7 @@ pub fn run() {
             workspace_file::change_workspace_password,
             workspace_file::decrypt_workspace_export,
             workspace_file::disable_system_unlock,
+            workspace_file::destroy_workspace,
             workspace_file::enable_system_unlock,
             workspace_file::enable_workspace_encryption,
             workspace_file::encrypt_workspace_export,

@@ -53,7 +53,7 @@ export default function WorkspaceSecurityGate({
     let active = true;
     let unsubscribe: (() => void) | undefined;
     void security
-      .subscribeLocked(() => {
+      .subscribeLocked((reason) => {
         if (!active) {
           return;
         }
@@ -61,7 +61,7 @@ export default function WorkspaceSecurityGate({
           current === null ? current : { ...current, locked: true },
         );
         setPassword("");
-        setError(null);
+        setError(reason === "workspace_destroy_failed" ? reason : null);
         void security.inspect().then((next) => {
           if (active) {
             setStatus(next);
@@ -223,7 +223,9 @@ export default function WorkspaceSecurityGate({
         </div>
         {error !== null && (
           <p className="security-error" role="alert">
-            {error === "workspace_vault_invalid_password"
+            {error === "workspace_destroy_failed"
+              ? t("security.destroyFailedLocked")
+              : error === "workspace_vault_invalid_password"
               ? t("security.invalidPassword")
               : error === "workspace_vault_password_rate_limited"
                 ? t("security.passwordRateLimited")

@@ -12,6 +12,7 @@ export interface WorkspaceSecurityStatus {
 export type SensitiveOperation =
   | "changePassword"
   | "clearRecoveryData"
+  | "destroyWorkspace"
   | "exportWorkspace"
   | "systemUnlockChange";
 
@@ -33,6 +34,7 @@ export interface WorkspaceSecurity {
   ): Promise<string>;
   changePassword(password: string, authorization: string): Promise<void>;
   clearRecoveryData(authorization: string): Promise<void>;
+  destroyWorkspace(authorization: string): Promise<void>;
   lock(): Promise<WorkspaceSecurityStatus>;
   setIdleTimeout(minutes: number | null): Promise<WorkspaceSecurityStatus>;
   recordActivity(): Promise<void>;
@@ -89,6 +91,9 @@ export const tauriWorkspaceSecurity: WorkspaceSecurity = {
   },
   clearRecoveryData(authorization) {
     return invoke<void>("clear_workspace_recovery_data", { authorization });
+  },
+  destroyWorkspace(authorization) {
+    return invoke<void>("destroy_workspace", { authorization });
   },
   lock() {
     return invoke<WorkspaceSecurityStatus>("lock_workspace");
@@ -147,6 +152,9 @@ export const unavailableWorkspaceSecurity: WorkspaceSecurity = {
     throw new Error("workspace encryption is unavailable outside the desktop app");
   },
   async clearRecoveryData() {
+    throw new Error("workspace encryption is unavailable outside the desktop app");
+  },
+  async destroyWorkspace() {
     throw new Error("workspace encryption is unavailable outside the desktop app");
   },
   async lock() {

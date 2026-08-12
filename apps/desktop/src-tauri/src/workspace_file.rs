@@ -200,6 +200,7 @@ pub struct WorkspaceSecurityStatus {
 pub enum SensitiveOperation {
     ChangePassword,
     ClearRecoveryData,
+    DestroyWorkspace,
     ExportWorkspace,
     SystemUnlockChange,
 }
@@ -1172,6 +1173,45 @@ pub async fn clear_workspace_recovery_data(
 }
 
 #[tauri::command]
+pub async fn destroy_workspace(
+    app: AppHandle,
+    state: tauri::State<'_, WorkspaceVaultState>,
+    system_unlock_state: tauri::State<'_, SystemUnlockState>,
+    authorization: String,
+) -> Result<(), String> {
+    let _permit = state
+        .consume_sensitive_authorization(SensitiveOperation::DestroyWorkspace, &authorization)?;
+    lock_workspace_runtime(&app, "workspace_destroy");
+
+    let store = workspace_store(&app).map_err(|error| error.to_string())?;
+    let operation_lock = Arc::clone(&state.operation_lock);
+    let provider = system_unlock_state.provider();
+    let destruction_result = tauri::async_runtime::spawn_blocking(move || {
+        let _guard = operation_lock
+            .lock()
+            .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
+        recover_pending_migration(&store)?;
+        let metadata = store.read_vault_metadata()?;
+        if let Some(credential) = metadata.and_then(|metadata| metadata.system_unlock)
+            && credential.provider == provider.provider_id()
+        {
+            provider.delete(&credential.credential_id)?;
+        }
+        remove_all_workspace_files(&store)
+    })
+    .await
+    .map_err(|error| error.to_string())
+    .and_then(|result| result);
+    if let Err(error) = destruction_result {
+        let _ = app.emit(WORKSPACE_LOCKED_EVENT, "workspace_destroy_failed");
+        return Err(error);
+    }
+
+    app.exit(0);
+    Ok(())
+}
+
+#[tauri::command]
 pub fn record_workspace_activity(state: tauri::State<'_, WorkspaceVaultState>) {
     state.record_activity();
 }
@@ -1324,6 +1364,18 @@ fn remove_workspace_subdirectory(base_directory: &Path, target: &Path) -> Result
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error.to_string()),
     }
+}
+
+fn remove_all_workspace_files(store: &WorkspaceFileStore) -> Result<(), String> {
+    for slot in [WorkspaceFileSlot::Primary, WorkspaceFileSlot::Recovery] {
+        remove_file_if_exists(&store.path(slot))?;
+        remove_file_if_exists(&store.pending_path(slot))?;
+    }
+    remove_workspace_subdirectory(&store.base_directory, &store.backup_directory())?;
+    remove_workspace_subdirectory(&store.base_directory, &store.pending_backup_directory())?;
+    remove_file_if_exists(&store.pending_vault_path())?;
+    remove_file_if_exists(&store.vault_path())?;
+    sync_parent_directory(&store.base_directory).map_err(|error| error.to_string())
 }
 
 fn current_time_milliseconds() -> Result<u64, String> {
@@ -2239,6 +2291,38 @@ mod tests {
                 .unwrap_err(),
             "workspace_vault_invalid_cleanup_path"
         );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn workspace_destruction_removes_every_managed_workspace_file() {
+        let directory = test_directory();
+        let store = WorkspaceFileStore::new(directory.clone());
+        fs::create_dir_all(store.backup_directory()).unwrap();
+        fs::create_dir_all(store.pending_backup_directory()).unwrap();
+        for path in [
+            store.path(WorkspaceFileSlot::Primary),
+            store.pending_path(WorkspaceFileSlot::Primary),
+            store.path(WorkspaceFileSlot::Recovery),
+            store.pending_path(WorkspaceFileSlot::Recovery),
+            store.vault_path(),
+            store.pending_vault_path(),
+            store.backup_directory().join("snapshot.json"),
+            store.pending_backup_directory().join("snapshot.json"),
+        ] {
+            fs::write(path, b"managed workspace data").unwrap();
+        }
+
+        remove_all_workspace_files(&store).unwrap();
+
+        assert!(!store.path(WorkspaceFileSlot::Primary).exists());
+        assert!(!store.pending_path(WorkspaceFileSlot::Primary).exists());
+        assert!(!store.path(WorkspaceFileSlot::Recovery).exists());
+        assert!(!store.pending_path(WorkspaceFileSlot::Recovery).exists());
+        assert!(!store.vault_path().exists());
+        assert!(!store.pending_vault_path().exists());
+        assert!(!store.backup_directory().exists());
+        assert!(!store.pending_backup_directory().exists());
         fs::remove_dir_all(directory).unwrap();
     }
 
