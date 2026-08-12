@@ -62,6 +62,7 @@ import type {
   WorkspaceBackupHistory,
   WorkspaceBackupHistoryStatus,
 } from "./workspaceBackupHistory";
+import { compareWorkspaces } from "./workspaceComparison";
 import type { WorkspaceLifecycle } from "./workspaceLifecycle";
 import {
   appendWorkspaceHistory,
@@ -610,6 +611,14 @@ function App({
         ),
       );
   }, [activeLanguage, referenceFilterNodeIds, t, workspace.nodes]);
+
+  const pendingWorkspaceComparison = useMemo(
+    () =>
+      pendingWorkspaceReplacement === null
+        ? null
+        : compareWorkspaces(workspace, pendingWorkspaceReplacement.workspace),
+    [pendingWorkspaceReplacement, workspace],
+  );
 
   const nameConflictNodeIds = useMemo(() => {
     const idsByName = new Map<string, string[]>();
@@ -3304,7 +3313,7 @@ function App({
           <section
             aria-labelledby="replace-workspace-dialog-title"
             aria-modal="true"
-            className="confirmation-dialog"
+            className="confirmation-dialog workspace-replacement-dialog"
             role="dialog"
           >
             <h2 id="replace-workspace-dialog-title">{t("backup.confirmTitle")}</h2>
@@ -3315,6 +3324,69 @@ function App({
                 references: pendingWorkspaceReplacement.workspace.references.length,
               })}
             </p>
+            {pendingWorkspaceComparison !== null && (
+              <div className="workspace-comparison">
+                <div className="workspace-comparison-totals">
+                  <span>
+                    {t("backup.comparison.current", {
+                      nodes: workspace.nodes.length,
+                      references: workspace.references.length,
+                    })}
+                  </span>
+                  <span aria-hidden="true">→</span>
+                  <span>
+                    {t("backup.comparison.replacement", {
+                      nodes: pendingWorkspaceReplacement.workspace.nodes.length,
+                      references:
+                        pendingWorkspaceReplacement.workspace.references.length,
+                    })}
+                  </span>
+                </div>
+                {pendingWorkspaceComparison.identical ? (
+                  <p className="workspace-comparison-identical">
+                    {t("backup.comparison.identical")}
+                  </p>
+                ) : (
+                  <div className="workspace-comparison-grid">
+                    <span className="is-added">
+                      {t("backup.comparison.addedNodes", {
+                        count: pendingWorkspaceComparison.addedNodes,
+                      })}
+                    </span>
+                    <span className="is-removed">
+                      {t("backup.comparison.removedNodes", {
+                        count: pendingWorkspaceComparison.removedNodes,
+                      })}
+                    </span>
+                    <span>
+                      {t("backup.comparison.modifiedNodes", {
+                        count: pendingWorkspaceComparison.modifiedNodes,
+                      })}
+                    </span>
+                    <span className="is-added">
+                      {t("backup.comparison.addedReferences", {
+                        count: pendingWorkspaceComparison.addedReferences,
+                      })}
+                    </span>
+                    <span className="is-removed">
+                      {t("backup.comparison.removedReferences", {
+                        count: pendingWorkspaceComparison.removedReferences,
+                      })}
+                    </span>
+                    <span>
+                      {t("backup.comparison.changedLayouts", {
+                        count: pendingWorkspaceComparison.changedLayouts,
+                      })}
+                    </span>
+                    <span>
+                      {pendingWorkspaceComparison.viewportChanged
+                        ? t("backup.comparison.viewportChanged")
+                        : t("backup.comparison.viewportUnchanged")}
+                    </span>
+                  </div>
+                )}
+              </div>
+            )}
             <div className="confirmation-dialog-actions">
               <button
                 className="secondary-button"
@@ -3325,6 +3397,7 @@ function App({
               </button>
               <button
                 className="primary-button"
+                disabled={pendingWorkspaceComparison?.identical ?? true}
                 onClick={() => void applyWorkspaceReplacement()}
                 type="button"
               >

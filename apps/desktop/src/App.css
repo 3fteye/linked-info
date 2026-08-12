@@ -1523,6 +1523,64 @@ h1 {
   gap: 8px;
 }
 
+.workspace-replacement-dialog {
+  width: min(560px, 100%);
+}
+
+.workspace-comparison {
+  display: grid;
+  margin-top: 14px;
+  gap: 10px;
+}
+
+.workspace-comparison-totals {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 9px 11px;
+  gap: 8px;
+  border: 1px solid #dfe5e0;
+  border-radius: 7px;
+  color: #4d5a51;
+  background: #f8faf8;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.workspace-comparison-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.workspace-comparison-grid span {
+  padding: 7px 9px;
+  border-radius: 6px;
+  color: #566159;
+  background: #f3f5f3;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.workspace-comparison-grid .is-added {
+  color: #286246;
+  background: #edf7f0;
+}
+
+.workspace-comparison-grid .is-removed {
+  color: #8a4037;
+  background: #fff1ef;
+}
+
+.workspace-comparison-identical {
+  margin: 0 !important;
+  padding: 9px 11px;
+  border-radius: 7px;
+  color: #496056 !important;
+  background: #edf5f0;
+  font-size: 11px !important;
+}
+
 .security-dialog-form {
   display: grid;
   margin-top: 18px;
