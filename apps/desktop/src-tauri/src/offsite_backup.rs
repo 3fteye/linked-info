@@ -251,7 +251,11 @@ pub async fn mark_automatic_offsite_backup_pending(
         if changed {
             write_config(&path, &config)?;
         }
-        config.targets.iter().map(target_summary).collect()
+        config
+            .targets
+            .iter()
+            .map(target_summary)
+            .collect::<Result<Vec<_>, String>>()
     })
     .await
     .map_err(|error| error.to_string())??;
@@ -676,7 +680,7 @@ pub async fn create_offsite_backup(
     .map_err(|_| "offsite_backup_invalid_snapshot".to_owned())?;
     let metadata = target.upload(snapshot).await.map_err(target_error)?;
     ensure_workspace_access(&app, &vault_state, permit)?;
-    update_target_status(&app, &backup_state, target_id, |config| {
+    update_target_status(&app, &backup_state, target_id, move |config| {
         record_upload_success(
             config,
             uploaded_revision,
