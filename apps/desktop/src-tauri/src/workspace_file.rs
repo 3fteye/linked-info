@@ -911,15 +911,15 @@ fn inspect_backup_history(
     let mut total_bytes = 0_u64;
     for file in files {
         total_bytes = total_bytes.saturating_add(file.size_bytes);
-        let state = WorkspaceFileStore::read_text_path(&file.path)
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| "workspace_backup_missing".to_owned())?
-            .and_then(|contents| backup_plaintext(&contents, data_key))
-            .and_then(|contents| {
-                validate_storage_envelope(&contents).map_err(|error| error.to_string())
-            })
-            .map(|_| WorkspaceBackupState::Ready)
-            .unwrap_or(WorkspaceBackupState::Invalid);
+        let state = (|| {
+            let contents = WorkspaceFileStore::read_text_path(&file.path)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "workspace_backup_missing".to_owned())?;
+            let plaintext = backup_plaintext(&contents, data_key)?;
+            validate_storage_envelope(&plaintext).map_err(|error| error.to_string())
+        })()
+        .map(|_| WorkspaceBackupState::Ready)
+        .unwrap_or(WorkspaceBackupState::Invalid);
         entries.push(WorkspaceBackupEntry {
             id: file.id,
             created_at_ms: file.created_at_ms,
