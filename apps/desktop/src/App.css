@@ -1403,6 +1403,76 @@ h1 {
   gap: 7px;
 }
 
+.offsite-backup-settings {
+  display: grid;
+  grid-column: 2;
+  width: 100%;
+  min-width: 0;
+  gap: 10px;
+}
+
+.offsite-backup-settings > small,
+.offsite-target-summary small {
+  color: #667068;
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.offsite-target-selector {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #454c47;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.offsite-target-selector select {
+  min-height: 32px;
+  min-width: 180px;
+  padding: 0 28px 0 9px;
+  border: 1px solid #d9ded9;
+  border-radius: 6px;
+  color: #303632;
+  background: #ffffff;
+  font: inherit;
+}
+
+.offsite-target-summary {
+  display: grid;
+  padding: 9px 10px;
+  gap: 3px;
+  border: 1px solid #e1e6e2;
+  border-radius: 7px;
+  background: #f9fbf9;
+}
+
+.offsite-target-summary strong {
+  overflow-wrap: anywhere;
+  color: #38423b;
+  font-size: 11px;
+}
+
+.offsite-entry-actions {
+  display: flex;
+  flex: none;
+  gap: 6px;
+}
+
+.offsite-target-form {
+  padding-top: 10px;
+  border-top: 1px solid #e4e8e5;
+}
+
+.offsite-target-form > strong {
+  color: #38423b;
+  font-size: 11px;
+}
+
+.offsite-target-form .secondary-button {
+  justify-self: start;
+}
+
 .automatic-backup-history {
   display: grid;
   grid-column: 2;
@@ -2227,7 +2297,8 @@ h1 {
     grid-column: 1;
   }
 
-  .automatic-backup-history {
+  .automatic-backup-history,
+  .offsite-backup-settings {
     grid-column: 1;
   }
 

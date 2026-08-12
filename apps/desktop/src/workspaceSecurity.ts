@@ -10,6 +10,7 @@ export interface WorkspaceSecurityStatus {
 }
 
 export type SensitiveOperation =
+  | "backupTargetChange"
   | "changePassword"
   | "clearRecoveryData"
   | "destroyWorkspace"

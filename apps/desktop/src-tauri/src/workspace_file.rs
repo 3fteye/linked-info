@@ -1398,7 +1398,7 @@ pub(crate) async fn encrypt_offsite_workspace_snapshot(
         let _guard = operation_lock
             .lock()
             .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
-        ensure_access_generation(&access_generation, Some(permit))?;
+        ensure_access_generation(&access_generation, permit)?;
         let metadata = store
             .read_vault_metadata()?
             .ok_or_else(|| "workspace_vault_not_configured".to_owned())?;
@@ -1406,7 +1406,7 @@ pub(crate) async fn encrypt_offsite_workspace_snapshot(
     })
     .await
     .map_err(|error| error.to_string())??;
-    ensure_workspace_access(app, state, Some(permit))?;
+    ensure_workspace_access(app, state, permit)?;
     Ok(result)
 }
 

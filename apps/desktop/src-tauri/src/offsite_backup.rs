@@ -227,7 +227,7 @@ pub async fn create_offsite_backup(
     let target_config = find_target(&app, &backup_state, target_id).await?;
     let target = open_target(&target_config).await?;
     let encrypted = encrypt_offsite_workspace_snapshot(&app, &vault_state, contents).await?;
-    ensure_workspace_access(&app, &vault_state, Some(permit))?;
+    ensure_workspace_access(&app, &vault_state, permit)?;
     let snapshot = BackupSnapshot::new(
         Uuid::new_v4(),
         current_time_milliseconds()?,
@@ -235,13 +235,13 @@ pub async fn create_offsite_backup(
     )
     .map_err(|_| "offsite_backup_invalid_snapshot".to_owned())?;
     let metadata = target.upload(snapshot).await.map_err(target_error)?;
-    ensure_workspace_access(&app, &vault_state, Some(permit))?;
+    ensure_workspace_access(&app, &vault_state, permit)?;
     update_target_status(&app, &backup_state, target_id, |config| {
         config.last_upload_at_ms = Some(current_time_milliseconds()?);
         Ok(())
     })
     .await?;
-    ensure_workspace_access(&app, &vault_state, Some(permit))?;
+    ensure_workspace_access(&app, &vault_state, permit)?;
     Ok(metadata)
 }
 
@@ -261,7 +261,7 @@ pub async fn list_offsite_backups(
         .list(cursor, limit)
         .await
         .map_err(target_error)?;
-    ensure_workspace_access(&app, &vault_state, Some(permit))?;
+    ensure_workspace_access(&app, &vault_state, permit)?;
     Ok(page)
 }
 
@@ -281,7 +281,7 @@ pub async fn download_offsite_backup(
         .await
         .map_err(target_error)?
         .ok_or_else(|| "offsite_backup_snapshot_not_found".to_owned())?;
-    ensure_workspace_access(&app, &vault_state, Some(permit))?;
+    ensure_workspace_access(&app, &vault_state, permit)?;
     let metadata = snapshot.metadata;
     let encrypted_export = String::from_utf8(snapshot.payload)
         .map_err(|_| "offsite_backup_invalid_snapshot".to_owned())?;
@@ -306,13 +306,13 @@ pub async fn verify_offsite_backup(
         .verify(snapshot_id)
         .await
         .map_err(target_error)?;
-    ensure_workspace_access(&app, &vault_state, Some(permit))?;
+    ensure_workspace_access(&app, &vault_state, permit)?;
     update_target_status(&app, &backup_state, target_id, |config| {
         config.last_verified_at_ms = Some(current_time_milliseconds()?);
         Ok(())
     })
     .await?;
-    ensure_workspace_access(&app, &vault_state, Some(permit))?;
+    ensure_workspace_access(&app, &vault_state, permit)?;
     Ok(verification)
 }
 

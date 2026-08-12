@@ -68,6 +68,11 @@ import type {
   SecretClipboard,
   SecretClipboardStatus,
 } from "./secretClipboard";
+import type {
+  OffsiteBackupPage,
+  OffsiteBackupService,
+  OffsiteBackupTarget,
+} from "./offsiteBackup";
 import WorkspaceRestorePreview from "./WorkspaceRestorePreview";
 import type { WorkspaceLifecycle } from "./workspaceLifecycle";
 import {
@@ -148,6 +153,7 @@ interface AppProps {
   localEmbeddingRuntime: LocalEmbeddingRuntime;
   localLlmRuntime: LocalLlmRuntime;
   lifecycle: WorkspaceLifecycle;
+  offsiteBackup: OffsiteBackupService;
   persistence: WorkspacePersistence;
   secretClipboard: SecretClipboard;
   updateWorkspaceSecurityStatus: (status: WorkspaceSecurityStatus) => void;
@@ -271,6 +277,7 @@ function App({
   localEmbeddingRuntime,
   localLlmRuntime,
   lifecycle,
+  offsiteBackup,
   persistence,
   secretClipboard,
   updateWorkspaceSecurityStatus,
@@ -315,8 +322,19 @@ function App({
   >(null);
   const [recoveryAvailable, setRecoveryAvailable] = useState(false);
   const [securityDialog, setSecurityDialog] = useState<
-    "enable" | "change" | "rotate" | "export" | "exportUnreadable" | null
+    | "enable"
+    | "change"
+    | "rotate"
+    | "export"
+    | "exportUnreadable"
+    | "backupTarget"
+    | null
   >(null);
+  const [pendingBackupTarget, setPendingBackupTarget] = useState<{
+    name: string;
+    endpoint: string;
+    token: string;
+  } | null>(null);
   const [pendingUnreadableExport, setPendingUnreadableExport] = useState<{
     raw: string;
     source: "primary" | "recovery";
@@ -342,6 +360,16 @@ function App({
   const [encryptedImportError, setEncryptedImportError] = useState<string | null>(
     null,
   );
+  const [offsiteTargets, setOffsiteTargets] = useState<OffsiteBackupTarget[]>([]);
+  const [selectedOffsiteTargetId, setSelectedOffsiteTargetId] = useState<
+    string | null
+  >(null);
+  const [offsitePage, setOffsitePage] = useState<OffsiteBackupPage | null>(null);
+  const [offsiteBusy, setOffsiteBusy] = useState(false);
+  const [offsiteMessage, setOffsiteMessage] = useState<string | null>(null);
+  const [offsiteTargetName, setOffsiteTargetName] = useState("Cloudflare R2");
+  const [offsiteEndpoint, setOffsiteEndpoint] = useState("");
+  const [offsiteToken, setOffsiteToken] = useState("");
   const embeddingAnalyzer = useMemo(
     () => new EmbeddingAnalyzer(embeddingGateway, embeddingVectorCache),
     [embeddingGateway, embeddingVectorCache],
@@ -394,6 +422,11 @@ function App({
   const remoteEmbeddingScope = useMemo(
     () => embeddingTransmissionEstimate(workspace.nodes),
     [workspace.nodes],
+  );
+  const selectedOffsiteTarget = useMemo(
+    () =>
+      offsiteTargets.find((target) => target.id === selectedOffsiteTargetId) ?? null,
+    [offsiteTargets, selectedOffsiteTargetId],
   );
 
   useEffect(() => {
@@ -565,6 +598,65 @@ function App({
       active = false;
     };
   }, [persistenceReady, t, workspaceBackupHistory]);
+
+  useEffect(() => {
+    if (
+      activeView !== "settings" ||
+      !workspaceSecurityStatus.encrypted ||
+      !offsiteBackup.available
+    ) {
+      return;
+    }
+    let active = true;
+    void offsiteBackup
+      .inspectTargets()
+      .then((targets) => {
+        if (!active) {
+          return;
+        }
+        setOffsiteTargets(targets);
+        setSelectedOffsiteTargetId((current) =>
+          current !== null && targets.some((target) => target.id === current)
+            ? current
+            : (targets[0]?.id ?? null),
+        );
+      })
+      .catch((error) => {
+        if (active) {
+          setOffsiteMessage(
+            t("offsiteBackup.errors.inspect", { reason: errorReason(error) }),
+          );
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [activeView, offsiteBackup, t, workspaceSecurityStatus.encrypted]);
+
+  useEffect(() => {
+    if (activeView !== "settings" || selectedOffsiteTargetId === null) {
+      setOffsitePage(null);
+      return;
+    }
+    let active = true;
+    void offsiteBackup
+      .list(selectedOffsiteTargetId)
+      .then((page) => {
+        if (active) {
+          setOffsitePage(page);
+        }
+      })
+      .catch((error) => {
+        if (active) {
+          setOffsiteMessage(
+            t("offsiteBackup.errors.list", { reason: errorReason(error) }),
+          );
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [activeView, offsiteBackup, selectedOffsiteTargetId, t]);
 
   useEffect(() => {
     let active = true;
@@ -767,6 +859,8 @@ function App({
     }
     setSecurityDialog(null);
     setPendingUnreadableExport(null);
+    setPendingBackupTarget(null);
+    setOffsiteToken("");
     setSecurityCurrentPassword("");
     setSecurityPassword("");
     setSecurityPasswordConfirmation("");
@@ -778,17 +872,19 @@ function App({
     if (securityDialog === null || securityBusy) {
       return;
     }
-    const exportDialog =
-      securityDialog === "export" || securityDialog === "exportUnreadable";
+    const reauthenticationOnly =
+      securityDialog === "export" ||
+      securityDialog === "exportUnreadable" ||
+      securityDialog === "backupTarget";
     if (
-      !exportDialog &&
+      !reauthenticationOnly &&
       securityPassword !== securityPasswordConfirmation
     ) {
       setSecurityMessage(t("security.passwordMismatch"));
       return;
     }
     if (
-      !exportDialog &&
+      !reauthenticationOnly &&
       Array.from(securityPassword).length < 15
     ) {
       setSecurityMessage(t("security.passwordTooShort"));
@@ -818,7 +914,9 @@ function App({
             ? "changePassword"
             : securityDialog === "rotate"
               ? "rotateDataKey"
-              : "exportWorkspace";
+              : securityDialog === "backupTarget"
+                ? "backupTargetChange"
+                : "exportWorkspace";
         const authorization = await workspaceSecurity.authorizeSensitiveOperation(
           sensitiveOperation,
           authenticationMethod === "system"
@@ -844,6 +942,21 @@ function App({
           );
         } else if (securityDialog === "export") {
           await exportWorkspace(authorization);
+        } else if (securityDialog === "backupTarget") {
+          if (pendingBackupTarget === null) {
+            throw new Error("offsite_backup_missing_pending_target");
+          }
+          const configured = await offsiteBackup.configureCloudflareTarget({
+            ...pendingBackupTarget,
+            authorization,
+          });
+          setOffsiteTargets((targets) => [...targets, configured]);
+          setSelectedOffsiteTargetId(configured.id);
+          setOffsitePage(null);
+          setOffsiteEndpoint("");
+          setOffsiteTargetName("Cloudflare R2");
+          setOffsiteToken("");
+          setOffsiteMessage(t("offsiteBackup.targetConnected"));
         } else if (pendingUnreadableExport !== null) {
           await exportUnreadableData(
             pendingUnreadableExport.raw,
@@ -854,6 +967,7 @@ function App({
       }
       setSecurityDialog(null);
       setPendingUnreadableExport(null);
+      setPendingBackupTarget(null);
       setSecurityCurrentPassword("");
       setSecurityPassword("");
       setSecurityPasswordConfirmation("");
@@ -1805,6 +1919,129 @@ function App({
       } catch {
         setAutomaticBackupHistoryError(t("backup.historyInspectFailed"));
       }
+    }
+  }
+
+  function requestOffsiteTargetConfiguration() {
+    if (
+      offsiteBusy ||
+      offsiteTargetName.trim().length === 0 ||
+      offsiteEndpoint.trim().length === 0 ||
+      offsiteToken.length < 32
+    ) {
+      setOffsiteMessage(t("offsiteBackup.errors.invalidConfiguration"));
+      return;
+    }
+    setOffsiteMessage(null);
+    setSecurityMessage(null);
+    setSecurityCurrentPassword("");
+    setPendingBackupTarget({
+      name: offsiteTargetName.trim(),
+      endpoint: offsiteEndpoint.trim(),
+      token: offsiteToken,
+    });
+    setSecurityDialog("backupTarget");
+  }
+
+  async function refreshOffsiteBackups(targetId = selectedOffsiteTargetId) {
+    if (targetId === null || offsiteBusy) {
+      return;
+    }
+    setOffsiteBusy(true);
+    setOffsiteMessage(null);
+    try {
+      const [targets, page] = await Promise.all([
+        offsiteBackup.inspectTargets(),
+        offsiteBackup.list(targetId),
+      ]);
+      setOffsiteTargets(targets);
+      setOffsitePage(page);
+    } catch (error) {
+      setOffsiteMessage(
+        t("offsiteBackup.errors.list", { reason: errorReason(error) }),
+      );
+    } finally {
+      setOffsiteBusy(false);
+    }
+  }
+
+  async function createOffsiteSnapshot() {
+    if (selectedOffsiteTargetId === null || offsiteBusy) {
+      return;
+    }
+    setOffsiteBusy(true);
+    setOffsiteMessage(null);
+    try {
+      await persistence.save(workspaceRef.current);
+      const plaintext = serializeWorkspaceExport(workspaceRef.current);
+      await offsiteBackup.create(selectedOffsiteTargetId, plaintext);
+      const [targets, page] = await Promise.all([
+        offsiteBackup.inspectTargets(),
+        offsiteBackup.list(selectedOffsiteTargetId),
+      ]);
+      setOffsiteTargets(targets);
+      setOffsitePage(page);
+      setOffsiteMessage(t("offsiteBackup.uploadSuccess"));
+    } catch (error) {
+      setOffsiteMessage(
+        t("offsiteBackup.errors.upload", { reason: errorReason(error) }),
+      );
+    } finally {
+      setOffsiteBusy(false);
+    }
+  }
+
+  async function verifyOffsiteSnapshot(snapshotId: string) {
+    if (selectedOffsiteTargetId === null || offsiteBusy) {
+      return;
+    }
+    setOffsiteBusy(true);
+    setOffsiteMessage(null);
+    try {
+      const verification = await offsiteBackup.verify(
+        selectedOffsiteTargetId,
+        snapshotId,
+      );
+      setOffsiteTargets(await offsiteBackup.inspectTargets());
+      setOffsiteMessage(
+        t("offsiteBackup.verifySuccess", {
+          size: formatByteCount(verification.downloadedBytes),
+        }),
+      );
+    } catch (error) {
+      setOffsiteMessage(
+        t("offsiteBackup.errors.verify", { reason: errorReason(error) }),
+      );
+    } finally {
+      setOffsiteBusy(false);
+    }
+  }
+
+  async function chooseOffsiteBackup(snapshotId: string) {
+    if (selectedOffsiteTargetId === null || offsiteBusy) {
+      return;
+    }
+    setOffsiteBusy(true);
+    setOffsiteMessage(null);
+    try {
+      const downloaded = await offsiteBackup.download(
+        selectedOffsiteTargetId,
+        snapshotId,
+      );
+      setPendingEncryptedImport({
+        name: t("offsiteBackup.restoreSource", {
+          time: formatBackupDate(downloaded.metadata.createdAtMs, activeLanguage),
+        }),
+        text: downloaded.encryptedExport,
+      });
+      setEncryptedImportPassword("");
+      setEncryptedImportError(null);
+    } catch (error) {
+      setOffsiteMessage(
+        t("offsiteBackup.errors.download", { reason: errorReason(error) }),
+      );
+    } finally {
+      setOffsiteBusy(false);
     }
   }
 
@@ -2922,6 +3159,193 @@ function App({
                   </p>
                 )}
               </div>
+              <div className="setting-row data-setting-row">
+                <div className="setting-label">
+                  <Cloud size={18} />
+                  <div className="setting-label-copy">
+                    <span>{t("offsiteBackup.title")}</span>
+                    <small>{t("offsiteBackup.description")}</small>
+                  </div>
+                </div>
+                <div className="offsite-backup-settings">
+                  {!workspaceSecurityStatus.encrypted ? (
+                    <small>{t("offsiteBackup.encryptionRequired")}</small>
+                  ) : (
+                    <>
+                      {offsiteTargets.length > 0 && (
+                        <>
+                          <label className="offsite-target-selector">
+                            <span>{t("offsiteBackup.target")}</span>
+                            <select
+                              disabled={offsiteBusy}
+                              onChange={(event) =>
+                                setSelectedOffsiteTargetId(event.target.value)
+                              }
+                              value={selectedOffsiteTargetId ?? ""}
+                            >
+                              {offsiteTargets.map((target) => (
+                                <option key={target.id} value={target.id}>
+                                  {target.name}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                          {selectedOffsiteTarget !== null && (
+                            <div className="offsite-target-summary">
+                              <strong>{selectedOffsiteTarget.endpoint}</strong>
+                              <small>
+                                {t("offsiteBackup.targetStatus", {
+                                  uploaded:
+                                    selectedOffsiteTarget.lastUploadAtMs === null
+                                      ? t("offsiteBackup.never")
+                                      : formatBackupDate(
+                                          selectedOffsiteTarget.lastUploadAtMs,
+                                          activeLanguage,
+                                        ),
+                                  verified:
+                                    selectedOffsiteTarget.lastVerifiedAtMs === null
+                                      ? t("offsiteBackup.never")
+                                      : formatBackupDate(
+                                          selectedOffsiteTarget.lastVerifiedAtMs,
+                                          activeLanguage,
+                                        ),
+                                })}
+                              </small>
+                              {selectedOffsiteTarget.maximumUploadBytes !== null && (
+                                <small>
+                                  {t("offsiteBackup.providerLimit", {
+                                    size: formatByteCount(
+                                      selectedOffsiteTarget.maximumUploadBytes,
+                                    ),
+                                  })}
+                                </small>
+                              )}
+                            </div>
+                          )}
+                          <div className="backup-actions">
+                            <button
+                              className="primary-button"
+                              disabled={offsiteBusy || selectedOffsiteTargetId === null}
+                              onClick={() => void createOffsiteSnapshot()}
+                              type="button"
+                            >
+                              <Upload aria-hidden="true" size={15} />
+                              {t("offsiteBackup.uploadNow")}
+                            </button>
+                            <button
+                              className="secondary-button"
+                              disabled={offsiteBusy || selectedOffsiteTargetId === null}
+                              onClick={() => void refreshOffsiteBackups()}
+                              type="button"
+                            >
+                              <RefreshCw aria-hidden="true" size={15} />
+                              {t("offsiteBackup.refresh")}
+                            </button>
+                          </div>
+                          {offsitePage !== null && offsitePage.items.length === 0 && (
+                            <p className="automatic-backup-history-message">
+                              {t("offsiteBackup.empty")}
+                            </p>
+                          )}
+                          {offsitePage !== null && offsitePage.items.length > 0 && (
+                            <div className="automatic-backup-list" role="list">
+                              {offsitePage.items.map((snapshot) => (
+                                <div
+                                  className="automatic-backup-entry"
+                                  key={snapshot.id}
+                                  role="listitem"
+                                >
+                                  <div>
+                                    <strong>
+                                      {formatBackupDate(
+                                        snapshot.createdAtMs,
+                                        activeLanguage,
+                                      )}
+                                    </strong>
+                                    <small>
+                                      {formatByteCount(snapshot.sizeBytes)} · {snapshot.sha256.slice(0, 12)}…
+                                    </small>
+                                  </div>
+                                  <div className="offsite-entry-actions">
+                                    <button
+                                      className="secondary-button"
+                                      disabled={offsiteBusy}
+                                      onClick={() =>
+                                        void verifyOffsiteSnapshot(snapshot.id)
+                                      }
+                                      type="button"
+                                    >
+                                      <ShieldCheck aria-hidden="true" size={14} />
+                                      {t("offsiteBackup.verify")}
+                                    </button>
+                                    <button
+                                      className="secondary-button"
+                                      disabled={offsiteBusy}
+                                      onClick={() => void chooseOffsiteBackup(snapshot.id)}
+                                      type="button"
+                                    >
+                                      <ArchiveRestore aria-hidden="true" size={14} />
+                                      {t("offsiteBackup.restore")}
+                                    </button>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </>
+                      )}
+                      <div className="remote-embedding-fields offsite-target-form">
+                        <strong>{t("offsiteBackup.addTarget")}</strong>
+                        <label>
+                          <span>{t("offsiteBackup.targetName")}</span>
+                          <input
+                            disabled={offsiteBusy}
+                            maxLength={80}
+                            onChange={(event) =>
+                              setOffsiteTargetName(event.target.value)
+                            }
+                            value={offsiteTargetName}
+                          />
+                        </label>
+                        <label>
+                          <span>{t("offsiteBackup.endpoint")}</span>
+                          <input
+                            disabled={offsiteBusy}
+                            onChange={(event) => setOffsiteEndpoint(event.target.value)}
+                            placeholder="https://linked-info-backup-api.example.workers.dev"
+                            type="url"
+                            value={offsiteEndpoint}
+                          />
+                        </label>
+                        <label>
+                          <span>{t("offsiteBackup.token")}</span>
+                          <input
+                            autoComplete="off"
+                            disabled={offsiteBusy}
+                            onChange={(event) => setOffsiteToken(event.target.value)}
+                            type="password"
+                            value={offsiteToken}
+                          />
+                        </label>
+                        <small>{t("offsiteBackup.tokenDescription")}</small>
+                        <button
+                          className="secondary-button"
+                          disabled={offsiteBusy || !offsiteBackup.available}
+                          onClick={requestOffsiteTargetConfiguration}
+                          type="button"
+                        >
+                          <Cloud aria-hidden="true" size={15} />
+                          {t("offsiteBackup.connect")}
+                        </button>
+                      </div>
+                      <small>{t("offsiteBackup.passwordHistoryWarning")}</small>
+                    </>
+                  )}
+                  {offsiteMessage !== null && (
+                    <small role="status">{offsiteMessage}</small>
+                  )}
+                </div>
+              </div>
             </section>
           ) : activeView === "canvas" ? (
             <GraphCanvas
@@ -3516,7 +3940,9 @@ function App({
                   ? t("security.changeTitle")
                   : securityDialog === "rotate"
                     ? t("security.rotateTitle")
-                  : t("security.exportTitle")}
+                    : securityDialog === "backupTarget"
+                      ? t("offsiteBackup.reauthenticateTitle")
+                    : t("security.exportTitle")}
             </h2>
             <p>
               {securityDialog === "enable"
@@ -3525,7 +3951,9 @@ function App({
                   ? t("security.changeDescription")
                   : securityDialog === "rotate"
                     ? t("security.rotateDescription")
-                  : securityDialog === "exportUnreadable"
+                    : securityDialog === "backupTarget"
+                      ? t("offsiteBackup.reauthenticateDescription")
+                    : securityDialog === "exportUnreadable"
                     ? t("security.exportUnreadableDescription")
                     : t("security.exportDescription")}
             </p>
@@ -3554,7 +3982,8 @@ function App({
                 </>
               )}
               {securityDialog !== "export" &&
-                securityDialog !== "exportUnreadable" && (
+                securityDialog !== "exportUnreadable" &&
+                securityDialog !== "backupTarget" && (
                 <>
                   <label htmlFor="workspace-security-password">
                     {securityDialog === "rotate"
@@ -3614,6 +4043,8 @@ function App({
                         ? t("security.changePassword")
                         : securityDialog === "rotate"
                           ? t("security.rotateConfirm")
+                          : securityDialog === "backupTarget"
+                            ? t("offsiteBackup.connect")
                         : t("backup.export")}
                 </button>
               </div>
