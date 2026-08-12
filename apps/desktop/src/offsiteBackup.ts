@@ -58,6 +58,11 @@ export interface OffsiteBackupService {
     targetId: string,
     snapshotId: string,
   ): Promise<OffsiteBackupVerification>;
+  testRestore(
+    targetId: string,
+    snapshotId: string,
+    password: string,
+  ): Promise<OffsiteBackupTarget>;
   listRecovery(input: {
     endpoint: string;
     token: string;
@@ -110,6 +115,13 @@ export const tauriOffsiteBackupService: OffsiteBackupService = {
       snapshotId,
     });
   },
+  testRestore(targetId, snapshotId, password) {
+    return invoke<OffsiteBackupTarget>("test_offsite_backup_restore", {
+      targetId,
+      snapshotId,
+      password,
+    });
+  },
   listRecovery({ endpoint, token, cursor = null, limit = 50 }) {
     return invoke<OffsiteBackupPage>("list_cloudflare_recovery_backups", {
       endpoint,
@@ -151,6 +163,9 @@ export const unavailableOffsiteBackupService: OffsiteBackupService = {
     return unavailable();
   },
   async verify() {
+    return unavailable();
+  },
+  async testRestore() {
     return unavailable();
   },
   async listRecovery() {

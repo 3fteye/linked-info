@@ -20,7 +20,7 @@ use crate::{
     workspace_file::{
         SensitiveOperation, WorkspaceVaultState, begin_workspace_access,
         encrypt_offsite_workspace_snapshot, ensure_workspace_access,
-        workspace_encryption_configured, write_atomically,
+        test_offsite_workspace_restore, workspace_encryption_configured, write_atomically,
     },
 };
 
@@ -353,6 +353,55 @@ pub async fn verify_offsite_backup(
     .await?;
     ensure_workspace_access(&app, &vault_state, permit)?;
     Ok(verification)
+}
+
+#[tauri::command]
+pub async fn test_offsite_backup_restore(
+    app: tauri::AppHandle,
+    backup_state: tauri::State<'_, OffsiteBackupState>,
+    vault_state: tauri::State<'_, WorkspaceVaultState>,
+    target_id: Uuid,
+    snapshot_id: Uuid,
+    password: String,
+) -> Result<BackupTargetSummary, String> {
+    let permit = begin_workspace_access(&app, &vault_state)?
+        .ok_or_else(|| "workspace_vault_not_configured".to_owned())?;
+    let config = find_target(&app, &backup_state, target_id).await?;
+    let snapshot = open_target(&config)
+        .await?
+        .download(snapshot_id)
+        .await
+        .map_err(target_error)?
+        .ok_or_else(|| "offsite_backup_snapshot_not_found".to_owned())?;
+    ensure_workspace_access(&app, &vault_state, Some(permit))?;
+    let encrypted = Zeroizing::new(
+        String::from_utf8(snapshot.payload)
+            .map_err(|_| "offsite_backup_invalid_snapshot".to_owned())?,
+    );
+    let password = Zeroizing::new(password);
+    let access_generation = vault_state.access_generation();
+    let restore_result = tauri::async_runtime::spawn_blocking(move || {
+        test_offsite_workspace_restore(
+            encrypted.as_str(),
+            password.as_str(),
+            Some(&access_generation),
+            Some(permit),
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?;
+    restore_result?;
+    ensure_workspace_access(&app, &vault_state, Some(permit))?;
+    let completed_at_ms = current_time_milliseconds()?;
+    update_target_status(&app, &backup_state, target_id, move |config| {
+        config.last_verified_at_ms = Some(completed_at_ms);
+        config.last_restore_test_at_ms = Some(completed_at_ms);
+        Ok(())
+    })
+    .await?;
+    ensure_workspace_access(&app, &vault_state, Some(permit))?;
+    let updated = find_target(&app, &backup_state, target_id).await?;
+    target_summary(&updated)
 }
 
 async fn open_target(config: &BackupTargetConfig) -> Result<Box<dyn BackupTarget>, String> {

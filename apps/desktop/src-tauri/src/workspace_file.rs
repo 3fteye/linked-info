@@ -1430,6 +1430,85 @@ pub(crate) async fn encrypt_offsite_workspace_snapshot(
     Ok(result)
 }
 
+pub(crate) fn test_offsite_workspace_restore(
+    contents: &str,
+    password: &str,
+    access_generation: Option<&AtomicU64>,
+    permit: Option<WorkspaceAccessPermit>,
+) -> Result<(), String> {
+    ensure_restore_drill_access(access_generation, permit)?;
+    let (envelope, data_key, plaintext) = open_encrypted_export(contents, password)?;
+    let plaintext = Zeroizing::new(plaintext);
+    validate_storage_envelope(plaintext.as_str())
+        .map_err(|_| "workspace_restore_invalid_data".to_owned())?;
+    ensure_restore_drill_access(access_generation, permit)?;
+    let directory = std::env::temp_dir().join(format!(
+        "linked-info-offsite-restore-drill-{}",
+        uuid::Uuid::new_v4()
+    ));
+    if directory.exists() {
+        return Err("workspace_restore_drill_directory_conflict".to_owned());
+    }
+    let store = WorkspaceFileStore::new(directory.clone());
+    let result = (|| {
+        ensure_restore_drill_access(access_generation, permit)?;
+        let installed_key = install_prepared_workspace_restore(
+            &store,
+            PreparedWorkspaceRestore {
+                id: uuid::Uuid::new_v4(),
+                expires_at_milliseconds: u64::MAX,
+                envelope,
+                data_key: Zeroizing::new(data_key),
+            },
+        )?;
+        let installed_key = Zeroizing::new(installed_key);
+        ensure_restore_drill_access(access_generation, permit)?;
+        let installed_metadata = store
+            .read_vault_metadata()?
+            .ok_or_else(|| "workspace_restore_drill_vault_missing".to_owned())?;
+        if installed_metadata.system_unlock.is_some() {
+            return Err("workspace_restore_drill_device_unlock_migrated".to_owned());
+        }
+        if unwrap_data_key(&installed_metadata, password)? != *installed_key {
+            return Err("workspace_restore_drill_password_unlock_failed".to_owned());
+        }
+        let installed_workspace = Zeroizing::new(
+            store
+                .read(WorkspaceFileSlot::Primary, Some(&installed_key))?
+                .ok_or_else(|| "workspace_restore_drill_workspace_missing".to_owned())?,
+        );
+        if installed_workspace.as_str() != plaintext.as_str() {
+            return Err("workspace_restore_drill_workspace_mismatch".to_owned());
+        }
+        ensure_restore_drill_access(access_generation, permit)?;
+        Ok(())
+    })();
+    let cleanup = match fs::remove_dir_all(&directory) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.to_string()),
+    };
+    match (result, cleanup) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(()), Err(_)) => Err("workspace_restore_drill_cleanup_failed".to_owned()),
+        (Err(error), Err(_)) => Err(format!("{error}:workspace_restore_drill_cleanup_failed")),
+    }
+}
+
+fn ensure_restore_drill_access(
+    access_generation: Option<&AtomicU64>,
+    permit: Option<WorkspaceAccessPermit>,
+) -> Result<(), String> {
+    match (access_generation, permit) {
+        (Some(access_generation), Some(permit)) => {
+            ensure_access_generation(access_generation, Some(permit))
+        }
+        (None, None) => Ok(()),
+        _ => Err("workspace_vault_session_expired".to_owned()),
+    }
+}
+
 #[tauri::command]
 pub async fn decrypt_workspace_export(
     contents: String,
@@ -3847,6 +3926,40 @@ mod tests {
     }
 
     #[test]
+    fn recovery_drill_installs_and_unlocks_an_isolated_fresh_vault() {
+        let restored = workspace("recovery-drill");
+        let source_key = random_array::<DATA_KEY_BYTES>().unwrap();
+        let source_metadata =
+            create_vault_metadata("correct horse battery", &source_key, Vec::new()).unwrap();
+        let encrypted = encrypt_export(&restored, &source_metadata, &source_key).unwrap();
+
+        assert_eq!(
+            test_offsite_workspace_restore(&encrypted, "correct horse battery", None, None,),
+            Ok(())
+        );
+        assert_eq!(
+            test_offsite_workspace_restore(&encrypted, "incorrect password", None, None),
+            Err("workspace_vault_invalid_password".to_owned())
+        );
+    }
+
+    #[test]
+    fn recovery_drill_rejects_a_revoked_workspace_permit() {
+        let generation = AtomicU64::new(2);
+        let permit = WorkspaceAccessPermit { generation: 1 };
+
+        assert_eq!(
+            test_offsite_workspace_restore(
+                "not-opened",
+                "not-opened",
+                Some(&generation),
+                Some(permit)
+            ),
+            Err("workspace_vault_session_expired".to_owned())
+        );
+    }
+
+    #[test]
     fn reads_vault_metadata_created_before_system_unlock_support() {
         let data_key = random_array::<DATA_KEY_BYTES>().unwrap();
         let metadata =
@@ -4064,8 +4177,6 @@ mod tests {
         )
         .expect("test snapshot creation failed");
         let snapshot_id = snapshot.metadata.id;
-        let directory = test_directory();
-
         let outcome: Result<(), String> = async {
             let uploaded = target
                 .upload(snapshot)
@@ -4086,44 +4197,14 @@ mod tests {
                 .ok_or_else(|| "drill snapshot disappeared after upload".to_owned())?;
             let encrypted = String::from_utf8(downloaded.payload)
                 .map_err(|_| "drill snapshot was not UTF-8 JSON".to_owned())?;
-            let (envelope, opened_key, preview) = open_encrypted_export(&encrypted, password)?;
-            if preview != restored {
-                return Err("drill preview did not match the source workspace".to_owned());
+            if decrypt_export(&encrypted, password)? != restored {
+                return Err("drill downloaded workspace differs from the source".to_owned());
             }
-
-            let store = WorkspaceFileStore::new(directory.clone());
-            if store.encryption_configured() {
-                return Err("drill destination was not a fresh configuration".to_owned());
-            }
-            let installed_key = install_prepared_workspace_restore(
-                &store,
-                PreparedWorkspaceRestore {
-                    id: uuid::Uuid::new_v4(),
-                    expires_at_milliseconds: u64::MAX,
-                    envelope,
-                    data_key: Zeroizing::new(opened_key),
-                },
-            )?;
-            let installed_metadata = store
-                .read_vault_metadata()?
-                .ok_or_else(|| "drill restore did not create vault metadata".to_owned())?;
-            if installed_metadata.system_unlock.is_some() {
-                return Err("drill restore migrated a device unlock entry".to_owned());
-            }
-            if unwrap_data_key(&installed_metadata, password)? != installed_key {
-                return Err(
-                    "drill restored vault cannot be opened by its master password".to_owned(),
-                );
-            }
-            if store.read(WorkspaceFileSlot::Primary, Some(&installed_key))? != Some(restored) {
-                return Err("drill restored workspace differs from the source".to_owned());
-            }
-            Ok(())
+            test_offsite_workspace_restore(&encrypted, password, None, None)
         }
         .await;
 
         let deletion = target.delete(snapshot_id).await;
-        let _ = fs::remove_dir_all(&directory);
         if let Err(error) = outcome {
             panic!("live recovery drill failed before cleanup: {error}");
         }

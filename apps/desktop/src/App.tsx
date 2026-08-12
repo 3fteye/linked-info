@@ -377,6 +377,16 @@ function App({
   const [offsiteToken, setOffsiteToken] = useState("");
   const [offsiteRecoveryPage, setOffsiteRecoveryPage] =
     useState<OffsiteBackupPage | null>(null);
+  const [offsiteRestoreDrill, setOffsiteRestoreDrill] = useState<{
+    targetId: string;
+    snapshotId: string;
+    createdAtMs: number;
+  } | null>(null);
+  const [offsiteRestoreDrillPassword, setOffsiteRestoreDrillPassword] =
+    useState("");
+  const [offsiteRestoreDrillError, setOffsiteRestoreDrillError] = useState<
+    string | null
+  >(null);
   const embeddingAnalyzer = useMemo(
     () => new EmbeddingAnalyzer(embeddingGateway, embeddingVectorCache),
     [embeddingGateway, embeddingVectorCache],
@@ -2097,6 +2107,62 @@ function App({
     }
   }
 
+  function openOffsiteRestoreDrill(snapshotId: string, createdAtMs: number) {
+    if (selectedOffsiteTargetId === null || offsiteBusy) {
+      return;
+    }
+    setOffsiteRestoreDrill({
+      targetId: selectedOffsiteTargetId,
+      snapshotId,
+      createdAtMs,
+    });
+    setOffsiteRestoreDrillPassword("");
+    setOffsiteRestoreDrillError(null);
+  }
+
+  function closeOffsiteRestoreDrill() {
+    if (offsiteBusy) {
+      return;
+    }
+    setOffsiteRestoreDrill(null);
+    setOffsiteRestoreDrillPassword("");
+    setOffsiteRestoreDrillError(null);
+  }
+
+  async function runOffsiteRestoreDrill() {
+    if (
+      offsiteRestoreDrill === null ||
+      offsiteBusy ||
+      offsiteRestoreDrillPassword.length === 0
+    ) {
+      return;
+    }
+    setOffsiteBusy(true);
+    setOffsiteRestoreDrillError(null);
+    try {
+      const updated = await offsiteBackup.testRestore(
+        offsiteRestoreDrill.targetId,
+        offsiteRestoreDrill.snapshotId,
+        offsiteRestoreDrillPassword,
+      );
+      setOffsiteTargets((targets) =>
+        targets.map((target) => (target.id === updated.id ? updated : target)),
+      );
+      setOffsiteRestoreDrill(null);
+      setOffsiteRestoreDrillPassword("");
+      setOffsiteMessage(t("offsiteBackup.restoreDrillSuccess"));
+    } catch (error) {
+      const reason = errorReason(error);
+      setOffsiteRestoreDrillError(
+        reason === "workspace_vault_invalid_password"
+          ? t("security.invalidPassword")
+          : t("offsiteBackup.errors.restoreDrill", { reason }),
+      );
+    } finally {
+      setOffsiteBusy(false);
+    }
+  }
+
   async function chooseOffsiteBackup(snapshotId: string) {
     if (selectedOffsiteTargetId === null || offsiteBusy) {
       return;
@@ -3396,6 +3462,13 @@ function App({
                                           selectedOffsiteTarget.lastVerifiedAtMs,
                                           activeLanguage,
                                         ),
+                                  restored:
+                                    selectedOffsiteTarget.lastRestoreTestAtMs === null
+                                      ? t("offsiteBackup.never")
+                                      : formatBackupDate(
+                                          selectedOffsiteTarget.lastRestoreTestAtMs,
+                                          activeLanguage,
+                                        ),
                                 })}
                               </small>
                               {selectedOffsiteTarget.maximumUploadBytes !== null && (
@@ -3464,6 +3537,20 @@ function App({
                                     >
                                       <ShieldCheck aria-hidden="true" size={14} />
                                       {t("offsiteBackup.verify")}
+                                    </button>
+                                    <button
+                                      className="secondary-button"
+                                      disabled={offsiteBusy}
+                                      onClick={() =>
+                                        openOffsiteRestoreDrill(
+                                          snapshot.id,
+                                          snapshot.createdAtMs,
+                                        )
+                                      }
+                                      type="button"
+                                    >
+                                      <KeyRound aria-hidden="true" size={14} />
+                                      {t("offsiteBackup.restoreDrill")}
                                     </button>
                                     <button
                                       className="secondary-button"
@@ -4475,6 +4562,74 @@ function App({
                   {encryptedImportBusy
                     ? t("security.unlocking")
                     : t("backup.decryptImport")}
+                </button>
+              </div>
+            </form>
+          </section>
+        </div>
+      )}
+
+      {offsiteRestoreDrill !== null && (
+        <div className="modal-backdrop" role="presentation">
+          <section
+            aria-labelledby="offsite-restore-drill-dialog-title"
+            aria-modal="true"
+            className="confirmation-dialog security-dialog"
+            role="dialog"
+          >
+            <h2 id="offsite-restore-drill-dialog-title">
+              {t("offsiteBackup.restoreDrillTitle")}
+            </h2>
+            <p>
+              {t("offsiteBackup.restoreDrillDescription", {
+                time: formatBackupDate(
+                  offsiteRestoreDrill.createdAtMs,
+                  activeLanguage,
+                ),
+              })}
+            </p>
+            <form
+              className="security-dialog-form"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void runOffsiteRestoreDrill();
+              }}
+            >
+              <label htmlFor="offsite-restore-drill-password">
+                {t("security.password")}
+              </label>
+              <input
+                autoComplete="current-password"
+                autoFocus
+                id="offsite-restore-drill-password"
+                onChange={(event) =>
+                  setOffsiteRestoreDrillPassword(event.target.value)
+                }
+                type="password"
+                value={offsiteRestoreDrillPassword}
+              />
+              {offsiteRestoreDrillError !== null && (
+                <p className="security-error" role="alert">
+                  {offsiteRestoreDrillError}
+                </p>
+              )}
+              <div className="confirmation-dialog-actions">
+                <button
+                  className="secondary-button"
+                  disabled={offsiteBusy}
+                  onClick={closeOffsiteRestoreDrill}
+                  type="button"
+                >
+                  {t("actions.cancel")}
+                </button>
+                <button
+                  className="primary-button"
+                  disabled={offsiteBusy || offsiteRestoreDrillPassword.length === 0}
+                  type="submit"
+                >
+                  {offsiteBusy
+                    ? t("offsiteBackup.restoreDrillRunning")
+                    : t("offsiteBackup.restoreDrillConfirm")}
                 </button>
               </div>
             </form>
