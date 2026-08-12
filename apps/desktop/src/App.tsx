@@ -320,6 +320,8 @@ function App({
     useState("");
   const [securityBusy, setSecurityBusy] = useState(false);
   const [securityMessage, setSecurityMessage] = useState<string | null>(null);
+  const [recoveryClearDialog, setRecoveryClearDialog] = useState(false);
+  const [recoveryClearPassword, setRecoveryClearPassword] = useState("");
   const [pendingEncryptedImport, setPendingEncryptedImport] =
     useState<ImportedWorkspaceFile | null>(null);
   const [encryptedImportPassword, setEncryptedImportPassword] = useState("");
@@ -907,6 +909,40 @@ function App({
       } catch {
         // Keep the previous status when even the status probe fails.
       }
+    } finally {
+      setSecurityBusy(false);
+    }
+  }
+
+  async function clearRecoveryData(
+    authenticationMethod: "password" | "system" = "password",
+  ) {
+    if (securityBusy) {
+      return;
+    }
+    setSecurityBusy(true);
+    setSecurityMessage(null);
+    try {
+      const authorization = await workspaceSecurity.authorizeSensitiveOperation(
+        "clearRecoveryData",
+        authenticationMethod === "system"
+          ? {
+              method: "system",
+              message: t("security.clearRecoveryPrompt"),
+            }
+          : { method: "password", password: recoveryClearPassword },
+      );
+      await workspaceSecurity.clearRecoveryData(authorization);
+      setAutomaticBackupHistory(await workspaceBackupHistory.inspect());
+      setRecoveryAvailable(false);
+      setRecoveryStorageProblem(null);
+      setRecoveryClearDialog(false);
+      setRecoveryClearPassword("");
+      setSecurityMessage(t("security.clearRecoverySuccess"));
+    } catch (error) {
+      setSecurityMessage(
+        t("security.clearRecoveryFailed", { reason: errorReason(error) }),
+      );
     } finally {
       setSecurityBusy(false);
     }
@@ -2694,6 +2730,25 @@ function App({
                         </small>
                       )}
                     </div>
+                    {workspaceSecurityStatus.encrypted &&
+                      automaticBackupHistory !== null &&
+                      (automaticBackupHistory.entries.length > 0 ||
+                        recoveryAvailable ||
+                        recoveryStorageProblem !== null) && (
+                        <button
+                          className="danger-button"
+                          disabled={securityBusy}
+                          onClick={() => {
+                            setSecurityMessage(null);
+                            setRecoveryClearPassword("");
+                            setRecoveryClearDialog(true);
+                          }}
+                          type="button"
+                        >
+                          <Trash2 aria-hidden="true" size={14} />
+                          {t("security.clearRecoveryData")}
+                        </button>
+                      )}
                     {automaticBackupHistoryLoading && (
                       <p className="automatic-backup-history-message">
                         {t("backup.historyLoading")}
@@ -3435,6 +3490,75 @@ function App({
                     className="secondary-button security-system-reauth-button"
                     disabled={securityBusy}
                     onClick={() => void submitSecurityDialog("system")}
+                    type="button"
+                  >
+                    <Fingerprint aria-hidden="true" size={15} />
+                    {t("security.useSystemVerification")}
+                  </button>
+                )}
+            </form>
+          </section>
+        </div>
+      )}
+
+      {recoveryClearDialog && (
+        <div className="modal-backdrop" role="presentation">
+          <section
+            aria-labelledby="clear-recovery-dialog-title"
+            aria-modal="true"
+            className="confirmation-dialog security-dialog"
+            role="dialog"
+          >
+            <h2 id="clear-recovery-dialog-title">
+              {t("security.clearRecoveryTitle")}
+            </h2>
+            <p>{t("security.clearRecoveryDescription")}</p>
+            <form
+              className="security-dialog-form"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void clearRecoveryData();
+              }}
+            >
+              <label htmlFor="clear-recovery-password">
+                {t("security.currentPassword")}
+              </label>
+              <input
+                autoComplete="current-password"
+                autoFocus
+                id="clear-recovery-password"
+                onChange={(event) => setRecoveryClearPassword(event.target.value)}
+                type="password"
+                value={recoveryClearPassword}
+              />
+              {securityMessage !== null && (
+                <p className="security-error" role="alert">
+                  {securityMessage}
+                </p>
+              )}
+              <div className="confirmation-dialog-actions">
+                <button
+                  className="secondary-button"
+                  disabled={securityBusy}
+                  onClick={() => setRecoveryClearDialog(false)}
+                  type="button"
+                >
+                  {t("actions.cancel")}
+                </button>
+                <button
+                  className="danger-button"
+                  disabled={securityBusy || recoveryClearPassword.length === 0}
+                  type="submit"
+                >
+                  {t("security.clearRecoveryConfirm")}
+                </button>
+              </div>
+              {workspaceSecurityStatus.systemUnlockAvailable &&
+                workspaceSecurityStatus.systemUnlockEnabled && (
+                  <button
+                    className="secondary-button security-system-reauth-button"
+                    disabled={securityBusy}
+                    onClick={() => void clearRecoveryData("system")}
                     type="button"
                   >
                     <Fingerprint aria-hidden="true" size={15} />

@@ -199,6 +199,7 @@ pub struct WorkspaceSecurityStatus {
 #[serde(rename_all = "camelCase")]
 pub enum SensitiveOperation {
     ChangePassword,
+    ClearRecoveryData,
     ExportWorkspace,
     SystemUnlockChange,
 }
@@ -670,7 +671,7 @@ pub async fn write_workspace_file(
 pub async fn inspect_workspace_backup_history(
     app: AppHandle,
     state: tauri::State<'_, WorkspaceVaultState>,
-) -> Result<WorkspaceBackupHistoryStatus, String> {
+) -> Result<(), String> {
     let store = workspace_store(&app).map_err(|error| error.to_string())?;
     let operation_lock = Arc::clone(&state.operation_lock);
     let data_key = state.optional_data_key()?;
@@ -1142,6 +1143,35 @@ pub async fn set_workspace_idle_timeout(
 }
 
 #[tauri::command]
+pub async fn clear_workspace_recovery_data(
+    app: AppHandle,
+    state: tauri::State<'_, WorkspaceVaultState>,
+    authorization: String,
+) -> Result<WorkspaceBackupHistoryStatus, String> {
+    let permit = state
+        .consume_sensitive_authorization(SensitiveOperation::ClearRecoveryData, &authorization)?;
+    let store = workspace_store(&app).map_err(|error| error.to_string())?;
+    let operation_lock = Arc::clone(&state.operation_lock);
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = operation_lock
+            .lock()
+            .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
+        recover_pending_migration(&store)?;
+        let recovery = store.path(WorkspaceFileSlot::Recovery);
+        let pending_recovery = store.pending_path(WorkspaceFileSlot::Recovery);
+        remove_file_if_exists(&recovery)?;
+        remove_file_if_exists(&pending_recovery)?;
+        remove_workspace_subdirectory(&store.base_directory, &store.backup_directory())?;
+        remove_workspace_subdirectory(&store.base_directory, &store.pending_backup_directory())?;
+        Ok::<(), String>(())
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+    ensure_workspace_access(&app, &state, Some(permit))?;
+    Ok(())
+}
+
+#[tauri::command]
 pub fn record_workspace_activity(state: tauri::State<'_, WorkspaceVaultState>) {
     state.record_activity();
 }
@@ -1275,6 +1305,25 @@ fn validate_unlock_password(password: &str) -> Result<(), String> {
         return Err("workspace_vault_invalid_password".to_owned());
     }
     Ok(())
+}
+
+fn remove_file_if_exists(path: &Path) -> Result<(), String> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn remove_workspace_subdirectory(base_directory: &Path, target: &Path) -> Result<(), String> {
+    if target == base_directory || !target.starts_with(base_directory) {
+        return Err("workspace_vault_invalid_cleanup_path".to_owned());
+    }
+    match fs::remove_dir_all(target) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.to_string()),
+    }
 }
 
 fn current_time_milliseconds() -> Result<u64, String> {
@@ -2170,6 +2219,27 @@ mod tests {
             "workspace_vault_password_blocked"
         );
         assert!(validate_new_password("three uncommon words 2026").is_ok());
+    }
+
+    #[test]
+    fn recovery_cleanup_is_restricted_to_workspace_subdirectories() {
+        let directory = test_directory();
+        let nested = directory.join("workspace.backups.v1");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(nested.join("snapshot.json"), b"snapshot").unwrap();
+
+        remove_workspace_subdirectory(&directory, &nested).unwrap();
+        assert!(!nested.exists());
+        assert_eq!(
+            remove_workspace_subdirectory(&directory, &directory).unwrap_err(),
+            "workspace_vault_invalid_cleanup_path"
+        );
+        assert_eq!(
+            remove_workspace_subdirectory(&directory, &directory.with_extension("outside"))
+                .unwrap_err(),
+            "workspace_vault_invalid_cleanup_path"
+        );
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
