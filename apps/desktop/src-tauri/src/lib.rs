@@ -1,6 +1,8 @@
+mod cloudflare_backup_target;
 mod embedding;
 mod file_transfer;
 mod llm;
+mod offsite_backup;
 mod secret_clipboard;
 mod system_unlock;
 mod vector_cache;
@@ -42,6 +44,7 @@ pub fn run() {
     builder
         .manage(embedding::EmbeddingState::default())
         .manage(llm::LlmState::default())
+        .manage(offsite_backup::OffsiteBackupState::default())
         .manage(secret_clipboard::SecretClipboardState::default())
         .manage(system_unlock::SystemUnlockState::default())
         .manage(vector_cache::VectorCacheState::default())
@@ -77,6 +80,13 @@ pub fn run() {
             llm::prepare_local_llm_model,
             llm::review_local_references,
             llm::stop_local_llm,
+            offsite_backup::configure_cloudflare_backup_target,
+            offsite_backup::create_offsite_backup,
+            offsite_backup::download_offsite_backup,
+            offsite_backup::inspect_offsite_backup_targets,
+            offsite_backup::list_offsite_backups,
+            offsite_backup::remove_offsite_backup_target,
+            offsite_backup::verify_offsite_backup,
             secret_clipboard::copy_secret_to_clipboard,
             secret_clipboard::inspect_secret_clipboard,
             vector_cache::clear_embedding_vector_cache,

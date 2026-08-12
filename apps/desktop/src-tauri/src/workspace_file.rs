@@ -232,6 +232,7 @@ pub struct WorkspaceSecurityStatus {
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum SensitiveOperation {
+    BackupTargetChange,
     ChangePassword,
     ClearRecoveryData,
     DestroyWorkspace,
@@ -445,7 +446,7 @@ impl WorkspaceVaultState {
         Ok(token)
     }
 
-    fn consume_sensitive_authorization(
+    pub(crate) fn consume_sensitive_authorization(
         &self,
         operation: SensitiveOperation,
         token: &str,
@@ -1379,6 +1380,33 @@ pub async fn encrypt_workspace_export(
     .await
     .map_err(|error| error.to_string())??;
     ensure_workspace_access(&app, &state, Some(permit))?;
+    Ok(result)
+}
+
+pub(crate) async fn encrypt_offsite_workspace_snapshot(
+    app: &AppHandle,
+    state: &WorkspaceVaultState,
+    contents: String,
+) -> Result<String, String> {
+    let permit = begin_workspace_access(app, state)?;
+    let contents = Zeroizing::new(contents);
+    let store = workspace_store(app).map_err(|error| error.to_string())?;
+    let operation_lock = Arc::clone(&state.operation_lock);
+    let access_generation = state.access_generation();
+    let data_key = state.data_key()?;
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let _guard = operation_lock
+            .lock()
+            .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
+        ensure_access_generation(&access_generation, Some(permit))?;
+        let metadata = store
+            .read_vault_metadata()?
+            .ok_or_else(|| "workspace_vault_not_configured".to_owned())?;
+        encrypt_export(&contents, &metadata, &data_key)
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+    ensure_workspace_access(app, state, Some(permit))?;
     Ok(result)
 }
 

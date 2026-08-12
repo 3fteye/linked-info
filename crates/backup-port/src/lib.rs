@@ -97,13 +97,15 @@ pub struct BackupListPage {
     pub next_cursor: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BackupTargetCapabilities {
     pub maximum_upload_bytes: Option<u64>,
     pub supports_delete: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BackupVerification {
     pub metadata: BackupSnapshotMetadata,
     pub downloaded_bytes: u64,
