@@ -40,6 +40,20 @@ jobs:
         working-directory: apps/desktop
         run: pnpm install --frozen-lockfile
 
+      - name: Test dependency license policy
+        run: node --test scripts/check-dependency-licenses.test.mjs
+
+      - name: Check dependency licenses and Rust sources
+        run: node scripts/check-dependency-licenses.mjs
+
+      - name: Install verified cargo-cyclonedx
+        shell: pwsh
+        run: ./.github/scripts/install-cargo-cyclonedx.ps1 -DestinationDirectory "$env:RUNNER_TEMP\cargo-cyclonedx"
+
+      - name: Generate and validate CycloneDX SBOMs
+        shell: pwsh
+        run: ./.github/scripts/generate-sbom.ps1 -OutputDirectory "artifacts\sbom"
+
       - name: Prepare Windows local LLM runtime
         shell: pwsh
         run: ./.github/scripts/prepare-llama-runtime.ps1
@@ -66,5 +80,6 @@ jobs:
             target/release/linked-info-desktop.exe
             target/release/linked-info-windows.sha256
             target/release/llama-runtime/**
+            artifacts/sbom/*.cdx.json
           if-no-files-found: error
           retention-days: 3

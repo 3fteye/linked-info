@@ -202,6 +202,12 @@ Cloudflare 不是桌面端的固定依赖。`apps/cloudflare-worker` 通过供�
 
 提交前至少运行受影响范围的测试，并确保 `cargo fmt --all -- --check`、`pnpm test` 和 `pnpm build` 通过。完整检查以 [.github/workflows/ci.yml](.github/workflows/ci.yml) 为准。
 
+## 依赖许可证与 SBOM
+
+CI 对当前 Windows 构建涉及的 Rust 依赖和前端全部依赖执行许可证门禁。门禁使用仓库内已审查的精确许可证表达式集合；出现新表达式、缺失许可证或工具输出结构变化时默认失败，必须人工确认后才能更新允许集合。它是工程审查门槛，不构成法律意见。
+
+SBOM 使用 CycloneDX JSON，并按生态分别生成：Rust workspace 每个 crate 的依赖由固定版本且校验过下载哈希的 `cargo-cyclonedx` 生成，桌面前端生产依赖由锁定版本的 pnpm 原生命令生成。这些清单随 CI 和 Windows 便携构建作为构建产物保存，不提交到源码仓库；SBOM 记录“包含了什么”，RustSec 与 `pnpm audit` 负责检查“已知存在什么风险”，两者不能相互替代。
+
 ## 许可证与贡献
 
 项目使用 [Apache License 2.0](LICENSE)。除非贡献者明确另行声明，提交给本项目并被接收的贡献按照同一许可证提供。
