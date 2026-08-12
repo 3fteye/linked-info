@@ -274,7 +274,7 @@ function App({
   const workspaceRef = useRef(workspace);
   const skipUnmountFlushRef = useRef(false);
   const workspaceReplacementGenerationRef = useRef(0);
-  const skipInitialAutomaticBackupRef = useRef(true);
+  const workspaceChangedInSessionRef = useRef(false);
   const [persistenceReady, setPersistenceReady] = useState(false);
   const [primaryStorageProblem, setPrimaryStorageProblem] = useState<string | null>(null);
   const [recoveryStorageProblem, setRecoveryStorageProblem] = useState<string | null>(null);
@@ -633,8 +633,7 @@ function App({
       return;
     }
     workspaceRef.current = workspace;
-    const captureAutomaticBackup = !skipInitialAutomaticBackupRef.current;
-    skipInitialAutomaticBackupRef.current = false;
+    const captureAutomaticBackup = workspaceChangedInSessionRef.current;
     const saveTimer = window.setTimeout(
       () => {
         void persistence
@@ -667,7 +666,23 @@ function App({
 
     let active = true;
     let unregister: (() => void) | null = null;
-    const flushLocalWorkspace = () => persistence.save(workspaceRef.current);
+    const flushLocalWorkspace = async () => {
+      await persistence.save(workspaceRef.current);
+      if (!workspaceChangedInSessionRef.current || !workspaceBackupHistory.available) {
+        return;
+      }
+      try {
+        const result = await workspaceBackupHistory.captureIfDue();
+        if (active) {
+          setAutomaticBackupHistory(result.status);
+          setAutomaticBackupHistoryError(null);
+        }
+      } catch {
+        if (active) {
+          setAutomaticBackupHistoryError(t("backup.historyCaptureFailed"));
+        }
+      }
+    };
     void lifecycle
       .registerCloseFlush(flushLocalWorkspace, () => {
         if (active) {
@@ -694,7 +709,7 @@ function App({
         void flushLocalWorkspace();
       }
     };
-  }, [lifecycle, persistence, persistenceReady, t]);
+  }, [lifecycle, persistence, persistenceReady, t, workspaceBackupHistory]);
 
   function changeLanguage(language: SupportedLanguage) {
     void i18n.changeLanguage(language);
@@ -1146,6 +1161,7 @@ function App({
     if (next === current) {
       return current;
     }
+    workspaceChangedInSessionRef.current = true;
     if (options.recordHistory) {
       recordHistory(captureWorkspaceHistory(current), captureWorkspaceHistory(next));
     }
@@ -1184,6 +1200,7 @@ function App({
 
   function applyHistoryState(state: WorkspaceHistoryState) {
     const next = restoreWorkspaceHistory(state, workspaceRef.current.viewport);
+    workspaceChangedInSessionRef.current = true;
     workspaceRef.current = next;
     setWorkspace(next);
     setEditingNodeId(null);
@@ -1587,6 +1604,7 @@ function App({
     try {
       await persistence.preserveForRecovery(workspaceRef.current);
       await persistence.save(pendingWorkspaceReplacement.workspace);
+      workspaceChangedInSessionRef.current = true;
       workspaceReplacementGenerationRef.current += 1;
       workspaceRef.current = pendingWorkspaceReplacement.workspace;
       setWorkspace(pendingWorkspaceReplacement.workspace);
@@ -1645,6 +1663,7 @@ function App({
     const initialWorkspace = emptyWorkspace();
     try {
       await persistence.save(initialWorkspace);
+      workspaceChangedInSessionRef.current = true;
       workspaceReplacementGenerationRef.current += 1;
       workspaceRef.current = initialWorkspace;
       setWorkspace(initialWorkspace);
