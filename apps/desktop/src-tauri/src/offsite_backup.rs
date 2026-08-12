@@ -13,10 +13,11 @@ use linked_info_backup_port::{
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
 use uuid::Uuid;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::{
     cloudflare_backup_target::CloudflareBackupTarget,
+    s3_backup_target::{S3BackupTarget, S3Credentials},
     workspace_file::{
         SensitiveOperation, WorkspaceVaultState, begin_workspace_access,
         encrypt_offsite_workspace_snapshot, ensure_workspace_access,
@@ -56,6 +57,16 @@ impl Default for OffsiteBackupConfig {
 #[serde(rename_all = "camelCase")]
 enum BackupProviderKind {
     CloudflareWorkerR2,
+    S3Compatible,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum S3ProviderTemplate {
+    BackblazeB2,
+    Tigris,
+    OracleOci,
+    Custom,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -65,6 +76,14 @@ struct BackupTargetConfig {
     name: String,
     provider: BackupProviderKind,
     endpoint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    s3_provider: Option<S3ProviderTemplate>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    region: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    bucket: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    prefix: Option<String>,
     credential_id: String,
     created_at_ms: u64,
     last_upload_at_ms: Option<u64>,
@@ -79,12 +98,29 @@ pub struct BackupTargetSummary {
     name: String,
     provider: BackupProviderKind,
     endpoint: String,
+    s3_provider: Option<S3ProviderTemplate>,
+    region: Option<String>,
+    bucket: Option<String>,
+    prefix: Option<String>,
     created_at_ms: u64,
     last_upload_at_ms: Option<u64>,
     last_verified_at_ms: Option<u64>,
     last_restore_test_at_ms: Option<u64>,
     maximum_upload_bytes: Option<u64>,
 }
+
+#[derive(Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
+#[serde(rename_all = "camelCase")]
+struct S3CredentialRecord {
+    format: String,
+    version: u16,
+    access_key_id: String,
+    secret_access_key: String,
+    session_token: Option<String>,
+}
+
+const S3_CREDENTIAL_FORMAT: &str = "linked-info-s3-credentials";
+const S3_CREDENTIAL_VERSION: u16 = 1;
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -141,6 +177,72 @@ pub async fn download_cloudflare_recovery_backup(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn list_s3_recovery_backups(
+    app: tauri::AppHandle,
+    endpoint: String,
+    region: String,
+    bucket: String,
+    prefix: String,
+    access_key_id: String,
+    secret_access_key: String,
+    session_token: Option<String>,
+    cursor: Option<String>,
+    limit: u16,
+) -> Result<BackupListPage, String> {
+    ensure_unconfigured_recovery_mode(&app)?;
+    let target = open_ephemeral_s3_target(
+        endpoint,
+        region,
+        bucket,
+        prefix,
+        access_key_id,
+        secret_access_key,
+        session_token,
+    )?;
+    let page = target.list(cursor, limit).await.map_err(target_error)?;
+    ensure_unconfigured_recovery_mode(&app)?;
+    Ok(page)
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn download_s3_recovery_backup(
+    app: tauri::AppHandle,
+    endpoint: String,
+    region: String,
+    bucket: String,
+    prefix: String,
+    access_key_id: String,
+    secret_access_key: String,
+    session_token: Option<String>,
+    snapshot_id: Uuid,
+) -> Result<DownloadedOffsiteBackup, String> {
+    ensure_unconfigured_recovery_mode(&app)?;
+    let snapshot = open_ephemeral_s3_target(
+        endpoint,
+        region,
+        bucket,
+        prefix,
+        access_key_id,
+        secret_access_key,
+        session_token,
+    )?
+    .download(snapshot_id)
+    .await
+    .map_err(target_error)?
+    .ok_or_else(|| "offsite_backup_snapshot_not_found".to_owned())?;
+    ensure_unconfigured_recovery_mode(&app)?;
+    let metadata = snapshot.metadata;
+    let encrypted_export = String::from_utf8(snapshot.payload)
+        .map_err(|_| "offsite_backup_invalid_snapshot".to_owned())?;
+    Ok(DownloadedOffsiteBackup {
+        metadata,
+        encrypted_export,
+    })
+}
+
+#[tauri::command]
 pub async fn configure_cloudflare_backup_target(
     app: tauri::AppHandle,
     backup_state: tauri::State<'_, OffsiteBackupState>,
@@ -179,6 +281,10 @@ pub async fn configure_cloudflare_backup_target(
         name,
         provider: BackupProviderKind::CloudflareWorkerR2,
         endpoint,
+        s3_provider: None,
+        region: None,
+        bucket: None,
+        prefix: None,
         credential_id: credential_id.clone(),
         created_at_ms: current_time_milliseconds()?,
         last_upload_at_ms: None,
@@ -198,12 +304,122 @@ pub async fn configure_cloudflare_backup_target(
             || config
                 .targets
                 .iter()
-                .any(|item| item.endpoint == target_for_write.endpoint)
+                .any(|item| targets_conflict(item, &target_for_write))
         {
             return Err("offsite_backup_target_conflict".to_owned());
         }
         config.targets.push(target_for_write);
         write_config(&config_path(&app_for_write)?, &config)
+    })
+    .await
+    .map_err(|error| error.to_string())?;
+    if let Err(error) = write_result {
+        let _ = delete_credential(&credential_id);
+        return Err(error);
+    }
+    ensure_workspace_access(&app, &vault_state, Some(permit))?;
+    Ok(summary)
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn configure_s3_backup_target(
+    app: tauri::AppHandle,
+    backup_state: tauri::State<'_, OffsiteBackupState>,
+    vault_state: tauri::State<'_, WorkspaceVaultState>,
+    name: String,
+    endpoint: String,
+    s3_provider: S3ProviderTemplate,
+    region: String,
+    bucket: String,
+    prefix: String,
+    access_key_id: String,
+    secret_access_key: String,
+    session_token: Option<String>,
+    authorization: String,
+) -> Result<BackupTargetSummary, String> {
+    let permit = vault_state
+        .consume_sensitive_authorization(SensitiveOperation::BackupTargetChange, &authorization)?;
+    let name = validate_target_name(&name)?;
+    let endpoint = S3BackupTarget::normalize_endpoint(&endpoint).map_err(target_error)?;
+    let region = S3BackupTarget::normalize_region(&region).map_err(target_error)?;
+    let bucket = S3BackupTarget::normalize_bucket(&bucket).map_err(target_error)?;
+    let prefix = S3BackupTarget::normalize_prefix(&prefix).map_err(target_error)?;
+    let mut credentials = S3CredentialRecord {
+        format: S3_CREDENTIAL_FORMAT.to_owned(),
+        version: S3_CREDENTIAL_VERSION,
+        access_key_id,
+        secret_access_key,
+        session_token: session_token.filter(|value| !value.is_empty()),
+    };
+    let stored_credentials = Zeroizing::new(
+        serde_json::to_string(&credentials)
+            .map_err(|_| "offsite_backup_invalid_credential".to_owned())?,
+    );
+    let target = S3BackupTarget::new(
+        &endpoint,
+        &region,
+        &bucket,
+        &prefix,
+        S3Credentials {
+            access_key_id: std::mem::take(&mut credentials.access_key_id),
+            secret_access_key: std::mem::take(&mut credentials.secret_access_key),
+            session_token: credentials.session_token.take(),
+        },
+    )
+    .map_err(target_error)?;
+    target.list(None, 1).await.map_err(target_error)?;
+    ensure_workspace_access(&app, &vault_state, Some(permit))?;
+
+    let id = Uuid::new_v4();
+    let credential_id = id.to_string();
+    let credential_id_for_store = credential_id.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        store_credential(&credential_id_for_store, stored_credentials.as_str())
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+
+    if let Err(error) = ensure_workspace_access(&app, &vault_state, Some(permit)) {
+        let _ = delete_credential(&credential_id);
+        return Err(error);
+    }
+
+    let config_target = BackupTargetConfig {
+        id,
+        name,
+        provider: BackupProviderKind::S3Compatible,
+        endpoint,
+        s3_provider: Some(s3_provider),
+        region: Some(region),
+        bucket: Some(bucket),
+        prefix: Some(prefix),
+        credential_id: credential_id.clone(),
+        created_at_ms: current_time_milliseconds()?,
+        last_upload_at_ms: None,
+        last_verified_at_ms: None,
+        last_restore_test_at_ms: None,
+    };
+    let summary = target_summary(&config_target)?;
+    let app_for_write = app.clone();
+    let config_lock = Arc::clone(&backup_state.config_lock);
+    let target_for_write = config_target.clone();
+    let write_result = tauri::async_runtime::spawn_blocking(move || {
+        let _guard = config_lock
+            .lock()
+            .map_err(|_| "offsite_backup_config_unavailable".to_owned())?;
+        let path = config_path(&app_for_write)?;
+        let mut config = read_config(&path)?;
+        if config.targets.len() >= MAXIMUM_TARGETS
+            || config
+                .targets
+                .iter()
+                .any(|item| targets_conflict(item, &target_for_write))
+        {
+            return Err("offsite_backup_target_conflict".to_owned());
+        }
+        config.targets.push(target_for_write);
+        write_config(&path, &config)
     })
     .await
     .map_err(|error| error.to_string())?;
@@ -405,12 +621,33 @@ pub async fn test_offsite_backup_restore(
 }
 
 async fn open_target(config: &BackupTargetConfig) -> Result<Box<dyn BackupTarget>, String> {
-    let token = load_credential_async(config.credential_id.clone()).await?;
+    let credential = load_credential_async(config.credential_id.clone()).await?;
     match config.provider {
         BackupProviderKind::CloudflareWorkerR2 => {
-            CloudflareBackupTarget::new(&config.endpoint, token.to_string())
+            CloudflareBackupTarget::new(&config.endpoint, credential.to_string())
                 .map(|target| Box::new(target) as Box<dyn BackupTarget>)
                 .map_err(target_error)
+        }
+        BackupProviderKind::S3Compatible => {
+            let credentials = parse_s3_credentials(credential.as_str())?;
+            S3BackupTarget::new(
+                &config.endpoint,
+                config
+                    .region
+                    .as_deref()
+                    .ok_or_else(|| "offsite_backup_invalid_config".to_owned())?,
+                config
+                    .bucket
+                    .as_deref()
+                    .ok_or_else(|| "offsite_backup_invalid_config".to_owned())?,
+                config
+                    .prefix
+                    .as_deref()
+                    .ok_or_else(|| "offsite_backup_invalid_config".to_owned())?,
+                credentials,
+            )
+            .map(|target| Box::new(target) as Box<dyn BackupTarget>)
+            .map_err(target_error)
         }
     }
 }
@@ -421,6 +658,43 @@ fn open_ephemeral_cloudflare_target(
 ) -> Result<CloudflareBackupTarget, String> {
     let token = Zeroizing::new(token);
     CloudflareBackupTarget::new(&endpoint, token.to_string()).map_err(target_error)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn open_ephemeral_s3_target(
+    endpoint: String,
+    region: String,
+    bucket: String,
+    prefix: String,
+    access_key_id: String,
+    secret_access_key: String,
+    session_token: Option<String>,
+) -> Result<S3BackupTarget, String> {
+    S3BackupTarget::new(
+        &endpoint,
+        &region,
+        &bucket,
+        &prefix,
+        S3Credentials {
+            access_key_id,
+            secret_access_key,
+            session_token: session_token.filter(|value| !value.is_empty()),
+        },
+    )
+    .map_err(target_error)
+}
+
+fn parse_s3_credentials(contents: &str) -> Result<S3Credentials, String> {
+    let mut record: S3CredentialRecord = serde_json::from_str(contents)
+        .map_err(|_| "offsite_backup_invalid_credential".to_owned())?;
+    if record.format != S3_CREDENTIAL_FORMAT || record.version != S3_CREDENTIAL_VERSION {
+        return Err("offsite_backup_invalid_credential".to_owned());
+    }
+    Ok(S3Credentials {
+        access_key_id: std::mem::take(&mut record.access_key_id),
+        secret_access_key: std::mem::take(&mut record.secret_access_key),
+        session_token: record.session_token.take(),
+    })
 }
 
 fn ensure_unconfigured_recovery_mode(app: &tauri::AppHandle) -> Result<(), String> {
@@ -488,13 +762,19 @@ async fn update_target_status(
 
 fn target_summary(config: &BackupTargetConfig) -> Result<BackupTargetSummary, String> {
     let maximum_upload_bytes = match config.provider {
-        BackupProviderKind::CloudflareWorkerR2 => Some(100 * 1024 * 1024),
+        BackupProviderKind::CloudflareWorkerR2 | BackupProviderKind::S3Compatible => {
+            Some(100 * 1024 * 1024)
+        }
     };
     Ok(BackupTargetSummary {
         id: config.id,
         name: config.name.clone(),
         provider: config.provider,
         endpoint: config.endpoint.clone(),
+        s3_provider: config.s3_provider,
+        region: config.region.clone(),
+        bucket: config.bucket.clone(),
+        prefix: config.prefix.clone(),
         created_at_ms: config.created_at_ms,
         last_upload_at_ms: config.last_upload_at_ms,
         last_verified_at_ms: config.last_verified_at_ms,
@@ -542,14 +822,43 @@ fn validate_config(config: &OffsiteBackupConfig) -> Result<(), String> {
         return Err("offsite_backup_invalid_config".to_owned());
     }
     let mut ids = HashSet::new();
-    let mut endpoints = HashSet::new();
     for target in &config.targets {
         validate_target_name(&target.name)?;
-        let normalized_endpoint = CloudflareBackupTarget::normalize_endpoint(&target.endpoint)
-            .map_err(|_| "offsite_backup_invalid_config".to_owned())?;
+        let provider_config_valid = match target.provider {
+            BackupProviderKind::CloudflareWorkerR2 => {
+                CloudflareBackupTarget::normalize_endpoint(&target.endpoint)
+                    .map(|endpoint| {
+                        endpoint == target.endpoint
+                            && target.s3_provider.is_none()
+                            && target.region.is_none()
+                            && target.bucket.is_none()
+                            && target.prefix.is_none()
+                    })
+                    .unwrap_or(false)
+            }
+            BackupProviderKind::S3Compatible => {
+                let Some(region) = target.region.as_deref() else {
+                    return Err("offsite_backup_invalid_config".to_owned());
+                };
+                let Some(bucket) = target.bucket.as_deref() else {
+                    return Err("offsite_backup_invalid_config".to_owned());
+                };
+                let Some(prefix) = target.prefix.as_deref() else {
+                    return Err("offsite_backup_invalid_config".to_owned());
+                };
+                target.s3_provider.is_some()
+                    && S3BackupTarget::normalize_endpoint(&target.endpoint)
+                        .is_ok_and(|endpoint| endpoint == target.endpoint)
+                    && S3BackupTarget::normalize_region(region)
+                        .is_ok_and(|normalized| normalized == region)
+                    && S3BackupTarget::normalize_bucket(bucket)
+                        .is_ok_and(|normalized| normalized == bucket)
+                    && S3BackupTarget::normalize_prefix(prefix)
+                        .is_ok_and(|normalized| normalized == prefix)
+            }
+        };
         if !ids.insert(target.id)
-            || normalized_endpoint != target.endpoint
-            || !endpoints.insert(target.endpoint.as_str())
+            || !provider_config_valid
             || Uuid::parse_str(&target.credential_id).is_err()
             || target.created_at_ms == 0
             || [
@@ -564,7 +873,30 @@ fn validate_config(config: &OffsiteBackupConfig) -> Result<(), String> {
             return Err("offsite_backup_invalid_config".to_owned());
         }
     }
+    for (index, target) in config.targets.iter().enumerate() {
+        if config.targets[index + 1..]
+            .iter()
+            .any(|other| targets_conflict(target, other))
+        {
+            return Err("offsite_backup_invalid_config".to_owned());
+        }
+    }
     Ok(())
+}
+
+fn targets_conflict(left: &BackupTargetConfig, right: &BackupTargetConfig) -> bool {
+    match (left.provider, right.provider) {
+        (BackupProviderKind::CloudflareWorkerR2, BackupProviderKind::CloudflareWorkerR2) => {
+            left.endpoint == right.endpoint
+        }
+        (BackupProviderKind::S3Compatible, BackupProviderKind::S3Compatible) => {
+            left.endpoint == right.endpoint
+                && left.region == right.region
+                && left.bucket == right.bucket
+                && left.prefix == right.prefix
+        }
+        _ => false,
+    }
 }
 
 fn validate_target_name(name: &str) -> Result<String, String> {
@@ -651,6 +983,10 @@ mod tests {
             name: "Cloudflare".to_owned(),
             provider: BackupProviderKind::CloudflareWorkerR2,
             endpoint: "https://backup.example.test".to_owned(),
+            s3_provider: None,
+            region: None,
+            bucket: None,
+            prefix: None,
             credential_id: Uuid::new_v4().to_string(),
             created_at_ms: 42,
             last_upload_at_ms: None,
@@ -678,6 +1014,10 @@ mod tests {
             name: "Cloudflare".to_owned(),
             provider: BackupProviderKind::CloudflareWorkerR2,
             endpoint: "https://backup.example.test".to_owned(),
+            s3_provider: None,
+            region: None,
+            bucket: None,
+            prefix: None,
             credential_id: Uuid::new_v4().to_string(),
             created_at_ms: 42,
             last_upload_at_ms: None,
@@ -692,5 +1032,80 @@ mod tests {
 
         assert!(!serialized.contains("token"));
         assert!(!serialized.contains("secret"));
+    }
+
+    fn s3_target(prefix: &str) -> BackupTargetConfig {
+        BackupTargetConfig {
+            id: Uuid::new_v4(),
+            name: "Backblaze".to_owned(),
+            provider: BackupProviderKind::S3Compatible,
+            endpoint: "https://s3.us-west-004.backblazeb2.com/".to_owned(),
+            s3_provider: Some(S3ProviderTemplate::BackblazeB2),
+            region: Some("us-west-004".to_owned()),
+            bucket: Some("linked-info-backup".to_owned()),
+            prefix: Some(prefix.to_owned()),
+            credential_id: Uuid::new_v4().to_string(),
+            created_at_ms: 42,
+            last_upload_at_ms: None,
+            last_verified_at_ms: None,
+            last_restore_test_at_ms: None,
+        }
+    }
+
+    #[test]
+    fn s3_config_contains_location_but_never_credentials() {
+        let serialized = serde_json::to_string(&OffsiteBackupConfig {
+            targets: vec![s3_target("linked-info/v1")],
+            ..OffsiteBackupConfig::default()
+        })
+        .unwrap();
+
+        assert!(serialized.contains("s3.us-west-004.backblazeb2.com"));
+        assert!(serialized.contains("linked-info-backup"));
+        assert!(!serialized.contains("accessKeyId"));
+        assert!(!serialized.contains("secretAccessKey"));
+        assert!(!serialized.contains("sessionToken"));
+    }
+
+    #[test]
+    fn s3_targets_can_share_a_bucket_when_prefixes_differ() {
+        let left = s3_target("linked-info/primary");
+        let right = s3_target("linked-info/secondary");
+
+        assert!(!targets_conflict(&left, &right));
+        assert!(
+            validate_config(&OffsiteBackupConfig {
+                targets: vec![left, right],
+                ..OffsiteBackupConfig::default()
+            })
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn existing_cloudflare_config_without_s3_fields_stays_valid() {
+        let json = format!(
+            r#"{{
+              "format": "{CONFIG_FORMAT}",
+              "version": {CONFIG_VERSION},
+              "targets": [{{
+                "id": "{}",
+                "name": "Cloudflare",
+                "provider": "cloudflareWorkerR2",
+                "endpoint": "https://backup.example.test/",
+                "credentialId": "{}",
+                "createdAtMs": 42,
+                "lastUploadAtMs": null,
+                "lastVerifiedAtMs": null,
+                "lastRestoreTestAtMs": null
+              }}]
+            }}"#,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        let config: OffsiteBackupConfig = serde_json::from_str(&json).unwrap();
+
+        assert!(validate_config(&config).is_ok());
+        assert!(config.targets[0].region.is_none());
     }
 }

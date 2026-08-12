@@ -3,14 +3,45 @@ import { invoke } from "@tauri-apps/api/core";
 export interface OffsiteBackupTarget {
   id: string;
   name: string;
-  provider: "cloudflareWorkerR2";
+  provider: "cloudflareWorkerR2" | "s3Compatible";
   endpoint: string;
+  s3Provider: S3ProviderTemplate | null;
+  region: string | null;
+  bucket: string | null;
+  prefix: string | null;
   createdAtMs: number;
   lastUploadAtMs: number | null;
   lastVerifiedAtMs: number | null;
   lastRestoreTestAtMs: number | null;
   maximumUploadBytes: number | null;
 }
+
+export type S3ProviderTemplate =
+  | "backblazeB2"
+  | "tigris"
+  | "oracleOci"
+  | "custom";
+
+export interface S3BackupConnection {
+  provider: "s3Compatible";
+  endpoint: string;
+  region: string;
+  bucket: string;
+  prefix: string;
+  accessKeyId: string;
+  secretAccessKey: string;
+  sessionToken?: string | null;
+}
+
+export interface CloudflareBackupConnection {
+  provider: "cloudflareWorkerR2";
+  endpoint: string;
+  token: string;
+}
+
+export type TemporaryBackupConnection =
+  | CloudflareBackupConnection
+  | S3BackupConnection;
 
 export interface OffsiteBackupSnapshot {
   id: string;
@@ -43,6 +74,11 @@ export interface OffsiteBackupService {
     token: string;
     authorization: string;
   }): Promise<OffsiteBackupTarget>;
+  configureS3Target(input: Omit<S3BackupConnection, "provider"> & {
+    name: string;
+    s3Provider: S3ProviderTemplate;
+    authorization: string;
+  }): Promise<OffsiteBackupTarget>;
   removeTarget(targetId: string, authorization: string): Promise<void>;
   create(targetId: string, contents: string): Promise<OffsiteBackupSnapshot>;
   list(
@@ -63,15 +99,11 @@ export interface OffsiteBackupService {
     snapshotId: string,
     password: string,
   ): Promise<OffsiteBackupTarget>;
-  listRecovery(input: {
-    endpoint: string;
-    token: string;
+  listRecovery(input: TemporaryBackupConnection & {
     cursor?: string | null;
     limit?: number;
   }): Promise<OffsiteBackupPage>;
-  downloadRecovery(input: {
-    endpoint: string;
-    token: string;
+  downloadRecovery(input: TemporaryBackupConnection & {
     snapshotId: string;
   }): Promise<DownloadedOffsiteBackup>;
 }
@@ -83,6 +115,9 @@ export const tauriOffsiteBackupService: OffsiteBackupService = {
   },
   configureCloudflareTarget(input) {
     return invoke<OffsiteBackupTarget>("configure_cloudflare_backup_target", input);
+  },
+  configureS3Target(input) {
+    return invoke<OffsiteBackupTarget>("configure_s3_backup_target", input);
   },
   removeTarget(targetId, authorization) {
     return invoke<void>("remove_offsite_backup_target", {
@@ -122,19 +157,49 @@ export const tauriOffsiteBackupService: OffsiteBackupService = {
       password,
     });
   },
-  listRecovery({ endpoint, token, cursor = null, limit = 50 }) {
-    return invoke<OffsiteBackupPage>("list_cloudflare_recovery_backups", {
-      endpoint,
-      token,
+  listRecovery(input) {
+    const { cursor = null, limit = 50 } = input;
+    if (input.provider === "cloudflareWorkerR2") {
+      return invoke<OffsiteBackupPage>("list_cloudflare_recovery_backups", {
+        endpoint: input.endpoint,
+        token: input.token,
+        cursor,
+        limit,
+      });
+    }
+    return invoke<OffsiteBackupPage>("list_s3_recovery_backups", {
+      endpoint: input.endpoint,
+      region: input.region,
+      bucket: input.bucket,
+      prefix: input.prefix,
+      accessKeyId: input.accessKeyId,
+      secretAccessKey: input.secretAccessKey,
+      sessionToken: input.sessionToken ?? null,
       cursor,
       limit,
     });
   },
-  downloadRecovery({ endpoint, token, snapshotId }) {
-    return invoke<DownloadedOffsiteBackup>(
-      "download_cloudflare_recovery_backup",
-      { endpoint, token, snapshotId },
-    );
+  downloadRecovery(input) {
+    if (input.provider === "cloudflareWorkerR2") {
+      return invoke<DownloadedOffsiteBackup>(
+        "download_cloudflare_recovery_backup",
+        {
+          endpoint: input.endpoint,
+          token: input.token,
+          snapshotId: input.snapshotId,
+        },
+      );
+    }
+    return invoke<DownloadedOffsiteBackup>("download_s3_recovery_backup", {
+      endpoint: input.endpoint,
+      region: input.region,
+      bucket: input.bucket,
+      prefix: input.prefix,
+      accessKeyId: input.accessKeyId,
+      secretAccessKey: input.secretAccessKey,
+      sessionToken: input.sessionToken ?? null,
+      snapshotId: input.snapshotId,
+    });
   },
 };
 
@@ -148,6 +213,9 @@ export const unavailableOffsiteBackupService: OffsiteBackupService = {
     return [];
   },
   async configureCloudflareTarget() {
+    return unavailable();
+  },
+  async configureS3Target() {
     return unavailable();
   },
   async removeTarget() {

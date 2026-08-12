@@ -3,6 +3,7 @@ mod embedding;
 mod file_transfer;
 mod llm;
 mod offsite_backup;
+mod s3_backup_target;
 mod secret_clipboard;
 mod system_unlock;
 mod vector_cache;
@@ -81,11 +82,14 @@ pub fn run() {
             llm::review_local_references,
             llm::stop_local_llm,
             offsite_backup::configure_cloudflare_backup_target,
+            offsite_backup::configure_s3_backup_target,
             offsite_backup::create_offsite_backup,
             offsite_backup::download_cloudflare_recovery_backup,
+            offsite_backup::download_s3_recovery_backup,
             offsite_backup::download_offsite_backup,
             offsite_backup::inspect_offsite_backup_targets,
             offsite_backup::list_cloudflare_recovery_backups,
+            offsite_backup::list_s3_recovery_backups,
             offsite_backup::list_offsite_backups,
             offsite_backup::remove_offsite_backup_target,
             offsite_backup::test_offsite_backup_restore,

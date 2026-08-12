@@ -10,6 +10,7 @@ export const sensitiveSourcePaths = [
   "apps/desktop/src-tauri/src/file_transfer.rs",
   "apps/desktop/src-tauri/src/llm.rs",
   "apps/desktop/src-tauri/src/offsite_backup.rs",
+  "apps/desktop/src-tauri/src/s3_backup_target.rs",
   "apps/desktop/src-tauri/src/secret_clipboard.rs",
   "apps/desktop/src-tauri/src/system_unlock.rs",
   "apps/desktop/src-tauri/src/vector_cache.rs",
