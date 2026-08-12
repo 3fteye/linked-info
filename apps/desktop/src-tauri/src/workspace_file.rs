@@ -11,7 +11,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU32, AtomicU64, Ordering},
     },
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -36,7 +36,7 @@ const CRYPTO_VERSION: u32 = 1;
 const DATA_KEY_BYTES: usize = 32;
 const SALT_BYTES: usize = 16;
 const NONCE_BYTES: usize = 24;
-const MINIMUM_PASSWORD_CHARACTERS: usize = 10;
+const MINIMUM_PASSWORD_CHARACTERS: usize = 15;
 const MAXIMUM_PASSWORD_BYTES: usize = 1_024;
 const BACKUP_INTERVAL_MILLISECONDS: u64 = 60 * 60 * 1_000;
 const BACKUP_MAXIMUM_COUNT: usize = 30;
@@ -44,6 +44,20 @@ const BACKUP_MAXIMUM_BYTES: u64 = 512 * 1024 * 1024;
 const DEFAULT_IDLE_TIMEOUT_MINUTES: u32 = 15;
 const ALLOWED_IDLE_TIMEOUT_MINUTES: [u32; 3] = [5, 15, 30];
 const SENSITIVE_AUTHORIZATION_TTL_MILLISECONDS: u64 = 60_000;
+const PASSWORD_BLOCKLIST: &[&str] = &[
+    "123456789012345",
+    "111111111111111",
+    "passwordpassword",
+    "password123456",
+    "qwertyuiopasdfgh",
+    "qwerty123456789",
+    "letmeinletmein",
+    "adminadminadmin",
+    "administrator",
+    "iloveyouiloveyou",
+    "welcome123456789",
+    "correcthorsebatterystaple",
+];
 #[cfg(not(test))]
 const ARGON2_MEMORY_KIB: u32 = 64 * 1_024;
 #[cfg(test)]
@@ -236,6 +250,8 @@ pub struct WorkspaceVaultState {
     idle_timeout_milliseconds: AtomicU64,
     last_activity_milliseconds: AtomicU64,
     sensitive_authorization: Mutex<Option<SensitiveAuthorization>>,
+    failed_password_attempts: AtomicU32,
+    password_retry_after_milliseconds: AtomicU64,
 }
 
 impl Default for WorkspaceVaultState {
@@ -249,6 +265,8 @@ impl Default for WorkspaceVaultState {
             )),
             last_activity_milliseconds: AtomicU64::new(now_milliseconds_lossy()),
             sensitive_authorization: Mutex::new(None),
+            failed_password_attempts: AtomicU32::new(0),
+            password_retry_after_milliseconds: AtomicU64::new(0),
         }
     }
 }
@@ -282,6 +300,7 @@ impl WorkspaceVaultState {
             .lock()
             .map_err(|_| "workspace_vault_state_unavailable".to_owned())?;
         *slot = Some(Zeroizing::new(key));
+        drop(slot);
         self.record_activity();
         Ok(())
     }
@@ -403,6 +422,36 @@ impl WorkspaceVaultState {
         }
         self.ensure_access_permit(authorization.permit)?;
         Ok(authorization.permit)
+    }
+
+    fn check_password_attempt_allowed(&self) -> Result<(), String> {
+        if now_milliseconds_lossy()
+            < self
+                .password_retry_after_milliseconds
+                .load(Ordering::Acquire)
+        {
+            Err("workspace_vault_password_rate_limited".to_owned())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn record_password_failure(&self) {
+        let attempts = self.failed_password_attempts.fetch_add(1, Ordering::AcqRel) + 1;
+        if attempts >= 3 {
+            let exponent = attempts.saturating_sub(3).min(4);
+            let delay_milliseconds = 2_000_u64.saturating_mul(1_u64 << exponent);
+            self.password_retry_after_milliseconds.store(
+                now_milliseconds_lossy().saturating_add(delay_milliseconds),
+                Ordering::Release,
+            );
+        }
+    }
+
+    fn reset_password_failures(&self) {
+        self.failed_password_attempts.store(0, Ordering::Release);
+        self.password_retry_after_milliseconds
+            .store(0, Ordering::Release);
     }
 
     pub fn shutdown(&self) -> bool {
@@ -721,34 +770,44 @@ pub async fn unlock_workspace(
     system_unlock_state: tauri::State<'_, SystemUnlockState>,
     password: String,
 ) -> Result<WorkspaceSecurityStatus, String> {
+    state.check_password_attempt_allowed()?;
     let store = workspace_store(&app).map_err(|error| error.to_string())?;
     let operation_lock = Arc::clone(&state.operation_lock);
     let password = Zeroizing::new(password);
     let provider = system_unlock_state.provider();
     let provider_for_unlock = Arc::clone(&provider);
-    let (data_key, system_unlock_enabled, idle_timeout_minutes) =
-        tauri::async_runtime::spawn_blocking(move || {
-            let _guard = operation_lock
-                .lock()
-                .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
-            recover_pending_migration(&store)?;
-            let metadata = store
-                .read_vault_metadata()?
-                .ok_or_else(|| "workspace_vault_not_configured".to_owned())?;
-            let data_key = unwrap_data_key(&metadata, &password)?;
-            verify_encrypted_store(&store, &data_key)?;
-            let system_unlock_enabled =
-                system_unlock_enabled(Some(&metadata), provider_for_unlock.as_ref());
-            Ok::<([u8; DATA_KEY_BYTES], bool, Option<u32>), String>((
-                data_key,
-                system_unlock_enabled,
-                metadata.idle_timeout_minutes,
-            ))
-        })
-        .await
-        .map_err(|error| error.to_string())??;
+    let unlock_result = tauri::async_runtime::spawn_blocking(move || {
+        let _guard = operation_lock
+            .lock()
+            .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
+        recover_pending_migration(&store)?;
+        let metadata = store
+            .read_vault_metadata()?
+            .ok_or_else(|| "workspace_vault_not_configured".to_owned())?;
+        let data_key = unwrap_data_key(&metadata, &password)?;
+        verify_encrypted_store(&store, &data_key)?;
+        let system_unlock_enabled =
+            system_unlock_enabled(Some(&metadata), provider_for_unlock.as_ref());
+        Ok::<([u8; DATA_KEY_BYTES], bool, Option<u32>), String>((
+            data_key,
+            system_unlock_enabled,
+            metadata.idle_timeout_minutes,
+        ))
+    })
+    .await
+    .map_err(|error| error.to_string())?;
+    let (data_key, system_unlock_enabled, idle_timeout_minutes) = match unlock_result {
+        Ok(result) => result,
+        Err(error) => {
+            if error == "workspace_vault_invalid_password" {
+                state.record_password_failure();
+            }
+            return Err(error);
+        }
+    };
     state.set_idle_timeout(idle_timeout_minutes);
     state.replace_data_key(data_key)?;
+    state.reset_password_failures();
     Ok(WorkspaceSecurityStatus {
         encrypted: true,
         locked: false,
@@ -789,6 +848,7 @@ pub async fn unlock_workspace_with_system(
     .map_err(|error| error.to_string())??;
     state.set_idle_timeout(idle_timeout_minutes);
     state.replace_data_key(data_key)?;
+    state.reset_password_failures();
     Ok(WorkspaceSecurityStatus {
         encrypted: true,
         locked: false,
@@ -886,8 +946,9 @@ pub async fn authorize_sensitive_operation(
 
     let verified_data_key = match authentication {
         SensitiveAuthentication::Password { password } => {
+            state.check_password_attempt_allowed()?;
             let password = Zeroizing::new(password);
-            tauri::async_runtime::spawn_blocking(move || {
+            let result = tauri::async_runtime::spawn_blocking(move || {
                 let _guard = operation_lock
                     .lock()
                     .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
@@ -898,7 +959,19 @@ pub async fn authorize_sensitive_operation(
                 unwrap_data_key(&metadata, &password)
             })
             .await
-            .map_err(|error| error.to_string())??
+            .map_err(|error| error.to_string())?;
+            match result {
+                Ok(data_key) => {
+                    state.reset_password_failures();
+                    data_key
+                }
+                Err(error) => {
+                    if error == "workspace_vault_invalid_password" {
+                        state.record_password_failure();
+                    }
+                    return Err(error);
+                }
+            }
         }
         SensitiveAuthentication::System { message } => {
             if !provider.available() {
@@ -1185,6 +1258,14 @@ fn validate_new_password(password: &str) -> Result<(), String> {
     }
     if password.len() > MAXIMUM_PASSWORD_BYTES {
         return Err("workspace_vault_password_too_long".to_owned());
+    }
+    let normalized = password
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .flat_map(char::to_lowercase)
+        .collect::<String>();
+    if PASSWORD_BLOCKLIST.contains(&normalized.as_str()) {
+        return Err("workspace_vault_password_blocked".to_owned());
     }
     Ok(())
 }
@@ -2076,6 +2157,35 @@ mod tests {
                 .unwrap_err(),
             "workspace_vault_reauthentication_required"
         );
+    }
+
+    #[test]
+    fn new_passwords_require_length_and_reject_common_values() {
+        assert_eq!(
+            validate_new_password("short password").unwrap_err(),
+            "workspace_vault_password_too_short"
+        );
+        assert_eq!(
+            validate_new_password("Password Password").unwrap_err(),
+            "workspace_vault_password_blocked"
+        );
+        assert!(validate_new_password("three uncommon words 2026").is_ok());
+    }
+
+    #[test]
+    fn repeated_password_failures_trigger_and_reset_backoff() {
+        let state = WorkspaceVaultState::default();
+        assert!(state.check_password_attempt_allowed().is_ok());
+        state.record_password_failure();
+        state.record_password_failure();
+        assert!(state.check_password_attempt_allowed().is_ok());
+        state.record_password_failure();
+        assert_eq!(
+            state.check_password_attempt_allowed().unwrap_err(),
+            "workspace_vault_password_rate_limited"
+        );
+        state.reset_password_failures();
+        assert!(state.check_password_attempt_allowed().is_ok());
     }
 
     #[test]

@@ -225,6 +225,8 @@ export default function WorkspaceSecurityGate({
           <p className="security-error" role="alert">
             {error === "workspace_vault_invalid_password"
               ? t("security.invalidPassword")
+              : error === "workspace_vault_password_rate_limited"
+                ? t("security.passwordRateLimited")
               : error === "system_unlock_verification_cancelled"
                 ? t("security.systemUnlockCancelled")
                 : error === "system_unlock_verification_not_configured"

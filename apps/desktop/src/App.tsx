@@ -751,7 +751,7 @@ function App({
     }
     if (
       !exportDialog &&
-      Array.from(securityPassword).length < 10
+      Array.from(securityPassword).length < 15
     ) {
       setSecurityMessage(t("security.passwordTooShort"));
       return;
@@ -806,8 +806,13 @@ function App({
       setSecurityPassword("");
       setSecurityPasswordConfirmation("");
     } catch (error) {
+      const reason = errorReason(error);
       setSecurityMessage(
-        t("security.operationFailed", { reason: errorReason(error) }),
+        reason === "workspace_vault_password_blocked"
+          ? t("security.passwordBlocked")
+          : reason === "workspace_vault_password_rate_limited"
+            ? t("security.passwordRateLimited")
+            : t("security.operationFailed", { reason }),
       );
       try {
         updateWorkspaceSecurityStatus(await workspaceSecurity.inspect());

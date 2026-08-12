@@ -26,7 +26,7 @@ const LOCAL_DOWNLOAD_CANCELLED: &str = "local embedding download cancelled";
 struct LocalModelFileSpec {
     path: &'static str,
     size: u64,
-    sha256: Option<&'static str>,
+    sha256: &'static str,
 }
 
 struct LocalModelSpec {
@@ -39,31 +39,38 @@ struct LocalModelSpec {
     document_prefix: &'static str,
 }
 
+#[derive(Deserialize, Serialize)]
+struct VerifiedModelFileMarker {
+    sha256: String,
+    size: u64,
+    modified_ns: u64,
+}
+
 const BGE_SMALL_ZH_FILES: &[LocalModelFileSpec] = &[
     LocalModelFileSpec {
         path: "onnx/model.onnx",
         size: 94_851_877,
-        sha256: Some("69a0b846f4f116b5e6aabf9546ea6754d02264f3211a13a1bd69b31b8040749a"),
+        sha256: "69a0b846f4f116b5e6aabf9546ea6754d02264f3211a13a1bd69b31b8040749a",
     },
     LocalModelFileSpec {
         path: "tokenizer.json",
         size: 439_125,
-        sha256: None,
+        sha256: "48cea5d44424912a6fd1ea647bf4fe50b55ab8b1e5879c3275f80e339e8fae26",
     },
     LocalModelFileSpec {
         path: "config.json",
         size: 716,
-        sha256: None,
+        sha256: "d4193ead3a810fd694fa8a31d7fc72fbaebc0668b603e398734bf2f6538ff42f",
     },
     LocalModelFileSpec {
         path: "special_tokens_map.json",
         size: 125,
-        sha256: None,
+        sha256: "b6d346be366a7d1d48332dbc9fdf3bf8960b5d879522b7799ddba59e76237ee3",
     },
     LocalModelFileSpec {
         path: "tokenizer_config.json",
         size: 367,
-        sha256: None,
+        sha256: "e6f3b96db926a37d4039995fbf5ad17de158dfb8f6343d607e4dbaad18d75f5a",
     },
 ];
 
@@ -71,27 +78,27 @@ const MINI_LM_L6_FILES: &[LocalModelFileSpec] = &[
     LocalModelFileSpec {
         path: "onnx/model_quantized.onnx",
         size: 22_972_370,
-        sha256: Some("afdb6f1a0e45b715d0bb9b11772f032c399babd23bfc31fed1c170afc848bdb1"),
+        sha256: "afdb6f1a0e45b715d0bb9b11772f032c399babd23bfc31fed1c170afc848bdb1",
     },
     LocalModelFileSpec {
         path: "tokenizer.json",
         size: 711_661,
-        sha256: None,
+        sha256: "da0e79933b9ed51798a3ae27893d3c5fa4a201126cef75586296df9b4d2c62a0",
     },
     LocalModelFileSpec {
         path: "config.json",
         size: 650,
-        sha256: None,
+        sha256: "7135149f7cffa1a573466c6e4d8423ed73b62fd2332c575bf738a0d033f70df7",
     },
     LocalModelFileSpec {
         path: "special_tokens_map.json",
         size: 125,
-        sha256: None,
+        sha256: "b6d346be366a7d1d48332dbc9fdf3bf8960b5d879522b7799ddba59e76237ee3",
     },
     LocalModelFileSpec {
         path: "tokenizer_config.json",
         size: 366,
-        sha256: None,
+        sha256: "9261e7d79b44c8195c1cada2b453e55b00aeb81e907a6664974b4d7776172ab3",
     },
 ];
 
@@ -99,27 +106,27 @@ const MULTILINGUAL_E5_SMALL_FILES: &[LocalModelFileSpec] = &[
     LocalModelFileSpec {
         path: "onnx/model.onnx",
         size: 470_268_510,
-        sha256: Some("ca456c06b3a9505ddfd9131408916dd79290368331e7d76bb621f1cba6bc8665"),
+        sha256: "ca456c06b3a9505ddfd9131408916dd79290368331e7d76bb621f1cba6bc8665",
     },
     LocalModelFileSpec {
         path: "tokenizer.json",
         size: 17_082_730,
-        sha256: Some("0b44a9d7b51c3c62626640cda0e2c2f70fdacdc25bbbd68038369d14ebdf4c39"),
+        sha256: "0b44a9d7b51c3c62626640cda0e2c2f70fdacdc25bbbd68038369d14ebdf4c39",
     },
     LocalModelFileSpec {
         path: "config.json",
         size: 655,
-        sha256: None,
+        sha256: "69137736cab8b8903a07fe8afaafdda25aac55415a12a55d1bffa9f581abf959",
     },
     LocalModelFileSpec {
         path: "special_tokens_map.json",
         size: 167,
-        sha256: None,
+        sha256: "d05497f1da52c5e09554c0cd874037a083e1dc1b9cfd48034d1c717f1afc07a7",
     },
     LocalModelFileSpec {
         path: "tokenizer_config.json",
         size: 443,
-        sha256: None,
+        sha256: "a1d6bc8734a6f635dc158508bef000f8e2e5a759c7d92f984b2c86e5ff53425b",
     },
 ];
 
@@ -349,22 +356,69 @@ fn model_partial_path(
     spec: &LocalModelSpec,
     file: LocalModelFileSpec,
 ) -> PathBuf {
-    if let Some(sha256) = file.sha256 {
-        let mut path = Cache::new(cache_dir.to_path_buf())
-            .model(spec.repository.to_owned())
-            .blob_path(sha256);
-        path.set_extension("part");
-        path
-    } else {
-        let mut path = model_file_path(cache_dir, spec, file);
-        let extension = path
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .map(|extension| format!("{extension}.part"))
-            .unwrap_or_else(|| "part".to_owned());
-        path.set_extension(extension);
-        path
-    }
+    let mut path = Cache::new(cache_dir.to_path_buf())
+        .model(spec.repository.to_owned())
+        .blob_path(file.sha256);
+    path.set_extension("part");
+    path
+}
+
+fn model_verification_path(final_path: &Path) -> PathBuf {
+    let mut path = final_path.to_path_buf();
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| format!("{value}.linked-info-verified.json"))
+        .unwrap_or_else(|| "linked-info-verified.json".to_owned());
+    path.set_extension(extension);
+    path
+}
+
+fn model_file_fingerprint(path: &Path) -> Option<(u64, u64)> {
+    let metadata = path.metadata().ok()?;
+    let modified_ns = metadata
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_nanos()
+        .try_into()
+        .ok()?;
+    Some((metadata.len(), modified_ns))
+}
+
+fn model_file_is_verified(final_path: &Path, file: LocalModelFileSpec) -> bool {
+    let Some((size, modified_ns)) = model_file_fingerprint(final_path) else {
+        return false;
+    };
+    let marker = fs::read(model_verification_path(final_path))
+        .ok()
+        .and_then(|contents| serde_json::from_slice::<VerifiedModelFileMarker>(&contents).ok());
+    marker.as_ref().is_some_and(|marker| {
+        marker.sha256 == file.sha256
+            && marker.size == file.size
+            && marker.size == size
+            && marker.modified_ns == modified_ns
+    })
+}
+
+fn write_model_verification_marker(
+    final_path: &Path,
+    file: LocalModelFileSpec,
+) -> Result<(), String> {
+    let (size, modified_ns) = model_file_fingerprint(final_path)
+        .ok_or_else(|| "cannot inspect verified embedding model file".to_owned())?;
+    let marker = serde_json::to_vec(&VerifiedModelFileMarker {
+        sha256: file.sha256.to_owned(),
+        size,
+        modified_ns,
+    })
+    .map_err(|error| error.to_string())?;
+    fs::write(model_verification_path(final_path), marker).map_err(|error| error.to_string())
+}
+
+fn remove_model_verification_marker(final_path: &Path) {
+    let _ = fs::remove_file(model_verification_path(final_path));
 }
 
 fn existing_file_bytes(path: &Path, maximum: u64) -> u64 {
@@ -380,15 +434,19 @@ fn model_status(cache_dir: &Path, spec: &'static LocalModelSpec) -> LocalEmbeddi
         .iter()
         .map(|file| {
             let final_path = model_file_path(cache_dir, spec, *file);
-            if final_path
+            let complete = final_path
                 .metadata()
                 .map(|metadata| metadata.len() == file.size)
-                .unwrap_or(false)
-            {
+                .unwrap_or(false);
+            if complete && model_file_is_verified(&final_path, *file) {
                 file.size
             } else {
                 ready = false;
-                existing_file_bytes(&model_partial_path(cache_dir, spec, *file), file.size)
+                if complete {
+                    file.size
+                } else {
+                    existing_file_bytes(&model_partial_path(cache_dir, spec, *file), file.size)
+                }
             }
         })
         .sum();
@@ -509,12 +567,39 @@ async fn download_model_file(
     cancel: Arc<AtomicBool>,
 ) -> Result<(), PrepareModelError> {
     let final_path = model_file_path(cache_dir, spec, file);
-    if final_path
+    if model_file_is_verified(&final_path, file) {
+        return Ok(());
+    }
+    let complete_final_file = final_path
         .metadata()
         .map(|metadata| metadata.len() == file.size)
-        .unwrap_or(false)
-    {
-        return Ok(());
+        .unwrap_or(false);
+    if complete_final_file {
+        emit_local_progress(
+            app,
+            spec,
+            LocalEmbeddingPhase::Verifying,
+            Some((file_index, file, file.size)),
+            completed_bytes + file.size,
+            None,
+        );
+        let verification_path = final_path.clone();
+        let expected = file.sha256;
+        let verification = tauri::async_runtime::spawn_blocking(move || {
+            verify_sha256(&verification_path, expected)
+        })
+        .await
+        .map_err(|error| PrepareModelError::Message(error.to_string()))?;
+        if verification.is_ok() {
+            write_model_verification_marker(&final_path, file)
+                .map_err(PrepareModelError::Message)?;
+            return Ok(());
+        }
+        fs::remove_file(&final_path)?;
+        remove_model_verification_marker(&final_path);
+    } else if final_path.exists() {
+        fs::remove_file(&final_path)?;
+        remove_model_verification_marker(&final_path);
     }
 
     let partial_path = model_partial_path(cache_dir, spec, file);
@@ -636,20 +721,18 @@ async fn download_model_file(
         completed_bytes + downloaded,
         None,
     );
-    if let Some(expected) = file.sha256 {
-        let verification_path = partial_path.clone();
-        let verification = tauri::async_runtime::spawn_blocking(move || {
-            verify_sha256(&verification_path, expected)
-        })
-        .await
-        .map_err(|error| PrepareModelError::Message(error.to_string()))?;
-        if let Err(error) = verification {
-            OpenOptions::new()
-                .write(true)
-                .open(&partial_path)?
-                .set_len(0)?;
-            return Err(PrepareModelError::Message(error));
-        }
+    let expected = file.sha256;
+    let verification_path = partial_path.clone();
+    let verification =
+        tauri::async_runtime::spawn_blocking(move || verify_sha256(&verification_path, expected))
+            .await
+            .map_err(|error| PrepareModelError::Message(error.to_string()))?;
+    if let Err(error) = verification {
+        OpenOptions::new()
+            .write(true)
+            .open(&partial_path)?
+            .set_len(0)?;
+        return Err(PrepareModelError::Message(error));
     }
     if cancel.load(Ordering::Acquire) {
         return Err(PrepareModelError::Cancelled);
@@ -662,6 +745,7 @@ async fn download_model_file(
         fs::remove_file(&final_path)?;
     }
     fs::rename(&partial_path, &final_path)?;
+    write_model_verification_marker(&final_path, file).map_err(PrepareModelError::Message)?;
     Ok(())
 }
 
@@ -1033,6 +1117,7 @@ mod tests {
             assert_eq!(local_model_spec(model.id).unwrap().id, model.id);
             assert!(!model.revision.is_empty());
             assert!(model.files.iter().all(|file| file.size > 0));
+            assert!(model.files.iter().all(|file| file.sha256.len() == 64));
             assert_eq!(
                 model_total_bytes(model),
                 model.files.iter().map(|file| file.size).sum::<u64>()
