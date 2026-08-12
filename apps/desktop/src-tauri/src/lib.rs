@@ -1,4 +1,5 @@
 mod embedding;
+mod file_transfer;
 mod llm;
 mod system_unlock;
 mod vector_cache;
@@ -43,7 +44,6 @@ pub fn run() {
         .manage(vector_cache::VectorCacheState::default())
         .manage(workspace_file::WorkspaceVaultState::default())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_fs::init())
         .setup(|app| {
             #[cfg(windows)]
             windows_session::register(app).map_err(std::io::Error::other)?;
@@ -67,6 +67,8 @@ pub fn run() {
             embedding::embed_remote_texts,
             embedding::inspect_local_embedding_models,
             embedding::prepare_local_embedding_model,
+            file_transfer::export_workspace_transfer,
+            file_transfer::import_workspace_transfer,
             llm::cancel_local_llm_download,
             llm::inspect_local_llm_models,
             llm::prepare_local_llm_model,

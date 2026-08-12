@@ -1869,7 +1869,7 @@ fn validate_storage_envelope(contents: &str) -> io::Result<()> {
     Ok(())
 }
 
-fn write_atomically(target: &Path, contents: &[u8]) -> io::Result<()> {
+pub(crate) fn write_atomically(target: &Path, contents: &[u8]) -> io::Result<()> {
     let parent = target.parent().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,

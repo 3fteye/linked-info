@@ -1,16 +1,8 @@
-import { isTauri } from "@tauri-apps/api/core";
-import { open, save } from "@tauri-apps/plugin-dialog";
-import { readTextFile, writeTextFile } from "@tauri-apps/plugin-fs";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 
 export interface ImportedWorkspaceFile {
   name: string;
   text: string;
-}
-
-const jsonFilter = [{ name: "JSON", extensions: ["json"] }];
-
-function fileNameFromPath(path: string): string {
-  return path.split(/[\\/]/).pop() || path;
 }
 
 export async function exportWorkspaceFile(
@@ -18,12 +10,10 @@ export async function exportWorkspaceFile(
   suggestedName: string,
 ): Promise<boolean> {
   if (isTauri()) {
-    const path = await save({ defaultPath: suggestedName, filters: jsonFilter });
-    if (path === null) {
-      return false;
-    }
-    await writeTextFile(path, text);
-    return true;
+    return invoke<boolean>("export_workspace_transfer", {
+      suggestedName,
+      text,
+    });
   }
 
   const url = URL.createObjectURL(
@@ -39,15 +29,7 @@ export async function exportWorkspaceFile(
 
 export async function importWorkspaceFile(): Promise<ImportedWorkspaceFile | null> {
   if (isTauri()) {
-    const path = await open({
-      directory: false,
-      filters: jsonFilter,
-      multiple: false,
-    });
-    if (typeof path !== "string") {
-      return null;
-    }
-    return { name: fileNameFromPath(path), text: await readTextFile(path) };
+    return invoke<ImportedWorkspaceFile | null>("import_workspace_transfer");
   }
 
   return new Promise((resolve) => {
