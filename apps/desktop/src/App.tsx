@@ -33,6 +33,7 @@ import {
   isUnnamedNode,
   moveNodeLayoutToFront,
   normalizeNodeName,
+  parseStoredWorkspaceText,
   type CanvasViewport,
   type InformationNode,
   type NodeLayout,
@@ -56,6 +57,11 @@ import {
   type WorkspaceSecurity,
   type WorkspaceSecurityStatus,
 } from "./workspaceSecurity";
+import type {
+  WorkspaceBackupEntry,
+  WorkspaceBackupHistory,
+  WorkspaceBackupHistoryStatus,
+} from "./workspaceBackupHistory";
 import type { WorkspaceLifecycle } from "./workspaceLifecycle";
 import {
   appendWorkspaceHistory,
@@ -120,7 +126,7 @@ import "./App.css";
 type ViewId = "canvas" | "nodes" | "settings";
 
 interface PendingWorkspaceReplacement {
-  kind: "import" | "recovery";
+  kind: "history" | "import" | "recovery";
   sourceName: string;
   workspace: WorkspaceSnapshot;
 }
@@ -136,6 +142,7 @@ interface AppProps {
   lifecycle: WorkspaceLifecycle;
   persistence: WorkspacePersistence;
   updateWorkspaceSecurityStatus: (status: WorkspaceSecurityStatus) => void;
+  workspaceBackupHistory: WorkspaceBackupHistory;
   workspaceSecurity: WorkspaceSecurity;
   workspaceSecurityStatus: WorkspaceSecurityStatus;
 }
@@ -176,6 +183,13 @@ function formatByteCount(bytes: number): string {
     unitIndex += 1;
   }
   return `${value >= 100 ? value.toFixed(0) : value.toFixed(1)} ${units[unitIndex]}`;
+}
+
+function formatBackupDate(createdAtMs: number, language: string): string {
+  return new Intl.DateTimeFormat(language, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(new Date(createdAtMs));
 }
 
 function formatDuration(seconds: number): string {
@@ -250,6 +264,7 @@ function App({
   lifecycle,
   persistence,
   updateWorkspaceSecurityStatus,
+  workspaceBackupHistory,
   workspaceSecurity,
   workspaceSecurityStatus,
 }: AppProps) {
@@ -259,6 +274,7 @@ function App({
   const workspaceRef = useRef(workspace);
   const skipUnmountFlushRef = useRef(false);
   const workspaceReplacementGenerationRef = useRef(0);
+  const skipInitialAutomaticBackupRef = useRef(true);
   const [persistenceReady, setPersistenceReady] = useState(false);
   const [primaryStorageProblem, setPrimaryStorageProblem] = useState<string | null>(null);
   const [recoveryStorageProblem, setRecoveryStorageProblem] = useState<string | null>(null);
@@ -280,6 +296,13 @@ function App({
   const [pendingWorkspaceReplacement, setPendingWorkspaceReplacement] =
     useState<PendingWorkspaceReplacement | null>(null);
   const [backupStatus, setBackupStatus] = useState<string | null>(null);
+  const [automaticBackupHistory, setAutomaticBackupHistory] =
+    useState<WorkspaceBackupHistoryStatus | null>(null);
+  const [automaticBackupHistoryLoading, setAutomaticBackupHistoryLoading] =
+    useState(false);
+  const [automaticBackupHistoryError, setAutomaticBackupHistoryError] = useState<
+    string | null
+  >(null);
   const [recoveryAvailable, setRecoveryAvailable] = useState(false);
   const [securityDialog, setSecurityDialog] = useState<"enable" | "change" | null>(
     null,
@@ -469,6 +492,35 @@ function App({
   }, [activeView, embeddingVectorCache, t]);
 
   useEffect(() => {
+    if (activeView !== "settings" || !workspaceBackupHistory.available) {
+      return;
+    }
+    let active = true;
+    setAutomaticBackupHistoryLoading(true);
+    void workspaceBackupHistory
+      .inspect()
+      .then((status) => {
+        if (active) {
+          setAutomaticBackupHistory(status);
+          setAutomaticBackupHistoryError(null);
+        }
+      })
+      .catch(() => {
+        if (active) {
+          setAutomaticBackupHistoryError(t("backup.historyInspectFailed"));
+        }
+      })
+      .finally(() => {
+        if (active) {
+          setAutomaticBackupHistoryLoading(false);
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [activeView, t, workspaceBackupHistory]);
+
+  useEffect(() => {
     let active = true;
 
     async function initializePersistence() {
@@ -581,16 +633,32 @@ function App({
       return;
     }
     workspaceRef.current = workspace;
+    const captureAutomaticBackup = !skipInitialAutomaticBackupRef.current;
+    skipInitialAutomaticBackupRef.current = false;
     const saveTimer = window.setTimeout(
       () => {
-        void persistence.save(workspace).catch(() => {
-          setBackupStatus(t("storage.saveFailed"));
-        });
+        void persistence
+          .save(workspace)
+          .then(async () => {
+            if (!captureAutomaticBackup || !workspaceBackupHistory.available) {
+              return;
+            }
+            try {
+              const result = await workspaceBackupHistory.captureIfDue();
+              setAutomaticBackupHistory(result.status);
+              setAutomaticBackupHistoryError(null);
+            } catch {
+              setAutomaticBackupHistoryError(t("backup.historyCaptureFailed"));
+            }
+          })
+          .catch(() => {
+            setBackupStatus(t("storage.saveFailed"));
+          });
       },
       300,
     );
     return () => window.clearTimeout(saveTimer);
-  }, [persistence, persistenceReady, t, workspace]);
+  }, [persistence, persistenceReady, t, workspace, workspaceBackupHistory]);
 
   useEffect(() => {
     if (!persistenceReady) {
@@ -1481,6 +1549,36 @@ function App({
     });
   }
 
+  async function chooseAutomaticBackup(entry: WorkspaceBackupEntry) {
+    if (entry.state !== "ready") {
+      setBackupStatus(t("backup.historyInvalid"));
+      return;
+    }
+    setBackupStatus(null);
+    try {
+      const contents = await workspaceBackupHistory.read(entry.id);
+      const loaded = parseStoredWorkspaceText(contents);
+      if (loaded.status !== "ready") {
+        setBackupStatus(t("backup.historyInvalid"));
+        return;
+      }
+      setPendingWorkspaceReplacement({
+        kind: "history",
+        sourceName: t("backup.historySource", {
+          time: formatBackupDate(entry.createdAtMs, activeLanguage),
+        }),
+        workspace: loaded.workspace,
+      });
+    } catch {
+      setBackupStatus(t("backup.historyReadFailed"));
+      try {
+        setAutomaticBackupHistory(await workspaceBackupHistory.inspect());
+      } catch {
+        setAutomaticBackupHistoryError(t("backup.historyInspectFailed"));
+      }
+    }
+  }
+
   async function applyWorkspaceReplacement() {
     if (pendingWorkspaceReplacement === null) {
       return;
@@ -1504,7 +1602,9 @@ function App({
       setBackupStatus(
         pendingWorkspaceReplacement.kind === "recovery"
           ? t("backup.recoverySuccess")
-          : t("backup.importSuccess"),
+          : pendingWorkspaceReplacement.kind === "history"
+            ? t("backup.historyRestoreSuccess")
+            : t("backup.importSuccess"),
       );
       setPendingWorkspaceReplacement(null);
     } catch {
@@ -2386,6 +2486,81 @@ function App({
                     </button>
                   )}
                 </div>
+                {workspaceBackupHistory.available && (
+                  <div className="automatic-backup-history">
+                    <div className="automatic-backup-history-heading">
+                      <div>
+                        <strong>{t("backup.historyTitle")}</strong>
+                        <small>{t("backup.historyDescription")}</small>
+                      </div>
+                      {automaticBackupHistory !== null && (
+                        <small>
+                          {t("backup.historyUsage", {
+                            count: automaticBackupHistory.entries.length,
+                            maximumCount: automaticBackupHistory.maximumCount,
+                            size: formatByteCount(automaticBackupHistory.totalBytes),
+                            maximumSize: formatByteCount(
+                              automaticBackupHistory.maximumBytes,
+                            ),
+                          })}
+                        </small>
+                      )}
+                    </div>
+                    {automaticBackupHistoryLoading && (
+                      <p className="automatic-backup-history-message">
+                        {t("backup.historyLoading")}
+                      </p>
+                    )}
+                    {automaticBackupHistoryError !== null && (
+                      <p
+                        className="automatic-backup-history-message is-error"
+                        role="status"
+                      >
+                        {automaticBackupHistoryError}
+                      </p>
+                    )}
+                    {!automaticBackupHistoryLoading &&
+                      automaticBackupHistory !== null &&
+                      automaticBackupHistory.entries.length === 0 && (
+                        <p className="automatic-backup-history-message">
+                          {t("backup.historyEmpty")}
+                        </p>
+                      )}
+                    {automaticBackupHistory !== null &&
+                      automaticBackupHistory.entries.length > 0 && (
+                        <div className="automatic-backup-list" role="list">
+                          {automaticBackupHistory.entries.map((entry) => (
+                            <div
+                              className="automatic-backup-entry"
+                              key={entry.id}
+                              role="listitem"
+                            >
+                              <div>
+                                <strong>
+                                  {formatBackupDate(entry.createdAtMs, activeLanguage)}
+                                </strong>
+                                <small>
+                                  {formatByteCount(entry.sizeBytes)}
+                                  {entry.state === "invalid"
+                                    ? ` · ${t("backup.historyInvalidLabel")}`
+                                    : ""}
+                                </small>
+                              </div>
+                              <button
+                                className="secondary-button"
+                                disabled={entry.state !== "ready"}
+                                onClick={() => void chooseAutomaticBackup(entry)}
+                                type="button"
+                              >
+                                <ArchiveRestore aria-hidden="true" size={14} />
+                                {t("backup.historyRestore")}
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                  </div>
+                )}
                 {backupStatus !== null && (
                   <p className="backup-status" role="status">
                     {backupStatus}

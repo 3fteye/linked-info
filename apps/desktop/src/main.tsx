@@ -31,6 +31,10 @@ import {
   tauriWorkspaceSecurity,
   unavailableWorkspaceSecurity,
 } from "./workspaceSecurity";
+import {
+  tauriWorkspaceBackupHistory,
+  unavailableWorkspaceBackupHistory,
+} from "./workspaceBackupHistory";
 
 document.addEventListener(
   "contextmenu",
@@ -68,6 +72,9 @@ const localLlmRuntime = runningInTauri
 const workspaceSecurity = runningInTauri
   ? tauriWorkspaceSecurity
   : unavailableWorkspaceSecurity;
+const workspaceBackupHistory = runningInTauri
+  ? tauriWorkspaceBackupHistory
+  : unavailableWorkspaceBackupHistory;
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
@@ -84,6 +91,7 @@ ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
           lifecycle={lifecycle}
           persistence={persistence}
           updateWorkspaceSecurityStatus={updateWorkspaceSecurityStatus}
+          workspaceBackupHistory={workspaceBackupHistory}
           workspaceSecurity={workspaceSecurity}
           workspaceSecurityStatus={workspaceSecurityStatus}
         />

@@ -13,6 +13,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
+    time::{SystemTime, UNIX_EPOCH},
 };
 use tauri::{AppHandle, Manager};
 use zeroize::{Zeroize, Zeroizing};
@@ -26,6 +27,8 @@ const PRIMARY_FILE_NAME: &str = "workspace.v1.json";
 const RECOVERY_FILE_NAME: &str = "workspace.recovery.v1.json";
 const VAULT_FILE_NAME: &str = "workspace.vault.v1.json";
 const VAULT_PENDING_FILE_NAME: &str = ".workspace.vault.v1.pending.json";
+const BACKUP_DIRECTORY_NAME: &str = "workspace.backups.v1";
+const BACKUP_PENDING_DIRECTORY_NAME: &str = ".workspace.backups.v1.pending";
 const ENCRYPTED_WORKSPACE_FORMAT: &str = "linked-info-encrypted-workspace";
 const ENCRYPTED_EXPORT_FORMAT: &str = "linked-info-encrypted-workspace-export";
 const VAULT_FORMAT: &str = "linked-info-workspace-vault";
@@ -35,6 +38,9 @@ const SALT_BYTES: usize = 16;
 const NONCE_BYTES: usize = 24;
 const MINIMUM_PASSWORD_CHARACTERS: usize = 10;
 const MAXIMUM_PASSWORD_BYTES: usize = 1_024;
+const BACKUP_INTERVAL_MILLISECONDS: u64 = 60 * 60 * 1_000;
+const BACKUP_MAXIMUM_COUNT: usize = 30;
+const BACKUP_MAXIMUM_BYTES: u64 = 512 * 1024 * 1024;
 #[cfg(not(test))]
 const ARGON2_MEMORY_KIB: u32 = 64 * 1_024;
 #[cfg(test)]
@@ -142,6 +148,39 @@ pub struct WorkspaceSecurityStatus {
     system_unlock_enabled: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum WorkspaceBackupState {
+    Ready,
+    Invalid,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceBackupEntry {
+    id: String,
+    created_at_ms: u64,
+    size_bytes: u64,
+    state: WorkspaceBackupState,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceBackupHistoryStatus {
+    entries: Vec<WorkspaceBackupEntry>,
+    total_bytes: u64,
+    maximum_count: usize,
+    maximum_bytes: u64,
+    interval_ms: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceBackupCaptureResult {
+    created: bool,
+    status: WorkspaceBackupHistoryStatus,
+}
+
 #[derive(Default)]
 pub struct WorkspaceVaultState {
     data_key: Arc<Mutex<Option<Zeroizing<[u8; DATA_KEY_BYTES]>>>>,
@@ -220,6 +259,19 @@ impl WorkspaceFileStore {
         self.base_directory.join(VAULT_PENDING_FILE_NAME)
     }
 
+    fn backup_directory(&self) -> PathBuf {
+        self.base_directory.join(BACKUP_DIRECTORY_NAME)
+    }
+
+    fn pending_backup_directory(&self) -> PathBuf {
+        self.base_directory.join(BACKUP_PENDING_DIRECTORY_NAME)
+    }
+
+    fn backup_path(&self, id: &str) -> Result<PathBuf, String> {
+        parse_backup_id(id)?;
+        Ok(self.backup_directory().join(format!("{id}.json")))
+    }
+
     fn read_text_path(path: &Path) -> io::Result<Option<String>> {
         match fs::read_to_string(path) {
             Ok(contents) => Ok(Some(contents)),
@@ -279,6 +331,54 @@ impl WorkspaceFileStore {
     fn encryption_configured(&self) -> bool {
         self.vault_path().is_file()
     }
+
+    fn backup_files(&self) -> Result<Vec<BackupFile>, String> {
+        let directory = self.backup_directory();
+        let entries = match fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error.to_string()),
+        };
+        let mut backups = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|error| error.to_string())?;
+            let file_type = entry.file_type().map_err(|error| error.to_string())?;
+            if !file_type.is_file() {
+                continue;
+            }
+            let Some(file_name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            let Some(id) = file_name.strip_suffix(".json") else {
+                continue;
+            };
+            let Ok(created_at_ms) = parse_backup_id(id) else {
+                continue;
+            };
+            let size_bytes = entry.metadata().map_err(|error| error.to_string())?.len();
+            backups.push(BackupFile {
+                id: id.to_owned(),
+                created_at_ms,
+                size_bytes,
+                path: entry.path(),
+            });
+        }
+        backups.sort_by(|left, right| {
+            right
+                .created_at_ms
+                .cmp(&left.created_at_ms)
+                .then_with(|| right.id.cmp(&left.id))
+        });
+        Ok(backups)
+    }
+}
+
+#[derive(Clone, Debug)]
+struct BackupFile {
+    id: String,
+    created_at_ms: u64,
+    size_bytes: u64,
+    path: PathBuf,
 }
 
 #[tauri::command]
@@ -333,6 +433,67 @@ pub async fn write_workspace_file(
             false => None,
         };
         store.write(slot, &contents, active_key)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn inspect_workspace_backup_history(
+    app: AppHandle,
+    state: tauri::State<'_, WorkspaceVaultState>,
+) -> Result<WorkspaceBackupHistoryStatus, String> {
+    let store = workspace_store(&app).map_err(|error| error.to_string())?;
+    let operation_lock = Arc::clone(&state.operation_lock);
+    let data_key = state.optional_data_key()?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = operation_lock
+            .lock()
+            .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
+        recover_pending_migration(&store)?;
+        let active_key = active_workspace_key(&store, data_key.as_deref())?;
+        inspect_backup_history(&store, active_key)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn capture_workspace_backup(
+    app: AppHandle,
+    state: tauri::State<'_, WorkspaceVaultState>,
+) -> Result<WorkspaceBackupCaptureResult, String> {
+    let store = workspace_store(&app).map_err(|error| error.to_string())?;
+    let operation_lock = Arc::clone(&state.operation_lock);
+    let data_key = state.optional_data_key()?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = operation_lock
+            .lock()
+            .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
+        recover_pending_migration(&store)?;
+        let active_key = active_workspace_key(&store, data_key.as_deref())?;
+        capture_workspace_backup_at(&store, active_key, current_time_milliseconds()?)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn read_workspace_backup(
+    app: AppHandle,
+    state: tauri::State<'_, WorkspaceVaultState>,
+    id: String,
+) -> Result<String, String> {
+    let store = workspace_store(&app).map_err(|error| error.to_string())?;
+    let operation_lock = Arc::clone(&state.operation_lock);
+    let data_key = state.optional_data_key()?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = operation_lock
+            .lock()
+            .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
+        recover_pending_migration(&store)?;
+        let active_key = active_workspace_key(&store, data_key.as_deref())?;
+        read_backup_contents(&store, &id, active_key)
     })
     .await
     .map_err(|error| error.to_string())?
@@ -693,6 +854,157 @@ fn validate_unlock_password(password: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn current_time_milliseconds() -> Result<u64, String> {
+    let milliseconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| "workspace_backup_system_time_invalid".to_owned())?
+        .as_millis();
+    u64::try_from(milliseconds).map_err(|_| "workspace_backup_system_time_invalid".to_owned())
+}
+
+fn parse_backup_id(id: &str) -> Result<u64, String> {
+    if id.len() > 64 || id.as_bytes().contains(&0) {
+        return Err("workspace_backup_invalid_id".to_owned());
+    }
+    let (timestamp, uuid) = id
+        .split_once('-')
+        .ok_or_else(|| "workspace_backup_invalid_id".to_owned())?;
+    if timestamp.is_empty()
+        || !timestamp.bytes().all(|byte| byte.is_ascii_digit())
+        || uuid::Uuid::parse_str(uuid).is_err()
+    {
+        return Err("workspace_backup_invalid_id".to_owned());
+    }
+    timestamp
+        .parse::<u64>()
+        .map_err(|_| "workspace_backup_invalid_id".to_owned())
+}
+
+fn active_workspace_key<'a>(
+    store: &WorkspaceFileStore,
+    data_key: Option<&'a [u8; DATA_KEY_BYTES]>,
+) -> Result<Option<&'a [u8; DATA_KEY_BYTES]>, String> {
+    match store.encryption_configured() {
+        true => data_key
+            .map(Some)
+            .ok_or_else(|| "workspace_vault_locked".to_owned()),
+        false => Ok(None),
+    }
+}
+
+fn backup_plaintext(
+    contents: &str,
+    data_key: Option<&[u8; DATA_KEY_BYTES]>,
+) -> Result<String, String> {
+    match data_key {
+        Some(key) => decrypt_workspace_file(contents, WorkspaceFileSlot::Primary, key),
+        None => Ok(contents.to_owned()),
+    }
+}
+
+fn inspect_backup_history(
+    store: &WorkspaceFileStore,
+    data_key: Option<&[u8; DATA_KEY_BYTES]>,
+) -> Result<WorkspaceBackupHistoryStatus, String> {
+    let files = store.backup_files()?;
+    let mut entries = Vec::with_capacity(files.len());
+    let mut total_bytes = 0_u64;
+    for file in files {
+        total_bytes = total_bytes.saturating_add(file.size_bytes);
+        let state = WorkspaceFileStore::read_text_path(&file.path)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "workspace_backup_missing".to_owned())?
+            .and_then(|contents| backup_plaintext(&contents, data_key))
+            .and_then(|contents| {
+                validate_storage_envelope(&contents).map_err(|error| error.to_string())
+            })
+            .map(|_| WorkspaceBackupState::Ready)
+            .unwrap_or(WorkspaceBackupState::Invalid);
+        entries.push(WorkspaceBackupEntry {
+            id: file.id,
+            created_at_ms: file.created_at_ms,
+            size_bytes: file.size_bytes,
+            state,
+        });
+    }
+    Ok(WorkspaceBackupHistoryStatus {
+        entries,
+        total_bytes,
+        maximum_count: BACKUP_MAXIMUM_COUNT,
+        maximum_bytes: BACKUP_MAXIMUM_BYTES,
+        interval_ms: BACKUP_INTERVAL_MILLISECONDS,
+    })
+}
+
+fn capture_workspace_backup_at(
+    store: &WorkspaceFileStore,
+    data_key: Option<&[u8; DATA_KEY_BYTES]>,
+    now_ms: u64,
+) -> Result<WorkspaceBackupCaptureResult, String> {
+    let primary = fs::read(store.path(WorkspaceFileSlot::Primary)).map_err(|error| {
+        if error.kind() == io::ErrorKind::NotFound {
+            "workspace_backup_primary_missing".to_owned()
+        } else {
+            error.to_string()
+        }
+    })?;
+    let existing = store.backup_files()?;
+    if let Some(latest) = existing.first() {
+        if now_ms.saturating_sub(latest.created_at_ms) < BACKUP_INTERVAL_MILLISECONDS {
+            return Ok(WorkspaceBackupCaptureResult {
+                created: false,
+                status: inspect_backup_history(store, data_key)?,
+            });
+        }
+        if fs::read(&latest.path).map_err(|error| error.to_string())? == primary {
+            return Ok(WorkspaceBackupCaptureResult {
+                created: false,
+                status: inspect_backup_history(store, data_key)?,
+            });
+        }
+    }
+
+    fs::create_dir_all(store.backup_directory()).map_err(|error| error.to_string())?;
+    let id = format!("{now_ms}-{}", uuid::Uuid::new_v4());
+    let path = store.backup_path(&id)?;
+    write_atomically(&path, &primary).map_err(|error| error.to_string())?;
+    prune_workspace_backups(store)?;
+    Ok(WorkspaceBackupCaptureResult {
+        created: true,
+        status: inspect_backup_history(store, data_key)?,
+    })
+}
+
+fn prune_workspace_backups(store: &WorkspaceFileStore) -> Result<(), String> {
+    let mut files = store.backup_files()?;
+    let mut total_bytes = files.iter().map(|file| file.size_bytes).sum::<u64>();
+    while files.len() > 1
+        && (files.len() > BACKUP_MAXIMUM_COUNT || total_bytes > BACKUP_MAXIMUM_BYTES)
+    {
+        let oldest = files.pop().expect("backup list is known to be non-empty");
+        fs::remove_file(&oldest.path).map_err(|error| error.to_string())?;
+        total_bytes = total_bytes.saturating_sub(oldest.size_bytes);
+    }
+    if store.backup_directory().is_dir() {
+        sync_parent_directory(&store.backup_directory()).map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+fn read_backup_contents(
+    store: &WorkspaceFileStore,
+    id: &str,
+    data_key: Option<&[u8; DATA_KEY_BYTES]>,
+) -> Result<String, String> {
+    let path = store.backup_path(id)?;
+    let contents = WorkspaceFileStore::read_text_path(&path)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "workspace_backup_missing".to_owned())?;
+    let plaintext = backup_plaintext(&contents, data_key)?;
+    validate_storage_envelope(&plaintext).map_err(|_| "workspace_backup_invalid".to_owned())?;
+    Ok(plaintext)
+}
+
 fn random_array<const N: usize>() -> Result<[u8; N], String> {
     let mut value = [0_u8; N];
     getrandom::fill(&mut value)
@@ -1034,6 +1346,7 @@ fn migrate_plaintext_store(
 ) -> Result<[u8; DATA_KEY_BYTES], String> {
     fs::create_dir_all(&store.base_directory).map_err(|error| error.to_string())?;
     let data_key = random_array::<DATA_KEY_BYTES>()?;
+    prepare_backup_migration(store, &data_key)?;
     let mut migrated_slots = Vec::new();
     for slot in [WorkspaceFileSlot::Primary, WorkspaceFileSlot::Recovery] {
         if let Some(contents) = store
@@ -1082,6 +1395,7 @@ fn finish_pending_migration(
             }
         }
     }
+    finish_pending_backup_migration(store)?;
     if store.pending_vault_path().is_file() {
         replace_file(&store.pending_vault_path(), &store.vault_path())
             .map_err(|error| error.to_string())?;
@@ -1100,6 +1414,65 @@ fn recover_pending_migration(store: &WorkspaceFileStore) -> Result<(), String> {
     };
     let metadata = parse_vault_metadata(&contents)?;
     finish_pending_migration(store, &metadata)
+}
+
+fn prepare_backup_migration(
+    store: &WorkspaceFileStore,
+    data_key: &[u8; DATA_KEY_BYTES],
+) -> Result<(), String> {
+    let pending_directory = store.pending_backup_directory();
+    if pending_directory.exists() {
+        fs::remove_dir_all(&pending_directory).map_err(|error| error.to_string())?;
+    }
+    let backups = store.backup_files()?;
+    if backups.is_empty() {
+        return Ok(());
+    }
+    fs::create_dir_all(&pending_directory).map_err(|error| error.to_string())?;
+    for backup in backups {
+        let contents = WorkspaceFileStore::read_text_path(&backup.path)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "workspace_backup_missing".to_owned())?;
+        let encrypted = encrypt_workspace_file(&contents, WorkspaceFileSlot::Primary, data_key)?;
+        let pending_path = pending_directory.join(format!("{}.json", backup.id));
+        write_atomically(&pending_path, encrypted.as_bytes()).map_err(|error| error.to_string())?;
+        if decrypt_workspace_file(&encrypted, WorkspaceFileSlot::Primary, data_key)? != contents {
+            return Err("workspace_vault_migration_verification_failed".to_owned());
+        }
+    }
+    sync_parent_directory(&pending_directory).map_err(|error| error.to_string())
+}
+
+fn finish_pending_backup_migration(store: &WorkspaceFileStore) -> Result<(), String> {
+    let pending_directory = store.pending_backup_directory();
+    let entries = match fs::read_dir(&pending_directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.to_string()),
+    };
+    fs::create_dir_all(store.backup_directory()).map_err(|error| error.to_string())?;
+    for entry in entries {
+        let entry = entry.map_err(|error| error.to_string())?;
+        if !entry
+            .file_type()
+            .map_err(|error| error.to_string())?
+            .is_file()
+        {
+            continue;
+        }
+        let file_name = entry
+            .file_name()
+            .to_str()
+            .map(str::to_owned)
+            .ok_or_else(|| "workspace_backup_invalid_id".to_owned())?;
+        let id = file_name
+            .strip_suffix(".json")
+            .ok_or_else(|| "workspace_backup_invalid_id".to_owned())?;
+        let destination = store.backup_path(id)?;
+        replace_file(&entry.path(), &destination).map_err(|error| error.to_string())?;
+    }
+    fs::remove_dir(&pending_directory).map_err(|error| error.to_string())?;
+    sync_parent_directory(&store.backup_directory()).map_err(|error| error.to_string())
 }
 
 fn encrypt_export(
@@ -1358,6 +1731,151 @@ mod tests {
         assert_eq!(
             store.read_plaintext(WorkspaceFileSlot::Recovery).unwrap(),
             Some(recovery)
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn captures_changed_primary_files_at_a_bounded_interval() {
+        let directory = test_directory();
+        let store = WorkspaceFileStore::new(directory.clone());
+        let started_at = 1_800_000_000_000_u64;
+        let first = workspace("First backup");
+        let second = workspace("Second backup");
+        store
+            .write_plaintext(WorkspaceFileSlot::Primary, &first)
+            .unwrap();
+
+        let first_capture = capture_workspace_backup_at(&store, None, started_at).unwrap();
+        assert!(first_capture.created);
+        assert_eq!(first_capture.status.entries.len(), 1);
+        assert_eq!(
+            read_backup_contents(&store, &first_capture.status.entries[0].id, None).unwrap(),
+            first
+        );
+
+        store
+            .write_plaintext(WorkspaceFileSlot::Primary, &second)
+            .unwrap();
+        let early = capture_workspace_backup_at(
+            &store,
+            None,
+            started_at + BACKUP_INTERVAL_MILLISECONDS - 1,
+        )
+        .unwrap();
+        assert!(!early.created);
+        assert_eq!(early.status.entries.len(), 1);
+
+        let second_capture =
+            capture_workspace_backup_at(&store, None, started_at + BACKUP_INTERVAL_MILLISECONDS)
+                .unwrap();
+        assert!(second_capture.created);
+        assert_eq!(second_capture.status.entries.len(), 2);
+        assert_eq!(
+            read_backup_contents(&store, &second_capture.status.entries[0].id, None).unwrap(),
+            second
+        );
+
+        let unchanged = capture_workspace_backup_at(
+            &store,
+            None,
+            started_at + BACKUP_INTERVAL_MILLISECONDS * 2,
+        )
+        .unwrap();
+        assert!(!unchanged.created);
+        assert_eq!(unchanged.status.entries.len(), 2);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn rotates_automatic_backups_by_count() {
+        let directory = test_directory();
+        let store = WorkspaceFileStore::new(directory.clone());
+        let started_at = 1_800_000_000_000_u64;
+
+        for index in 0..=BACKUP_MAXIMUM_COUNT {
+            store
+                .write_plaintext(
+                    WorkspaceFileSlot::Primary,
+                    &workspace(&format!("Version {index}")),
+                )
+                .unwrap();
+            assert!(
+                capture_workspace_backup_at(
+                    &store,
+                    None,
+                    started_at + BACKUP_INTERVAL_MILLISECONDS * index as u64,
+                )
+                .unwrap()
+                .created
+            );
+        }
+
+        let status = inspect_backup_history(&store, None).unwrap();
+        assert_eq!(status.entries.len(), BACKUP_MAXIMUM_COUNT);
+        assert_eq!(
+            read_backup_contents(&store, &status.entries[0].id, None).unwrap(),
+            workspace(&format!("Version {BACKUP_MAXIMUM_COUNT}"))
+        );
+        assert!(
+            !status
+                .entries
+                .iter()
+                .any(|entry| entry.created_at_ms == started_at)
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn migrates_existing_backup_history_without_leaving_plaintext() {
+        let directory = test_directory();
+        let store = WorkspaceFileStore::new(directory.clone());
+        let primary = workspace("secret-from-backup-history");
+        store
+            .write_plaintext(WorkspaceFileSlot::Primary, &primary)
+            .unwrap();
+        let captured = capture_workspace_backup_at(&store, None, 1_800_000_000_000).unwrap();
+        let backup_id = captured.status.entries[0].id.clone();
+
+        let data_key = migrate_plaintext_store(&store, "correct horse battery").unwrap();
+
+        let raw_backup =
+            WorkspaceFileStore::read_text_path(&store.backup_path(&backup_id).unwrap())
+                .unwrap()
+                .unwrap();
+        assert!(!raw_backup.contains("secret-from-backup-history"));
+        assert_eq!(
+            read_backup_contents(&store, &backup_id, Some(&data_key)).unwrap(),
+            primary
+        );
+        assert_eq!(
+            inspect_backup_history(&store, Some(&data_key))
+                .unwrap()
+                .entries[0]
+                .state,
+            WorkspaceBackupState::Ready
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn marks_damaged_history_without_returning_it_for_restore() {
+        let directory = test_directory();
+        let store = WorkspaceFileStore::new(directory.clone());
+        fs::create_dir_all(store.backup_directory()).unwrap();
+        let id = format!("1800000000000-{}", uuid::Uuid::new_v4());
+        write_atomically(&store.backup_path(&id).unwrap(), b"not-json").unwrap();
+
+        let status = inspect_backup_history(&store, None).unwrap();
+        assert_eq!(status.entries.len(), 1);
+        assert_eq!(status.entries[0].state, WorkspaceBackupState::Invalid);
+        assert_eq!(
+            read_backup_contents(&store, &id, None).unwrap_err(),
+            "workspace_backup_invalid"
+        );
+        assert_eq!(
+            read_backup_contents(&store, "../workspace.v1", None).unwrap_err(),
+            "workspace_backup_invalid_id"
         );
         fs::remove_dir_all(directory).unwrap();
     }

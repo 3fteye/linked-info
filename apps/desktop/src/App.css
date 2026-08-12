@@ -1372,6 +1372,93 @@ h1 {
   gap: 7px;
 }
 
+.automatic-backup-history {
+  display: grid;
+  grid-column: 2;
+  width: 100%;
+  min-width: 0;
+  gap: 8px;
+}
+
+.automatic-backup-history-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  min-width: 0;
+  gap: 12px;
+}
+
+.automatic-backup-history-heading > div {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.automatic-backup-history-heading strong {
+  color: #303832;
+  font-size: 12px;
+}
+
+.automatic-backup-history-heading small,
+.automatic-backup-entry small,
+.automatic-backup-history-message {
+  color: #667068;
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.automatic-backup-history-heading > small {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.automatic-backup-history-message {
+  margin: 0;
+}
+
+.automatic-backup-history-message.is-error {
+  color: #8a3f35;
+}
+
+.automatic-backup-list {
+  display: grid;
+  max-height: 230px;
+  overflow: auto;
+  gap: 6px;
+}
+
+.automatic-backup-entry {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-width: 0;
+  padding: 8px 9px;
+  gap: 12px;
+  border: 1px solid #e1e6e2;
+  border-radius: 7px;
+  background: #f9fbf9;
+}
+
+.automatic-backup-entry > div {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.automatic-backup-entry strong {
+  color: #38423b;
+  font-size: 11px;
+  font-weight: 620;
+}
+
+.automatic-backup-entry .secondary-button {
+  min-height: 30px;
+  flex: none;
+  padding: 0 9px;
+  font-size: 10px;
+}
+
 .security-settings-actions {
   display: flex;
   width: 100%;
@@ -1803,6 +1890,10 @@ h1 {
   }
 
   .backup-status {
+    grid-column: 1;
+  }
+
+  .automatic-backup-history {
     grid-column: 1;
   }
 
