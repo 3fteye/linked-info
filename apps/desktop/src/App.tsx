@@ -156,6 +156,18 @@ interface PendingEncryptedWorkspaceImport extends ImportedWorkspaceFile {
   bootstrapRestore: boolean;
 }
 
+type PendingOffsiteSensitiveAction =
+  | { kind: "deleteSnapshot"; targetId: string; snapshotId: string; createdAtMs: number }
+  | { kind: "removeTarget"; targetId: string; targetName: string }
+  | { kind: "destroyTarget"; targetId: string; targetName: string }
+  | {
+      kind: "retention";
+      targetId: string;
+      enabled: boolean;
+      maxSnapshots: number;
+      maxAgeDays: number;
+    };
+
 interface AppProps {
   embeddingGateway: EmbeddingGateway;
   embeddingVectorCache: EmbeddingVectorCache;
@@ -341,6 +353,7 @@ function App({
     | "export"
     | "exportUnreadable"
     | "backupTarget"
+    | "offsiteSensitive"
     | null
   >(null);
   const [pendingBackupTarget, setPendingBackupTarget] = useState<
@@ -349,6 +362,9 @@ function App({
       })
     | null
   >(null);
+  const [pendingOffsiteSensitiveAction, setPendingOffsiteSensitiveAction] =
+    useState<PendingOffsiteSensitiveAction | null>(null);
+  const [offsiteConfirmationName, setOffsiteConfirmationName] = useState("");
   const [pendingUnreadableExport, setPendingUnreadableExport] = useState<{
     raw: string;
     source: "primary" | "recovery";
@@ -956,6 +972,8 @@ function App({
     setSecurityDialog(null);
     setPendingUnreadableExport(null);
     setPendingBackupTarget(null);
+    setPendingOffsiteSensitiveAction(null);
+    setOffsiteConfirmationName("");
     setOffsiteToken("");
     setOffsiteAccessKeyId("");
     setOffsiteSecretAccessKey("");
@@ -971,10 +989,18 @@ function App({
     if (securityDialog === null || securityBusy) {
       return;
     }
+    if (
+      securityDialog === "offsiteSensitive" &&
+      pendingOffsiteSensitiveAction?.kind === "destroyTarget" &&
+      offsiteConfirmationName !== pendingOffsiteSensitiveAction.targetName
+    ) {
+      return;
+    }
     const reauthenticationOnly =
       securityDialog === "export" ||
       securityDialog === "exportUnreadable" ||
-      securityDialog === "backupTarget";
+      securityDialog === "backupTarget" ||
+      securityDialog === "offsiteSensitive";
     if (
       !reauthenticationOnly &&
       securityPassword !== securityPasswordConfirmation
@@ -1015,6 +1041,14 @@ function App({
               ? "rotateDataKey"
               : securityDialog === "backupTarget"
                 ? "backupTargetChange"
+                : securityDialog === "offsiteSensitive"
+                  ? pendingOffsiteSensitiveAction?.kind === "deleteSnapshot"
+                    ? "backupSnapshotDelete"
+                    : pendingOffsiteSensitiveAction?.kind === "destroyTarget"
+                      ? "backupTargetDestroy"
+                      : pendingOffsiteSensitiveAction?.kind === "retention"
+                        ? "backupRetentionChange"
+                        : "backupTargetChange"
                 : "exportWorkspace";
         const authorization = await workspaceSecurity.authorizeSensitiveOperation(
           sensitiveOperation,
@@ -1080,6 +1114,70 @@ function App({
           setOffsiteSecretAccessKey("");
           setOffsiteSessionToken("");
           showAppNotice(t("offsiteBackup.targetConnected"));
+        } else if (
+          securityDialog === "offsiteSensitive" &&
+          pendingOffsiteSensitiveAction !== null
+        ) {
+          const action = pendingOffsiteSensitiveAction;
+          if (action.kind === "deleteSnapshot") {
+            await offsiteBackup.deleteSnapshot(
+              action.targetId,
+              action.snapshotId,
+              authorization,
+            );
+            setOffsitePage(await offsiteBackup.list(action.targetId));
+            setOffsiteTargets(await offsiteBackup.inspectTargets());
+            showAppNotice(t("offsiteBackup.snapshotDeleted"));
+          } else if (action.kind === "removeTarget") {
+            await offsiteBackup.removeTarget(action.targetId, authorization);
+            const targets = await offsiteBackup.inspectTargets();
+            setOffsiteTargets(targets);
+            setSelectedOffsiteTargetId(targets[0]?.id ?? null);
+            setOffsitePage(null);
+            showAppNotice(t("offsiteBackup.targetRemoved"));
+          } else if (action.kind === "destroyTarget") {
+            const result = await offsiteBackup.deleteAllAndRemoveTarget(
+              action.targetId,
+              offsiteConfirmationName,
+              authorization,
+            );
+            if (!result.targetRemoved) {
+              setOffsiteMessage(
+                t("offsiteBackup.errors.destroyPartial", {
+                  count: result.deletedCount,
+                  reason: result.error ?? "offsite_backup_unknown_error",
+                }),
+              );
+            } else {
+              const targets = await offsiteBackup.inspectTargets();
+              setOffsiteTargets(targets);
+              setSelectedOffsiteTargetId(targets[0]?.id ?? null);
+              setOffsitePage(null);
+              showAppNotice(
+                t("offsiteBackup.targetDestroyed", {
+                  count: result.deletedCount,
+                }),
+              );
+            }
+          } else {
+            const updated = await offsiteBackup.updateRetentionSettings(
+              action.targetId,
+              action.enabled,
+              action.maxSnapshots,
+              action.maxAgeDays,
+              authorization,
+            );
+            setOffsiteTargets((targets) =>
+              targets.map((target) =>
+                target.id === updated.id ? updated : target,
+              ),
+            );
+            showAppNotice(
+              action.enabled
+                ? t("offsiteBackup.retentionEnabled")
+                : t("offsiteBackup.retentionDisabled"),
+            );
+          }
         } else if (pendingUnreadableExport !== null) {
           await exportUnreadableData(
             pendingUnreadableExport.raw,
@@ -1091,6 +1189,8 @@ function App({
       setSecurityDialog(null);
       setPendingUnreadableExport(null);
       setPendingBackupTarget(null);
+      setPendingOffsiteSensitiveAction(null);
+      setOffsiteConfirmationName("");
       setSecurityCurrentPassword("");
       setSecurityPassword("");
       setSecurityPasswordConfirmation("");
@@ -2332,6 +2432,18 @@ function App({
         : {}),
     });
     setSecurityDialog("backupTarget");
+  }
+
+  function requestOffsiteSensitiveAction(action: PendingOffsiteSensitiveAction) {
+    if (offsiteBusy || securityBusy) {
+      return;
+    }
+    setOffsiteMessage(null);
+    setSecurityMessage(null);
+    setSecurityCurrentPassword("");
+    setOffsiteConfirmationName("");
+    setPendingOffsiteSensitiveAction(action);
+    setSecurityDialog("offsiteSensitive");
   }
 
   async function connectOffsiteRecovery() {
@@ -3972,6 +4084,118 @@ function App({
                                   })}
                                 </small>
                               )}
+                              <div className="offsite-automatic-settings offsite-retention-settings">
+                                <label className="switch-setting">
+                                  <input
+                                    checked={selectedOffsiteTarget.retentionEnabled}
+                                    disabled={offsiteBusy}
+                                    onChange={(event) =>
+                                      requestOffsiteSensitiveAction({
+                                        kind: "retention",
+                                        targetId: selectedOffsiteTarget.id,
+                                        enabled: event.target.checked,
+                                        maxSnapshots:
+                                          selectedOffsiteTarget.retentionMaxSnapshots,
+                                        maxAgeDays:
+                                          selectedOffsiteTarget.retentionMaxAgeDays,
+                                      })
+                                    }
+                                    type="checkbox"
+                                  />
+                                  {t("offsiteBackup.retention")}
+                                </label>
+                                <label>
+                                  <span>{t("offsiteBackup.retentionCount")}</span>
+                                  <select
+                                    disabled={offsiteBusy}
+                                    onChange={(event) =>
+                                      requestOffsiteSensitiveAction({
+                                        kind: "retention",
+                                        targetId: selectedOffsiteTarget.id,
+                                        enabled: selectedOffsiteTarget.retentionEnabled,
+                                        maxSnapshots: Number(event.target.value),
+                                        maxAgeDays:
+                                          selectedOffsiteTarget.retentionMaxAgeDays,
+                                      })
+                                    }
+                                    value={selectedOffsiteTarget.retentionMaxSnapshots}
+                                  >
+                                    {[10, 30, 60, 100].map((count) => (
+                                      <option key={count} value={count}>
+                                        {t("offsiteBackup.retentionSnapshots", { count })}
+                                      </option>
+                                    ))}
+                                  </select>
+                                </label>
+                                <label>
+                                  <span>{t("offsiteBackup.retentionAge")}</span>
+                                  <select
+                                    disabled={offsiteBusy}
+                                    onChange={(event) =>
+                                      requestOffsiteSensitiveAction({
+                                        kind: "retention",
+                                        targetId: selectedOffsiteTarget.id,
+                                        enabled: selectedOffsiteTarget.retentionEnabled,
+                                        maxSnapshots:
+                                          selectedOffsiteTarget.retentionMaxSnapshots,
+                                        maxAgeDays: Number(event.target.value),
+                                      })
+                                    }
+                                    value={selectedOffsiteTarget.retentionMaxAgeDays}
+                                  >
+                                    {[30, 90, 180, 365].map((count) => (
+                                      <option key={count} value={count}>
+                                        {t("offsiteBackup.retentionDays", { count })}
+                                      </option>
+                                    ))}
+                                  </select>
+                                </label>
+                              </div>
+                              <small>
+                                {selectedOffsiteTarget.retentionEnabled
+                                  ? t("offsiteBackup.retentionDescriptionEnabled")
+                                  : t("offsiteBackup.retentionDescription")}
+                              </small>
+                              <small>
+                                {t("offsiteBackup.lifecycleStatus", {
+                                  attempted:
+                                    selectedOffsiteTarget.lastAutomaticAttemptAtMs === null
+                                      ? t("offsiteBackup.never")
+                                      : formatBackupDate(
+                                          selectedOffsiteTarget.lastAutomaticAttemptAtMs,
+                                          activeLanguage,
+                                        ),
+                                  next:
+                                    !selectedOffsiteTarget.automaticEnabled
+                                      ? t("offsiteBackup.automaticOff")
+                                      : !selectedOffsiteTarget.automaticPending
+                                        ? t("offsiteBackup.noPendingChanges")
+                                        : selectedOffsiteTarget.lastUploadAtMs === null
+                                          ? t("offsiteBackup.whenAppChecks")
+                                          : formatBackupDate(
+                                              selectedOffsiteTarget.lastUploadAtMs +
+                                                selectedOffsiteTarget.automaticIntervalHours *
+                                                  60 *
+                                                  60 *
+                                                  1_000,
+                                              activeLanguage,
+                                            ),
+                                  cleanup:
+                                    selectedOffsiteTarget.lastRetentionCleanupAtMs === null
+                                      ? t("offsiteBackup.never")
+                                      : formatBackupDate(
+                                          selectedOffsiteTarget.lastRetentionCleanupAtMs,
+                                          activeLanguage,
+                                        ),
+                                })}
+                              </small>
+                              {selectedOffsiteTarget.lastRetentionError !== null && (
+                                <small className="offsite-automatic-error" role="alert">
+                                  {t("offsiteBackup.retentionError", {
+                                    reason: selectedOffsiteTarget.lastRetentionError,
+                                  })}
+                                </small>
+                              )}
                             </div>
                           )}
                           <div className="backup-actions">
@@ -3983,6 +4207,38 @@ function App({
                             >
                               <Upload aria-hidden="true" size={15} />
                               {t("offsiteBackup.uploadNow")}
+                            </button>
+                            <button
+                              className="secondary-button"
+                              disabled={offsiteBusy || selectedOffsiteTarget === null}
+                              onClick={() =>
+                                selectedOffsiteTarget !== null &&
+                                requestOffsiteSensitiveAction({
+                                  kind: "removeTarget",
+                                  targetId: selectedOffsiteTarget.id,
+                                  targetName: selectedOffsiteTarget.name,
+                                })
+                              }
+                              type="button"
+                            >
+                              <X aria-hidden="true" size={15} />
+                              {t("offsiteBackup.removeTarget")}
+                            </button>
+                            <button
+                              className="danger-button"
+                              disabled={offsiteBusy || selectedOffsiteTarget === null}
+                              onClick={() =>
+                                selectedOffsiteTarget !== null &&
+                                requestOffsiteSensitiveAction({
+                                  kind: "destroyTarget",
+                                  targetId: selectedOffsiteTarget.id,
+                                  targetName: selectedOffsiteTarget.name,
+                                })
+                              }
+                              type="button"
+                            >
+                              <Trash2 aria-hidden="true" size={15} />
+                              {t("offsiteBackup.destroyTarget")}
                             </button>
                             <button
                               className="secondary-button"
@@ -4029,6 +4285,23 @@ function App({
                                     >
                                       <ShieldCheck aria-hidden="true" size={14} />
                                       {t("offsiteBackup.verify")}
+                                    </button>
+                                    <button
+                                      className="danger-button"
+                                      disabled={offsiteBusy}
+                                      onClick={() =>
+                                        selectedOffsiteTargetId !== null &&
+                                        requestOffsiteSensitiveAction({
+                                          kind: "deleteSnapshot",
+                                          targetId: selectedOffsiteTargetId,
+                                          snapshotId: snapshot.id,
+                                          createdAtMs: snapshot.createdAtMs,
+                                        })
+                                      }
+                                      type="button"
+                                    >
+                                      <Trash2 aria-hidden="true" size={14} />
+                                      {t("offsiteBackup.deleteSnapshot")}
                                     </button>
                                     <button
                                       className="secondary-button"
@@ -4688,6 +4961,14 @@ function App({
                     ? t("security.rotateTitle")
                     : securityDialog === "backupTarget"
                       ? t("offsiteBackup.reauthenticateTitle")
+                    : securityDialog === "offsiteSensitive"
+                      ? pendingOffsiteSensitiveAction?.kind === "deleteSnapshot"
+                        ? t("offsiteBackup.deleteSnapshotTitle")
+                        : pendingOffsiteSensitiveAction?.kind === "removeTarget"
+                          ? t("offsiteBackup.removeTargetTitle")
+                          : pendingOffsiteSensitiveAction?.kind === "destroyTarget"
+                            ? t("offsiteBackup.destroyTargetTitle")
+                            : t("offsiteBackup.retentionTitle")
                     : t("security.exportTitle")}
             </h2>
             <p>
@@ -4699,6 +4980,32 @@ function App({
                     ? t("security.rotateDescription")
                     : securityDialog === "backupTarget"
                       ? t("offsiteBackup.reauthenticateDescription")
+                    : securityDialog === "offsiteSensitive"
+                      ? pendingOffsiteSensitiveAction?.kind === "deleteSnapshot"
+                        ? t("offsiteBackup.deleteSnapshotDescription", {
+                            time: formatBackupDate(
+                              pendingOffsiteSensitiveAction.createdAtMs,
+                              activeLanguage,
+                            ),
+                          })
+                        : pendingOffsiteSensitiveAction?.kind === "removeTarget"
+                          ? t("offsiteBackup.removeTargetDescription", {
+                              name: pendingOffsiteSensitiveAction.targetName,
+                            })
+                          : pendingOffsiteSensitiveAction?.kind === "destroyTarget"
+                            ? t("offsiteBackup.destroyTargetDescription", {
+                                name: pendingOffsiteSensitiveAction.targetName,
+                              })
+                            : t("offsiteBackup.retentionDescriptionConfirm", {
+                                count:
+                                  pendingOffsiteSensitiveAction?.kind === "retention"
+                                    ? pendingOffsiteSensitiveAction.maxSnapshots
+                                    : 0,
+                                days:
+                                  pendingOffsiteSensitiveAction?.kind === "retention"
+                                    ? pendingOffsiteSensitiveAction.maxAgeDays
+                                    : 0,
+                              })
                     : securityDialog === "exportUnreadable"
                     ? t("security.exportUnreadableDescription")
                     : t("security.exportDescription")}
@@ -4729,7 +5036,8 @@ function App({
               )}
               {securityDialog !== "export" &&
                 securityDialog !== "exportUnreadable" &&
-                securityDialog !== "backupTarget" && (
+                securityDialog !== "backupTarget" &&
+                securityDialog !== "offsiteSensitive" && (
                 <>
                   <label htmlFor="workspace-security-password">
                     {securityDialog === "rotate"
@@ -4758,6 +5066,24 @@ function App({
                   />
                 </>
               )}
+              {securityDialog === "offsiteSensitive" &&
+                pendingOffsiteSensitiveAction?.kind === "destroyTarget" && (
+                  <>
+                    <label htmlFor="offsite-target-confirmation-name">
+                      {t("offsiteBackup.destroyTargetConfirmation", {
+                        name: pendingOffsiteSensitiveAction.targetName,
+                      })}
+                    </label>
+                    <input
+                      autoComplete="off"
+                      id="offsite-target-confirmation-name"
+                      onChange={(event) =>
+                        setOffsiteConfirmationName(event.target.value)
+                      }
+                      value={offsiteConfirmationName}
+                    />
+                  </>
+                )}
               {securityMessage !== null && (
                 <p className="security-error" role="alert">
                   {securityMessage}
@@ -4777,7 +5103,11 @@ function App({
                   disabled={
                     securityBusy ||
                     (securityDialog !== "enable" &&
-                      securityCurrentPassword.length === 0)
+                      securityCurrentPassword.length === 0) ||
+                    (securityDialog === "offsiteSensitive" &&
+                      pendingOffsiteSensitiveAction?.kind === "destroyTarget" &&
+                      offsiteConfirmationName !==
+                        pendingOffsiteSensitiveAction.targetName)
                   }
                   type="submit"
                 >
@@ -4791,6 +5121,14 @@ function App({
                           ? t("security.rotateConfirm")
                           : securityDialog === "backupTarget"
                             ? t("offsiteBackup.connect")
+                          : securityDialog === "offsiteSensitive"
+                            ? pendingOffsiteSensitiveAction?.kind === "deleteSnapshot"
+                              ? t("offsiteBackup.deleteSnapshot")
+                              : pendingOffsiteSensitiveAction?.kind === "removeTarget"
+                                ? t("offsiteBackup.removeTarget")
+                                : pendingOffsiteSensitiveAction?.kind === "destroyTarget"
+                                  ? t("offsiteBackup.destroyTargetConfirm")
+                                  : t("offsiteBackup.retentionConfirm")
                         : t("backup.export")}
                 </button>
               </div>

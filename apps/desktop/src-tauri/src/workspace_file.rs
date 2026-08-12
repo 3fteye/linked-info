@@ -247,7 +247,10 @@ pub struct WorkspaceSecurityStatus {
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum SensitiveOperation {
+    BackupRetentionChange,
+    BackupSnapshotDelete,
     BackupTargetChange,
+    BackupTargetDestroy,
     ChangePassword,
     ClearRecoveryData,
     DestroyWorkspace,

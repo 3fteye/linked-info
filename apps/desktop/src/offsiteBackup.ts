@@ -19,6 +19,11 @@ export interface OffsiteBackupTarget {
   automaticPending: boolean;
   lastAutomaticAttemptAtMs: number | null;
   lastAutomaticError: string | null;
+  retentionEnabled: boolean;
+  retentionMaxSnapshots: number;
+  retentionMaxAgeDays: number;
+  lastRetentionCleanupAtMs: number | null;
+  lastRetentionError: string | null;
 }
 
 export type S3ProviderTemplate =
@@ -76,6 +81,12 @@ export interface AutomaticBackupOutcome {
   error: string | null;
 }
 
+export interface DeleteAllOffsiteBackupsOutcome {
+  deletedCount: number;
+  targetRemoved: boolean;
+  error: string | null;
+}
+
 export interface OffsiteBackupService {
   readonly available: boolean;
   inspectTargets(): Promise<OffsiteBackupTarget[]>;
@@ -91,10 +102,27 @@ export interface OffsiteBackupService {
     authorization: string;
   }): Promise<OffsiteBackupTarget>;
   removeTarget(targetId: string, authorization: string): Promise<void>;
+  deleteSnapshot(
+    targetId: string,
+    snapshotId: string,
+    authorization: string,
+  ): Promise<void>;
+  deleteAllAndRemoveTarget(
+    targetId: string,
+    confirmationName: string,
+    authorization: string,
+  ): Promise<DeleteAllOffsiteBackupsOutcome>;
   updateAutomaticSettings(
     targetId: string,
     enabled: boolean,
     intervalHours: number,
+  ): Promise<OffsiteBackupTarget>;
+  updateRetentionSettings(
+    targetId: string,
+    enabled: boolean,
+    maxSnapshots: number,
+    maxAgeDays: number,
+    authorization: string,
   ): Promise<OffsiteBackupTarget>;
   markAutomaticPending(): Promise<OffsiteBackupTarget[]>;
   runDueAutomatic(contents: string): Promise<AutomaticBackupOutcome[]>;
@@ -143,10 +171,35 @@ export const tauriOffsiteBackupService: OffsiteBackupService = {
       authorization,
     });
   },
+  deleteSnapshot(targetId, snapshotId, authorization) {
+    return invoke<void>("delete_offsite_backup", {
+      targetId,
+      snapshotId,
+      authorization,
+    });
+  },
+  deleteAllAndRemoveTarget(targetId, confirmationName, authorization) {
+    return invoke<DeleteAllOffsiteBackupsOutcome>(
+      "delete_all_offsite_backups_and_remove_target",
+      { targetId, confirmationName, authorization },
+    );
+  },
   updateAutomaticSettings(targetId, enabled, intervalHours) {
     return invoke<OffsiteBackupTarget>(
       "update_offsite_backup_automatic_settings",
       { targetId, enabled, intervalHours },
+    );
+  },
+  updateRetentionSettings(
+    targetId,
+    enabled,
+    maxSnapshots,
+    maxAgeDays,
+    authorization,
+  ) {
+    return invoke<OffsiteBackupTarget>(
+      "update_offsite_backup_retention_settings",
+      { targetId, enabled, maxSnapshots, maxAgeDays, authorization },
     );
   },
   markAutomaticPending() {
@@ -256,7 +309,16 @@ export const unavailableOffsiteBackupService: OffsiteBackupService = {
   async removeTarget() {
     return unavailable();
   },
+  async deleteSnapshot() {
+    return unavailable();
+  },
+  async deleteAllAndRemoveTarget() {
+    return unavailable();
+  },
   async updateAutomaticSettings() {
+    return unavailable();
+  },
+  async updateRetentionSettings() {
     return unavailable();
   },
   async markAutomaticPending() {

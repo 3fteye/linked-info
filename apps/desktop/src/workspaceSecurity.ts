@@ -15,7 +15,10 @@ export interface PreparedWorkspaceRestorePreview {
 }
 
 export type SensitiveOperation =
+  | "backupRetentionChange"
+  | "backupSnapshotDelete"
   | "backupTargetChange"
+  | "backupTargetDestroy"
   | "changePassword"
   | "clearRecoveryData"
   | "destroyWorkspace"

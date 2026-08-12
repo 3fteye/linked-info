@@ -8,7 +8,7 @@ use std::{
 
 use linked_info_backup_port::{
     BackupListPage, BackupSnapshot, BackupSnapshotMetadata, BackupTarget, BackupTargetError,
-    BackupVerification,
+    BackupVerification, MAX_BACKUP_PAGE_LIMIT,
 };
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
@@ -33,10 +33,44 @@ const MAXIMUM_TARGETS: usize = 16;
 const DEFAULT_AUTOMATIC_INTERVAL_HOURS: u32 = 24;
 const MAXIMUM_AUTOMATIC_INTERVAL_HOURS: u32 = 24 * 31;
 const AUTOMATIC_RETRY_DELAY_MS: u64 = 15 * 60 * 1_000;
+const DEFAULT_RETENTION_MAX_SNAPSHOTS: u32 = 30;
+const DEFAULT_RETENTION_MAX_AGE_DAYS: u32 = 90;
+const MAXIMUM_RETENTION_SNAPSHOTS: u32 = 1_000;
+const MAXIMUM_RETENTION_AGE_DAYS: u32 = 3_650;
 
 pub struct OffsiteBackupState {
     config_lock: Arc<Mutex<()>>,
     automatic_uploads: Arc<Mutex<HashSet<Uuid>>>,
+}
+
+struct TargetOperationClaim {
+    uploads: Arc<Mutex<HashSet<Uuid>>>,
+    target_id: Uuid,
+}
+
+impl TargetOperationClaim {
+    fn acquire(state: &OffsiteBackupState, target_id: Uuid) -> Result<Self, String> {
+        let mut uploads = state
+            .automatic_uploads
+            .lock()
+            .map_err(|_| "offsite_backup_state_unavailable".to_owned())?;
+        if !uploads.insert(target_id) {
+            return Err("offsite_backup_target_busy".to_owned());
+        }
+        drop(uploads);
+        Ok(Self {
+            uploads: Arc::clone(&state.automatic_uploads),
+            target_id,
+        })
+    }
+}
+
+impl Drop for TargetOperationClaim {
+    fn drop(&mut self) {
+        if let Ok(mut uploads) = self.uploads.lock() {
+            uploads.remove(&self.target_id);
+        }
+    }
 }
 
 impl Default for OffsiteBackupState {
@@ -102,6 +136,8 @@ struct BackupTargetConfig {
     last_verified_at_ms: Option<u64>,
     last_restore_test_at_ms: Option<u64>,
     #[serde(default)]
+    last_restore_test_snapshot_id: Option<Uuid>,
+    #[serde(default)]
     automatic_enabled: bool,
     #[serde(default = "default_automatic_interval_hours")]
     automatic_interval_hours: u32,
@@ -113,6 +149,16 @@ struct BackupTargetConfig {
     last_automatic_attempt_at_ms: Option<u64>,
     #[serde(default)]
     last_automatic_error: Option<String>,
+    #[serde(default)]
+    retention_enabled: bool,
+    #[serde(default = "default_retention_max_snapshots")]
+    retention_max_snapshots: u32,
+    #[serde(default = "default_retention_max_age_days")]
+    retention_max_age_days: u32,
+    #[serde(default)]
+    last_retention_cleanup_at_ms: Option<u64>,
+    #[serde(default)]
+    last_retention_error: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -136,6 +182,11 @@ pub struct BackupTargetSummary {
     automatic_pending: bool,
     last_automatic_attempt_at_ms: Option<u64>,
     last_automatic_error: Option<String>,
+    retention_enabled: bool,
+    retention_max_snapshots: u32,
+    retention_max_age_days: u32,
+    last_retention_cleanup_at_ms: Option<u64>,
+    last_retention_error: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -146,8 +197,24 @@ pub struct AutomaticBackupOutcome {
     error: Option<String>,
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteAllOffsiteBackupsOutcome {
+    deleted_count: usize,
+    target_removed: bool,
+    error: Option<String>,
+}
+
 fn default_automatic_interval_hours() -> u32 {
     DEFAULT_AUTOMATIC_INTERVAL_HOURS
+}
+
+fn default_retention_max_snapshots() -> u32 {
+    DEFAULT_RETENTION_MAX_SNAPSHOTS
+}
+
+fn default_retention_max_age_days() -> u32 {
+    DEFAULT_RETENTION_MAX_AGE_DAYS
 }
 
 #[derive(Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
@@ -205,6 +272,12 @@ pub async fn update_offsite_backup_automatic_settings(
             .iter_mut()
             .find(|target| target.id == target_id)
             .ok_or_else(|| "offsite_backup_target_not_found".to_owned())?;
+        if enabled
+            && target.last_restore_test_at_ms.is_some()
+            && target.last_restore_test_snapshot_id.is_none()
+        {
+            return Err("offsite_backup_retention_requires_new_restore_drill".to_owned());
+        }
         if enabled && !target.automatic_enabled {
             target.automatic_revision = target
                 .automatic_revision
@@ -220,6 +293,49 @@ pub async fn update_offsite_backup_automatic_settings(
     .await
     .map_err(|error| error.to_string())??;
     ensure_workspace_access(&app, &vault_state, permit)?;
+    Ok(summary)
+}
+
+#[tauri::command]
+pub async fn update_offsite_backup_retention_settings(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, OffsiteBackupState>,
+    vault_state: tauri::State<'_, WorkspaceVaultState>,
+    target_id: Uuid,
+    enabled: bool,
+    max_snapshots: u32,
+    max_age_days: u32,
+    authorization: String,
+) -> Result<BackupTargetSummary, String> {
+    let permit = vault_state.consume_sensitive_authorization(
+        SensitiveOperation::BackupRetentionChange,
+        &authorization,
+    )?;
+    validate_retention_settings(max_snapshots, max_age_days)?;
+    let app_for_write = app.clone();
+    let config_lock = Arc::clone(&state.config_lock);
+    let summary = tauri::async_runtime::spawn_blocking(move || {
+        let _guard = config_lock
+            .lock()
+            .map_err(|_| "offsite_backup_config_unavailable".to_owned())?;
+        let path = config_path(&app_for_write)?;
+        let mut config = read_config(&path)?;
+        let target = config
+            .targets
+            .iter_mut()
+            .find(|target| target.id == target_id)
+            .ok_or_else(|| "offsite_backup_target_not_found".to_owned())?;
+        target.retention_enabled = enabled;
+        target.retention_max_snapshots = max_snapshots;
+        target.retention_max_age_days = max_age_days;
+        target.last_retention_error = None;
+        let summary = target_summary(target)?;
+        write_config(&path, &config)?;
+        Ok::<_, String>(summary)
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+    ensure_workspace_access(&app, &vault_state, Some(permit))?;
     Ok(summary)
 }
 
@@ -466,12 +582,18 @@ pub async fn configure_cloudflare_backup_target(
         last_upload_at_ms: None,
         last_verified_at_ms: None,
         last_restore_test_at_ms: None,
+        last_restore_test_snapshot_id: None,
         automatic_enabled: false,
         automatic_interval_hours: DEFAULT_AUTOMATIC_INTERVAL_HOURS,
         automatic_revision: 0,
         automatic_uploaded_revision: 0,
         last_automatic_attempt_at_ms: None,
         last_automatic_error: None,
+        retention_enabled: false,
+        retention_max_snapshots: DEFAULT_RETENTION_MAX_SNAPSHOTS,
+        retention_max_age_days: DEFAULT_RETENTION_MAX_AGE_DAYS,
+        last_retention_cleanup_at_ms: None,
+        last_retention_error: None,
     };
     let summary = target_summary(&config_target)?;
     let app_for_write = app.clone();
@@ -581,12 +703,18 @@ pub async fn configure_s3_backup_target(
         last_upload_at_ms: None,
         last_verified_at_ms: None,
         last_restore_test_at_ms: None,
+        last_restore_test_snapshot_id: None,
         automatic_enabled: false,
         automatic_interval_hours: DEFAULT_AUTOMATIC_INTERVAL_HOURS,
         automatic_revision: 0,
         automatic_uploaded_revision: 0,
         last_automatic_attempt_at_ms: None,
         last_automatic_error: None,
+        retention_enabled: false,
+        retention_max_snapshots: DEFAULT_RETENTION_MAX_SNAPSHOTS,
+        retention_max_age_days: DEFAULT_RETENTION_MAX_AGE_DAYS,
+        last_retention_cleanup_at_ms: None,
+        last_retention_error: None,
     };
     let summary = target_summary(&config_target)?;
     let app_for_write = app.clone();
@@ -627,35 +755,95 @@ pub async fn remove_offsite_backup_target(
     target_id: Uuid,
     authorization: String,
 ) -> Result<(), String> {
+    let _claim = TargetOperationClaim::acquire(&backup_state, target_id)?;
     let permit = vault_state
         .consume_sensitive_authorization(SensitiveOperation::BackupTargetChange, &authorization)?;
     let target = find_target(&app, &backup_state, target_id).await?;
-    let credential = load_credential_async(target.credential_id.clone()).await?;
     ensure_workspace_access(&app, &vault_state, Some(permit))?;
-    delete_credential_async(target.credential_id.clone()).await?;
-
-    let app_for_write = app.clone();
-    let config_lock = Arc::clone(&backup_state.config_lock);
-    let write_result = tauri::async_runtime::spawn_blocking(move || {
-        let _guard = config_lock
-            .lock()
-            .map_err(|_| "offsite_backup_config_unavailable".to_owned())?;
-        let path = config_path(&app_for_write)?;
-        let mut config = read_config(&path)?;
-        let previous_length = config.targets.len();
-        config.targets.retain(|item| item.id != target_id);
-        if config.targets.len() == previous_length {
-            return Err("offsite_backup_target_not_found".to_owned());
-        }
-        write_config(&path, &config)
-    })
-    .await
-    .map_err(|error| error.to_string())?;
-    if let Err(error) = write_result {
-        let _ = store_credential(&target.credential_id, &credential);
-        return Err(error);
-    }
+    remove_target_config_and_credential(&app, &backup_state, &target, target_id).await?;
     ensure_workspace_access(&app, &vault_state, Some(permit))
+}
+
+#[tauri::command]
+pub async fn delete_offsite_backup(
+    app: tauri::AppHandle,
+    backup_state: tauri::State<'_, OffsiteBackupState>,
+    vault_state: tauri::State<'_, WorkspaceVaultState>,
+    target_id: Uuid,
+    snapshot_id: Uuid,
+    authorization: String,
+) -> Result<(), String> {
+    let _claim = TargetOperationClaim::acquire(&backup_state, target_id)?;
+    let permit = vault_state.consume_sensitive_authorization(
+        SensitiveOperation::BackupSnapshotDelete,
+        &authorization,
+    )?;
+    let config = find_target(&app, &backup_state, target_id).await?;
+    let target = open_target(&config).await?;
+    ensure_workspace_access(&app, &vault_state, Some(permit))?;
+    if !target.delete(snapshot_id).await.map_err(target_error)? {
+        return Err("offsite_backup_snapshot_not_found".to_owned());
+    }
+    ensure_workspace_access(&app, &vault_state, Some(permit))?;
+    update_target_status(&app, &backup_state, target_id, move |config| {
+        if config.last_restore_test_snapshot_id == Some(snapshot_id) {
+            config.last_restore_test_snapshot_id = None;
+            config.last_restore_test_at_ms = None;
+        }
+        Ok(())
+    })
+    .await?;
+    ensure_workspace_access(&app, &vault_state, Some(permit))
+}
+
+#[tauri::command]
+pub async fn delete_all_offsite_backups_and_remove_target(
+    app: tauri::AppHandle,
+    backup_state: tauri::State<'_, OffsiteBackupState>,
+    vault_state: tauri::State<'_, WorkspaceVaultState>,
+    target_id: Uuid,
+    confirmation_name: String,
+    authorization: String,
+) -> Result<DeleteAllOffsiteBackupsOutcome, String> {
+    let _claim = TargetOperationClaim::acquire(&backup_state, target_id)?;
+    let permit = vault_state
+        .consume_sensitive_authorization(SensitiveOperation::BackupTargetDestroy, &authorization)?;
+    let config = find_target(&app, &backup_state, target_id).await?;
+    if confirmation_name != config.name {
+        return Err("offsite_backup_target_confirmation_mismatch".to_owned());
+    }
+    let target = open_target(&config).await?;
+    ensure_workspace_access(&app, &vault_state, Some(permit))?;
+    let snapshots = list_all_snapshots(target.as_ref()).await?;
+    let mut deleted_count = 0;
+    for snapshot in snapshots {
+        ensure_workspace_access(&app, &vault_state, Some(permit))?;
+        match target.delete(snapshot.id).await {
+            Ok(true) => deleted_count += 1,
+            Ok(false) => {
+                return Ok(DeleteAllOffsiteBackupsOutcome {
+                    deleted_count,
+                    target_removed: false,
+                    error: Some("offsite_backup_snapshot_not_found".to_owned()),
+                });
+            }
+            Err(error) => {
+                return Ok(DeleteAllOffsiteBackupsOutcome {
+                    deleted_count,
+                    target_removed: false,
+                    error: Some(target_error(error)),
+                });
+            }
+        }
+    }
+    ensure_workspace_access(&app, &vault_state, Some(permit))?;
+    remove_target_config_and_credential(&app, &backup_state, &config, target_id).await?;
+    ensure_workspace_access(&app, &vault_state, Some(permit))?;
+    Ok(DeleteAllOffsiteBackupsOutcome {
+        deleted_count,
+        target_removed: true,
+        error: None,
+    })
 }
 
 #[tauri::command]
@@ -666,6 +854,7 @@ pub async fn create_offsite_backup(
     target_id: Uuid,
     contents: String,
 ) -> Result<BackupSnapshotMetadata, String> {
+    let _claim = TargetOperationClaim::acquire(&backup_state, target_id)?;
     let permit = begin_workspace_access(&app, &vault_state)?;
     let target_config = find_target(&app, &backup_state, target_id).await?;
     let uploaded_revision = target_config.automatic_revision;
@@ -690,6 +879,8 @@ pub async fn create_offsite_backup(
         Ok(())
     })
     .await?;
+    ensure_workspace_access(&app, &vault_state, permit)?;
+    run_retention_cleanup(&app, &backup_state, &vault_state, permit, target_id).await;
     ensure_workspace_access(&app, &vault_state, permit)?;
     Ok(metadata)
 }
@@ -806,6 +997,7 @@ pub async fn test_offsite_backup_restore(
     update_target_status(&app, &backup_state, target_id, move |config| {
         config.last_verified_at_ms = Some(completed_at_ms);
         config.last_restore_test_at_ms = Some(completed_at_ms);
+        config.last_restore_test_snapshot_id = Some(snapshot_id);
         Ok(())
     })
     .await?;
@@ -912,6 +1104,64 @@ async fn find_target(
         .ok_or_else(|| "offsite_backup_target_not_found".to_owned())
 }
 
+async fn remove_target_config_and_credential(
+    app: &tauri::AppHandle,
+    state: &OffsiteBackupState,
+    target: &BackupTargetConfig,
+    target_id: Uuid,
+) -> Result<(), String> {
+    let credential = load_credential_async(target.credential_id.clone()).await?;
+    delete_credential_async(target.credential_id.clone()).await?;
+    let app_for_write = app.clone();
+    let config_lock = Arc::clone(&state.config_lock);
+    let write_result = tauri::async_runtime::spawn_blocking(move || {
+        let _guard = config_lock
+            .lock()
+            .map_err(|_| "offsite_backup_config_unavailable".to_owned())?;
+        let path = config_path(&app_for_write)?;
+        let mut config = read_config(&path)?;
+        let previous_length = config.targets.len();
+        config.targets.retain(|item| item.id != target_id);
+        if config.targets.len() == previous_length {
+            return Err("offsite_backup_target_not_found".to_owned());
+        }
+        write_config(&path, &config)
+    })
+    .await
+    .map_err(|error| error.to_string())?;
+    if let Err(error) = write_result {
+        let _ = store_credential(&target.credential_id, &credential);
+        return Err(error);
+    }
+    Ok(())
+}
+
+async fn list_all_snapshots(
+    target: &dyn BackupTarget,
+) -> Result<Vec<BackupSnapshotMetadata>, String> {
+    let mut cursor = None;
+    let mut seen_cursors = HashSet::new();
+    let mut snapshots = Vec::new();
+    loop {
+        let page = target
+            .list(cursor, MAX_BACKUP_PAGE_LIMIT)
+            .await
+            .map_err(target_error)?;
+        snapshots.extend(page.items);
+        cursor = page.next_cursor;
+        if cursor
+            .as_ref()
+            .is_some_and(|value| !seen_cursors.insert(value.clone()))
+        {
+            return Err("offsite_backup_invalid_response".to_owned());
+        }
+        if cursor.is_none() {
+            break;
+        }
+    }
+    Ok(snapshots)
+}
+
 fn automatic_backup_due(target: &BackupTargetConfig, now: u64) -> bool {
     if !target.automatic_enabled || target.automatic_revision <= target.automatic_uploaded_revision
     {
@@ -972,11 +1222,14 @@ async fn run_automatic_upload(
     .await;
 
     match result {
-        Ok(()) => AutomaticBackupOutcome {
-            target_id,
-            uploaded: true,
-            error: None,
-        },
+        Ok(()) => {
+            run_retention_cleanup(app, state, vault_state, permit, target_id).await;
+            AutomaticBackupOutcome {
+                target_id,
+                uploaded: true,
+                error: None,
+            }
+        }
         Err(error) => {
             let stored_error = bounded_automatic_error(&error);
             if error != "workspace_vault_session_expired" && error != "workspace_vault_locked" {
@@ -1013,6 +1266,84 @@ fn record_upload_success(
     }
     config.automatic_uploaded_revision = config.automatic_uploaded_revision.max(uploaded_revision);
     config.last_automatic_error = None;
+}
+
+async fn run_retention_cleanup(
+    app: &tauri::AppHandle,
+    state: &OffsiteBackupState,
+    vault_state: &WorkspaceVaultState,
+    permit: Option<WorkspaceAccessPermit>,
+    target_id: Uuid,
+) {
+    let result = async {
+        let config = find_target(app, state, target_id).await?;
+        if !config.retention_enabled {
+            return Ok(());
+        }
+        if config.last_restore_test_at_ms.is_some()
+            && config.last_restore_test_snapshot_id.is_none()
+        {
+            return Err("offsite_backup_retention_requires_new_restore_drill".to_owned());
+        }
+        ensure_workspace_access(app, vault_state, permit)?;
+        let target = open_target(&config).await?;
+        let snapshots = list_all_snapshots(target.as_ref()).await?;
+        let now = current_time_milliseconds()?;
+        let candidates = retention_candidates(&config, snapshots, now);
+        for snapshot in candidates {
+            ensure_workspace_access(app, vault_state, permit)?;
+            if !target.delete(snapshot.id).await.map_err(target_error)? {
+                return Err("offsite_backup_snapshot_not_found".to_owned());
+            }
+        }
+        ensure_workspace_access(app, vault_state, permit)?;
+        update_target_status(app, state, target_id, move |target| {
+            target.last_retention_cleanup_at_ms = Some(now);
+            target.last_retention_error = None;
+            Ok(())
+        })
+        .await
+    }
+    .await;
+
+    if let Err(error) = result {
+        if error != "workspace_vault_session_expired" && error != "workspace_vault_locked" {
+            let bounded = bounded_automatic_error(&error);
+            let _ = update_target_status(app, state, target_id, move |target| {
+                target.last_retention_error = Some(bounded);
+                Ok(())
+            })
+            .await;
+        }
+    }
+}
+
+fn retention_candidates(
+    config: &BackupTargetConfig,
+    mut snapshots: Vec<BackupSnapshotMetadata>,
+    now: u64,
+) -> Vec<BackupSnapshotMetadata> {
+    snapshots.sort_by(|left, right| {
+        right
+            .created_at_ms
+            .cmp(&left.created_at_ms)
+            .then_with(|| right.id.cmp(&left.id))
+    });
+    let newest_id = snapshots.first().map(|snapshot| snapshot.id);
+    let maximum_age_ms =
+        u64::from(config.retention_max_age_days).saturating_mul(24 * 60 * 60 * 1_000);
+    snapshots
+        .into_iter()
+        .enumerate()
+        .filter(|(index, snapshot)| {
+            let protected = Some(snapshot.id) == newest_id
+                || Some(snapshot.id) == config.last_restore_test_snapshot_id;
+            let exceeds_count = *index >= config.retention_max_snapshots as usize;
+            let exceeds_age = now.saturating_sub(snapshot.created_at_ms) > maximum_age_ms;
+            !protected && (exceeds_count || exceeds_age)
+        })
+        .map(|(_, snapshot)| snapshot)
+        .collect()
 }
 
 async fn read_config_locked(
@@ -1082,6 +1413,11 @@ fn target_summary(config: &BackupTargetConfig) -> Result<BackupTargetSummary, St
         automatic_pending: config.automatic_revision > config.automatic_uploaded_revision,
         last_automatic_attempt_at_ms: config.last_automatic_attempt_at_ms,
         last_automatic_error: config.last_automatic_error.clone(),
+        retention_enabled: config.retention_enabled,
+        retention_max_snapshots: config.retention_max_snapshots,
+        retention_max_age_days: config.retention_max_age_days,
+        last_retention_cleanup_at_ms: config.last_retention_cleanup_at_ms,
+        last_retention_error: config.last_retention_error.clone(),
     })
 }
 
@@ -1164,9 +1500,20 @@ fn validate_config(config: &OffsiteBackupConfig) -> Result<(), String> {
             || Uuid::parse_str(&target.credential_id).is_err()
             || target.created_at_ms == 0
             || !(1..=MAXIMUM_AUTOMATIC_INTERVAL_HOURS).contains(&target.automatic_interval_hours)
+            || validate_retention_settings(
+                target.retention_max_snapshots,
+                target.retention_max_age_days,
+            )
+            .is_err()
             || target.automatic_uploaded_revision > target.automatic_revision
+            || (target.last_restore_test_snapshot_id.is_some()
+                && target.last_restore_test_at_ms.is_none())
             || target
                 .last_automatic_error
+                .as_ref()
+                .is_some_and(|error| error.is_empty() || error.chars().count() > 160)
+            || target
+                .last_retention_error
                 .as_ref()
                 .is_some_and(|error| error.is_empty() || error.chars().count() > 160)
             || [
@@ -1174,6 +1521,7 @@ fn validate_config(config: &OffsiteBackupConfig) -> Result<(), String> {
                 target.last_verified_at_ms,
                 target.last_restore_test_at_ms,
                 target.last_automatic_attempt_at_ms,
+                target.last_retention_cleanup_at_ms,
             ]
             .into_iter()
             .flatten()
@@ -1214,6 +1562,15 @@ fn validate_target_name(name: &str) -> Result<String, String> {
         return Err("offsite_backup_invalid_target_name".to_owned());
     }
     Ok(name.to_owned())
+}
+
+fn validate_retention_settings(max_snapshots: u32, max_age_days: u32) -> Result<(), String> {
+    if !(1..=MAXIMUM_RETENTION_SNAPSHOTS).contains(&max_snapshots)
+        || !(1..=MAXIMUM_RETENTION_AGE_DAYS).contains(&max_age_days)
+    {
+        return Err("offsite_backup_invalid_retention_settings".to_owned());
+    }
+    Ok(())
 }
 
 fn credential_entry(credential_id: &str) -> Result<keyring::Entry, String> {
@@ -1301,12 +1658,18 @@ mod tests {
             last_upload_at_ms: None,
             last_verified_at_ms: None,
             last_restore_test_at_ms: None,
+            last_restore_test_snapshot_id: None,
             automatic_enabled: false,
             automatic_interval_hours: DEFAULT_AUTOMATIC_INTERVAL_HOURS,
             automatic_revision: 0,
             automatic_uploaded_revision: 0,
             last_automatic_attempt_at_ms: None,
             last_automatic_error: None,
+            retention_enabled: false,
+            retention_max_snapshots: DEFAULT_RETENTION_MAX_SNAPSHOTS,
+            retention_max_age_days: DEFAULT_RETENTION_MAX_AGE_DAYS,
+            last_retention_cleanup_at_ms: None,
+            last_retention_error: None,
         };
         let mut duplicate = target.clone();
         duplicate.id = Uuid::new_v4();
@@ -1338,12 +1701,18 @@ mod tests {
             last_upload_at_ms: None,
             last_verified_at_ms: None,
             last_restore_test_at_ms: None,
+            last_restore_test_snapshot_id: None,
             automatic_enabled: false,
             automatic_interval_hours: DEFAULT_AUTOMATIC_INTERVAL_HOURS,
             automatic_revision: 0,
             automatic_uploaded_revision: 0,
             last_automatic_attempt_at_ms: None,
             last_automatic_error: None,
+            retention_enabled: false,
+            retention_max_snapshots: DEFAULT_RETENTION_MAX_SNAPSHOTS,
+            retention_max_age_days: DEFAULT_RETENTION_MAX_AGE_DAYS,
+            last_retention_cleanup_at_ms: None,
+            last_retention_error: None,
         };
         let serialized = serde_json::to_string(&OffsiteBackupConfig {
             targets: vec![target],
@@ -1370,12 +1739,18 @@ mod tests {
             last_upload_at_ms: None,
             last_verified_at_ms: None,
             last_restore_test_at_ms: None,
+            last_restore_test_snapshot_id: None,
             automatic_enabled: false,
             automatic_interval_hours: DEFAULT_AUTOMATIC_INTERVAL_HOURS,
             automatic_revision: 0,
             automatic_uploaded_revision: 0,
             last_automatic_attempt_at_ms: None,
             last_automatic_error: None,
+            retention_enabled: false,
+            retention_max_snapshots: DEFAULT_RETENTION_MAX_SNAPSHOTS,
+            retention_max_age_days: DEFAULT_RETENTION_MAX_AGE_DAYS,
+            last_retention_cleanup_at_ms: None,
+            last_retention_error: None,
         }
     }
 
@@ -1467,5 +1842,71 @@ mod tests {
         assert_eq!(target.automatic_uploaded_revision, 3);
         assert_eq!(target.automatic_revision, 5);
         assert!(target_summary(&target).unwrap().automatic_pending);
+    }
+
+    fn snapshot(id: Uuid, created_at_ms: u64) -> BackupSnapshotMetadata {
+        BackupSnapshotMetadata {
+            id,
+            created_at_ms,
+            size_bytes: 1,
+            sha256: "a".repeat(64),
+        }
+    }
+
+    #[test]
+    fn retention_keeps_newest_and_last_restore_tested_snapshot() {
+        let now = 200 * 24 * 60 * 60 * 1_000;
+        let newest = Uuid::new_v4();
+        let tested = Uuid::new_v4();
+        let old = Uuid::new_v4();
+        let mut target = s3_target("linked-info/v1");
+        target.retention_enabled = true;
+        target.retention_max_snapshots = 1;
+        target.retention_max_age_days = 1;
+        target.last_restore_test_snapshot_id = Some(tested);
+
+        let candidates = retention_candidates(
+            &target,
+            vec![
+                snapshot(old, now - 100),
+                snapshot(tested, now - 50),
+                snapshot(newest, now),
+            ],
+            now,
+        );
+
+        assert_eq!(
+            candidates
+                .into_iter()
+                .map(|snapshot| snapshot.id)
+                .collect::<Vec<_>>(),
+            vec![old]
+        );
+    }
+
+    #[test]
+    fn retention_uses_count_or_age_limit() {
+        let day = 24 * 60 * 60 * 1_000;
+        let now = 200 * day;
+        let newest = Uuid::new_v4();
+        let second = Uuid::new_v4();
+        let expired = Uuid::new_v4();
+        let mut target = s3_target("linked-info/v1");
+        target.retention_enabled = true;
+        target.retention_max_snapshots = 2;
+        target.retention_max_age_days = 30;
+
+        let candidates = retention_candidates(
+            &target,
+            vec![
+                snapshot(expired, now - 31 * day),
+                snapshot(second, now - day),
+                snapshot(newest, now),
+            ],
+            now,
+        );
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].id, expired);
     }
 }

@@ -1502,7 +1502,7 @@ h1 {
   gap: 8px 16px;
 }
 
-.offsite-automatic-settings > label:last-child {
+.offsite-automatic-settings > label:not(.switch-setting) {
   display: flex;
   align-items: center;
   gap: 7px;
@@ -1527,6 +1527,8 @@ h1 {
 .offsite-entry-actions {
   display: flex;
   flex: none;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 6px;
 }
 
