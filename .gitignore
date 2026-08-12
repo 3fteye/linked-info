@@ -3,6 +3,7 @@
 **/node_modules/
 **/dist/
 **/.wrangler/
+apps/cloudflare-backup-worker/build/
 *.log
 .env
 .env.*

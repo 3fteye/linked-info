@@ -13,5 +13,19 @@
   "observability": {
     "enabled": true
   },
+  "env": {
+    "drill": {
+      "name": "linked-info-backup-drill-api",
+      "r2_buckets": [
+        {
+          "binding": "BACKUP_BUCKET",
+          "bucket_name": "linked-info-backups-preview"
+        }
+      ],
+      "observability": {
+        "enabled": true
+      }
+    }
+  },
   "no_bundle": true
 }
