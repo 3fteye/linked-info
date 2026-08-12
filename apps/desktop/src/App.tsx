@@ -62,7 +62,7 @@ import type {
   WorkspaceBackupHistory,
   WorkspaceBackupHistoryStatus,
 } from "./workspaceBackupHistory";
-import { compareWorkspaces } from "./workspaceComparison";
+import WorkspaceRestorePreview from "./WorkspaceRestorePreview";
 import type { WorkspaceLifecycle } from "./workspaceLifecycle";
 import {
   appendWorkspaceHistory,
@@ -128,6 +128,7 @@ type ViewId = "canvas" | "nodes" | "settings";
 
 interface PendingWorkspaceReplacement {
   kind: "history" | "import" | "recovery";
+  returnView: ViewId;
   sourceName: string;
   workspace: WorkspaceSnapshot;
 }
@@ -611,14 +612,6 @@ function App({
         ),
       );
   }, [activeLanguage, referenceFilterNodeIds, t, workspace.nodes]);
-
-  const pendingWorkspaceComparison = useMemo(
-    () =>
-      pendingWorkspaceReplacement === null
-        ? null
-        : compareWorkspaces(workspace, pendingWorkspaceReplacement.workspace),
-    [pendingWorkspaceReplacement, workspace],
-  );
 
   const nameConflictNodeIds = useMemo(() => {
     const idsByName = new Map<string, string[]>();
@@ -1489,6 +1482,7 @@ function App({
     }
     setPendingWorkspaceReplacement({
       kind: "import",
+      returnView: activeView,
       sourceName: file.name,
       workspace: result.workspace,
     });
@@ -1570,6 +1564,7 @@ function App({
     }
     setPendingWorkspaceReplacement({
       kind: "recovery",
+      returnView: activeView,
       sourceName: t("backup.recoverySource"),
       workspace: recovery.workspace,
     });
@@ -1590,11 +1585,13 @@ function App({
       }
       setPendingWorkspaceReplacement({
         kind: "history",
+        returnView: activeView,
         sourceName: t("backup.historySource", {
           time: formatBackupDate(entry.createdAtMs, activeLanguage),
         }),
         workspace: loaded.workspace,
       });
+      setActiveView("canvas");
     } catch {
       setBackupStatus(t("backup.historyReadFailed"));
       try {
@@ -1637,6 +1634,14 @@ function App({
     } catch {
       setBackupStatus(t("backup.importFailed"));
     }
+  }
+
+  function cancelWorkspaceReplacement() {
+    if (pendingWorkspaceReplacement === null) {
+      return;
+    }
+    setActiveView(pendingWorkspaceReplacement.returnView);
+    setPendingWorkspaceReplacement(null);
   }
 
   async function exportUnreadableData(raw: string, source: "primary" | "recovery") {
@@ -1819,6 +1824,7 @@ function App({
             <button
               className="nav-item"
               data-active={activeView === id}
+              disabled={pendingWorkspaceReplacement !== null}
               key={id}
               onClick={() => setActiveView(id)}
               type="button"
@@ -1837,6 +1843,7 @@ function App({
           <button
             className="nav-item"
             data-active={activeView === "settings"}
+            disabled={pendingWorkspaceReplacement !== null}
             onClick={() => setActiveView("settings")}
             type="button"
           >
@@ -1851,13 +1858,15 @@ function App({
           <div className="workspace-heading">
             <p className="section-label">{t("workspace.label")}</p>
             <h1>
-              {activeView === "settings"
-                ? t("navigation.settings")
-                : t(currentView.labelKey)}
+              {pendingWorkspaceReplacement !== null
+                ? t("backup.preview.title")
+                : activeView === "settings"
+                  ? t("navigation.settings")
+                  : t(currentView.labelKey)}
             </h1>
           </div>
 
-          {activeView !== "settings" && (
+          {activeView !== "settings" && pendingWorkspaceReplacement === null && (
             <div className="workspace-actions">
               <label className="search-field">
                 <Search aria-hidden="true" size={16} />
@@ -1952,7 +1961,36 @@ function App({
         </header>
 
         <div className="workspace-content">
-          {activeView === "settings" ? (
+          {pendingWorkspaceReplacement !== null ? (
+            <WorkspaceRestorePreview
+              current={workspace}
+              labels={{
+                title: t("backup.preview.title"),
+                source: pendingWorkspaceReplacement.sourceName,
+                before: t("backup.preview.before"),
+                after: t("backup.preview.after"),
+                overlay: t("backup.preview.overlay"),
+                cancel: t("actions.cancel"),
+                confirm: t("backup.confirmReplace"),
+                identical: t("backup.preview.identical"),
+                added: t("backup.preview.added"),
+                removed: t("backup.preview.removed"),
+                modified: t("backup.preview.modified"),
+                moved: t("backup.preview.moved"),
+                stacking: t("backup.preview.stacking"),
+                beforePosition: t("backup.preview.beforePosition"),
+                unnamed: t("nodes.unnamed"),
+                noContent: t("nodes.noContent"),
+                legendAdded: t("backup.preview.legendAdded"),
+                legendRemoved: t("backup.preview.legendRemoved"),
+                legendModified: t("backup.preview.legendModified"),
+                legendMoved: t("backup.preview.legendMoved"),
+              }}
+              onCancel={cancelWorkspaceReplacement}
+              onConfirm={() => void applyWorkspaceReplacement()}
+              replacement={pendingWorkspaceReplacement.workspace}
+            />
+          ) : activeView === "settings" ? (
             <section className="settings-panel">
               <header className="settings-group-heading">
                 <h2>{t("settings.generalTitle")}</h2>
@@ -3308,105 +3346,6 @@ function App({
         </div>
       )}
 
-      {pendingWorkspaceReplacement !== null && (
-        <div className="modal-backdrop" role="presentation">
-          <section
-            aria-labelledby="replace-workspace-dialog-title"
-            aria-modal="true"
-            className="confirmation-dialog workspace-replacement-dialog"
-            role="dialog"
-          >
-            <h2 id="replace-workspace-dialog-title">{t("backup.confirmTitle")}</h2>
-            <p>
-              {t("backup.confirmBody", {
-                name: pendingWorkspaceReplacement.sourceName,
-                nodes: pendingWorkspaceReplacement.workspace.nodes.length,
-                references: pendingWorkspaceReplacement.workspace.references.length,
-              })}
-            </p>
-            {pendingWorkspaceComparison !== null && (
-              <div className="workspace-comparison">
-                <div className="workspace-comparison-totals">
-                  <span>
-                    {t("backup.comparison.current", {
-                      nodes: workspace.nodes.length,
-                      references: workspace.references.length,
-                    })}
-                  </span>
-                  <span aria-hidden="true">→</span>
-                  <span>
-                    {t("backup.comparison.replacement", {
-                      nodes: pendingWorkspaceReplacement.workspace.nodes.length,
-                      references:
-                        pendingWorkspaceReplacement.workspace.references.length,
-                    })}
-                  </span>
-                </div>
-                {pendingWorkspaceComparison.identical ? (
-                  <p className="workspace-comparison-identical">
-                    {t("backup.comparison.identical")}
-                  </p>
-                ) : (
-                  <div className="workspace-comparison-grid">
-                    <span className="is-added">
-                      {t("backup.comparison.addedNodes", {
-                        count: pendingWorkspaceComparison.addedNodes,
-                      })}
-                    </span>
-                    <span className="is-removed">
-                      {t("backup.comparison.removedNodes", {
-                        count: pendingWorkspaceComparison.removedNodes,
-                      })}
-                    </span>
-                    <span>
-                      {t("backup.comparison.modifiedNodes", {
-                        count: pendingWorkspaceComparison.modifiedNodes,
-                      })}
-                    </span>
-                    <span className="is-added">
-                      {t("backup.comparison.addedReferences", {
-                        count: pendingWorkspaceComparison.addedReferences,
-                      })}
-                    </span>
-                    <span className="is-removed">
-                      {t("backup.comparison.removedReferences", {
-                        count: pendingWorkspaceComparison.removedReferences,
-                      })}
-                    </span>
-                    <span>
-                      {t("backup.comparison.changedLayouts", {
-                        count: pendingWorkspaceComparison.changedLayouts,
-                      })}
-                    </span>
-                    <span>
-                      {pendingWorkspaceComparison.viewportChanged
-                        ? t("backup.comparison.viewportChanged")
-                        : t("backup.comparison.viewportUnchanged")}
-                    </span>
-                  </div>
-                )}
-              </div>
-            )}
-            <div className="confirmation-dialog-actions">
-              <button
-                className="secondary-button"
-                onClick={() => setPendingWorkspaceReplacement(null)}
-                type="button"
-              >
-                {t("actions.cancel")}
-              </button>
-              <button
-                className="primary-button"
-                disabled={pendingWorkspaceComparison?.identical ?? true}
-                onClick={() => void applyWorkspaceReplacement()}
-                type="button"
-              >
-                {t("backup.confirmReplace")}
-              </button>
-            </div>
-          </section>
-        </div>
-      )}
     </div>
   );
 }
