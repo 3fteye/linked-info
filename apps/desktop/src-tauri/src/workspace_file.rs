@@ -29,9 +29,14 @@ const VAULT_FILE_NAME: &str = "workspace.vault.v1.json";
 const VAULT_PENDING_FILE_NAME: &str = ".workspace.vault.v1.pending.json";
 const BACKUP_DIRECTORY_NAME: &str = "workspace.backups.v1";
 const BACKUP_PENDING_DIRECTORY_NAME: &str = ".workspace.backups.v1.pending";
+const DATA_KEY_ROTATION_DIRECTORY_NAME: &str = ".workspace.data-key-rotation.v1.pending";
+const DATA_KEY_ROTATION_MANIFEST_FILE_NAME: &str = "manifest.json";
+const DATA_KEY_ROTATION_VAULT_FILE_NAME: &str = "workspace.vault.v1.json";
+const DATA_KEY_ROTATION_BACKUP_DIRECTORY_NAME: &str = "backups";
 const ENCRYPTED_WORKSPACE_FORMAT: &str = "linked-info-encrypted-workspace";
 const ENCRYPTED_EXPORT_FORMAT: &str = "linked-info-encrypted-workspace-export";
 const VAULT_FORMAT: &str = "linked-info-workspace-vault";
+const DATA_KEY_ROTATION_FORMAT: &str = "linked-info-data-key-rotation";
 const CRYPTO_VERSION: u32 = 1;
 const DATA_KEY_BYTES: usize = 32;
 const SALT_BYTES: usize = 16;
@@ -185,6 +190,34 @@ struct EncryptedExportEnvelope {
     payload: CipherEnvelope,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+enum DataKeyRotationPhase {
+    Preparing,
+    Ready,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RotationSystemCredential {
+    provider: String,
+    credential_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DataKeyRotationManifest {
+    format: String,
+    version: u32,
+    phase: DataKeyRotationPhase,
+    slots: Vec<WorkspaceFileSlot>,
+    backup_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    previous_system_credential: Option<RotationSystemCredential>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    next_system_credential: Option<RotationSystemCredential>,
+}
+
 #[derive(Clone, Copy, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceSecurityStatus {
@@ -202,6 +235,7 @@ pub enum SensitiveOperation {
     ClearRecoveryData,
     DestroyWorkspace,
     ExportWorkspace,
+    RotateDataKey,
     SystemUnlockChange,
 }
 
@@ -248,7 +282,7 @@ pub struct WorkspaceBackupCaptureResult {
 pub struct WorkspaceVaultState {
     data_key: Arc<Mutex<Option<Zeroizing<[u8; DATA_KEY_BYTES]>>>>,
     operation_lock: Arc<Mutex<()>>,
-    access_generation: AtomicU64,
+    access_generation: Arc<AtomicU64>,
     idle_timeout_milliseconds: AtomicU64,
     last_activity_milliseconds: AtomicU64,
     sensitive_authorization: Mutex<Option<SensitiveAuthorization>>,
@@ -261,7 +295,7 @@ impl Default for WorkspaceVaultState {
         Self {
             data_key: Arc::new(Mutex::new(None)),
             operation_lock: Arc::new(Mutex::new(())),
-            access_generation: AtomicU64::new(0),
+            access_generation: Arc::new(AtomicU64::new(0)),
             idle_timeout_milliseconds: AtomicU64::new(minutes_to_milliseconds(
                 DEFAULT_IDLE_TIMEOUT_MINUTES,
             )),
@@ -342,6 +376,10 @@ impl WorkspaceVaultState {
         Ok(WorkspaceAccessPermit {
             generation: self.access_generation.load(Ordering::Acquire),
         })
+    }
+
+    fn access_generation(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.access_generation)
     }
 
     pub fn ensure_access_permit(&self, permit: WorkspaceAccessPermit) -> Result<(), String> {
@@ -492,6 +530,36 @@ impl WorkspaceFileStore {
 
     fn pending_backup_directory(&self) -> PathBuf {
         self.base_directory.join(BACKUP_PENDING_DIRECTORY_NAME)
+    }
+
+    fn data_key_rotation_directory(&self) -> PathBuf {
+        self.base_directory.join(DATA_KEY_ROTATION_DIRECTORY_NAME)
+    }
+
+    fn data_key_rotation_manifest_path(&self) -> PathBuf {
+        self.data_key_rotation_directory()
+            .join(DATA_KEY_ROTATION_MANIFEST_FILE_NAME)
+    }
+
+    fn data_key_rotation_vault_path(&self) -> PathBuf {
+        self.data_key_rotation_directory()
+            .join(DATA_KEY_ROTATION_VAULT_FILE_NAME)
+    }
+
+    fn data_key_rotation_slot_path(&self, slot: WorkspaceFileSlot) -> PathBuf {
+        self.data_key_rotation_directory().join(slot.file_name())
+    }
+
+    fn data_key_rotation_backup_directory(&self) -> PathBuf {
+        self.data_key_rotation_directory()
+            .join(DATA_KEY_ROTATION_BACKUP_DIRECTORY_NAME)
+    }
+
+    fn data_key_rotation_backup_path(&self, id: &str) -> Result<PathBuf, String> {
+        parse_backup_id(id)?;
+        Ok(self
+            .data_key_rotation_backup_directory()
+            .join(format!("{id}.json")))
     }
 
     fn backup_path(&self, id: &str) -> Result<PathBuf, String> {
@@ -646,13 +714,16 @@ pub async fn write_workspace_file(
     slot: WorkspaceFileSlot,
     contents: String,
 ) -> Result<(), String> {
+    let permit = begin_workspace_access(&app, &state)?;
     let store = workspace_store(&app).map_err(|error| error.to_string())?;
     let operation_lock = Arc::clone(&state.operation_lock);
+    let access_generation = state.access_generation();
     let data_key = state.optional_data_key()?;
     tauri::async_runtime::spawn_blocking(move || {
         let _guard = operation_lock
             .lock()
             .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
+        ensure_access_generation(&access_generation, permit)?;
         recover_pending_migration(&store)?;
         let active_key = match store.encryption_configured() {
             true => Some(
@@ -665,7 +736,8 @@ pub async fn write_workspace_file(
         store.write(slot, &contents, active_key)
     })
     .await
-    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())??;
+    ensure_workspace_access(&app, &state, permit)
 }
 
 #[tauri::command]
@@ -741,11 +813,12 @@ pub async fn inspect_workspace_security(
     let store = workspace_store(&app).map_err(|error| error.to_string())?;
     let operation_lock = Arc::clone(&state.operation_lock);
     let provider = system_unlock_state.provider();
+    let provider_for_recovery = Arc::clone(&provider);
     let metadata = tauri::async_runtime::spawn_blocking(move || {
         let _guard = operation_lock
             .lock()
             .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
-        recover_pending_migration(&store)?;
+        recover_pending_workspace_transactions(&store, provider_for_recovery.as_ref())?;
         store.read_vault_metadata()
     })
     .await
@@ -782,7 +855,7 @@ pub async fn unlock_workspace(
         let _guard = operation_lock
             .lock()
             .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
-        recover_pending_migration(&store)?;
+        recover_pending_workspace_transactions(&store, provider_for_unlock.as_ref())?;
         let metadata = store
             .read_vault_metadata()?
             .ok_or_else(|| "workspace_vault_not_configured".to_owned())?;
@@ -838,7 +911,7 @@ pub async fn unlock_workspace_with_system(
         let _guard = operation_lock
             .lock()
             .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
-        recover_pending_migration(&store)?;
+        recover_pending_workspace_transactions(&store, provider_for_unlock.as_ref())?;
         let metadata = store
             .read_vault_metadata()?
             .ok_or_else(|| "workspace_vault_not_configured".to_owned())?;
@@ -912,12 +985,14 @@ pub async fn change_workspace_password(
         .consume_sensitive_authorization(SensitiveOperation::ChangePassword, &authorization)?;
     let store = workspace_store(&app).map_err(|error| error.to_string())?;
     let operation_lock = Arc::clone(&state.operation_lock);
+    let access_generation = state.access_generation();
     let data_key = state.data_key()?;
     let password = Zeroizing::new(password);
     tauri::async_runtime::spawn_blocking(move || {
         let _guard = operation_lock
             .lock()
             .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
+        ensure_access_generation(&access_generation, Some(permit))?;
         recover_pending_migration(&store)?;
         let previous = store
             .read_vault_metadata()?
@@ -929,6 +1004,45 @@ pub async fn change_workspace_password(
     .await
     .map_err(|error| error.to_string())??;
     ensure_workspace_access(&app, &state, Some(permit))
+}
+
+#[tauri::command]
+pub async fn rotate_workspace_data_key(
+    app: AppHandle,
+    state: tauri::State<'_, WorkspaceVaultState>,
+    system_unlock_state: tauri::State<'_, SystemUnlockState>,
+    password: String,
+    authorization: String,
+) -> Result<(), String> {
+    validate_new_password(&password)?;
+    let _permit =
+        state.consume_sensitive_authorization(SensitiveOperation::RotateDataKey, &authorization)?;
+    let previous_data_key = state.data_key()?;
+    let store = workspace_store(&app).map_err(|error| error.to_string())?;
+    let operation_lock = Arc::clone(&state.operation_lock);
+    let provider = system_unlock_state.provider();
+    let password = Zeroizing::new(password);
+
+    state.revoke_access()?;
+    cleanup_locked_workspace(&app);
+    let rotation_result = tauri::async_runtime::spawn_blocking(move || {
+        let _guard = operation_lock
+            .lock()
+            .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
+        recover_pending_workspace_transactions(&store, provider.as_ref())?;
+        rotate_encrypted_store(&store, &previous_data_key, &password, provider.as_ref())
+    })
+    .await
+    .map_err(|error| error.to_string())
+    .and_then(|result| result);
+
+    let event_reason = if rotation_result.is_ok() {
+        "workspace_data_key_rotated"
+    } else {
+        "workspace_data_key_rotation_failed"
+    };
+    let _ = app.emit(WORKSPACE_LOCKED_EVENT, event_reason);
+    rotation_result
 }
 
 #[tauri::command]
@@ -1019,6 +1133,7 @@ pub async fn enable_system_unlock(
     }
     let store = workspace_store(&app).map_err(|error| error.to_string())?;
     let operation_lock = Arc::clone(&state.operation_lock);
+    let access_generation = state.access_generation();
     let data_key = state.data_key()?;
     crate::system_unlock::verify_user_presence(&app, message).await?;
     ensure_workspace_access(&app, &state, Some(permit))?;
@@ -1027,6 +1142,7 @@ pub async fn enable_system_unlock(
         let _guard = operation_lock
             .lock()
             .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
+        ensure_access_generation(&access_generation, Some(permit))?;
         recover_pending_migration(&store)?;
         let mut metadata = store
             .read_vault_metadata()?
@@ -1082,11 +1198,13 @@ pub async fn disable_system_unlock(
     let provider = system_unlock_state.provider();
     let store = workspace_store(&app).map_err(|error| error.to_string())?;
     let operation_lock = Arc::clone(&state.operation_lock);
+    let access_generation = state.access_generation();
     let provider_for_disable = Arc::clone(&provider);
     tauri::async_runtime::spawn_blocking(move || {
         let _guard = operation_lock
             .lock()
             .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
+        ensure_access_generation(&access_generation, Some(permit))?;
         recover_pending_migration(&store)?;
         let mut metadata = store
             .read_vault_metadata()?
@@ -1121,13 +1239,16 @@ pub async fn set_workspace_idle_timeout(
     minutes: Option<u32>,
 ) -> Result<WorkspaceSecurityStatus, String> {
     validate_idle_timeout_minutes(minutes)?;
-    let _ = state.data_key()?;
+    let permit = begin_workspace_access(&app, &state)?
+        .ok_or_else(|| "workspace_vault_not_configured".to_owned())?;
     let store = workspace_store(&app).map_err(|error| error.to_string())?;
     let operation_lock = Arc::clone(&state.operation_lock);
+    let access_generation = state.access_generation();
     tauri::async_runtime::spawn_blocking(move || {
         let _guard = operation_lock
             .lock()
             .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
+        ensure_access_generation(&access_generation, Some(permit))?;
         recover_pending_migration(&store)?;
         let mut metadata = store
             .read_vault_metadata()?
@@ -1153,10 +1274,12 @@ pub async fn clear_workspace_recovery_data(
         .consume_sensitive_authorization(SensitiveOperation::ClearRecoveryData, &authorization)?;
     let store = workspace_store(&app).map_err(|error| error.to_string())?;
     let operation_lock = Arc::clone(&state.operation_lock);
+    let access_generation = state.access_generation();
     tauri::async_runtime::spawn_blocking(move || {
         let _guard = operation_lock
             .lock()
             .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
+        ensure_access_generation(&access_generation, Some(permit))?;
         recover_pending_migration(&store)?;
         let recovery = store.path(WorkspaceFileSlot::Recovery);
         let pending_recovery = store.pending_path(WorkspaceFileSlot::Recovery);
@@ -1237,11 +1360,13 @@ pub async fn encrypt_workspace_export(
         .consume_sensitive_authorization(SensitiveOperation::ExportWorkspace, &authorization)?;
     let store = workspace_store(&app).map_err(|error| error.to_string())?;
     let operation_lock = Arc::clone(&state.operation_lock);
+    let access_generation = state.access_generation();
     let data_key = state.data_key()?;
     let result = tauri::async_runtime::spawn_blocking(move || {
         let _guard = operation_lock
             .lock()
             .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
+        ensure_access_generation(&access_generation, Some(permit))?;
         let metadata = store
             .read_vault_metadata()?
             .ok_or_else(|| "workspace_vault_not_configured".to_owned())?;
@@ -1298,6 +1423,17 @@ pub fn ensure_workspace_access(
         None if workspace_encryption_configured(app) => {
             Err("workspace_vault_session_expired".to_owned())
         }
+        None => Ok(()),
+    }
+}
+
+fn ensure_access_generation(
+    access_generation: &AtomicU64,
+    permit: Option<WorkspaceAccessPermit>,
+) -> Result<(), String> {
+    match permit {
+        Some(permit) if access_generation.load(Ordering::Acquire) == permit.generation => Ok(()),
+        Some(_) => Err("workspace_vault_session_expired".to_owned()),
         None => Ok(()),
     }
 }
@@ -1373,6 +1509,7 @@ fn remove_all_workspace_files(store: &WorkspaceFileStore) -> Result<(), String> 
     }
     remove_workspace_subdirectory(&store.base_directory, &store.backup_directory())?;
     remove_workspace_subdirectory(&store.base_directory, &store.pending_backup_directory())?;
+    remove_workspace_subdirectory(&store.base_directory, &store.data_key_rotation_directory())?;
     remove_file_if_exists(&store.pending_vault_path())?;
     remove_file_if_exists(&store.vault_path())?;
     sync_parent_directory(&store.base_directory).map_err(|error| error.to_string())
@@ -1930,7 +2067,7 @@ fn finish_pending_migration(
     sync_parent_directory(&store.base_directory).map_err(|error| error.to_string())
 }
 
-fn recover_pending_migration(store: &WorkspaceFileStore) -> Result<(), String> {
+fn recover_pending_encryption_migration(store: &WorkspaceFileStore) -> Result<(), String> {
     if store.encryption_configured() {
         return Ok(());
     }
@@ -1941,6 +2078,355 @@ fn recover_pending_migration(store: &WorkspaceFileStore) -> Result<(), String> {
     };
     let metadata = parse_vault_metadata(&contents)?;
     finish_pending_migration(store, &metadata)
+}
+
+fn recover_pending_migration(store: &WorkspaceFileStore) -> Result<(), String> {
+    recover_pending_encryption_migration(store)?;
+    if store.data_key_rotation_directory().exists() {
+        return Err("workspace_vault_data_key_rotation_recovery_required".to_owned());
+    }
+    Ok(())
+}
+
+fn recover_pending_workspace_transactions(
+    store: &WorkspaceFileStore,
+    provider: &dyn SystemUnlockProvider,
+) -> Result<(), String> {
+    recover_pending_encryption_migration(store)?;
+    recover_pending_data_key_rotation(store, provider)
+}
+
+fn rotation_credential(envelope: &SystemUnlockEnvelope) -> RotationSystemCredential {
+    RotationSystemCredential {
+        provider: envelope.provider.clone(),
+        credential_id: envelope.credential_id.clone(),
+    }
+}
+
+fn validate_rotation_credential(credential: &RotationSystemCredential) -> Result<(), String> {
+    if credential.provider.is_empty()
+        || credential.provider.len() > 128
+        || credential.credential_id.is_empty()
+        || credential.credential_id.len() > 256
+        || credential.provider.as_bytes().contains(&0)
+        || credential.credential_id.as_bytes().contains(&0)
+    {
+        Err("workspace_vault_invalid_data_key_rotation_manifest".to_owned())
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_data_key_rotation_manifest(manifest: &DataKeyRotationManifest) -> Result<(), String> {
+    if manifest.format != DATA_KEY_ROTATION_FORMAT || manifest.version != CRYPTO_VERSION {
+        return Err("workspace_vault_invalid_data_key_rotation_manifest".to_owned());
+    }
+    if manifest.slots.len() > 2
+        || manifest
+            .slots
+            .iter()
+            .enumerate()
+            .any(|(index, slot)| manifest.slots[..index].contains(slot))
+    {
+        return Err("workspace_vault_invalid_data_key_rotation_manifest".to_owned());
+    }
+    for (index, id) in manifest.backup_ids.iter().enumerate() {
+        parse_backup_id(id)
+            .map_err(|_| "workspace_vault_invalid_data_key_rotation_manifest".to_owned())?;
+        if manifest.backup_ids[..index].contains(id) {
+            return Err("workspace_vault_invalid_data_key_rotation_manifest".to_owned());
+        }
+    }
+    if let Some(credential) = manifest.previous_system_credential.as_ref() {
+        validate_rotation_credential(credential)?;
+    }
+    if let Some(credential) = manifest.next_system_credential.as_ref() {
+        validate_rotation_credential(credential)?;
+    }
+    if manifest.previous_system_credential.is_some() != manifest.next_system_credential.is_some()
+        || manifest
+            .previous_system_credential
+            .as_ref()
+            .zip(manifest.next_system_credential.as_ref())
+            .is_some_and(|(previous, next)| previous == next)
+    {
+        return Err("workspace_vault_invalid_data_key_rotation_manifest".to_owned());
+    }
+    Ok(())
+}
+
+fn read_data_key_rotation_manifest(
+    store: &WorkspaceFileStore,
+) -> Result<Option<DataKeyRotationManifest>, String> {
+    let Some(contents) =
+        WorkspaceFileStore::read_text_path(&store.data_key_rotation_manifest_path())
+            .map_err(|error| error.to_string())?
+    else {
+        return Ok(None);
+    };
+    let manifest: DataKeyRotationManifest = serde_json::from_str(&contents)
+        .map_err(|_| "workspace_vault_invalid_data_key_rotation_manifest".to_owned())?;
+    validate_data_key_rotation_manifest(&manifest)?;
+    Ok(Some(manifest))
+}
+
+fn write_data_key_rotation_manifest(
+    store: &WorkspaceFileStore,
+    manifest: &DataKeyRotationManifest,
+) -> Result<(), String> {
+    validate_data_key_rotation_manifest(manifest)?;
+    let serialized = serde_json::to_vec(manifest).map_err(|error| error.to_string())?;
+    write_atomically(&store.data_key_rotation_manifest_path(), &serialized)
+        .map_err(|error| error.to_string())
+}
+
+fn remove_data_key_rotation_directory(store: &WorkspaceFileStore) -> Result<(), String> {
+    remove_workspace_subdirectory(&store.base_directory, &store.data_key_rotation_directory())
+}
+
+fn abort_pending_data_key_rotation(
+    store: &WorkspaceFileStore,
+    provider: &dyn SystemUnlockProvider,
+) -> Result<(), String> {
+    let Some(manifest) = read_data_key_rotation_manifest(store)? else {
+        return remove_data_key_rotation_directory(store);
+    };
+    if let Some(credential) = manifest.next_system_credential.as_ref()
+        && credential.provider == provider.provider_id()
+    {
+        provider.delete(&credential.credential_id)?;
+    }
+    remove_data_key_rotation_directory(store)
+}
+
+fn pending_rotation_file(path: &Path) -> Result<Vec<u8>, String> {
+    fs::read(path).map_err(|error| {
+        if error.kind() == io::ErrorKind::NotFound {
+            "workspace_vault_pending_data_key_rotation_missing".to_owned()
+        } else {
+            error.to_string()
+        }
+    })
+}
+
+fn finish_pending_data_key_rotation(
+    store: &WorkspaceFileStore,
+    provider: &dyn SystemUnlockProvider,
+    manifest: &DataKeyRotationManifest,
+) -> Result<(), String> {
+    if manifest.phase != DataKeyRotationPhase::Ready {
+        return Err("workspace_vault_data_key_rotation_not_ready".to_owned());
+    }
+    let pending_vault = pending_rotation_file(&store.data_key_rotation_vault_path())?;
+    let pending_metadata = parse_vault_metadata(
+        std::str::from_utf8(&pending_vault)
+            .map_err(|_| "workspace_vault_invalid_metadata".to_owned())?,
+    )?;
+    let pending_credential = pending_metadata
+        .system_unlock
+        .as_ref()
+        .map(rotation_credential);
+    if pending_credential != manifest.next_system_credential {
+        return Err("workspace_vault_invalid_data_key_rotation_manifest".to_owned());
+    }
+
+    for slot in manifest.slots.iter().copied() {
+        let contents = pending_rotation_file(&store.data_key_rotation_slot_path(slot))?;
+        write_atomically(&store.path(slot), &contents).map_err(|error| error.to_string())?;
+    }
+    if !manifest.backup_ids.is_empty() {
+        fs::create_dir_all(store.backup_directory()).map_err(|error| error.to_string())?;
+    }
+    for id in &manifest.backup_ids {
+        let contents = pending_rotation_file(&store.data_key_rotation_backup_path(id)?)?;
+        write_atomically(&store.backup_path(id)?, &contents).map_err(|error| error.to_string())?;
+    }
+
+    // The vault is the commit point. Before this write, startup recovery still
+    // has everything needed to finish replacing files encrypted with the old key.
+    write_atomically(&store.vault_path(), &pending_vault).map_err(|error| error.to_string())?;
+    sync_parent_directory(&store.base_directory).map_err(|error| error.to_string())?;
+
+    if let Some(credential) = manifest.previous_system_credential.as_ref()
+        && credential.provider == provider.provider_id()
+    {
+        provider.delete(&credential.credential_id)?;
+    }
+    remove_data_key_rotation_directory(store)?;
+    sync_parent_directory(&store.base_directory).map_err(|error| error.to_string())
+}
+
+fn recover_pending_data_key_rotation(
+    store: &WorkspaceFileStore,
+    provider: &dyn SystemUnlockProvider,
+) -> Result<(), String> {
+    if !store.data_key_rotation_directory().exists() {
+        return Ok(());
+    }
+    let Some(manifest) = read_data_key_rotation_manifest(store)? else {
+        return remove_data_key_rotation_directory(store);
+    };
+    match manifest.phase {
+        DataKeyRotationPhase::Preparing => abort_pending_data_key_rotation(store, provider),
+        DataKeyRotationPhase::Ready => finish_pending_data_key_rotation(store, provider, &manifest),
+    }
+}
+
+fn prepare_data_key_rotation(
+    store: &WorkspaceFileStore,
+    previous_data_key: &[u8; DATA_KEY_BYTES],
+    next_data_key: &[u8; DATA_KEY_BYTES],
+    password: &str,
+    provider: &dyn SystemUnlockProvider,
+) -> Result<(), String> {
+    let previous_metadata = store
+        .read_vault_metadata()?
+        .ok_or_else(|| "workspace_vault_not_configured".to_owned())?;
+    verify_encrypted_store(store, previous_data_key)?;
+
+    let mut slots = Vec::new();
+    for slot in [WorkspaceFileSlot::Primary, WorkspaceFileSlot::Recovery] {
+        if store.path(slot).is_file() {
+            slots.push(slot);
+        }
+    }
+    let backups = store.backup_files()?;
+    let backup_ids = backups
+        .iter()
+        .map(|backup| backup.id.clone())
+        .collect::<Vec<_>>();
+
+    let previous_system_credential = previous_metadata
+        .system_unlock
+        .as_ref()
+        .filter(|envelope| provider.available() && envelope.provider == provider.provider_id())
+        .map(rotation_credential);
+    let next_system_credential =
+        previous_system_credential
+            .as_ref()
+            .map(|_| RotationSystemCredential {
+                provider: provider.provider_id().to_owned(),
+                credential_id: uuid::Uuid::new_v4().to_string(),
+            });
+    let mut manifest = DataKeyRotationManifest {
+        format: DATA_KEY_ROTATION_FORMAT.to_owned(),
+        version: CRYPTO_VERSION,
+        phase: DataKeyRotationPhase::Preparing,
+        slots,
+        backup_ids,
+        previous_system_credential,
+        next_system_credential,
+    };
+
+    fs::create_dir_all(store.data_key_rotation_directory()).map_err(|error| error.to_string())?;
+    write_data_key_rotation_manifest(store, &manifest)?;
+
+    let preparation_result = (|| {
+        let mut next_metadata = create_vault_metadata(
+            password,
+            next_data_key,
+            previous_metadata.migrated_slots.clone(),
+        )?;
+        next_metadata.idle_timeout_minutes = previous_metadata.idle_timeout_minutes;
+
+        if let Some(credential) = manifest.next_system_credential.as_ref() {
+            let device_key = Zeroizing::new(random_array::<DATA_KEY_BYTES>()?);
+            provider.store(&credential.credential_id, device_key.as_slice())?;
+            next_metadata.system_unlock = Some(create_system_unlock_envelope(
+                &credential.provider,
+                &credential.credential_id,
+                next_data_key,
+                &device_key,
+            )?);
+        }
+
+        for slot in manifest.slots.iter().copied() {
+            let plaintext = store
+                .read(slot, Some(previous_data_key))?
+                .ok_or_else(|| "workspace_vault_rotation_workspace_missing".to_owned())?;
+            validate_storage_envelope(&plaintext).map_err(|error| error.to_string())?;
+            let encrypted = encrypt_workspace_file(&plaintext, slot, next_data_key)?;
+            write_atomically(
+                &store.data_key_rotation_slot_path(slot),
+                encrypted.as_bytes(),
+            )
+            .map_err(|error| error.to_string())?;
+            if decrypt_workspace_file(&encrypted, slot, next_data_key)? != plaintext {
+                return Err("workspace_vault_data_key_rotation_verification_failed".to_owned());
+            }
+        }
+
+        if !backups.is_empty() {
+            fs::create_dir_all(store.data_key_rotation_backup_directory())
+                .map_err(|error| error.to_string())?;
+        }
+        for backup in &backups {
+            let contents = WorkspaceFileStore::read_text_path(&backup.path)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "workspace_backup_missing".to_owned())?;
+            let plaintext =
+                decrypt_workspace_file(&contents, WorkspaceFileSlot::Primary, previous_data_key)
+                    .map_err(|_| {
+                        format!(
+                            "workspace_vault_data_key_rotation_invalid_backup:{}",
+                            backup.id
+                        )
+                    })?;
+            validate_storage_envelope(&plaintext).map_err(|_| {
+                format!(
+                    "workspace_vault_data_key_rotation_invalid_backup:{}",
+                    backup.id
+                )
+            })?;
+            let encrypted =
+                encrypt_workspace_file(&plaintext, WorkspaceFileSlot::Primary, next_data_key)?;
+            write_atomically(
+                &store.data_key_rotation_backup_path(&backup.id)?,
+                encrypted.as_bytes(),
+            )
+            .map_err(|error| error.to_string())?;
+            if decrypt_workspace_file(&encrypted, WorkspaceFileSlot::Primary, next_data_key)?
+                != plaintext
+            {
+                return Err("workspace_vault_data_key_rotation_verification_failed".to_owned());
+            }
+        }
+
+        if unwrap_data_key(&next_metadata, password)? != *next_data_key {
+            return Err("workspace_vault_data_key_rotation_verification_failed".to_owned());
+        }
+        let serialized = serde_json::to_vec(&next_metadata).map_err(|error| error.to_string())?;
+        write_atomically(&store.data_key_rotation_vault_path(), &serialized)
+            .map_err(|error| error.to_string())?;
+        manifest.phase = DataKeyRotationPhase::Ready;
+        write_data_key_rotation_manifest(store, &manifest)
+    })();
+
+    if let Err(error) = preparation_result {
+        return match abort_pending_data_key_rotation(store, provider) {
+            Ok(()) => Err(error),
+            Err(cleanup_error) => Err(format!(
+                "workspace_vault_data_key_rotation_abort_failed:{error}:{cleanup_error}"
+            )),
+        };
+    }
+    Ok(())
+}
+
+fn rotate_encrypted_store(
+    store: &WorkspaceFileStore,
+    previous_data_key: &[u8; DATA_KEY_BYTES],
+    password: &str,
+    provider: &dyn SystemUnlockProvider,
+) -> Result<(), String> {
+    if !store.encryption_configured() {
+        return Err("workspace_vault_not_configured".to_owned());
+    }
+    let next_data_key = Zeroizing::new(random_array::<DATA_KEY_BYTES>()?);
+    prepare_data_key_rotation(store, previous_data_key, &next_data_key, password, provider)?;
+    let manifest = read_data_key_rotation_manifest(store)?
+        .ok_or_else(|| "workspace_vault_pending_data_key_rotation_missing".to_owned())?;
+    finish_pending_data_key_rotation(store, provider, &manifest)
 }
 
 fn prepare_backup_migration(
@@ -2300,6 +2786,7 @@ mod tests {
         let store = WorkspaceFileStore::new(directory.clone());
         fs::create_dir_all(store.backup_directory()).unwrap();
         fs::create_dir_all(store.pending_backup_directory()).unwrap();
+        fs::create_dir_all(store.data_key_rotation_directory()).unwrap();
         for path in [
             store.path(WorkspaceFileSlot::Primary),
             store.pending_path(WorkspaceFileSlot::Primary),
@@ -2309,6 +2796,7 @@ mod tests {
             store.pending_vault_path(),
             store.backup_directory().join("snapshot.json"),
             store.pending_backup_directory().join("snapshot.json"),
+            store.data_key_rotation_manifest_path(),
         ] {
             fs::write(path, b"managed workspace data").unwrap();
         }
@@ -2323,6 +2811,7 @@ mod tests {
         assert!(!store.pending_vault_path().exists());
         assert!(!store.backup_directory().exists());
         assert!(!store.pending_backup_directory().exists());
+        assert!(!store.data_key_rotation_directory().exists());
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -2591,6 +3080,273 @@ mod tests {
                 .unwrap(),
             Some(recovery)
         );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn data_key_rotation_reencrypts_primary_recovery_and_history() {
+        let directory = test_directory();
+        let store = WorkspaceFileStore::new(directory.clone());
+        let provider = FakeSystemUnlockProvider::default();
+        let primary = workspace("secret-primary");
+        let recovery = workspace("secret-recovery");
+        store
+            .write_plaintext(WorkspaceFileSlot::Primary, &primary)
+            .unwrap();
+        store
+            .write_plaintext(WorkspaceFileSlot::Recovery, &recovery)
+            .unwrap();
+        let captured = capture_workspace_backup_at(&store, None, 1_800_000_000_000).unwrap();
+        let backup_id = captured.status.entries[0].id.clone();
+        let previous_key = migrate_plaintext_store(&store, "correct horse battery").unwrap();
+
+        rotate_encrypted_store(
+            &store,
+            &previous_key,
+            "replacement master password",
+            &provider,
+        )
+        .unwrap();
+
+        let metadata = store.read_vault_metadata().unwrap().unwrap();
+        let next_key = unwrap_data_key(&metadata, "replacement master password").unwrap();
+        assert_ne!(next_key, previous_key);
+        assert_eq!(
+            unwrap_data_key(&metadata, "correct horse battery").unwrap_err(),
+            "workspace_vault_invalid_password"
+        );
+        assert_eq!(
+            store
+                .read(WorkspaceFileSlot::Primary, Some(&next_key))
+                .unwrap(),
+            Some(primary)
+        );
+        assert_eq!(
+            store
+                .read(WorkspaceFileSlot::Recovery, Some(&next_key))
+                .unwrap(),
+            Some(recovery)
+        );
+        assert_eq!(
+            read_backup_contents(&store, &backup_id, Some(&next_key)).unwrap(),
+            workspace("secret-primary")
+        );
+        assert!(
+            store
+                .read(WorkspaceFileSlot::Primary, Some(&previous_key))
+                .is_err()
+        );
+        assert!(!store.data_key_rotation_directory().exists());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn data_key_rotation_replaces_the_system_unlock_credential() {
+        let directory = test_directory();
+        let store = WorkspaceFileStore::new(directory.clone());
+        let provider = FakeSystemUnlockProvider::default();
+        store
+            .write_plaintext(WorkspaceFileSlot::Primary, &workspace("system-unlock"))
+            .unwrap();
+        let previous_key = migrate_plaintext_store(&store, "correct horse battery").unwrap();
+        let previous_credential_id = "previous-device-credential";
+        let previous_device_key = random_array::<DATA_KEY_BYTES>().unwrap();
+        provider
+            .store(previous_credential_id, &previous_device_key)
+            .unwrap();
+        let mut metadata = store.read_vault_metadata().unwrap().unwrap();
+        metadata.system_unlock = Some(
+            create_system_unlock_envelope(
+                provider.provider_id(),
+                previous_credential_id,
+                &previous_key,
+                &previous_device_key,
+            )
+            .unwrap(),
+        );
+        write_atomically(&store.vault_path(), &serde_json::to_vec(&metadata).unwrap()).unwrap();
+
+        rotate_encrypted_store(
+            &store,
+            &previous_key,
+            "replacement master password",
+            &provider,
+        )
+        .unwrap();
+
+        let next_metadata = store.read_vault_metadata().unwrap().unwrap();
+        let next_credential_id = next_metadata
+            .system_unlock
+            .as_ref()
+            .unwrap()
+            .credential_id
+            .clone();
+        let next_key = unwrap_data_key(&next_metadata, "replacement master password").unwrap();
+        assert_ne!(next_credential_id, previous_credential_id);
+        assert_eq!(
+            unwrap_data_key_with_system(&next_metadata, &provider).unwrap(),
+            next_key
+        );
+        assert_eq!(
+            provider.load(previous_credential_id).unwrap_err(),
+            "system_unlock_credential_missing"
+        );
+        assert!(provider.load(&next_credential_id).is_ok());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn restart_finishes_a_ready_data_key_rotation() {
+        let directory = test_directory();
+        let store = WorkspaceFileStore::new(directory.clone());
+        let provider = FakeSystemUnlockProvider::default();
+        let primary = workspace("rotation-restart-primary");
+        let recovery = workspace("rotation-restart-recovery");
+        store
+            .write_plaintext(WorkspaceFileSlot::Primary, &primary)
+            .unwrap();
+        store
+            .write_plaintext(WorkspaceFileSlot::Recovery, &recovery)
+            .unwrap();
+        let previous_key = migrate_plaintext_store(&store, "correct horse battery").unwrap();
+        let next_key = random_array::<DATA_KEY_BYTES>().unwrap();
+        prepare_data_key_rotation(
+            &store,
+            &previous_key,
+            &next_key,
+            "replacement master password",
+            &provider,
+        )
+        .unwrap();
+        let partly_replaced =
+            pending_rotation_file(&store.data_key_rotation_slot_path(WorkspaceFileSlot::Primary))
+                .unwrap();
+        write_atomically(&store.path(WorkspaceFileSlot::Primary), &partly_replaced).unwrap();
+
+        recover_pending_workspace_transactions(&store, &provider).unwrap();
+
+        let metadata = store.read_vault_metadata().unwrap().unwrap();
+        assert_eq!(
+            unwrap_data_key(&metadata, "replacement master password").unwrap(),
+            next_key
+        );
+        assert_eq!(
+            unwrap_data_key(&metadata, "correct horse battery").unwrap_err(),
+            "workspace_vault_invalid_password"
+        );
+        assert_eq!(
+            store
+                .read(WorkspaceFileSlot::Primary, Some(&next_key))
+                .unwrap(),
+            Some(primary)
+        );
+        assert_eq!(
+            store
+                .read(WorkspaceFileSlot::Recovery, Some(&next_key))
+                .unwrap(),
+            Some(recovery)
+        );
+        assert!(!store.data_key_rotation_directory().exists());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn restart_discards_an_uncommitted_data_key_rotation() {
+        let directory = test_directory();
+        let store = WorkspaceFileStore::new(directory.clone());
+        let provider = FakeSystemUnlockProvider::default();
+        store
+            .write_plaintext(WorkspaceFileSlot::Primary, &workspace("unchanged"))
+            .unwrap();
+        let previous_key = migrate_plaintext_store(&store, "correct horse battery").unwrap();
+        let next_credential_id = "uncommitted-next-credential";
+        provider
+            .store(next_credential_id, &[8; DATA_KEY_BYTES])
+            .unwrap();
+        fs::create_dir_all(store.data_key_rotation_directory()).unwrap();
+        write_data_key_rotation_manifest(
+            &store,
+            &DataKeyRotationManifest {
+                format: DATA_KEY_ROTATION_FORMAT.to_owned(),
+                version: CRYPTO_VERSION,
+                phase: DataKeyRotationPhase::Preparing,
+                slots: vec![WorkspaceFileSlot::Primary],
+                backup_ids: Vec::new(),
+                previous_system_credential: Some(RotationSystemCredential {
+                    provider: provider.provider_id().to_owned(),
+                    credential_id: "previous-credential".to_owned(),
+                }),
+                next_system_credential: Some(RotationSystemCredential {
+                    provider: provider.provider_id().to_owned(),
+                    credential_id: next_credential_id.to_owned(),
+                }),
+            },
+        )
+        .unwrap();
+
+        recover_pending_workspace_transactions(&store, &provider).unwrap();
+
+        assert_eq!(
+            provider.load(next_credential_id).unwrap_err(),
+            "system_unlock_credential_missing"
+        );
+        assert_eq!(
+            unwrap_data_key(
+                &store.read_vault_metadata().unwrap().unwrap(),
+                "correct horse battery",
+            )
+            .unwrap(),
+            previous_key
+        );
+        assert!(!store.data_key_rotation_directory().exists());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn invalid_history_aborts_rotation_without_replacing_the_old_key() {
+        let directory = test_directory();
+        let store = WorkspaceFileStore::new(directory.clone());
+        let provider = FakeSystemUnlockProvider::default();
+        let primary = workspace("keep-old-key");
+        store
+            .write_plaintext(WorkspaceFileSlot::Primary, &primary)
+            .unwrap();
+        let previous_key = migrate_plaintext_store(&store, "correct horse battery").unwrap();
+        fs::create_dir_all(store.backup_directory()).unwrap();
+        let invalid_backup_id = format!("1800000000000-{}", uuid::Uuid::new_v4());
+        write_atomically(
+            &store.backup_path(&invalid_backup_id).unwrap(),
+            b"damaged history",
+        )
+        .unwrap();
+
+        let error = rotate_encrypted_store(
+            &store,
+            &previous_key,
+            "replacement master password",
+            &provider,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            format!("workspace_vault_data_key_rotation_invalid_backup:{invalid_backup_id}")
+        );
+        assert_eq!(
+            unwrap_data_key(
+                &store.read_vault_metadata().unwrap().unwrap(),
+                "correct horse battery",
+            )
+            .unwrap(),
+            previous_key
+        );
+        assert_eq!(
+            store
+                .read(WorkspaceFileSlot::Primary, Some(&previous_key))
+                .unwrap(),
+            Some(primary)
+        );
+        assert!(!store.data_key_rotation_directory().exists());
         fs::remove_dir_all(directory).unwrap();
     }
 

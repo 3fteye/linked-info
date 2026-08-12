@@ -17,6 +17,7 @@ import {
   LockKeyhole,
   Network,
   Plus,
+  RefreshCw,
   Search,
   Settings,
   Sparkles,
@@ -308,7 +309,7 @@ function App({
   >(null);
   const [recoveryAvailable, setRecoveryAvailable] = useState(false);
   const [securityDialog, setSecurityDialog] = useState<
-    "enable" | "change" | "export" | "exportUnreadable" | null
+    "enable" | "change" | "rotate" | "export" | "exportUnreadable" | null
   >(null);
   const [pendingUnreadableExport, setPendingUnreadableExport] = useState<{
     raw: string;
@@ -781,8 +782,14 @@ function App({
         updateWorkspaceSecurityStatus(status);
         setSecurityMessage(t("security.enableSuccess"));
       } else {
+        const sensitiveOperation =
+          securityDialog === "change"
+            ? "changePassword"
+            : securityDialog === "rotate"
+              ? "rotateDataKey"
+              : "exportWorkspace";
         const authorization = await workspaceSecurity.authorizeSensitiveOperation(
-          securityDialog === "change" ? "changePassword" : "exportWorkspace",
+          sensitiveOperation,
           authenticationMethod === "system"
             ? {
                 method: "system",
@@ -796,6 +803,14 @@ function App({
             authorization,
           );
           setSecurityMessage(t("security.changeSuccess"));
+        } else if (securityDialog === "rotate") {
+          // Rotation revokes the current Rust plaintext session before it starts.
+          // Prevent the unmount cleanup from attempting one final stale write.
+          skipUnmountFlushRef.current = true;
+          await workspaceSecurity.rotateDataKey(
+            securityPassword,
+            authorization,
+          );
         } else if (securityDialog === "export") {
           await exportWorkspace(authorization);
         } else if (pendingUnreadableExport !== null) {
@@ -2642,6 +2657,18 @@ function App({
                       <button
                         className="secondary-button"
                         disabled={securityBusy}
+                        onClick={() => {
+                          setSecurityMessage(null);
+                          setSecurityDialog("rotate");
+                        }}
+                        type="button"
+                      >
+                        <RefreshCw aria-hidden="true" size={15} />
+                        {t("security.rotateDataKey")}
+                      </button>
+                      <button
+                        className="secondary-button"
+                        disabled={securityBusy}
                         onClick={() => void lockEncryptedWorkspace()}
                         type="button"
                       >
@@ -3438,6 +3465,8 @@ function App({
                 ? t("security.enableTitle")
                 : securityDialog === "change"
                   ? t("security.changeTitle")
+                  : securityDialog === "rotate"
+                    ? t("security.rotateTitle")
                   : t("security.exportTitle")}
             </h2>
             <p>
@@ -3445,6 +3474,8 @@ function App({
                 ? t("security.enableWarning")
                 : securityDialog === "change"
                   ? t("security.changeDescription")
+                  : securityDialog === "rotate"
+                    ? t("security.rotateDescription")
                   : securityDialog === "exportUnreadable"
                     ? t("security.exportUnreadableDescription")
                     : t("security.exportDescription")}
@@ -3477,7 +3508,9 @@ function App({
                 securityDialog !== "exportUnreadable" && (
                 <>
                   <label htmlFor="workspace-security-password">
-                    {t("security.newPassword")}
+                    {securityDialog === "rotate"
+                      ? t("security.rotatePassword")
+                      : t("security.newPassword")}
                   </label>
                   <input
                     autoComplete="new-password"
@@ -3530,6 +3563,8 @@ function App({
                       ? t("security.enable")
                       : securityDialog === "change"
                         ? t("security.changePassword")
+                        : securityDialog === "rotate"
+                          ? t("security.rotateConfirm")
                         : t("backup.export")}
                 </button>
               </div>

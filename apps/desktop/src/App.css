@@ -171,6 +171,15 @@ button:disabled {
   font-size: 12px !important;
 }
 
+.security-notice {
+  padding: 9px 12px;
+  border: 1px solid #b9d2c2;
+  border-radius: 6px;
+  color: #276044 !important;
+  background: #f2f8f4;
+  font-size: 12px !important;
+}
+
 .storage-problem-card {
   width: min(560px, 100%);
   padding: 28px;

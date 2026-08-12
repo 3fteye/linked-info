@@ -26,6 +26,7 @@ export default function WorkspaceSecurityGate({
   const [status, setStatus] = useState<WorkspaceSecurityStatus | null>(null);
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [retryGeneration, setRetryGeneration] = useState(0);
 
@@ -61,7 +62,17 @@ export default function WorkspaceSecurityGate({
           current === null ? current : { ...current, locked: true },
         );
         setPassword("");
-        setError(reason === "workspace_destroy_failed" ? reason : null);
+        setNotice(
+          reason === "workspace_data_key_rotated"
+            ? t("security.rotateSuccessLocked")
+            : null,
+        );
+        setError(
+          reason === "workspace_destroy_failed" ||
+            reason === "workspace_data_key_rotation_failed"
+            ? reason
+            : null,
+        );
         void security.inspect().then((next) => {
           if (active) {
             setStatus(next);
@@ -84,7 +95,7 @@ export default function WorkspaceSecurityGate({
       active = false;
       unsubscribe?.();
     };
-  }, [security]);
+  }, [security, t]);
 
   useEffect(() => {
     if (status?.encrypted !== true || status.locked) {
@@ -118,6 +129,7 @@ export default function WorkspaceSecurityGate({
     }
     setBusy(true);
     setError(null);
+    setNotice(null);
     try {
       const next = await security.unlock(password);
       setPassword("");
@@ -135,6 +147,7 @@ export default function WorkspaceSecurityGate({
     }
     setBusy(true);
     setError(null);
+    setNotice(null);
     try {
       setStatus(
         await security.unlockWithSystem(t("security.systemUnlockPrompt")),
@@ -184,6 +197,11 @@ export default function WorkspaceSecurityGate({
       <LockKeyhole aria-hidden="true" size={34} />
       <h1>{t("security.unlockTitle")}</h1>
       <p>{t("security.unlockDescription")}</p>
+      {notice !== null && (
+        <p className="security-notice" role="status">
+          {notice}
+        </p>
+      )}
       {status.systemUnlockAvailable && status.systemUnlockEnabled && (
         <div className="security-system-unlock">
           <button
@@ -225,6 +243,8 @@ export default function WorkspaceSecurityGate({
           <p className="security-error" role="alert">
             {error === "workspace_destroy_failed"
               ? t("security.destroyFailedLocked")
+              : error === "workspace_data_key_rotation_failed"
+                ? t("security.rotateFailedLocked")
               : error === "workspace_vault_invalid_password"
               ? t("security.invalidPassword")
               : error === "workspace_vault_password_rate_limited"

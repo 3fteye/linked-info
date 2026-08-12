@@ -14,6 +14,7 @@ export type SensitiveOperation =
   | "clearRecoveryData"
   | "destroyWorkspace"
   | "exportWorkspace"
+  | "rotateDataKey"
   | "systemUnlockChange";
 
 export type SensitiveAuthentication =
@@ -33,6 +34,7 @@ export interface WorkspaceSecurity {
     authentication: SensitiveAuthentication,
   ): Promise<string>;
   changePassword(password: string, authorization: string): Promise<void>;
+  rotateDataKey(password: string, authorization: string): Promise<void>;
   clearRecoveryData(authorization: string): Promise<void>;
   destroyWorkspace(authorization: string): Promise<void>;
   lock(): Promise<WorkspaceSecurityStatus>;
@@ -85,6 +87,12 @@ export const tauriWorkspaceSecurity: WorkspaceSecurity = {
   },
   changePassword(password, authorization) {
     return invoke<void>("change_workspace_password", {
+      password,
+      authorization,
+    });
+  },
+  rotateDataKey(password, authorization) {
+    return invoke<void>("rotate_workspace_data_key", {
       password,
       authorization,
     });
@@ -149,6 +157,9 @@ export const unavailableWorkspaceSecurity: WorkspaceSecurity = {
     throw new Error("workspace encryption is unavailable outside the desktop app");
   },
   async changePassword() {
+    throw new Error("workspace encryption is unavailable outside the desktop app");
+  },
+  async rotateDataKey() {
     throw new Error("workspace encryption is unavailable outside the desktop app");
   },
   async clearRecoveryData() {
