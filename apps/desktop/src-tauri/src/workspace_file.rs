@@ -671,7 +671,7 @@ pub async fn write_workspace_file(
 pub async fn inspect_workspace_backup_history(
     app: AppHandle,
     state: tauri::State<'_, WorkspaceVaultState>,
-) -> Result<(), String> {
+) -> Result<WorkspaceBackupHistoryStatus, String> {
     let store = workspace_store(&app).map_err(|error| error.to_string())?;
     let operation_lock = Arc::clone(&state.operation_lock);
     let data_key = state.optional_data_key()?;
@@ -1147,7 +1147,7 @@ pub async fn clear_workspace_recovery_data(
     app: AppHandle,
     state: tauri::State<'_, WorkspaceVaultState>,
     authorization: String,
-) -> Result<WorkspaceBackupHistoryStatus, String> {
+) -> Result<(), String> {
     let permit = state
         .consume_sensitive_authorization(SensitiveOperation::ClearRecoveryData, &authorization)?;
     let store = workspace_store(&app).map_err(|error| error.to_string())?;
