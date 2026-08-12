@@ -1841,6 +1841,11 @@ h1 {
   box-shadow: 0 0 0 2px rgb(48 116 80 / 12%);
 }
 
+.security-system-reauth-button {
+  width: 100%;
+  justify-content: center;
+}
+
 .smart-reference-status,
 .smart-reference-progress {
   position: fixed;

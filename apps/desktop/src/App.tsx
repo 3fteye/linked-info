@@ -307,9 +307,14 @@ function App({
     string | null
   >(null);
   const [recoveryAvailable, setRecoveryAvailable] = useState(false);
-  const [securityDialog, setSecurityDialog] = useState<"enable" | "change" | null>(
-    null,
-  );
+  const [securityDialog, setSecurityDialog] = useState<
+    "enable" | "change" | "export" | "exportUnreadable" | null
+  >(null);
+  const [pendingUnreadableExport, setPendingUnreadableExport] = useState<{
+    raw: string;
+    source: "primary" | "recovery";
+  } | null>(null);
+  const [securityCurrentPassword, setSecurityCurrentPassword] = useState("");
   const [securityPassword, setSecurityPassword] = useState("");
   const [securityPasswordConfirmation, setSecurityPasswordConfirmation] =
     useState("");
@@ -723,19 +728,31 @@ function App({
       return;
     }
     setSecurityDialog(null);
+    setPendingUnreadableExport(null);
+    setSecurityCurrentPassword("");
     setSecurityPassword("");
     setSecurityPasswordConfirmation("");
   }
 
-  async function submitSecurityDialog() {
+  async function submitSecurityDialog(
+    authenticationMethod: "password" | "system" = "password",
+  ) {
     if (securityDialog === null || securityBusy) {
       return;
     }
-    if (securityPassword !== securityPasswordConfirmation) {
+    const exportDialog =
+      securityDialog === "export" || securityDialog === "exportUnreadable";
+    if (
+      !exportDialog &&
+      securityPassword !== securityPasswordConfirmation
+    ) {
       setSecurityMessage(t("security.passwordMismatch"));
       return;
     }
-    if (Array.from(securityPassword).length < 10) {
+    if (
+      !exportDialog &&
+      Array.from(securityPassword).length < 10
+    ) {
       setSecurityMessage(t("security.passwordTooShort"));
       return;
     }
@@ -758,10 +775,34 @@ function App({
         updateWorkspaceSecurityStatus(status);
         setSecurityMessage(t("security.enableSuccess"));
       } else {
-        await workspaceSecurity.changePassword(securityPassword);
-        setSecurityMessage(t("security.changeSuccess"));
+        const authorization = await workspaceSecurity.authorizeSensitiveOperation(
+          securityDialog === "change" ? "changePassword" : "exportWorkspace",
+          authenticationMethod === "system"
+            ? {
+                method: "system",
+                message: t("security.sensitiveOperationPrompt"),
+              }
+            : { method: "password", password: securityCurrentPassword },
+        );
+        if (securityDialog === "change") {
+          await workspaceSecurity.changePassword(
+            securityPassword,
+            authorization,
+          );
+          setSecurityMessage(t("security.changeSuccess"));
+        } else if (securityDialog === "export") {
+          await exportWorkspace(authorization);
+        } else if (pendingUnreadableExport !== null) {
+          await exportUnreadableData(
+            pendingUnreadableExport.raw,
+            pendingUnreadableExport.source,
+            authorization,
+          );
+        }
       }
       setSecurityDialog(null);
+      setPendingUnreadableExport(null);
+      setSecurityCurrentPassword("");
       setSecurityPassword("");
       setSecurityPasswordConfirmation("");
     } catch (error) {
@@ -808,7 +849,15 @@ function App({
         ? await workspaceSecurity.enableSystemUnlock(
             t("security.systemUnlockEnablePrompt"),
           )
-        : await workspaceSecurity.disableSystemUnlock();
+        : await workspaceSecurity.disableSystemUnlock(
+            await workspaceSecurity.authorizeSensitiveOperation(
+              "systemUnlockChange",
+              {
+                method: "system",
+                message: t("security.systemUnlockDisablePrompt"),
+              },
+            ),
+          );
       updateWorkspaceSecurityStatus(status);
       setSecurityMessage(
         enable
@@ -1480,13 +1529,19 @@ function App({
     );
   }
 
-  async function exportWorkspace() {
+  async function exportWorkspace(authorization?: string) {
     setBackupStatus(null);
+    if (workspaceSecurityStatus.encrypted && authorization === undefined) {
+      setSecurityMessage(null);
+      setSecurityCurrentPassword("");
+      setSecurityDialog("export");
+      return;
+    }
     try {
       const date = new Date().toISOString().slice(0, 10);
       const plaintext = serializeWorkspaceExport(workspaceRef.current);
       const contents = workspaceSecurityStatus.encrypted
-        ? await workspaceSecurity.encryptExport(plaintext)
+        ? await workspaceSecurity.encryptExport(plaintext, authorization ?? "")
         : plaintext;
       const exported = await exportWorkspaceFile(
         contents,
@@ -1672,12 +1727,23 @@ function App({
     setPendingWorkspaceReplacement(null);
   }
 
-  async function exportUnreadableData(raw: string, source: "primary" | "recovery") {
+  async function exportUnreadableData(
+    raw: string,
+    source: "primary" | "recovery",
+    authorization?: string,
+  ) {
     setStorageProblemStatus(null);
+    if (workspaceSecurityStatus.encrypted && authorization === undefined) {
+      setSecurityMessage(null);
+      setSecurityCurrentPassword("");
+      setPendingUnreadableExport({ raw, source });
+      setSecurityDialog("exportUnreadable");
+      return;
+    }
     try {
       const date = new Date().toISOString().slice(0, 10);
       const contents = workspaceSecurityStatus.encrypted
-        ? await workspaceSecurity.encryptExport(raw)
+        ? await workspaceSecurity.encryptExport(raw, authorization ?? "")
         : raw;
       const exported = await exportWorkspaceFile(
         contents,
@@ -3260,12 +3326,18 @@ function App({
             <h2 id="workspace-security-dialog-title">
               {securityDialog === "enable"
                 ? t("security.enableTitle")
-                : t("security.changeTitle")}
+                : securityDialog === "change"
+                  ? t("security.changeTitle")
+                  : t("security.exportTitle")}
             </h2>
             <p>
               {securityDialog === "enable"
                 ? t("security.enableWarning")
-                : t("security.changeDescription")}
+                : securityDialog === "change"
+                  ? t("security.changeDescription")
+                  : securityDialog === "exportUnreadable"
+                    ? t("security.exportUnreadableDescription")
+                    : t("security.exportDescription")}
             </p>
             <form
               className="security-dialog-form"
@@ -3274,29 +3346,51 @@ function App({
                 void submitSecurityDialog();
               }}
             >
-              <label htmlFor="workspace-security-password">
-                {t("security.newPassword")}
-              </label>
-              <input
-                autoComplete="new-password"
-                autoFocus
-                id="workspace-security-password"
-                onChange={(event) => setSecurityPassword(event.target.value)}
-                type="password"
-                value={securityPassword}
-              />
-              <label htmlFor="workspace-security-password-confirmation">
-                {t("security.confirmPassword")}
-              </label>
-              <input
-                autoComplete="new-password"
-                id="workspace-security-password-confirmation"
-                onChange={(event) =>
-                  setSecurityPasswordConfirmation(event.target.value)
-                }
-                type="password"
-                value={securityPasswordConfirmation}
-              />
+              {securityDialog !== "enable" && (
+                <>
+                  <label htmlFor="workspace-security-current-password">
+                    {t("security.currentPassword")}
+                  </label>
+                  <input
+                    autoComplete="current-password"
+                    autoFocus
+                    id="workspace-security-current-password"
+                    onChange={(event) =>
+                      setSecurityCurrentPassword(event.target.value)
+                    }
+                    type="password"
+                    value={securityCurrentPassword}
+                  />
+                </>
+              )}
+              {securityDialog !== "export" &&
+                securityDialog !== "exportUnreadable" && (
+                <>
+                  <label htmlFor="workspace-security-password">
+                    {t("security.newPassword")}
+                  </label>
+                  <input
+                    autoComplete="new-password"
+                    autoFocus={securityDialog === "enable"}
+                    id="workspace-security-password"
+                    onChange={(event) => setSecurityPassword(event.target.value)}
+                    type="password"
+                    value={securityPassword}
+                  />
+                  <label htmlFor="workspace-security-password-confirmation">
+                    {t("security.confirmPassword")}
+                  </label>
+                  <input
+                    autoComplete="new-password"
+                    id="workspace-security-password-confirmation"
+                    onChange={(event) =>
+                      setSecurityPasswordConfirmation(event.target.value)
+                    }
+                    type="password"
+                    value={securityPasswordConfirmation}
+                  />
+                </>
+              )}
               {securityMessage !== null && (
                 <p className="security-error" role="alert">
                   {securityMessage}
@@ -3313,16 +3407,35 @@ function App({
                 </button>
                 <button
                   className="primary-button"
-                  disabled={securityBusy}
+                  disabled={
+                    securityBusy ||
+                    (securityDialog !== "enable" &&
+                      securityCurrentPassword.length === 0)
+                  }
                   type="submit"
                 >
                   {securityBusy
                     ? t("security.processing")
                     : securityDialog === "enable"
                       ? t("security.enable")
-                      : t("security.changePassword")}
+                      : securityDialog === "change"
+                        ? t("security.changePassword")
+                        : t("backup.export")}
                 </button>
               </div>
+              {securityDialog !== "enable" &&
+                workspaceSecurityStatus.systemUnlockAvailable &&
+                workspaceSecurityStatus.systemUnlockEnabled && (
+                  <button
+                    className="secondary-button security-system-reauth-button"
+                    disabled={securityBusy}
+                    onClick={() => void submitSecurityDialog("system")}
+                    type="button"
+                  >
+                    <Fingerprint aria-hidden="true" size={15} />
+                    {t("security.useSystemVerification")}
+                  </button>
+                )}
             </form>
           </section>
         </div>

@@ -43,6 +43,7 @@ const BACKUP_MAXIMUM_COUNT: usize = 30;
 const BACKUP_MAXIMUM_BYTES: u64 = 512 * 1024 * 1024;
 const DEFAULT_IDLE_TIMEOUT_MINUTES: u32 = 15;
 const ALLOWED_IDLE_TIMEOUT_MINUTES: [u32; 3] = [5, 15, 30];
+const SENSITIVE_AUTHORIZATION_TTL_MILLISECONDS: u64 = 60_000;
 #[cfg(not(test))]
 const ARGON2_MEMORY_KIB: u32 = 64 * 1_024;
 #[cfg(test)]
@@ -180,6 +181,21 @@ pub struct WorkspaceSecurityStatus {
     idle_timeout_minutes: Option<u32>,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SensitiveOperation {
+    ChangePassword,
+    ExportWorkspace,
+    SystemUnlockChange,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "method", rename_all = "camelCase")]
+pub enum SensitiveAuthentication {
+    Password { password: String },
+    System { message: String },
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum WorkspaceBackupState {
@@ -219,6 +235,7 @@ pub struct WorkspaceVaultState {
     access_generation: AtomicU64,
     idle_timeout_milliseconds: AtomicU64,
     last_activity_milliseconds: AtomicU64,
+    sensitive_authorization: Mutex<Option<SensitiveAuthorization>>,
 }
 
 impl Default for WorkspaceVaultState {
@@ -231,6 +248,7 @@ impl Default for WorkspaceVaultState {
                 DEFAULT_IDLE_TIMEOUT_MINUTES,
             )),
             last_activity_milliseconds: AtomicU64::new(now_milliseconds_lossy()),
+            sensitive_authorization: Mutex::new(None),
         }
     }
 }
@@ -238,6 +256,13 @@ impl Default for WorkspaceVaultState {
 #[derive(Clone, Copy, Debug)]
 pub struct WorkspaceAccessPermit {
     generation: u64,
+}
+
+struct SensitiveAuthorization {
+    operation: SensitiveOperation,
+    permit: WorkspaceAccessPermit,
+    token: Zeroizing<String>,
+    expires_at_milliseconds: u64,
 }
 
 impl WorkspaceVaultState {
@@ -276,6 +301,9 @@ impl WorkspaceVaultState {
             .map_err(|_| "workspace_vault_state_unavailable".to_owned())?;
         let was_unlocked = slot.is_some();
         *slot = None;
+        if let Ok(mut authorization) = self.sensitive_authorization.lock() {
+            *authorization = None;
+        }
         Ok(was_unlocked)
     }
 
@@ -332,6 +360,49 @@ impl WorkspaceVaultState {
             && now_milliseconds_lossy()
                 .saturating_sub(self.last_activity_milliseconds.load(Ordering::Acquire))
                 >= timeout
+    }
+
+    fn issue_sensitive_authorization(
+        &self,
+        operation: SensitiveOperation,
+        permit: WorkspaceAccessPermit,
+    ) -> Result<String, String> {
+        self.ensure_access_permit(permit)?;
+        let token = encode_bytes(&random_array::<DATA_KEY_BYTES>()?);
+        let authorization = SensitiveAuthorization {
+            operation,
+            permit,
+            token: Zeroizing::new(token.clone()),
+            expires_at_milliseconds: now_milliseconds_lossy()
+                .saturating_add(SENSITIVE_AUTHORIZATION_TTL_MILLISECONDS),
+        };
+        *self
+            .sensitive_authorization
+            .lock()
+            .map_err(|_| "workspace_vault_authorization_unavailable".to_owned())? =
+            Some(authorization);
+        Ok(token)
+    }
+
+    fn consume_sensitive_authorization(
+        &self,
+        operation: SensitiveOperation,
+        token: &str,
+    ) -> Result<WorkspaceAccessPermit, String> {
+        let authorization = self
+            .sensitive_authorization
+            .lock()
+            .map_err(|_| "workspace_vault_authorization_unavailable".to_owned())?
+            .take()
+            .ok_or_else(|| "workspace_vault_reauthentication_required".to_owned())?;
+        if authorization.operation != operation
+            || authorization.token.as_str() != token
+            || authorization.expires_at_milliseconds < now_milliseconds_lossy()
+        {
+            return Err("workspace_vault_reauthentication_required".to_owned());
+        }
+        self.ensure_access_permit(authorization.permit)?;
+        Ok(authorization.permit)
     }
 
     pub fn shutdown(&self) -> bool {
@@ -772,8 +843,11 @@ pub async fn change_workspace_password(
     app: AppHandle,
     state: tauri::State<'_, WorkspaceVaultState>,
     password: String,
+    authorization: String,
 ) -> Result<(), String> {
     validate_new_password(&password)?;
+    let permit = state
+        .consume_sensitive_authorization(SensitiveOperation::ChangePassword, &authorization)?;
     let store = workspace_store(&app).map_err(|error| error.to_string())?;
     let operation_lock = Arc::clone(&state.operation_lock);
     let data_key = state.data_key()?;
@@ -791,7 +865,68 @@ pub async fn change_workspace_password(
         write_atomically(&store.vault_path(), &serialized).map_err(|error| error.to_string())
     })
     .await
-    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())??;
+    ensure_workspace_access(&app, &state, Some(permit))
+}
+
+#[tauri::command]
+pub async fn authorize_sensitive_operation(
+    app: AppHandle,
+    state: tauri::State<'_, WorkspaceVaultState>,
+    system_unlock_state: tauri::State<'_, SystemUnlockState>,
+    operation: SensitiveOperation,
+    authentication: SensitiveAuthentication,
+) -> Result<String, String> {
+    let permit = begin_workspace_access(&app, &state)?
+        .ok_or_else(|| "workspace_vault_not_configured".to_owned())?;
+    let active_data_key = state.data_key()?;
+    let store = workspace_store(&app).map_err(|error| error.to_string())?;
+    let operation_lock = Arc::clone(&state.operation_lock);
+    let provider = system_unlock_state.provider();
+
+    let verified_data_key = match authentication {
+        SensitiveAuthentication::Password { password } => {
+            let password = Zeroizing::new(password);
+            tauri::async_runtime::spawn_blocking(move || {
+                let _guard = operation_lock
+                    .lock()
+                    .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
+                recover_pending_migration(&store)?;
+                let metadata = store
+                    .read_vault_metadata()?
+                    .ok_or_else(|| "workspace_vault_not_configured".to_owned())?;
+                unwrap_data_key(&metadata, &password)
+            })
+            .await
+            .map_err(|error| error.to_string())??
+        }
+        SensitiveAuthentication::System { message } => {
+            if !provider.available() {
+                return Err("system_unlock_unavailable".to_owned());
+            }
+            crate::system_unlock::verify_user_presence(&app, message).await?;
+            ensure_workspace_access(&app, &state, Some(permit))?;
+            let provider_for_authentication = Arc::clone(&provider);
+            tauri::async_runtime::spawn_blocking(move || {
+                let _guard = operation_lock
+                    .lock()
+                    .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
+                recover_pending_migration(&store)?;
+                let metadata = store
+                    .read_vault_metadata()?
+                    .ok_or_else(|| "workspace_vault_not_configured".to_owned())?;
+                unwrap_data_key_with_system(&metadata, provider_for_authentication.as_ref())
+            })
+            .await
+            .map_err(|error| error.to_string())??
+        }
+    };
+
+    ensure_workspace_access(&app, &state, Some(permit))?;
+    if verified_data_key != *active_data_key {
+        return Err("workspace_vault_reauthentication_failed".to_owned());
+    }
+    state.issue_sensitive_authorization(operation, permit)
 }
 
 #[tauri::command]
@@ -801,6 +936,8 @@ pub async fn enable_system_unlock(
     system_unlock_state: tauri::State<'_, SystemUnlockState>,
     message: String,
 ) -> Result<WorkspaceSecurityStatus, String> {
+    let permit = begin_workspace_access(&app, &state)?
+        .ok_or_else(|| "workspace_vault_not_configured".to_owned())?;
     let provider = system_unlock_state.provider();
     if !provider.available() {
         return Err("system_unlock_unavailable".to_owned());
@@ -809,6 +946,7 @@ pub async fn enable_system_unlock(
     let operation_lock = Arc::clone(&state.operation_lock);
     let data_key = state.data_key()?;
     crate::system_unlock::verify_user_presence(&app, message).await?;
+    ensure_workspace_access(&app, &state, Some(permit))?;
     let provider_for_enable = Arc::clone(&provider);
     tauri::async_runtime::spawn_blocking(move || {
         let _guard = operation_lock
@@ -847,6 +985,7 @@ pub async fn enable_system_unlock(
     })
     .await
     .map_err(|error| error.to_string())??;
+    ensure_workspace_access(&app, &state, Some(permit))?;
     Ok(WorkspaceSecurityStatus {
         encrypted: true,
         locked: false,
@@ -861,8 +1000,10 @@ pub async fn disable_system_unlock(
     app: AppHandle,
     state: tauri::State<'_, WorkspaceVaultState>,
     system_unlock_state: tauri::State<'_, SystemUnlockState>,
+    authorization: String,
 ) -> Result<WorkspaceSecurityStatus, String> {
-    let _ = state.data_key()?;
+    let permit = state
+        .consume_sensitive_authorization(SensitiveOperation::SystemUnlockChange, &authorization)?;
     let provider = system_unlock_state.provider();
     let store = workspace_store(&app).map_err(|error| error.to_string())?;
     let operation_lock = Arc::clone(&state.operation_lock);
@@ -887,6 +1028,7 @@ pub async fn disable_system_unlock(
     })
     .await
     .map_err(|error| error.to_string())??;
+    ensure_workspace_access(&app, &state, Some(permit))?;
     Ok(WorkspaceSecurityStatus {
         encrypted: true,
         locked: false,
@@ -946,11 +1088,14 @@ pub async fn encrypt_workspace_export(
     app: AppHandle,
     state: tauri::State<'_, WorkspaceVaultState>,
     contents: String,
+    authorization: String,
 ) -> Result<String, String> {
+    let permit = state
+        .consume_sensitive_authorization(SensitiveOperation::ExportWorkspace, &authorization)?;
     let store = workspace_store(&app).map_err(|error| error.to_string())?;
     let operation_lock = Arc::clone(&state.operation_lock);
     let data_key = state.data_key()?;
-    tauri::async_runtime::spawn_blocking(move || {
+    let result = tauri::async_runtime::spawn_blocking(move || {
         let _guard = operation_lock
             .lock()
             .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
@@ -960,7 +1105,9 @@ pub async fn encrypt_workspace_export(
         encrypt_export(&contents, &metadata, &data_key)
     })
     .await
-    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())??;
+    ensure_workspace_access(&app, &state, Some(permit))?;
+    Ok(result)
 }
 
 #[tauri::command]
@@ -1892,6 +2039,43 @@ mod tests {
         assert!(state.should_idle_lock());
         state.set_idle_timeout(None);
         assert!(!state.should_idle_lock());
+    }
+
+    #[test]
+    fn sensitive_authorizations_are_single_use_and_purpose_bound() {
+        let state = WorkspaceVaultState::default();
+        state.replace_data_key([11; DATA_KEY_BYTES]).unwrap();
+        let permit = state.access_permit().unwrap();
+        let wrong_purpose = state
+            .issue_sensitive_authorization(SensitiveOperation::ChangePassword, permit)
+            .unwrap();
+
+        assert_eq!(
+            state
+                .consume_sensitive_authorization(
+                    SensitiveOperation::ExportWorkspace,
+                    &wrong_purpose,
+                )
+                .unwrap_err(),
+            "workspace_vault_reauthentication_required"
+        );
+
+        let token = state
+            .issue_sensitive_authorization(SensitiveOperation::ExportWorkspace, permit)
+            .unwrap();
+        assert_eq!(
+            state
+                .consume_sensitive_authorization(SensitiveOperation::ExportWorkspace, &token)
+                .unwrap()
+                .generation,
+            permit.generation
+        );
+        assert_eq!(
+            state
+                .consume_sensitive_authorization(SensitiveOperation::ExportWorkspace, &token)
+                .unwrap_err(),
+            "workspace_vault_reauthentication_required"
+        );
     }
 
     #[test]

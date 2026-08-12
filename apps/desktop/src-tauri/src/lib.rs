@@ -78,6 +78,7 @@ pub fn run() {
             vector_cache::write_embedding_vector_cache,
             workspace_file::capture_workspace_backup,
             exit_application,
+            workspace_file::authorize_sensitive_operation,
             workspace_file::change_workspace_password,
             workspace_file::decrypt_workspace_export,
             workspace_file::disable_system_unlock,

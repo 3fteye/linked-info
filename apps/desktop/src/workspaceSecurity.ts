@@ -9,6 +9,15 @@ export interface WorkspaceSecurityStatus {
   idleTimeoutMinutes: number | null;
 }
 
+export type SensitiveOperation =
+  | "changePassword"
+  | "exportWorkspace"
+  | "systemUnlockChange";
+
+export type SensitiveAuthentication =
+  | { method: "password"; password: string }
+  | { method: "system"; message: string };
+
 export interface WorkspaceSecurity {
   readonly available: boolean;
   inspect(): Promise<WorkspaceSecurityStatus>;
@@ -16,13 +25,17 @@ export interface WorkspaceSecurity {
   unlockWithSystem(message: string): Promise<WorkspaceSecurityStatus>;
   enable(password: string): Promise<WorkspaceSecurityStatus>;
   enableSystemUnlock(message: string): Promise<WorkspaceSecurityStatus>;
-  disableSystemUnlock(): Promise<WorkspaceSecurityStatus>;
-  changePassword(password: string): Promise<void>;
+  disableSystemUnlock(authorization: string): Promise<WorkspaceSecurityStatus>;
+  authorizeSensitiveOperation(
+    operation: SensitiveOperation,
+    authentication: SensitiveAuthentication,
+  ): Promise<string>;
+  changePassword(password: string, authorization: string): Promise<void>;
   lock(): Promise<WorkspaceSecurityStatus>;
   setIdleTimeout(minutes: number | null): Promise<WorkspaceSecurityStatus>;
   recordActivity(): Promise<void>;
   subscribeLocked(listener: (reason: string) => void): Promise<() => void>;
-  encryptExport(contents: string): Promise<string>;
+  encryptExport(contents: string, authorization: string): Promise<string>;
   decryptExport(contents: string, password: string): Promise<string>;
 }
 
@@ -55,11 +68,22 @@ export const tauriWorkspaceSecurity: WorkspaceSecurity = {
   enableSystemUnlock(message) {
     return invoke<WorkspaceSecurityStatus>("enable_system_unlock", { message });
   },
-  disableSystemUnlock() {
-    return invoke<WorkspaceSecurityStatus>("disable_system_unlock");
+  disableSystemUnlock(authorization) {
+    return invoke<WorkspaceSecurityStatus>("disable_system_unlock", {
+      authorization,
+    });
   },
-  changePassword(password) {
-    return invoke<void>("change_workspace_password", { password });
+  authorizeSensitiveOperation(operation, authentication) {
+    return invoke<string>("authorize_sensitive_operation", {
+      operation,
+      authentication,
+    });
+  },
+  changePassword(password, authorization) {
+    return invoke<void>("change_workspace_password", {
+      password,
+      authorization,
+    });
   },
   lock() {
     return invoke<WorkspaceSecurityStatus>("lock_workspace");
@@ -77,8 +101,11 @@ export const tauriWorkspaceSecurity: WorkspaceSecurity = {
       listener(event.payload);
     });
   },
-  encryptExport(contents) {
-    return invoke<string>("encrypt_workspace_export", { contents });
+  encryptExport(contents, authorization) {
+    return invoke<string>("encrypt_workspace_export", {
+      contents,
+      authorization,
+    });
   },
   decryptExport(contents, password) {
     return invoke<string>("decrypt_workspace_export", {
@@ -106,6 +133,9 @@ export const unavailableWorkspaceSecurity: WorkspaceSecurity = {
     throw new Error("workspace encryption is unavailable outside the desktop app");
   },
   async disableSystemUnlock() {
+    throw new Error("workspace encryption is unavailable outside the desktop app");
+  },
+  async authorizeSensitiveOperation() {
     throw new Error("workspace encryption is unavailable outside the desktop app");
   },
   async changePassword() {
