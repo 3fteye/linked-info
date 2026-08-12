@@ -19,7 +19,8 @@ use crate::{
     cloudflare_backup_target::CloudflareBackupTarget,
     workspace_file::{
         SensitiveOperation, WorkspaceVaultState, begin_workspace_access,
-        encrypt_offsite_workspace_snapshot, ensure_workspace_access, write_atomically,
+        encrypt_offsite_workspace_snapshot, ensure_workspace_access,
+        workspace_encryption_configured, write_atomically,
     },
 };
 
@@ -99,6 +100,44 @@ pub async fn inspect_offsite_backup_targets(
 ) -> Result<Vec<BackupTargetSummary>, String> {
     let config = read_config_locked(&app, &state).await?;
     config.targets.iter().map(target_summary).collect()
+}
+
+#[tauri::command]
+pub async fn list_cloudflare_recovery_backups(
+    app: tauri::AppHandle,
+    endpoint: String,
+    token: String,
+    cursor: Option<String>,
+    limit: u16,
+) -> Result<BackupListPage, String> {
+    ensure_unconfigured_recovery_mode(&app)?;
+    let target = open_ephemeral_cloudflare_target(endpoint, token)?;
+    let page = target.list(cursor, limit).await.map_err(target_error)?;
+    ensure_unconfigured_recovery_mode(&app)?;
+    Ok(page)
+}
+
+#[tauri::command]
+pub async fn download_cloudflare_recovery_backup(
+    app: tauri::AppHandle,
+    endpoint: String,
+    token: String,
+    snapshot_id: Uuid,
+) -> Result<DownloadedOffsiteBackup, String> {
+    ensure_unconfigured_recovery_mode(&app)?;
+    let snapshot = open_ephemeral_cloudflare_target(endpoint, token)?
+        .download(snapshot_id)
+        .await
+        .map_err(target_error)?
+        .ok_or_else(|| "offsite_backup_snapshot_not_found".to_owned())?;
+    ensure_unconfigured_recovery_mode(&app)?;
+    let metadata = snapshot.metadata;
+    let encrypted_export = String::from_utf8(snapshot.payload)
+        .map_err(|_| "offsite_backup_invalid_snapshot".to_owned())?;
+    Ok(DownloadedOffsiteBackup {
+        metadata,
+        encrypted_export,
+    })
 }
 
 #[tauri::command]
@@ -324,6 +363,22 @@ async fn open_target(config: &BackupTargetConfig) -> Result<Box<dyn BackupTarget
                 .map(|target| Box::new(target) as Box<dyn BackupTarget>)
                 .map_err(target_error)
         }
+    }
+}
+
+fn open_ephemeral_cloudflare_target(
+    endpoint: String,
+    token: String,
+) -> Result<CloudflareBackupTarget, String> {
+    let token = Zeroizing::new(token);
+    CloudflareBackupTarget::new(&endpoint, token.to_string()).map_err(target_error)
+}
+
+fn ensure_unconfigured_recovery_mode(app: &tauri::AppHandle) -> Result<(), String> {
+    if workspace_encryption_configured(app) {
+        Err("offsite_recovery_requires_unconfigured_workspace".to_owned())
+    } else {
+        Ok(())
     }
 }
 

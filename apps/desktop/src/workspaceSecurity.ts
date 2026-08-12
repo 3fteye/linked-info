@@ -9,6 +9,11 @@ export interface WorkspaceSecurityStatus {
   idleTimeoutMinutes: number | null;
 }
 
+export interface PreparedWorkspaceRestorePreview {
+  id: string;
+  plaintext: string;
+}
+
 export type SensitiveOperation =
   | "backupTargetChange"
   | "changePassword"
@@ -44,6 +49,12 @@ export interface WorkspaceSecurity {
   subscribeLocked(listener: (reason: string) => void): Promise<() => void>;
   encryptExport(contents: string, authorization: string): Promise<string>;
   decryptExport(contents: string, password: string): Promise<string>;
+  prepareRestore(
+    contents: string,
+    password: string,
+  ): Promise<PreparedWorkspaceRestorePreview>;
+  cancelRestore(restoreId: string): Promise<void>;
+  commitRestore(restoreId: string): Promise<WorkspaceSecurityStatus>;
 }
 
 const plaintextStatus: WorkspaceSecurityStatus = {
@@ -132,6 +143,20 @@ export const tauriWorkspaceSecurity: WorkspaceSecurity = {
       password,
     });
   },
+  prepareRestore(contents, password) {
+    return invoke<PreparedWorkspaceRestorePreview>("prepare_workspace_restore", {
+      contents,
+      password,
+    });
+  },
+  cancelRestore(restoreId) {
+    return invoke<void>("cancel_workspace_restore", { restoreId });
+  },
+  commitRestore(restoreId) {
+    return invoke<WorkspaceSecurityStatus>("commit_workspace_restore", {
+      restoreId,
+    });
+  },
 };
 
 export const unavailableWorkspaceSecurity: WorkspaceSecurity = {
@@ -183,6 +208,15 @@ export const unavailableWorkspaceSecurity: WorkspaceSecurity = {
     throw new Error("workspace encryption is unavailable outside the desktop app");
   },
   async decryptExport() {
+    throw new Error("workspace encryption is unavailable outside the desktop app");
+  },
+  async prepareRestore() {
+    throw new Error("workspace encryption is unavailable outside the desktop app");
+  },
+  async cancelRestore() {
+    throw new Error("workspace encryption is unavailable outside the desktop app");
+  },
+  async commitRestore() {
     throw new Error("workspace encryption is unavailable outside the desktop app");
   },
 };

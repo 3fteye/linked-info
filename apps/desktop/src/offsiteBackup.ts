@@ -58,6 +58,17 @@ export interface OffsiteBackupService {
     targetId: string,
     snapshotId: string,
   ): Promise<OffsiteBackupVerification>;
+  listRecovery(input: {
+    endpoint: string;
+    token: string;
+    cursor?: string | null;
+    limit?: number;
+  }): Promise<OffsiteBackupPage>;
+  downloadRecovery(input: {
+    endpoint: string;
+    token: string;
+    snapshotId: string;
+  }): Promise<DownloadedOffsiteBackup>;
 }
 
 export const tauriOffsiteBackupService: OffsiteBackupService = {
@@ -99,6 +110,20 @@ export const tauriOffsiteBackupService: OffsiteBackupService = {
       snapshotId,
     });
   },
+  listRecovery({ endpoint, token, cursor = null, limit = 50 }) {
+    return invoke<OffsiteBackupPage>("list_cloudflare_recovery_backups", {
+      endpoint,
+      token,
+      cursor,
+      limit,
+    });
+  },
+  downloadRecovery({ endpoint, token, snapshotId }) {
+    return invoke<DownloadedOffsiteBackup>(
+      "download_cloudflare_recovery_backup",
+      { endpoint, token, snapshotId },
+    );
+  },
 };
 
 function unavailable(): never {
@@ -126,6 +151,12 @@ export const unavailableOffsiteBackupService: OffsiteBackupService = {
     return unavailable();
   },
   async verify() {
+    return unavailable();
+  },
+  async listRecovery() {
+    return unavailable();
+  },
+  async downloadRecovery() {
     return unavailable();
   },
 };

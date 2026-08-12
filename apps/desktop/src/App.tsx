@@ -138,10 +138,15 @@ import "./App.css";
 type ViewId = "canvas" | "nodes" | "settings";
 
 interface PendingWorkspaceReplacement {
-  kind: "history" | "import" | "recovery";
+  kind: "history" | "import" | "recovery" | "bootstrapRestore";
   returnView: ViewId;
   sourceName: string;
   workspace: WorkspaceSnapshot;
+  preparedRestoreId?: string;
+}
+
+interface PendingEncryptedWorkspaceImport extends ImportedWorkspaceFile {
+  bootstrapRestore: boolean;
 }
 
 interface AppProps {
@@ -354,7 +359,7 @@ function App({
   const [destroyWorkspaceConfirmation, setDestroyWorkspaceConfirmation] =
     useState("");
   const [pendingEncryptedImport, setPendingEncryptedImport] =
-    useState<ImportedWorkspaceFile | null>(null);
+    useState<PendingEncryptedWorkspaceImport | null>(null);
   const [encryptedImportPassword, setEncryptedImportPassword] = useState("");
   const [encryptedImportBusy, setEncryptedImportBusy] = useState(false);
   const [encryptedImportError, setEncryptedImportError] = useState<string | null>(
@@ -370,6 +375,8 @@ function App({
   const [offsiteTargetName, setOffsiteTargetName] = useState("Cloudflare R2");
   const [offsiteEndpoint, setOffsiteEndpoint] = useState("");
   const [offsiteToken, setOffsiteToken] = useState("");
+  const [offsiteRecoveryPage, setOffsiteRecoveryPage] =
+    useState<OffsiteBackupPage | null>(null);
   const embeddingAnalyzer = useMemo(
     () => new EmbeddingAnalyzer(embeddingGateway, embeddingVectorCache),
     [embeddingGateway, embeddingVectorCache],
@@ -1794,17 +1801,25 @@ function App({
     }
   }
 
-  function queueWorkspaceImport(file: ImportedWorkspaceFile, text = file.text) {
+  function queueWorkspaceImport(
+    file: ImportedWorkspaceFile,
+    text = file.text,
+    preparedRestoreId?: string,
+  ) {
     const result = parseWorkspaceExport(text);
     if (!result.ok) {
+      if (preparedRestoreId !== undefined) {
+        void workspaceSecurity.cancelRestore(preparedRestoreId);
+      }
       setBackupStatus(t(importFailureTranslationKeys[result.reason]));
       return;
     }
     setPendingWorkspaceReplacement({
-      kind: "import",
+      kind: preparedRestoreId === undefined ? "import" : "bootstrapRestore",
       returnView: activeView,
       sourceName: file.name,
       workspace: result.workspace,
+      preparedRestoreId,
     });
   }
 
@@ -1816,11 +1831,10 @@ function App({
         return;
       }
       if (isEncryptedWorkspaceExport(file.text)) {
-        if (!workspaceSecurityStatus.encrypted) {
-          setBackupStatus(t("backup.encryptedImportRequiresEncryption"));
-          return;
-        }
-        setPendingEncryptedImport(file);
+        setPendingEncryptedImport({
+          ...file,
+          bootstrapRestore: !workspaceSecurityStatus.encrypted,
+        });
         setEncryptedImportPassword("");
         setEncryptedImportError(null);
         return;
@@ -1842,14 +1856,22 @@ function App({
     setEncryptedImportBusy(true);
     setEncryptedImportError(null);
     try {
-      const plaintext = await workspaceSecurity.decryptExport(
-        pendingEncryptedImport.text,
-        encryptedImportPassword,
-      );
       const file = pendingEncryptedImport;
+      const prepared = file.bootstrapRestore
+        ? await workspaceSecurity.prepareRestore(
+            file.text,
+            encryptedImportPassword,
+          )
+        : null;
+      const plaintext =
+        prepared?.plaintext ??
+        (await workspaceSecurity.decryptExport(
+          file.text,
+          encryptedImportPassword,
+        ));
       setPendingEncryptedImport(null);
       setEncryptedImportPassword("");
-      queueWorkspaceImport(file, plaintext);
+      queueWorkspaceImport(file, plaintext, prepared?.id);
     } catch (error) {
       const reason = errorReason(error);
       setEncryptedImportError(
@@ -1943,6 +1965,64 @@ function App({
     setSecurityDialog("backupTarget");
   }
 
+  async function connectOffsiteRecovery() {
+    if (
+      offsiteBusy ||
+      offsiteEndpoint.trim().length === 0 ||
+      offsiteToken.length < 32
+    ) {
+      setOffsiteMessage(t("offsiteBackup.errors.invalidRecoveryConfiguration"));
+      return;
+    }
+    setOffsiteBusy(true);
+    setOffsiteMessage(null);
+    try {
+      const page = await offsiteBackup.listRecovery({
+        endpoint: offsiteEndpoint.trim(),
+        token: offsiteToken,
+      });
+      setOffsiteRecoveryPage(page);
+      setOffsiteMessage(t("offsiteBackup.recoveryConnected"));
+    } catch (error) {
+      setOffsiteRecoveryPage(null);
+      setOffsiteMessage(
+        t("offsiteBackup.errors.list", { reason: errorReason(error) }),
+      );
+    } finally {
+      setOffsiteBusy(false);
+    }
+  }
+
+  async function chooseOffsiteBootstrapBackup(snapshotId: string) {
+    if (offsiteBusy || offsiteRecoveryPage === null) {
+      return;
+    }
+    setOffsiteBusy(true);
+    setOffsiteMessage(null);
+    try {
+      const downloaded = await offsiteBackup.downloadRecovery({
+        endpoint: offsiteEndpoint.trim(),
+        token: offsiteToken,
+        snapshotId,
+      });
+      setPendingEncryptedImport({
+        name: t("offsiteBackup.restoreSource", {
+          time: formatBackupDate(downloaded.metadata.createdAtMs, activeLanguage),
+        }),
+        text: downloaded.encryptedExport,
+        bootstrapRestore: true,
+      });
+      setEncryptedImportPassword("");
+      setEncryptedImportError(null);
+    } catch (error) {
+      setOffsiteMessage(
+        t("offsiteBackup.errors.download", { reason: errorReason(error) }),
+      );
+    } finally {
+      setOffsiteBusy(false);
+    }
+  }
+
   async function refreshOffsiteBackups(targetId = selectedOffsiteTargetId) {
     if (targetId === null || offsiteBusy) {
       return;
@@ -2033,6 +2113,7 @@ function App({
           time: formatBackupDate(downloaded.metadata.createdAtMs, activeLanguage),
         }),
         text: downloaded.encryptedExport,
+        bootstrapRestore: false,
       });
       setEncryptedImportPassword("");
       setEncryptedImportError(null);
@@ -2051,8 +2132,23 @@ function App({
     }
 
     try {
-      await persistence.preserveForRecovery(workspaceRef.current);
-      await persistence.save(pendingWorkspaceReplacement.workspace);
+      if (pendingWorkspaceReplacement.kind === "bootstrapRestore") {
+        if (pendingWorkspaceReplacement.preparedRestoreId === undefined) {
+          throw new Error("workspace_restore_not_prepared");
+        }
+        await persistence.save(workspaceRef.current);
+        updateWorkspaceSecurityStatus(
+          await workspaceSecurity.commitRestore(
+            pendingWorkspaceReplacement.preparedRestoreId,
+          ),
+        );
+        setOffsiteEndpoint("");
+        setOffsiteToken("");
+        setOffsiteRecoveryPage(null);
+      } else {
+        await persistence.preserveForRecovery(workspaceRef.current);
+        await persistence.save(pendingWorkspaceReplacement.workspace);
+      }
       workspaceChangedInSessionRef.current = true;
       workspaceReplacementGenerationRef.current += 1;
       workspaceRef.current = pendingWorkspaceReplacement.workspace;
@@ -2071,7 +2167,9 @@ function App({
           ? t("backup.recoverySuccess")
           : pendingWorkspaceReplacement.kind === "history"
             ? t("backup.historyRestoreSuccess")
-            : t("backup.importSuccess"),
+            : pendingWorkspaceReplacement.kind === "bootstrapRestore"
+              ? t("offsiteBackup.bootstrapSuccess")
+              : t("backup.importSuccess"),
       );
       setPendingWorkspaceReplacement(null);
     } catch {
@@ -2079,9 +2177,18 @@ function App({
     }
   }
 
-  function cancelWorkspaceReplacement() {
+  async function cancelWorkspaceReplacement() {
     if (pendingWorkspaceReplacement === null) {
       return;
+    }
+    if (pendingWorkspaceReplacement.preparedRestoreId !== undefined) {
+      try {
+        await workspaceSecurity.cancelRestore(
+          pendingWorkspaceReplacement.preparedRestoreId,
+        );
+      } catch {
+        setBackupStatus(t("offsiteBackup.errors.cancelRestore"));
+      }
     }
     setActiveView(pendingWorkspaceReplacement.returnView);
     setPendingWorkspaceReplacement(null);
@@ -3169,7 +3276,87 @@ function App({
                 </div>
                 <div className="offsite-backup-settings">
                   {!workspaceSecurityStatus.encrypted ? (
-                    <small>{t("offsiteBackup.encryptionRequired")}</small>
+                    <div className="remote-embedding-fields offsite-target-form">
+                      <strong>{t("offsiteBackup.bootstrapTitle")}</strong>
+                      <small>{t("offsiteBackup.bootstrapDescription")}</small>
+                      <label>
+                        <span>{t("offsiteBackup.endpoint")}</span>
+                        <input
+                          disabled={offsiteBusy}
+                          onChange={(event) => {
+                            setOffsiteEndpoint(event.target.value);
+                            setOffsiteRecoveryPage(null);
+                          }}
+                          placeholder="https://linked-info-backup-api.example.workers.dev"
+                          type="url"
+                          value={offsiteEndpoint}
+                        />
+                      </label>
+                      <label>
+                        <span>{t("offsiteBackup.token")}</span>
+                        <input
+                          autoComplete="off"
+                          disabled={offsiteBusy}
+                          onChange={(event) => {
+                            setOffsiteToken(event.target.value);
+                            setOffsiteRecoveryPage(null);
+                          }}
+                          type="password"
+                          value={offsiteToken}
+                        />
+                      </label>
+                      <small>{t("offsiteBackup.bootstrapTokenDescription")}</small>
+                      <button
+                        className="secondary-button"
+                        disabled={offsiteBusy || !offsiteBackup.available}
+                        onClick={() => void connectOffsiteRecovery()}
+                        type="button"
+                      >
+                        <Cloud aria-hidden="true" size={15} />
+                        {t("offsiteBackup.connectForRecovery")}
+                      </button>
+                      {offsiteRecoveryPage !== null &&
+                        offsiteRecoveryPage.items.length === 0 && (
+                          <p className="automatic-backup-history-message">
+                            {t("offsiteBackup.empty")}
+                          </p>
+                        )}
+                      {offsiteRecoveryPage !== null &&
+                        offsiteRecoveryPage.items.length > 0 && (
+                          <div className="automatic-backup-list" role="list">
+                            {offsiteRecoveryPage.items.map((snapshot) => (
+                              <div
+                                className="automatic-backup-entry"
+                                key={snapshot.id}
+                                role="listitem"
+                              >
+                                <div>
+                                  <strong>
+                                    {formatBackupDate(
+                                      snapshot.createdAtMs,
+                                      activeLanguage,
+                                    )}
+                                  </strong>
+                                  <small>
+                                    {formatByteCount(snapshot.sizeBytes)} · {snapshot.sha256.slice(0, 12)}…
+                                  </small>
+                                </div>
+                                <button
+                                  className="primary-button"
+                                  disabled={offsiteBusy}
+                                  onClick={() =>
+                                    void chooseOffsiteBootstrapBackup(snapshot.id)
+                                  }
+                                  type="button"
+                                >
+                                  <ArchiveRestore aria-hidden="true" size={14} />
+                                  {t("offsiteBackup.restoreOnThisDevice")}
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                    </div>
                   ) : (
                     <>
                       {offsiteTargets.length > 0 && (

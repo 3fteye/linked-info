@@ -50,6 +50,7 @@ const BACKUP_MAXIMUM_AGE_MILLISECONDS: u64 = 90 * 24 * 60 * 60 * 1_000;
 const DEFAULT_IDLE_TIMEOUT_MINUTES: u32 = 15;
 const ALLOWED_IDLE_TIMEOUT_MINUTES: [u32; 3] = [5, 15, 30];
 const SENSITIVE_AUTHORIZATION_TTL_MILLISECONDS: u64 = 60_000;
+const PREPARED_RESTORE_TTL_MILLISECONDS: u64 = 5 * 60_000;
 const PASSWORD_BLOCKLIST: &[&str] = &[
     "123456789012345",
     "111111111111111",
@@ -191,6 +192,20 @@ struct EncryptedExportEnvelope {
     payload: CipherEnvelope,
 }
 
+struct PreparedWorkspaceRestore {
+    id: uuid::Uuid,
+    expires_at_milliseconds: u64,
+    envelope: EncryptedExportEnvelope,
+    data_key: Zeroizing<[u8; DATA_KEY_BYTES]>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreparedWorkspaceRestorePreview {
+    id: uuid::Uuid,
+    plaintext: String,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 enum DataKeyRotationPhase {
@@ -291,6 +306,7 @@ pub struct WorkspaceVaultState {
     sensitive_authorization: Mutex<Option<SensitiveAuthorization>>,
     failed_password_attempts: AtomicU32,
     password_retry_after_milliseconds: AtomicU64,
+    prepared_restore: Arc<Mutex<Option<PreparedWorkspaceRestore>>>,
 }
 
 impl Default for WorkspaceVaultState {
@@ -306,6 +322,7 @@ impl Default for WorkspaceVaultState {
             sensitive_authorization: Mutex::new(None),
             failed_password_attempts: AtomicU32::new(0),
             password_retry_after_milliseconds: AtomicU64::new(0),
+            prepared_restore: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -498,6 +515,9 @@ impl WorkspaceVaultState {
     }
 
     pub fn shutdown(&self) -> bool {
+        if let Ok(mut prepared_restore) = self.prepared_restore.lock() {
+            *prepared_restore = None;
+        }
         self.revoke_access().unwrap_or(false)
     }
 }
@@ -1421,6 +1441,136 @@ pub async fn decrypt_workspace_export(
         .map_err(|error| error.to_string())?
 }
 
+#[tauri::command]
+pub async fn prepare_workspace_restore(
+    app: AppHandle,
+    state: tauri::State<'_, WorkspaceVaultState>,
+    contents: String,
+    password: String,
+) -> Result<PreparedWorkspaceRestorePreview, String> {
+    if workspace_encryption_configured(&app) {
+        return Err("workspace_restore_requires_unconfigured_vault".to_owned());
+    }
+    state.check_password_attempt_allowed()?;
+    let contents = Zeroizing::new(contents);
+    let password = Zeroizing::new(password);
+    let opened = tauri::async_runtime::spawn_blocking(move || {
+        open_encrypted_export(contents.as_str(), password.as_str())
+    })
+    .await
+    .map_err(|error| error.to_string())?;
+    let (envelope, data_key, plaintext) = match opened {
+        Ok(opened) => opened,
+        Err(error) => {
+            if error == "workspace_vault_invalid_password" {
+                state.record_password_failure();
+            }
+            return Err(error);
+        }
+    };
+    validate_storage_envelope(&plaintext)
+        .map_err(|_| "workspace_restore_invalid_data".to_owned())?;
+    let id = uuid::Uuid::new_v4();
+    let expires_at_milliseconds =
+        now_milliseconds_lossy().saturating_add(PREPARED_RESTORE_TTL_MILLISECONDS);
+    *state
+        .prepared_restore
+        .lock()
+        .map_err(|_| "workspace_restore_state_unavailable".to_owned())? =
+        Some(PreparedWorkspaceRestore {
+            id,
+            expires_at_milliseconds,
+            envelope,
+            data_key: Zeroizing::new(data_key),
+        });
+    let prepared_restore = Arc::clone(&state.prepared_restore);
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(
+            PREPARED_RESTORE_TTL_MILLISECONDS,
+        ))
+        .await;
+        if let Ok(mut pending) = prepared_restore.lock() {
+            if pending.as_ref().is_some_and(|restore| restore.id == id) {
+                *pending = None;
+            }
+        }
+    });
+    state.reset_password_failures();
+    Ok(PreparedWorkspaceRestorePreview { id, plaintext })
+}
+
+#[tauri::command]
+pub async fn cancel_workspace_restore(
+    state: tauri::State<'_, WorkspaceVaultState>,
+    restore_id: uuid::Uuid,
+) -> Result<(), String> {
+    let mut pending = state
+        .prepared_restore
+        .lock()
+        .map_err(|_| "workspace_restore_state_unavailable".to_owned())?;
+    if pending.as_ref().is_some_and(|restore| {
+        restore.id == restore_id && restore.expires_at_milliseconds >= now_milliseconds_lossy()
+    }) {
+        *pending = None;
+        Ok(())
+    } else {
+        Err("workspace_restore_not_prepared".to_owned())
+    }
+}
+
+#[tauri::command]
+pub async fn commit_workspace_restore(
+    app: AppHandle,
+    state: tauri::State<'_, WorkspaceVaultState>,
+    vector_cache_state: tauri::State<'_, crate::vector_cache::VectorCacheState>,
+    embedding_state: tauri::State<'_, crate::embedding::EmbeddingState>,
+    llm_state: tauri::State<'_, crate::llm::LlmState>,
+    system_unlock_state: tauri::State<'_, SystemUnlockState>,
+    restore_id: uuid::Uuid,
+) -> Result<WorkspaceSecurityStatus, String> {
+    crate::vector_cache::purge_for_encryption(&app, &vector_cache_state).await?;
+    let prepared = {
+        let mut pending = state
+            .prepared_restore
+            .lock()
+            .map_err(|_| "workspace_restore_state_unavailable".to_owned())?;
+        if pending.as_ref().is_none_or(|restore| {
+            restore.id != restore_id || restore.expires_at_milliseconds < now_milliseconds_lossy()
+        }) {
+            return Err("workspace_restore_not_prepared".to_owned());
+        }
+        pending
+            .take()
+            .ok_or_else(|| "workspace_restore_not_prepared".to_owned())?
+    };
+    let store = workspace_store(&app).map_err(|error| error.to_string())?;
+    let operation_lock = Arc::clone(&state.operation_lock);
+    let data_key = tauri::async_runtime::spawn_blocking(move || {
+        let _guard = operation_lock
+            .lock()
+            .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
+        recover_pending_migration(&store)?;
+        if store.encryption_configured() {
+            return Err("workspace_vault_already_configured".to_owned());
+        }
+        install_prepared_workspace_restore(&store, prepared)
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+    state.replace_data_key(data_key)?;
+    state.set_idle_timeout(default_idle_timeout_minutes());
+    crate::vector_cache::purge_for_encryption(&app, &vector_cache_state).await?;
+    let _ = embedding_state.shutdown();
+    llm_state.shutdown();
+    Ok(WorkspaceSecurityStatus {
+        encrypted: true,
+        locked: false,
+        system_unlock_available: system_unlock_state.provider().available(),
+        system_unlock_enabled: false,
+        idle_timeout_minutes: default_idle_timeout_minutes(),
+    })
+}
+
 fn workspace_store(app: &AppHandle) -> io::Result<WorkspaceFileStore> {
     app.path()
         .app_data_dir()
@@ -2080,6 +2230,64 @@ fn migrate_plaintext_store(
     Ok(data_key)
 }
 
+fn install_prepared_workspace_restore(
+    store: &WorkspaceFileStore,
+    prepared: PreparedWorkspaceRestore,
+) -> Result<[u8; DATA_KEY_BYTES], String> {
+    fs::create_dir_all(&store.base_directory).map_err(|error| error.to_string())?;
+    let plaintext = decrypt_export_payload(&prepared.envelope, &prepared.data_key)?;
+    validate_storage_envelope(&plaintext)
+        .map_err(|_| "workspace_restore_invalid_data".to_owned())?;
+    let existing_primary = store
+        .read_plaintext(WorkspaceFileSlot::Primary)
+        .map_err(|error| error.to_string())?;
+    let existing_recovery = store
+        .read_plaintext(WorkspaceFileSlot::Recovery)
+        .map_err(|error| error.to_string())?;
+    let recovery = existing_primary.or(existing_recovery);
+    if let Some(recovery) = recovery.as_deref() {
+        validate_storage_envelope(recovery)
+            .map_err(|_| "workspace_restore_invalid_existing_data".to_owned())?;
+    }
+
+    prepare_backup_migration(store, &prepared.data_key)?;
+    let encrypted_primary =
+        encrypt_workspace_file(&plaintext, WorkspaceFileSlot::Primary, &prepared.data_key)?;
+    write_atomically(
+        &store.pending_path(WorkspaceFileSlot::Primary),
+        encrypted_primary.as_bytes(),
+    )
+    .map_err(|error| error.to_string())?;
+
+    let mut migrated_slots = vec![WorkspaceFileSlot::Primary];
+    if let Some(recovery) = recovery {
+        let encrypted_recovery =
+            encrypt_workspace_file(&recovery, WorkspaceFileSlot::Recovery, &prepared.data_key)?;
+        write_atomically(
+            &store.pending_path(WorkspaceFileSlot::Recovery),
+            encrypted_recovery.as_bytes(),
+        )
+        .map_err(|error| error.to_string())?;
+        migrated_slots.push(WorkspaceFileSlot::Recovery);
+    }
+
+    let metadata = VaultMetadata {
+        format: VAULT_FORMAT.to_owned(),
+        version: CRYPTO_VERSION,
+        kdf: prepared.envelope.kdf,
+        wrapped_data_key: prepared.envelope.wrapped_data_key,
+        migrated_slots,
+        system_unlock: None,
+        idle_timeout_minutes: default_idle_timeout_minutes(),
+    };
+    let serialized = serde_json::to_vec(&metadata).map_err(|error| error.to_string())?;
+    write_atomically(&store.pending_vault_path(), &serialized)
+        .map_err(|error| error.to_string())?;
+    finish_pending_migration(store, &metadata)?;
+    verify_encrypted_store(store, &prepared.data_key)?;
+    Ok(*prepared.data_key)
+}
+
 fn finish_pending_migration(
     store: &WorkspaceFileStore,
     metadata: &VaultMetadata,
@@ -2548,6 +2756,13 @@ fn encrypt_export(
 }
 
 fn decrypt_export(contents: &str, password: &str) -> Result<String, String> {
+    open_encrypted_export(contents, password).map(|(_, _, plaintext)| plaintext)
+}
+
+fn open_encrypted_export(
+    contents: &str,
+    password: &str,
+) -> Result<(EncryptedExportEnvelope, [u8; DATA_KEY_BYTES], String), String> {
     let envelope: EncryptedExportEnvelope = serde_json::from_str(contents)
         .map_err(|_| "workspace_export_invalid_encrypted_envelope".to_owned())?;
     if envelope.format != ENCRYPTED_EXPORT_FORMAT || envelope.version != CRYPTO_VERSION {
@@ -2556,17 +2771,23 @@ fn decrypt_export(contents: &str, password: &str) -> Result<String, String> {
     let metadata = VaultMetadata {
         format: VAULT_FORMAT.to_owned(),
         version: CRYPTO_VERSION,
-        kdf: envelope.kdf,
-        wrapped_data_key: envelope.wrapped_data_key,
+        kdf: envelope.kdf.clone(),
+        wrapped_data_key: envelope.wrapped_data_key.clone(),
         migrated_slots: Vec::new(),
         system_unlock: None,
         idle_timeout_minutes: None,
     };
-    let data_key = Zeroizing::new(unwrap_data_key(&metadata, password)?);
-    let plaintext = decrypt_bytes(&envelope.payload, &data_key, EXPORT_PAYLOAD_AAD)?;
-    let text = String::from_utf8(plaintext)
-        .map_err(|_| "workspace_export_invalid_plaintext".to_owned())?;
-    Ok(text)
+    let data_key = unwrap_data_key(&metadata, password)?;
+    let plaintext = decrypt_export_payload(&envelope, &data_key)?;
+    Ok((envelope, data_key, plaintext))
+}
+
+fn decrypt_export_payload(
+    envelope: &EncryptedExportEnvelope,
+    data_key: &[u8; DATA_KEY_BYTES],
+) -> Result<String, String> {
+    let plaintext = decrypt_bytes(&envelope.payload, data_key, EXPORT_PAYLOAD_AAD)?;
+    String::from_utf8(plaintext).map_err(|_| "workspace_export_invalid_plaintext".to_owned())
 }
 
 fn validate_storage_envelope(contents: &str) -> io::Result<()> {
@@ -3571,6 +3792,56 @@ mod tests {
             decrypt_export(&encrypted, "incorrect password").unwrap_err(),
             "workspace_vault_invalid_password"
         );
+    }
+
+    #[test]
+    fn restores_an_encrypted_export_without_the_original_device_vault() {
+        let directory = test_directory();
+        let store = WorkspaceFileStore::new(directory.clone());
+        let current = workspace("current-local-workspace");
+        let restored = workspace("restored-from-offsite");
+        store
+            .write_plaintext(WorkspaceFileSlot::Primary, &current)
+            .unwrap();
+
+        let source_key = random_array::<DATA_KEY_BYTES>().unwrap();
+        let source_metadata =
+            create_vault_metadata("correct horse battery", &source_key, Vec::new()).unwrap();
+        let encrypted = encrypt_export(&restored, &source_metadata, &source_key).unwrap();
+        let (envelope, opened_key, preview) =
+            open_encrypted_export(&encrypted, "correct horse battery").unwrap();
+        assert_eq!(preview, restored);
+
+        let installed_key = install_prepared_workspace_restore(
+            &store,
+            PreparedWorkspaceRestore {
+                id: uuid::Uuid::new_v4(),
+                expires_at_milliseconds: u64::MAX,
+                envelope,
+                data_key: Zeroizing::new(opened_key),
+            },
+        )
+        .unwrap();
+        let installed_metadata = store.read_vault_metadata().unwrap().unwrap();
+
+        assert_eq!(
+            unwrap_data_key(&installed_metadata, "correct horse battery").unwrap(),
+            installed_key
+        );
+        assert!(installed_metadata.system_unlock.is_none());
+        assert_eq!(
+            store
+                .read(WorkspaceFileSlot::Primary, Some(&installed_key))
+                .unwrap(),
+            Some(restored)
+        );
+        assert_eq!(
+            store
+                .read(WorkspaceFileSlot::Recovery, Some(&installed_key))
+                .unwrap(),
+            Some(current)
+        );
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
