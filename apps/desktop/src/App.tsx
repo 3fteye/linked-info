@@ -380,6 +380,8 @@ function App({
   const [offsitePage, setOffsitePage] = useState<OffsiteBackupPage | null>(null);
   const [offsiteBusy, setOffsiteBusy] = useState(false);
   const [offsiteMessage, setOffsiteMessage] = useState<string | null>(null);
+  const [appNotice, setAppNotice] = useState<string | null>(null);
+  const appNoticeTimerRef = useRef<number | null>(null);
   const [offsiteProvider, setOffsiteProvider] = useState<
     "cloudflareWorkerR2" | "s3Compatible"
   >("cloudflareWorkerR2");
@@ -466,6 +468,25 @@ function App({
       offsiteTargets.find((target) => target.id === selectedOffsiteTargetId) ?? null,
     [offsiteTargets, selectedOffsiteTargetId],
   );
+
+  useEffect(() => {
+    return () => {
+      if (appNoticeTimerRef.current !== null) {
+        window.clearTimeout(appNoticeTimerRef.current);
+      }
+    };
+  }, []);
+
+  function showAppNotice(message: string) {
+    if (appNoticeTimerRef.current !== null) {
+      window.clearTimeout(appNoticeTimerRef.current);
+    }
+    setAppNotice(message);
+    appNoticeTimerRef.current = window.setTimeout(() => {
+      setAppNotice(null);
+      appNoticeTimerRef.current = null;
+    }, 6_000);
+  }
 
   useEffect(() => {
     if (!workspaceSecurityStatus.encrypted) {
@@ -948,7 +969,7 @@ function App({
         embeddingAnalyzer.clearCache();
         setVectorCacheStatus(await embeddingVectorCache.inspect());
         updateWorkspaceSecurityStatus(status);
-        setSecurityMessage(t("security.enableSuccess"));
+        showAppNotice(t("security.enableSuccess"));
       } else {
         const sensitiveOperation =
           securityDialog === "change"
@@ -972,7 +993,7 @@ function App({
             securityPassword,
             authorization,
           );
-          setSecurityMessage(t("security.changeSuccess"));
+          showAppNotice(t("security.changeSuccess"));
         } else if (securityDialog === "rotate") {
           // Rotation revokes the current Rust plaintext session before it starts.
           // Prevent the unmount cleanup from attempting one final stale write.
@@ -1021,7 +1042,7 @@ function App({
           setOffsiteAccessKeyId("");
           setOffsiteSecretAccessKey("");
           setOffsiteSessionToken("");
-          setOffsiteMessage(t("offsiteBackup.targetConnected"));
+          showAppNotice(t("offsiteBackup.targetConnected"));
         } else if (pendingUnreadableExport !== null) {
           await exportUnreadableData(
             pendingUnreadableExport.raw,
@@ -1095,7 +1116,7 @@ function App({
             ),
           );
       updateWorkspaceSecurityStatus(status);
-      setSecurityMessage(
+      showAppNotice(
         enable
           ? t("security.systemUnlockEnableSuccess")
           : t("security.systemUnlockDisableSuccess"),
@@ -1126,7 +1147,7 @@ function App({
       updateWorkspaceSecurityStatus(
         await workspaceSecurity.setIdleTimeout(minutes),
       );
-      setSecurityMessage(t("security.idleTimeoutUpdated"));
+      showAppNotice(t("security.idleTimeoutUpdated"));
     } catch (error) {
       setSecurityMessage(
         t("security.idleTimeoutUpdateFailed", {
@@ -1167,7 +1188,7 @@ function App({
       setRecoveryStorageProblem(null);
       setRecoveryClearDialog(false);
       setRecoveryClearPassword("");
-      setSecurityMessage(t("security.clearRecoverySuccess"));
+      showAppNotice(t("security.clearRecoverySuccess"));
     } catch (error) {
       setSecurityMessage(
         t("security.clearRecoveryFailed", { reason: errorReason(error) }),
@@ -1254,7 +1275,7 @@ function App({
       const status = await embeddingVectorCache.clear();
       embeddingAnalyzer.clearCache();
       setVectorCacheStatus(status);
-      setVectorCacheMessage(t("smartReference.settings.vectorCache.clearSuccess"));
+      showAppNotice(t("smartReference.settings.vectorCache.clearSuccess"));
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
       setVectorCacheMessage(
@@ -1852,7 +1873,7 @@ function App({
           : `linked-info-${date}.json`,
       );
       if (exported) {
-        setBackupStatus(t("backup.exportSuccess"));
+        showAppNotice(t("backup.exportSuccess"));
       }
     } catch {
       setBackupStatus(t("backup.exportFailed"));
@@ -2285,7 +2306,7 @@ function App({
         ...connection,
       });
       setOffsiteRecoveryPage(page);
-      setOffsiteMessage(t("offsiteBackup.recoveryConnected"));
+      showAppNotice(t("offsiteBackup.recoveryConnected"));
     } catch (error) {
       setOffsiteRecoveryPage(null);
       setOffsiteMessage(
@@ -2368,7 +2389,7 @@ function App({
       ]);
       setOffsiteTargets(targets);
       setOffsitePage(page);
-      setOffsiteMessage(t("offsiteBackup.uploadSuccess"));
+      showAppNotice(t("offsiteBackup.uploadSuccess"));
     } catch (error) {
       setOffsiteMessage(
         t("offsiteBackup.errors.upload", { reason: errorReason(error) }),
@@ -2390,7 +2411,7 @@ function App({
         snapshotId,
       );
       setOffsiteTargets(await offsiteBackup.inspectTargets());
-      setOffsiteMessage(
+      showAppNotice(
         t("offsiteBackup.verifySuccess", {
           size: formatByteCount(verification.downloadedBytes),
         }),
@@ -2449,7 +2470,6 @@ function App({
       );
       setOffsiteRestoreDrillPassword("");
       setOffsiteRestoreDrillSucceeded(true);
-      setOffsiteMessage(t("offsiteBackup.restoreDrillSuccess"));
     } catch (error) {
       const reason = errorReason(error);
       setOffsiteRestoreDrillError(
@@ -2527,7 +2547,7 @@ function App({
       setRecoveryAvailable(true);
       setRecoveryStorageProblem(null);
       setActiveView("canvas");
-      setBackupStatus(
+      showAppNotice(
         pendingWorkspaceReplacement.kind === "recovery"
           ? t("backup.recoverySuccess")
           : pendingWorkspaceReplacement.kind === "history"
@@ -4927,6 +4947,25 @@ function App({
               </>
             )}
           </section>
+        </div>
+      )}
+
+      {appNotice !== null && (
+        <div className="app-status-toast" role="status">
+          <span>{appNotice}</span>
+          <button
+            aria-label={t("actions.close")}
+            onClick={() => {
+              if (appNoticeTimerRef.current !== null) {
+                window.clearTimeout(appNoticeTimerRef.current);
+                appNoticeTimerRef.current = null;
+              }
+              setAppNotice(null);
+            }}
+            type="button"
+          >
+            <X aria-hidden="true" size={15} />
+          </button>
         </div>
       )}
 

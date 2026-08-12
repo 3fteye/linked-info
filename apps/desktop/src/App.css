@@ -180,6 +180,47 @@ button:disabled {
   font-size: 12px !important;
 }
 
+.app-status-toast {
+  position: fixed;
+  top: 72px;
+  right: 18px;
+  z-index: 90;
+  display: flex;
+  align-items: center;
+  max-width: min(440px, calc(100vw - 36px));
+  padding: 10px 10px 10px 12px;
+  gap: 10px;
+  border: 1px solid #b7d0c0;
+  border-radius: 7px;
+  color: #275e43;
+  background: #f4faf6;
+  box-shadow: 0 8px 24px rgb(24 39 29 / 14%);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.app-status-toast > span {
+  min-width: 0;
+  flex: 1;
+}
+
+.app-status-toast > button {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  flex: 0 0 auto;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  color: inherit;
+  background: transparent;
+}
+
+.app-status-toast > button:hover {
+  background: rgb(39 94 67 / 9%);
+}
+
 .storage-problem-card {
   width: min(560px, 100%);
   padding: 28px;
