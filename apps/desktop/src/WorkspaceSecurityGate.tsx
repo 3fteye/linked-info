@@ -49,6 +49,69 @@ export default function WorkspaceSecurityGate({
     };
   }, [retryGeneration, security]);
 
+  useEffect(() => {
+    let active = true;
+    let unsubscribe: (() => void) | undefined;
+    void security
+      .subscribeLocked(() => {
+        if (!active) {
+          return;
+        }
+        setStatus((current) =>
+          current === null ? current : { ...current, locked: true },
+        );
+        setPassword("");
+        setError(null);
+        void security.inspect().then((next) => {
+          if (active) {
+            setStatus(next);
+          }
+        });
+      })
+      .then((dispose) => {
+        if (active) {
+          unsubscribe = dispose;
+        } else {
+          dispose();
+        }
+      })
+      .catch((reason) => {
+        if (active) {
+          setError(errorReason(reason));
+        }
+      });
+    return () => {
+      active = false;
+      unsubscribe?.();
+    };
+  }, [security]);
+
+  useEffect(() => {
+    if (status?.encrypted !== true || status.locked) {
+      return;
+    }
+    let lastReportedAt = 0;
+    const recordActivity = () => {
+      const now = Date.now();
+      if (now - lastReportedAt < 30_000) {
+        return;
+      }
+      lastReportedAt = now;
+      void security.recordActivity().catch(() => {
+        // The Rust idle timer remains authoritative if an activity report fails.
+      });
+    };
+    const eventTypes = ["pointerdown", "keydown", "input", "wheel"] as const;
+    for (const eventType of eventTypes) {
+      window.addEventListener(eventType, recordActivity, { capture: true });
+    }
+    return () => {
+      for (const eventType of eventTypes) {
+        window.removeEventListener(eventType, recordActivity, { capture: true });
+      }
+    };
+  }, [security, status?.encrypted, status?.locked]);
+
   async function unlock() {
     if (busy || password.length === 0) {
       return;

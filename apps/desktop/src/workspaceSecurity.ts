@@ -1,10 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 
 export interface WorkspaceSecurityStatus {
   encrypted: boolean;
   locked: boolean;
   systemUnlockAvailable: boolean;
   systemUnlockEnabled: boolean;
+  idleTimeoutMinutes: number | null;
 }
 
 export interface WorkspaceSecurity {
@@ -17,6 +19,9 @@ export interface WorkspaceSecurity {
   disableSystemUnlock(): Promise<WorkspaceSecurityStatus>;
   changePassword(password: string): Promise<void>;
   lock(): Promise<WorkspaceSecurityStatus>;
+  setIdleTimeout(minutes: number | null): Promise<WorkspaceSecurityStatus>;
+  recordActivity(): Promise<void>;
+  subscribeLocked(listener: (reason: string) => void): Promise<() => void>;
   encryptExport(contents: string): Promise<string>;
   decryptExport(contents: string, password: string): Promise<string>;
 }
@@ -26,6 +31,7 @@ const plaintextStatus: WorkspaceSecurityStatus = {
   locked: false,
   systemUnlockAvailable: false,
   systemUnlockEnabled: false,
+  idleTimeoutMinutes: null,
 };
 
 export const tauriWorkspaceSecurity: WorkspaceSecurity = {
@@ -57,6 +63,19 @@ export const tauriWorkspaceSecurity: WorkspaceSecurity = {
   },
   lock() {
     return invoke<WorkspaceSecurityStatus>("lock_workspace");
+  },
+  setIdleTimeout(minutes) {
+    return invoke<WorkspaceSecurityStatus>("set_workspace_idle_timeout", {
+      minutes,
+    });
+  },
+  recordActivity() {
+    return invoke<void>("record_workspace_activity");
+  },
+  subscribeLocked(listener) {
+    return listen<string>("workspace-security-locked", (event) => {
+      listener(event.payload);
+    });
   },
   encryptExport(contents) {
     return invoke<string>("encrypt_workspace_export", { contents });
@@ -94,6 +113,13 @@ export const unavailableWorkspaceSecurity: WorkspaceSecurity = {
   },
   async lock() {
     throw new Error("workspace encryption is unavailable outside the desktop app");
+  },
+  async setIdleTimeout() {
+    return plaintextStatus;
+  },
+  async recordActivity() {},
+  async subscribeLocked() {
+    return () => {};
   },
   async encryptExport() {
     throw new Error("workspace encryption is unavailable outside the desktop app");

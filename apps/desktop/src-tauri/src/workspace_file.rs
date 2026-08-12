@@ -15,7 +15,7 @@ use std::{
     },
     time::{SystemTime, UNIX_EPOCH},
 };
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::system_unlock::{SystemUnlockProvider, SystemUnlockState};
@@ -41,6 +41,8 @@ const MAXIMUM_PASSWORD_BYTES: usize = 1_024;
 const BACKUP_INTERVAL_MILLISECONDS: u64 = 60 * 60 * 1_000;
 const BACKUP_MAXIMUM_COUNT: usize = 30;
 const BACKUP_MAXIMUM_BYTES: u64 = 512 * 1024 * 1024;
+const DEFAULT_IDLE_TIMEOUT_MINUTES: u32 = 15;
+const ALLOWED_IDLE_TIMEOUT_MINUTES: [u32; 3] = [5, 15, 30];
 #[cfg(not(test))]
 const ARGON2_MEMORY_KIB: u32 = 64 * 1_024;
 #[cfg(test)]
@@ -54,6 +56,33 @@ const VAULT_KEY_AAD: &[u8] = b"linked-info-workspace-vault-key-v1";
 const SYSTEM_UNLOCK_KEY_AAD_PREFIX: &[u8] = b"linked-info-system-unlock-v1\0";
 const EXPORT_PAYLOAD_AAD: &[u8] = b"linked-info-workspace-export-v1";
 static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+pub const WORKSPACE_LOCKED_EVENT: &str = "workspace-security-locked";
+
+fn default_idle_timeout_minutes() -> Option<u32> {
+    Some(DEFAULT_IDLE_TIMEOUT_MINUTES)
+}
+
+fn minutes_to_milliseconds(minutes: u32) -> u64 {
+    u64::from(minutes) * 60_000
+}
+
+fn now_milliseconds_lossy() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| u64::try_from(duration.as_millis()).ok())
+        .unwrap_or(0)
+}
+
+fn validate_idle_timeout_minutes(minutes: Option<u32>) -> Result<(), String> {
+    if minutes.is_none()
+        || minutes.is_some_and(|value| ALLOWED_IDLE_TIMEOUT_MINUTES.contains(&value))
+    {
+        Ok(())
+    } else {
+        Err("workspace_vault_invalid_idle_timeout".to_owned())
+    }
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -110,6 +139,8 @@ struct VaultMetadata {
     migrated_slots: Vec<WorkspaceFileSlot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     system_unlock: Option<SystemUnlockEnvelope>,
+    #[serde(default = "default_idle_timeout_minutes")]
+    idle_timeout_minutes: Option<u32>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -146,6 +177,7 @@ pub struct WorkspaceSecurityStatus {
     locked: bool,
     system_unlock_available: bool,
     system_unlock_enabled: bool,
+    idle_timeout_minutes: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -181,10 +213,31 @@ pub struct WorkspaceBackupCaptureResult {
     status: WorkspaceBackupHistoryStatus,
 }
 
-#[derive(Default)]
 pub struct WorkspaceVaultState {
     data_key: Arc<Mutex<Option<Zeroizing<[u8; DATA_KEY_BYTES]>>>>,
     operation_lock: Arc<Mutex<()>>,
+    access_generation: AtomicU64,
+    idle_timeout_milliseconds: AtomicU64,
+    last_activity_milliseconds: AtomicU64,
+}
+
+impl Default for WorkspaceVaultState {
+    fn default() -> Self {
+        Self {
+            data_key: Arc::new(Mutex::new(None)),
+            operation_lock: Arc::new(Mutex::new(())),
+            access_generation: AtomicU64::new(0),
+            idle_timeout_milliseconds: AtomicU64::new(minutes_to_milliseconds(
+                DEFAULT_IDLE_TIMEOUT_MINUTES,
+            )),
+            last_activity_milliseconds: AtomicU64::new(now_milliseconds_lossy()),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct WorkspaceAccessPermit {
+    generation: u64,
 }
 
 impl WorkspaceVaultState {
@@ -198,11 +251,13 @@ impl WorkspaceVaultState {
     }
 
     fn replace_data_key(&self, key: [u8; DATA_KEY_BYTES]) -> Result<(), String> {
+        self.access_generation.fetch_add(1, Ordering::AcqRel);
         let mut slot = self
             .data_key
             .lock()
             .map_err(|_| "workspace_vault_state_unavailable".to_owned())?;
         *slot = Some(Zeroizing::new(key));
+        self.record_activity();
         Ok(())
     }
 
@@ -213,13 +268,15 @@ impl WorkspaceVaultState {
             .map(|slot| slot.as_ref().map(|key| Zeroizing::new(**key)))
     }
 
-    fn clear_data_key(&self) -> Result<(), String> {
+    fn revoke_access(&self) -> Result<bool, String> {
+        self.access_generation.fetch_add(1, Ordering::AcqRel);
         let mut slot = self
             .data_key
             .lock()
             .map_err(|_| "workspace_vault_state_unavailable".to_owned())?;
+        let was_unlocked = slot.is_some();
         *slot = None;
-        Ok(())
+        Ok(was_unlocked)
     }
 
     fn is_unlocked(&self) -> Result<bool, String> {
@@ -229,8 +286,56 @@ impl WorkspaceVaultState {
             .map_err(|_| "workspace_vault_state_unavailable".to_owned())
     }
 
-    pub fn shutdown(&self) {
-        let _ = self.clear_data_key();
+    fn access_permit(&self) -> Result<WorkspaceAccessPermit, String> {
+        if !self.is_unlocked()? {
+            return Err("workspace_vault_locked".to_owned());
+        }
+        Ok(WorkspaceAccessPermit {
+            generation: self.access_generation.load(Ordering::Acquire),
+        })
+    }
+
+    pub fn ensure_access_permit(&self, permit: WorkspaceAccessPermit) -> Result<(), String> {
+        if self.access_generation.load(Ordering::Acquire) != permit.generation
+            || !self.is_unlocked()?
+        {
+            return Err("workspace_vault_session_expired".to_owned());
+        }
+        Ok(())
+    }
+
+    fn set_idle_timeout(&self, minutes: Option<u32>) {
+        self.idle_timeout_milliseconds.store(
+            minutes.map(minutes_to_milliseconds).unwrap_or(0),
+            Ordering::Release,
+        );
+    }
+
+    fn idle_timeout_minutes(&self) -> Option<u32> {
+        let milliseconds = self.idle_timeout_milliseconds.load(Ordering::Acquire);
+        (milliseconds > 0).then(|| u32::try_from(milliseconds / 60_000).unwrap_or(u32::MAX))
+    }
+
+    pub fn record_activity(&self) {
+        if self.is_unlocked().unwrap_or(false) {
+            self.last_activity_milliseconds
+                .store(now_milliseconds_lossy(), Ordering::Release);
+        }
+    }
+
+    pub fn should_idle_lock(&self) -> bool {
+        if !self.is_unlocked().unwrap_or(false) {
+            return false;
+        }
+        let timeout = self.idle_timeout_milliseconds.load(Ordering::Acquire);
+        timeout > 0
+            && now_milliseconds_lossy()
+                .saturating_sub(self.last_activity_milliseconds.load(Ordering::Acquire))
+                >= timeout
+    }
+
+    pub fn shutdown(&self) -> bool {
+        self.revoke_access().unwrap_or(false)
     }
 }
 
@@ -387,10 +492,11 @@ pub async fn read_workspace_file(
     state: tauri::State<'_, WorkspaceVaultState>,
     slot: WorkspaceFileSlot,
 ) -> Result<Option<String>, String> {
+    let permit = begin_workspace_access(&app, &state)?;
     let store = workspace_store(&app).map_err(|error| error.to_string())?;
     let operation_lock = Arc::clone(&state.operation_lock);
     let data_key = state.optional_data_key()?;
-    tauri::async_runtime::spawn_blocking(move || {
+    let result = tauri::async_runtime::spawn_blocking(move || {
         let _guard = operation_lock
             .lock()
             .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
@@ -406,7 +512,9 @@ pub async fn read_workspace_file(
         store.read(slot, active_key)
     })
     .await
-    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())??;
+    ensure_workspace_access(&app, &state, permit)?;
+    Ok(result)
 }
 
 #[tauri::command]
@@ -484,10 +592,11 @@ pub async fn read_workspace_backup(
     state: tauri::State<'_, WorkspaceVaultState>,
     id: String,
 ) -> Result<String, String> {
+    let permit = begin_workspace_access(&app, &state)?;
     let store = workspace_store(&app).map_err(|error| error.to_string())?;
     let operation_lock = Arc::clone(&state.operation_lock);
     let data_key = state.optional_data_key()?;
-    tauri::async_runtime::spawn_blocking(move || {
+    let result = tauri::async_runtime::spawn_blocking(move || {
         let _guard = operation_lock
             .lock()
             .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
@@ -496,7 +605,9 @@ pub async fn read_workspace_backup(
         read_backup_contents(&store, &id, active_key)
     })
     .await
-    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())??;
+    ensure_workspace_access(&app, &state, permit)?;
+    Ok(result)
 }
 
 #[tauri::command]
@@ -518,11 +629,17 @@ pub async fn inspect_workspace_security(
     .await
     .map_err(|error| error.to_string())??;
     let encrypted = metadata.is_some();
+    let idle_timeout_minutes = metadata
+        .as_ref()
+        .map(|value| value.idle_timeout_minutes)
+        .unwrap_or_else(default_idle_timeout_minutes);
+    state.set_idle_timeout(idle_timeout_minutes);
     Ok(WorkspaceSecurityStatus {
         encrypted,
         locked: encrypted && !state.is_unlocked()?,
         system_unlock_available: provider.available(),
         system_unlock_enabled: system_unlock_enabled(metadata.as_ref(), provider.as_ref()),
+        idle_timeout_minutes,
     })
 }
 
@@ -538,28 +655,35 @@ pub async fn unlock_workspace(
     let password = Zeroizing::new(password);
     let provider = system_unlock_state.provider();
     let provider_for_unlock = Arc::clone(&provider);
-    let (data_key, system_unlock_enabled) = tauri::async_runtime::spawn_blocking(move || {
-        let _guard = operation_lock
-            .lock()
-            .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
-        recover_pending_migration(&store)?;
-        let metadata = store
-            .read_vault_metadata()?
-            .ok_or_else(|| "workspace_vault_not_configured".to_owned())?;
-        let data_key = unwrap_data_key(&metadata, &password)?;
-        verify_encrypted_store(&store, &data_key)?;
-        let system_unlock_enabled =
-            system_unlock_enabled(Some(&metadata), provider_for_unlock.as_ref());
-        Ok::<([u8; DATA_KEY_BYTES], bool), String>((data_key, system_unlock_enabled))
-    })
-    .await
-    .map_err(|error| error.to_string())??;
+    let (data_key, system_unlock_enabled, idle_timeout_minutes) =
+        tauri::async_runtime::spawn_blocking(move || {
+            let _guard = operation_lock
+                .lock()
+                .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
+            recover_pending_migration(&store)?;
+            let metadata = store
+                .read_vault_metadata()?
+                .ok_or_else(|| "workspace_vault_not_configured".to_owned())?;
+            let data_key = unwrap_data_key(&metadata, &password)?;
+            verify_encrypted_store(&store, &data_key)?;
+            let system_unlock_enabled =
+                system_unlock_enabled(Some(&metadata), provider_for_unlock.as_ref());
+            Ok::<([u8; DATA_KEY_BYTES], bool, Option<u32>), String>((
+                data_key,
+                system_unlock_enabled,
+                metadata.idle_timeout_minutes,
+            ))
+        })
+        .await
+        .map_err(|error| error.to_string())??;
+    state.set_idle_timeout(idle_timeout_minutes);
     state.replace_data_key(data_key)?;
     Ok(WorkspaceSecurityStatus {
         encrypted: true,
         locked: false,
         system_unlock_available: provider.available(),
         system_unlock_enabled,
+        idle_timeout_minutes,
     })
 }
 
@@ -578,7 +702,7 @@ pub async fn unlock_workspace_with_system(
     }
     crate::system_unlock::verify_user_presence(&app, message).await?;
     let provider_for_unlock = Arc::clone(&provider);
-    let data_key = tauri::async_runtime::spawn_blocking(move || {
+    let (data_key, idle_timeout_minutes) = tauri::async_runtime::spawn_blocking(move || {
         let _guard = operation_lock
             .lock()
             .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
@@ -588,16 +712,18 @@ pub async fn unlock_workspace_with_system(
             .ok_or_else(|| "workspace_vault_not_configured".to_owned())?;
         let data_key = unwrap_data_key_with_system(&metadata, provider_for_unlock.as_ref())?;
         verify_encrypted_store(&store, &data_key)?;
-        Ok::<[u8; DATA_KEY_BYTES], String>(data_key)
+        Ok::<([u8; DATA_KEY_BYTES], Option<u32>), String>((data_key, metadata.idle_timeout_minutes))
     })
     .await
     .map_err(|error| error.to_string())??;
+    state.set_idle_timeout(idle_timeout_minutes);
     state.replace_data_key(data_key)?;
     Ok(WorkspaceSecurityStatus {
         encrypted: true,
         locked: false,
         system_unlock_available: true,
         system_unlock_enabled: true,
+        idle_timeout_minutes,
     })
 }
 
@@ -637,6 +763,7 @@ pub async fn enable_workspace_encryption(
         locked: false,
         system_unlock_available: system_unlock_state.provider().available(),
         system_unlock_enabled: false,
+        idle_timeout_minutes: default_idle_timeout_minutes(),
     })
 }
 
@@ -725,6 +852,7 @@ pub async fn enable_system_unlock(
         locked: false,
         system_unlock_available: true,
         system_unlock_enabled: true,
+        idle_timeout_minutes: state.idle_timeout_minutes(),
     })
 }
 
@@ -764,7 +892,43 @@ pub async fn disable_system_unlock(
         locked: false,
         system_unlock_available: provider.available(),
         system_unlock_enabled: false,
+        idle_timeout_minutes: state.idle_timeout_minutes(),
     })
+}
+
+#[tauri::command]
+pub async fn set_workspace_idle_timeout(
+    app: AppHandle,
+    state: tauri::State<'_, WorkspaceVaultState>,
+    system_unlock_state: tauri::State<'_, SystemUnlockState>,
+    minutes: Option<u32>,
+) -> Result<WorkspaceSecurityStatus, String> {
+    validate_idle_timeout_minutes(minutes)?;
+    let _ = state.data_key()?;
+    let store = workspace_store(&app).map_err(|error| error.to_string())?;
+    let operation_lock = Arc::clone(&state.operation_lock);
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = operation_lock
+            .lock()
+            .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
+        recover_pending_migration(&store)?;
+        let mut metadata = store
+            .read_vault_metadata()?
+            .ok_or_else(|| "workspace_vault_not_configured".to_owned())?;
+        metadata.idle_timeout_minutes = minutes;
+        let serialized = serde_json::to_vec(&metadata).map_err(|error| error.to_string())?;
+        write_atomically(&store.vault_path(), &serialized).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+    state.set_idle_timeout(minutes);
+    state.record_activity();
+    inspect_workspace_security(app, state, system_unlock_state).await
+}
+
+#[tauri::command]
+pub fn record_workspace_activity(state: tauri::State<'_, WorkspaceVaultState>) {
+    state.record_activity();
 }
 
 #[tauri::command]
@@ -772,12 +936,8 @@ pub async fn lock_workspace(
     app: AppHandle,
     state: tauri::State<'_, WorkspaceVaultState>,
     system_unlock_state: tauri::State<'_, SystemUnlockState>,
-    embedding_state: tauri::State<'_, crate::embedding::EmbeddingState>,
-    llm_state: tauri::State<'_, crate::llm::LlmState>,
 ) -> Result<WorkspaceSecurityStatus, String> {
-    let _ = embedding_state.shutdown();
-    llm_state.shutdown();
-    state.shutdown();
+    lock_workspace_runtime(&app, "manual");
     inspect_workspace_security(app, state, system_unlock_state).await
 }
 
@@ -827,14 +987,49 @@ pub fn workspace_encryption_configured(app: &AppHandle) -> bool {
         .unwrap_or(false)
 }
 
-pub fn require_workspace_unlocked(
+pub fn begin_workspace_access(
     app: &AppHandle,
     state: &WorkspaceVaultState,
-) -> Result<(), String> {
-    if workspace_encryption_configured(app) && !state.is_unlocked()? {
-        return Err("workspace_vault_locked".to_owned());
+) -> Result<Option<WorkspaceAccessPermit>, String> {
+    if workspace_encryption_configured(app) {
+        state.access_permit().map(Some)
+    } else {
+        Ok(None)
     }
-    Ok(())
+}
+
+pub fn ensure_workspace_access(
+    app: &AppHandle,
+    state: &WorkspaceVaultState,
+    permit: Option<WorkspaceAccessPermit>,
+) -> Result<(), String> {
+    match permit {
+        Some(permit) => state.ensure_access_permit(permit),
+        None if workspace_encryption_configured(app) => {
+            Err("workspace_vault_session_expired".to_owned())
+        }
+        None => Ok(()),
+    }
+}
+
+pub fn revoke_workspace_access(app: &AppHandle, reason: &str) -> bool {
+    let state = app.state::<WorkspaceVaultState>();
+    let was_unlocked = state.shutdown();
+    if was_unlocked {
+        let _ = app.emit(WORKSPACE_LOCKED_EVENT, reason);
+    }
+    was_unlocked
+}
+
+pub fn cleanup_locked_workspace(app: &AppHandle) {
+    let _ = app.state::<crate::embedding::EmbeddingState>().shutdown();
+    app.state::<crate::llm::LlmState>().shutdown();
+}
+
+pub fn lock_workspace_runtime(app: &AppHandle, reason: &str) -> bool {
+    let was_unlocked = revoke_workspace_access(app, reason);
+    cleanup_locked_workspace(app);
+    was_unlocked
 }
 
 fn validate_new_password(password: &str) -> Result<(), String> {
@@ -1140,6 +1335,7 @@ fn create_vault_metadata(
         wrapped_data_key,
         migrated_slots,
         system_unlock: None,
+        idle_timeout_minutes: default_idle_timeout_minutes(),
     })
 }
 
@@ -1150,6 +1346,7 @@ fn rewrap_vault_metadata(
 ) -> Result<VaultMetadata, String> {
     let mut metadata = create_vault_metadata(password, data_key, previous.migrated_slots)?;
     metadata.system_unlock = previous.system_unlock;
+    metadata.idle_timeout_minutes = previous.idle_timeout_minutes;
     Ok(metadata)
 }
 
@@ -1214,6 +1411,7 @@ fn parse_vault_metadata(contents: &str) -> Result<VaultMetadata, String> {
     {
         return Err("workspace_vault_invalid_slots".to_owned());
     }
+    validate_idle_timeout_minutes(metadata.idle_timeout_minutes)?;
     if let Some(system_unlock) = metadata.system_unlock.as_ref() {
         if system_unlock.provider.is_empty()
             || system_unlock.provider.len() > 128
@@ -1503,6 +1701,7 @@ fn decrypt_export(contents: &str, password: &str) -> Result<String, String> {
         wrapped_data_key: envelope.wrapped_data_key,
         migrated_slots: Vec::new(),
         system_unlock: None,
+        idle_timeout_minutes: None,
     };
     let data_key = Zeroizing::new(unwrap_data_key(&metadata, password)?);
     let plaintext = decrypt_bytes(&envelope.payload, &data_key, EXPORT_PAYLOAD_AAD)?;
@@ -1666,6 +1865,33 @@ mod tests {
             "viewport": null
         })
         .to_string()
+    }
+
+    #[test]
+    fn locking_invalidates_existing_workspace_access_permits() {
+        let state = WorkspaceVaultState::default();
+        state.replace_data_key([7; DATA_KEY_BYTES]).unwrap();
+        let permit = state.access_permit().unwrap();
+
+        assert!(state.ensure_access_permit(permit).is_ok());
+        assert!(state.shutdown());
+        assert_eq!(
+            state.ensure_access_permit(permit).unwrap_err(),
+            "workspace_vault_session_expired"
+        );
+        assert!(!state.shutdown());
+    }
+
+    #[test]
+    fn idle_timeout_is_decided_by_rust_state_and_can_be_disabled() {
+        let state = WorkspaceVaultState::default();
+        state.replace_data_key([9; DATA_KEY_BYTES]).unwrap();
+        state.set_idle_timeout(Some(5));
+        state.last_activity_milliseconds.store(0, Ordering::Release);
+
+        assert!(state.should_idle_lock());
+        state.set_idle_timeout(None);
+        assert!(!state.should_idle_lock());
     }
 
     #[test]
@@ -2080,6 +2306,19 @@ mod tests {
             unwrap_data_key(&parsed, "correct horse battery").unwrap(),
             data_key
         );
+    }
+
+    #[test]
+    fn vault_metadata_created_before_idle_lock_support_uses_the_default() {
+        let data_key = random_array::<DATA_KEY_BYTES>().unwrap();
+        let metadata =
+            create_vault_metadata("correct horse battery", &data_key, Vec::new()).unwrap();
+        let mut value = serde_json::to_value(metadata).unwrap();
+        value.as_object_mut().unwrap().remove("idleTimeoutMinutes");
+
+        let parsed = parse_vault_metadata(&value.to_string()).unwrap();
+
+        assert_eq!(parsed.idle_timeout_minutes, Some(15));
     }
 
     #[test]

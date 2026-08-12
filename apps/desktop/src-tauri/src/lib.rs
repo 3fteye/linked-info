@@ -2,9 +2,10 @@ mod embedding;
 mod llm;
 mod system_unlock;
 mod vector_cache;
+#[cfg(windows)]
+mod windows_session;
 mod workspace_file;
 
-#[cfg(desktop)]
 use tauri::Manager;
 
 #[tauri::command]
@@ -43,6 +44,23 @@ pub fn run() {
         .manage(workspace_file::WorkspaceVaultState::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
+        .setup(|app| {
+            #[cfg(windows)]
+            windows_session::register(app).map_err(std::io::Error::other)?;
+            let app_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    let should_lock = app_handle
+                        .state::<workspace_file::WorkspaceVaultState>()
+                        .should_idle_lock();
+                    if should_lock {
+                        workspace_file::lock_workspace_runtime(&app_handle, "idle_timeout");
+                    }
+                }
+            });
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             embedding::cancel_local_embedding_download,
             embedding::embed_local_texts,
@@ -71,6 +89,8 @@ pub fn run() {
             workspace_file::lock_workspace,
             workspace_file::read_workspace_backup,
             workspace_file::read_workspace_file,
+            workspace_file::record_workspace_activity,
+            workspace_file::set_workspace_idle_timeout,
             workspace_file::unlock_workspace,
             workspace_file::unlock_workspace_with_system,
             workspace_file::write_workspace_file

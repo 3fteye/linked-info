@@ -202,6 +202,11 @@ impl Default for LlmState {
 
 impl LlmState {
     pub fn shutdown(&self) {
+        if let Ok(slot) = self.download_cancel.lock()
+            && let Some(cancel) = slot.as_ref()
+        {
+            cancel.store(true, Ordering::Release);
+        }
         let _ = stop_server(&self.server);
     }
 }
@@ -1257,7 +1262,7 @@ pub async fn review_local_references(
     model_id: String,
     request: LocalLlmReviewRequest,
 ) -> Result<LocalLlmReviewResponse, String> {
-    crate::workspace_file::require_workspace_unlocked(&app, &vault_state)?;
+    let access_permit = crate::workspace_file::begin_workspace_access(&app, &vault_state)?;
     validate_review_request(&request)?;
     let spec = local_llm_model_spec(&model_id)?;
     let (cancel, _guard) = begin_llm_task(&state)?;
@@ -1265,10 +1270,13 @@ pub async fn review_local_references(
     ensure_local_llm_model(&app, &cache_dir, spec, cancel)
         .await
         .map_err(|error| emit_prepare_failure(&app, spec, error))?;
+    crate::workspace_file::ensure_workspace_access(&app, &vault_state, access_permit)?;
     let model_path = local_llm_model_path(&cache_dir, spec);
     let connection = ensure_local_llm_server(&app, &state, spec, &model_path).await?;
+    crate::workspace_file::ensure_workspace_access(&app, &vault_state, access_permit)?;
     emit_local_llm_progress(&app, spec, LocalLlmPhase::Inferencing, spec.size, None);
     let response = request_local_llm_review(&connection, &request).await;
+    crate::workspace_file::ensure_workspace_access(&app, &vault_state, access_permit)?;
     match response {
         Ok(response) => {
             emit_local_llm_progress(&app, spec, LocalLlmPhase::Ready, spec.size, None);

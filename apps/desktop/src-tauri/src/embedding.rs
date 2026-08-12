@@ -162,6 +162,7 @@ pub struct EmbeddingState {
     local_model: Arc<Mutex<Option<LoadedLocalModel>>>,
     local_task_active: Arc<AtomicBool>,
     local_download_cancel: Arc<Mutex<Option<Arc<AtomicBool>>>>,
+    unload_requested: Arc<AtomicBool>,
 }
 
 impl Default for EmbeddingState {
@@ -170,12 +171,14 @@ impl Default for EmbeddingState {
             local_model: Arc::new(Mutex::new(None)),
             local_task_active: Arc::new(AtomicBool::new(false)),
             local_download_cancel: Arc::new(Mutex::new(None)),
+            unload_requested: Arc::new(AtomicBool::new(false)),
         }
     }
 }
 
 impl EmbeddingState {
     pub fn shutdown(&self) -> Result<(), String> {
+        self.unload_requested.store(true, Ordering::Release);
         if let Ok(slot) = self.local_download_cancel.lock() {
             if let Some(cancel) = slot.as_ref() {
                 cancel.store(true, Ordering::Release);
@@ -184,6 +187,7 @@ impl EmbeddingState {
         match self.local_model.try_lock() {
             Ok(mut model) => {
                 *model = None;
+                self.unload_requested.store(false, Ordering::Release);
                 Ok(())
             }
             Err(std::sync::TryLockError::WouldBlock) => Ok(()),
@@ -197,12 +201,19 @@ impl EmbeddingState {
 struct LocalTaskGuard {
     active: Arc<AtomicBool>,
     cancel_slot: Arc<Mutex<Option<Arc<AtomicBool>>>>,
+    local_model: Arc<Mutex<Option<LoadedLocalModel>>>,
+    unload_requested: Arc<AtomicBool>,
 }
 
 impl Drop for LocalTaskGuard {
     fn drop(&mut self) {
         if let Ok(mut slot) = self.cancel_slot.lock() {
             *slot = None;
+        }
+        if self.unload_requested.swap(false, Ordering::AcqRel) {
+            if let Ok(mut model) = self.local_model.lock() {
+                *model = None;
+            }
         }
         self.active.store(false, Ordering::Release);
     }
@@ -433,6 +444,8 @@ fn begin_local_task(state: &EmbeddingState) -> Result<(Arc<AtomicBool>, LocalTas
     let guard = LocalTaskGuard {
         active: Arc::clone(&state.local_task_active),
         cancel_slot: Arc::clone(&state.local_download_cancel),
+        local_model: Arc::clone(&state.local_model),
+        unload_requested: Arc::clone(&state.unload_requested),
     };
     Ok((cancel, guard))
 }
@@ -834,7 +847,7 @@ pub async fn embed_local_texts(
     model_id: String,
     inputs: Vec<LocalEmbeddingInput>,
 ) -> Result<Vec<Vec<f32>>, String> {
-    crate::workspace_file::require_workspace_unlocked(&app, &vault_state)?;
+    let access_permit = crate::workspace_file::begin_workspace_access(&app, &vault_state)?;
     let spec = local_model_spec(&model_id)?;
     let texts = inputs
         .into_iter()
@@ -853,6 +866,7 @@ pub async fn embed_local_texts(
     ensure_model_files(&app, &cache_dir, spec, Arc::clone(&cancel))
         .await
         .map_err(|error| emit_prepare_failure(&app, spec, error))?;
+    crate::workspace_file::ensure_workspace_access(&app, &vault_state, access_permit)?;
 
     emit_local_progress(
         &app,
@@ -891,6 +905,7 @@ pub async fn embed_local_texts(
     })
     .await
     .map_err(|error| format!("local embedding loading task failed: {error}"))??;
+    crate::workspace_file::ensure_workspace_access(&app, &vault_state, access_permit)?;
 
     emit_local_progress(
         &app,
@@ -914,6 +929,7 @@ pub async fn embed_local_texts(
     })
     .await
     .map_err(|error| format!("local embedding task failed: {error}"))??;
+    crate::workspace_file::ensure_workspace_access(&app, &vault_state, access_permit)?;
     emit_local_progress(
         &app,
         spec,

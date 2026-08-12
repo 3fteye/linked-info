@@ -4,6 +4,7 @@ import {
   ArchiveRestore,
   BrainCircuit,
   Cloud,
+  Clock3,
   Cpu,
   Database,
   Download,
@@ -817,6 +818,33 @@ function App({
     } catch (error) {
       setSecurityMessage(
         t("security.systemUnlockOperationFailed", {
+          reason: errorReason(error),
+        }),
+      );
+      try {
+        updateWorkspaceSecurityStatus(await workspaceSecurity.inspect());
+      } catch {
+        // Keep the previous status when even the status probe fails.
+      }
+    } finally {
+      setSecurityBusy(false);
+    }
+  }
+
+  async function changeIdleTimeout(minutes: number | null) {
+    if (securityBusy) {
+      return;
+    }
+    setSecurityBusy(true);
+    setSecurityMessage(null);
+    try {
+      updateWorkspaceSecurityStatus(
+        await workspaceSecurity.setIdleTimeout(minutes),
+      );
+      setSecurityMessage(t("security.idleTimeoutUpdated"));
+    } catch (error) {
+      setSecurityMessage(
+        t("security.idleTimeoutUpdateFailed", {
           reason: errorReason(error),
         }),
       );
@@ -2477,6 +2505,29 @@ function App({
                         <LockKeyhole aria-hidden="true" size={15} />
                         {t("security.lockNow")}
                       </button>
+                      <label className="security-idle-setting">
+                        <Clock3 aria-hidden="true" size={15} />
+                        <span>{t("security.idleTimeout")}</span>
+                        <select
+                          aria-label={t("security.idleTimeout")}
+                          disabled={securityBusy}
+                          onChange={(event) => {
+                            const value = event.target.value;
+                            void changeIdleTimeout(
+                              value === "off" ? null : Number(value),
+                            );
+                          }}
+                          value={
+                            workspaceSecurityStatus.idleTimeoutMinutes?.toString() ??
+                            "off"
+                          }
+                        >
+                          <option value="5">{t("security.idleTimeout5")}</option>
+                          <option value="15">{t("security.idleTimeout15")}</option>
+                          <option value="30">{t("security.idleTimeout30")}</option>
+                          <option value="off">{t("security.idleTimeoutOff")}</option>
+                        </select>
+                      </label>
                       <small>
                         {!workspaceSecurityStatus.systemUnlockAvailable
                           ? t("security.systemUnlockUnavailable")

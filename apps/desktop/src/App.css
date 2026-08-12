@@ -1474,6 +1474,38 @@ h1 {
   line-height: 1.45;
 }
 
+.security-idle-setting {
+  display: inline-flex;
+  min-height: 34px;
+  align-items: center;
+  gap: 7px;
+  padding: 0 7px 0 10px;
+  border: 1px solid #dce2dd;
+  border-radius: 7px;
+  color: #465149;
+  background: #ffffff;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.security-idle-setting > svg {
+  color: #587060;
+}
+
+.security-idle-setting select {
+  min-height: 26px;
+  border: 0;
+  color: #314038;
+  background: transparent;
+  font: inherit;
+  font-weight: 500;
+}
+
+.security-idle-setting select:focus-visible {
+  outline: 2px solid rgb(58 126 91 / 22%);
+  outline-offset: 1px;
+}
+
 .backup-status {
   grid-column: 2;
   width: 100%;
