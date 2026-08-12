@@ -14,6 +14,7 @@ export interface WorkspaceBackupHistoryStatus {
   totalBytes: number;
   maximumCount: number;
   maximumBytes: number;
+  maximumAgeMs: number;
   intervalMs: number;
 }
 
@@ -47,6 +48,7 @@ const unavailableStatus: WorkspaceBackupHistoryStatus = {
   totalBytes: 0,
   maximumCount: 0,
   maximumBytes: 0,
+  maximumAgeMs: 0,
   intervalMs: 0,
 };
 

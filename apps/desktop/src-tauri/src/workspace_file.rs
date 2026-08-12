@@ -46,6 +46,7 @@ const MAXIMUM_PASSWORD_BYTES: usize = 1_024;
 const BACKUP_INTERVAL_MILLISECONDS: u64 = 60 * 60 * 1_000;
 const BACKUP_MAXIMUM_COUNT: usize = 30;
 const BACKUP_MAXIMUM_BYTES: u64 = 512 * 1024 * 1024;
+const BACKUP_MAXIMUM_AGE_MILLISECONDS: u64 = 90 * 24 * 60 * 60 * 1_000;
 const DEFAULT_IDLE_TIMEOUT_MINUTES: u32 = 15;
 const ALLOWED_IDLE_TIMEOUT_MINUTES: [u32; 3] = [5, 15, 30];
 const SENSITIVE_AUTHORIZATION_TTL_MILLISECONDS: u64 = 60_000;
@@ -269,6 +270,7 @@ pub struct WorkspaceBackupHistoryStatus {
     total_bytes: u64,
     maximum_count: usize,
     maximum_bytes: u64,
+    maximum_age_ms: u64,
     interval_ms: u64,
 }
 
@@ -378,7 +380,7 @@ impl WorkspaceVaultState {
         })
     }
 
-    fn access_generation(&self) -> Arc<AtomicU64> {
+    pub(crate) fn access_generation(&self) -> Arc<AtomicU64> {
         Arc::clone(&self.access_generation)
     }
 
@@ -754,6 +756,7 @@ pub async fn inspect_workspace_backup_history(
             .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
         recover_pending_migration(&store)?;
         let active_key = active_workspace_key(&store, data_key.as_deref())?;
+        prune_workspace_backups(&store, current_time_milliseconds()?)?;
         inspect_backup_history(&store, active_key)
     })
     .await
@@ -1025,6 +1028,7 @@ pub async fn rotate_workspace_data_key(
 
     state.revoke_access()?;
     cleanup_locked_workspace(&app);
+    crate::secret_clipboard::clear_active(&app);
     let rotation_result = tauri::async_runtime::spawn_blocking(move || {
         let _guard = operation_lock
             .lock()
@@ -1427,7 +1431,7 @@ pub fn ensure_workspace_access(
     }
 }
 
-fn ensure_access_generation(
+pub(crate) fn ensure_access_generation(
     access_generation: &AtomicU64,
     permit: Option<WorkspaceAccessPermit>,
 ) -> Result<(), String> {
@@ -1455,6 +1459,7 @@ pub fn cleanup_locked_workspace(app: &AppHandle) {
 pub fn lock_workspace_runtime(app: &AppHandle, reason: &str) -> bool {
     let was_unlocked = revoke_workspace_access(app, reason);
     cleanup_locked_workspace(app);
+    crate::secret_clipboard::clear_active(app);
     was_unlocked
 }
 
@@ -1593,6 +1598,7 @@ fn inspect_backup_history(
         total_bytes,
         maximum_count: BACKUP_MAXIMUM_COUNT,
         maximum_bytes: BACKUP_MAXIMUM_BYTES,
+        maximum_age_ms: BACKUP_MAXIMUM_AGE_MILLISECONDS,
         interval_ms: BACKUP_INTERVAL_MILLISECONDS,
     })
 }
@@ -1602,6 +1608,7 @@ fn capture_workspace_backup_at(
     data_key: Option<&[u8; DATA_KEY_BYTES]>,
     now_ms: u64,
 ) -> Result<WorkspaceBackupCaptureResult, String> {
+    prune_workspace_backups(store, now_ms)?;
     let primary = fs::read(store.path(WorkspaceFileSlot::Primary)).map_err(|error| {
         if error.kind() == io::ErrorKind::NotFound {
             "workspace_backup_primary_missing".to_owned()
@@ -1629,15 +1636,24 @@ fn capture_workspace_backup_at(
     let id = format!("{now_ms}-{}", uuid::Uuid::new_v4());
     let path = store.backup_path(&id)?;
     write_atomically(&path, &primary).map_err(|error| error.to_string())?;
-    prune_workspace_backups(store)?;
+    prune_workspace_backups(store, now_ms)?;
     Ok(WorkspaceBackupCaptureResult {
         created: true,
         status: inspect_backup_history(store, data_key)?,
     })
 }
 
-fn prune_workspace_backups(store: &WorkspaceFileStore) -> Result<(), String> {
+fn prune_workspace_backups(store: &WorkspaceFileStore, now_ms: u64) -> Result<(), String> {
     let mut files = store.backup_files()?;
+    for expired in files
+        .iter()
+        .filter(|file| now_ms.saturating_sub(file.created_at_ms) > BACKUP_MAXIMUM_AGE_MILLISECONDS)
+    {
+        fs::remove_file(&expired.path).map_err(|error| error.to_string())?;
+    }
+    files.retain(|file| {
+        now_ms.saturating_sub(file.created_at_ms) <= BACKUP_MAXIMUM_AGE_MILLISECONDS
+    });
     let mut total_bytes = files.iter().map(|file| file.size_bytes).sum::<u64>();
     while files.len() > 1
         && (files.len() > BACKUP_MAXIMUM_COUNT || total_bytes > BACKUP_MAXIMUM_BYTES)
@@ -2985,6 +3001,40 @@ mod tests {
                 .entries
                 .iter()
                 .any(|entry| entry.created_at_ms == started_at)
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn expires_old_history_and_refreshes_an_unchanged_snapshot() {
+        let directory = test_directory();
+        let store = WorkspaceFileStore::new(directory.clone());
+        let started_at = 1_800_000_000_000_u64;
+        let primary = workspace("age-limited-backup");
+        store
+            .write_plaintext(WorkspaceFileSlot::Primary, &primary)
+            .unwrap();
+        let first = capture_workspace_backup_at(&store, None, started_at).unwrap();
+        let first_id = first.status.entries[0].id.clone();
+
+        let refreshed = capture_workspace_backup_at(
+            &store,
+            None,
+            started_at + BACKUP_MAXIMUM_AGE_MILLISECONDS + 1,
+        )
+        .unwrap();
+
+        assert!(refreshed.created);
+        assert_eq!(refreshed.status.entries.len(), 1);
+        assert_eq!(
+            refreshed.status.maximum_age_ms,
+            BACKUP_MAXIMUM_AGE_MILLISECONDS
+        );
+        assert_ne!(refreshed.status.entries[0].id, first_id);
+        assert!(!store.backup_path(&first_id).unwrap().exists());
+        assert_eq!(
+            read_backup_contents(&store, &refreshed.status.entries[0].id, None,).unwrap(),
+            primary
         );
         fs::remove_dir_all(directory).unwrap();
     }

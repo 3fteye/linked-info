@@ -23,6 +23,11 @@ export const resources = {
         undo: "撤销",
         redo: "重做",
       },
+      secretClipboard: {
+        copy: "复制内容（按秘密处理）",
+        copied: "已复制；若剪贴板没有变化，将在 {{seconds}} 秒后清除。系统剪贴板历史或跨设备同步仍可能保留副本。",
+        failed: "无法使用秘密剪贴板，内容没有复制。",
+      },
       deleteNode: {
         title: "删除这个节点？",
         titleMultiple: "删除选中的 {{count}} 个节点？",
@@ -341,7 +346,7 @@ export const resources = {
         restoreRecovery: "恢复导入前数据",
         historyTitle: "自动备份历史",
         historyDescription: "首次变更后建立快照，之后内容有变化时最多每小时一份；历史只保存在当前设备。",
-        historyUsage: "{{count}} / {{maximumCount}} 份 · {{size}} / {{maximumSize}}",
+        historyUsage: "{{count}} / {{maximumCount}} 份 · {{size}} / {{maximumSize}} · 最长 {{maximumAgeDays}} 天",
         historyLoading: "正在读取备份历史……",
         historyEmpty: "还没有自动备份。编辑并成功保存工作区后会建立第一份。",
         historyRestore: "恢复",
@@ -438,6 +443,11 @@ export const resources = {
         editNode: "Edit node",
         undo: "Undo",
         redo: "Redo",
+      },
+      secretClipboard: {
+        copy: "Copy content as secret",
+        copied: "Copied. If the clipboard does not change, it will be cleared in {{seconds}} seconds. System clipboard history or cross-device sync may still retain a copy.",
+        failed: "The secret clipboard is unavailable. The content was not copied.",
       },
       deleteNode: {
         title: "Delete this node?",
@@ -757,7 +767,7 @@ export const resources = {
         restoreRecovery: "Restore pre-import data",
         historyTitle: "Automatic backup history",
         historyDescription: "Creates a snapshot after the first change, then at most hourly when content changes. History stays on this device.",
-        historyUsage: "{{count}} / {{maximumCount}} copies · {{size}} / {{maximumSize}}",
+        historyUsage: "{{count}} / {{maximumCount}} copies · {{size}} / {{maximumSize}} · up to {{maximumAgeDays}} days",
         historyLoading: "Loading backup history…",
         historyEmpty: "No automatic backups yet. The first one is created after the workspace is edited and saved successfully.",
         historyRestore: "Restore",

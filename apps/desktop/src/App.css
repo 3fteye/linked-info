@@ -906,6 +906,28 @@ h1 {
   background: #f8e9e7;
 }
 
+.graph-status-toast {
+  position: absolute;
+  right: 18px;
+  bottom: 18px;
+  z-index: 25;
+  max-width: min(440px, calc(100% - 36px));
+  padding: 10px 12px;
+  border: 1px solid #b7d0c0;
+  border-radius: 7px;
+  color: #275e43;
+  background: #f4faf6;
+  box-shadow: 0 8px 24px rgb(24 39 29 / 14%);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.graph-status-toast[data-error="true"] {
+  border-color: #ddb7b2;
+  color: #8b3832;
+  background: #fff5f4;
+}
+
 .reference-search-popover {
   position: absolute;
   z-index: 25;

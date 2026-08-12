@@ -1,6 +1,7 @@
 mod embedding;
 mod file_transfer;
 mod llm;
+mod secret_clipboard;
 mod system_unlock;
 mod vector_cache;
 #[cfg(windows)]
@@ -19,6 +20,7 @@ fn exit_application(
     let _ = embedding_state.shutdown();
     llm_state.shutdown();
     vault_state.shutdown();
+    secret_clipboard::clear_active(&app);
     app.exit(0);
 }
 
@@ -40,6 +42,7 @@ pub fn run() {
     builder
         .manage(embedding::EmbeddingState::default())
         .manage(llm::LlmState::default())
+        .manage(secret_clipboard::SecretClipboardState::default())
         .manage(system_unlock::SystemUnlockState::default())
         .manage(vector_cache::VectorCacheState::default())
         .manage(workspace_file::WorkspaceVaultState::default())
@@ -74,6 +77,8 @@ pub fn run() {
             llm::prepare_local_llm_model,
             llm::review_local_references,
             llm::stop_local_llm,
+            secret_clipboard::copy_secret_to_clipboard,
+            secret_clipboard::inspect_secret_clipboard,
             vector_cache::clear_embedding_vector_cache,
             vector_cache::inspect_embedding_vector_cache,
             vector_cache::read_embedding_vector_cache,

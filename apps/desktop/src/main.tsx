@@ -35,6 +35,10 @@ import {
   tauriWorkspaceBackupHistory,
   unavailableWorkspaceBackupHistory,
 } from "./workspaceBackupHistory";
+import {
+  tauriSecretClipboard,
+  unavailableSecretClipboard,
+} from "./secretClipboard";
 
 document.addEventListener(
   "contextmenu",
@@ -75,6 +79,9 @@ const workspaceSecurity = runningInTauri
 const workspaceBackupHistory = runningInTauri
   ? tauriWorkspaceBackupHistory
   : unavailableWorkspaceBackupHistory;
+const secretClipboard = runningInTauri
+  ? tauriSecretClipboard
+  : unavailableSecretClipboard;
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
@@ -90,6 +97,7 @@ ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
           localLlmRuntime={localLlmRuntime}
           lifecycle={lifecycle}
           persistence={persistence}
+          secretClipboard={secretClipboard}
           updateWorkspaceSecurityStatus={updateWorkspaceSecurityStatus}
           workspaceBackupHistory={workspaceBackupHistory}
           workspaceSecurity={workspaceSecurity}

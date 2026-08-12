@@ -64,6 +64,10 @@ import type {
   WorkspaceBackupHistory,
   WorkspaceBackupHistoryStatus,
 } from "./workspaceBackupHistory";
+import type {
+  SecretClipboard,
+  SecretClipboardStatus,
+} from "./secretClipboard";
 import WorkspaceRestorePreview from "./WorkspaceRestorePreview";
 import type { WorkspaceLifecycle } from "./workspaceLifecycle";
 import {
@@ -145,6 +149,7 @@ interface AppProps {
   localLlmRuntime: LocalLlmRuntime;
   lifecycle: WorkspaceLifecycle;
   persistence: WorkspacePersistence;
+  secretClipboard: SecretClipboard;
   updateWorkspaceSecurityStatus: (status: WorkspaceSecurityStatus) => void;
   workspaceBackupHistory: WorkspaceBackupHistory;
   workspaceSecurity: WorkspaceSecurity;
@@ -267,6 +272,7 @@ function App({
   localLlmRuntime,
   lifecycle,
   persistence,
+  secretClipboard,
   updateWorkspaceSecurityStatus,
   workspaceBackupHistory,
   workspaceSecurity,
@@ -321,6 +327,8 @@ function App({
     useState("");
   const [securityBusy, setSecurityBusy] = useState(false);
   const [securityMessage, setSecurityMessage] = useState<string | null>(null);
+  const [secretClipboardStatus, setSecretClipboardStatus] =
+    useState<SecretClipboardStatus | null>(null);
   const [recoveryClearDialog, setRecoveryClearDialog] = useState(false);
   const [recoveryClearPassword, setRecoveryClearPassword] = useState("");
   const [destroyWorkspaceDialog, setDestroyWorkspaceDialog] = useState(false);
@@ -387,6 +395,29 @@ function App({
     () => embeddingTransmissionEstimate(workspace.nodes),
     [workspace.nodes],
   );
+
+  useEffect(() => {
+    if (!workspaceSecurityStatus.encrypted) {
+      setSecretClipboardStatus(null);
+      return;
+    }
+    let active = true;
+    void secretClipboard
+      .inspect()
+      .then((status) => {
+        if (active) {
+          setSecretClipboardStatus(status);
+        }
+      })
+      .catch(() => {
+        if (active) {
+          setSecretClipboardStatus(null);
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [secretClipboard, workspaceSecurityStatus.encrypted]);
 
   useEffect(() => {
     let active = true;
@@ -507,7 +538,7 @@ function App({
   }, [activeView, embeddingVectorCache, t]);
 
   useEffect(() => {
-    if (activeView !== "settings" || !workspaceBackupHistory.available) {
+    if (!persistenceReady || !workspaceBackupHistory.available) {
       return;
     }
     let active = true;
@@ -533,7 +564,7 @@ function App({
     return () => {
       active = false;
     };
-  }, [activeView, t, workspaceBackupHistory]);
+  }, [persistenceReady, t, workspaceBackupHistory]);
 
   useEffect(() => {
     let active = true;
@@ -2803,6 +2834,10 @@ function App({
                             maximumSize: formatByteCount(
                               automaticBackupHistory.maximumBytes,
                             ),
+                            maximumAgeDays: Math.round(
+                              automaticBackupHistory.maximumAgeMs /
+                                (24 * 60 * 60 * 1_000),
+                            ),
                           })}
                         </small>
                       )}
@@ -2905,6 +2940,13 @@ function App({
                 createNode: t("actions.newNode"),
                 content: t("editor.content"),
                 contentPlaceholder: t("editor.contentPlaceholder"),
+                copySecret: t("secretClipboard.copy"),
+                copySecretFailed: t("secretClipboard.failed"),
+                copySecretSuccess: t("secretClipboard.copied", {
+                  seconds: Math.round(
+                    (secretClipboardStatus?.clearAfterMs ?? 45_000) / 1_000,
+                  ),
+                }),
                 editNode: t("actions.editNode"),
                 deleteNode: t("actions.deleteNode"),
                 deleteNodeBody: (names) =>
@@ -2943,6 +2985,13 @@ function App({
               onAnalyzeNode={(nodeId) => void analyzeNodeReferences(nodeId)}
               onCreateNode={createNode}
               onCreateReferencedNode={createReferencedNode}
+              onCopySecret={
+                secretClipboardStatus?.available === true
+                  ? async (text) => {
+                      setSecretClipboardStatus(await secretClipboard.copy(text));
+                    }
+                  : null
+              }
               onDeleteNodes={deleteNodes}
               onEditNode={editNode}
               onLayoutChange={updateLayout}

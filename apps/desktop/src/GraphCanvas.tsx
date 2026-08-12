@@ -21,6 +21,7 @@ import {
   useNodesState,
 } from "@xyflow/react";
 import {
+  Copy,
   Filter,
   GripVertical,
   Link2,
@@ -95,6 +96,9 @@ interface GraphLabels {
   deleteNodeTitle: (count: number) => string;
   content: string;
   contentPlaceholder: string;
+  copySecret: string;
+  copySecretFailed: string;
+  copySecretSuccess: string;
   editNode: string;
   empty: string;
   filterByNode: string;
@@ -140,6 +144,7 @@ interface GraphCanvasProps {
     name: string,
     position: { x: number; y: number },
   ) => string | null;
+  onCopySecret: ((text: string) => Promise<void>) | null;
   onDeleteNodes: (nodeIds: string[]) => void;
   onEditNode: (nodeId: string) => void;
   onLayoutChange: (layout: NodeLayout[]) => void;
@@ -405,6 +410,7 @@ export default function GraphCanvas({
   onAnalyzeNode,
   onCreateNode,
   onCreateReferencedNode,
+  onCopySecret,
   onDeleteNodes,
   onEditNode,
   onLayoutChange,
@@ -428,12 +434,49 @@ export default function GraphCanvas({
   const lastWorkspaceViewportRef = useRef<CanvasViewport | null>(viewport);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [pendingDeletionNodeIds, setPendingDeletionNodeIds] = useState<string[]>([]);
+  const [secretClipboardNotice, setSecretClipboardNotice] = useState<{
+    error: boolean;
+    message: string;
+  } | null>(null);
+  const secretClipboardNoticeTimerRef = useRef<number | null>(null);
   const [referenceSearch, setReferenceSearch] =
     useState<ReferenceSearchState | null>(null);
   const [flowNodes, setFlowNodes, applyNodeChanges] =
     useNodesState<InformationFlowNode>([]);
   const [flowEdges, setFlowEdges, applyEdgeChanges] = useEdgesState<Edge>([]);
   const normalizedSearch = searchTerm.trim().toLowerCase();
+
+  useEffect(() => {
+    return () => {
+      if (secretClipboardNoticeTimerRef.current !== null) {
+        window.clearTimeout(secretClipboardNoticeTimerRef.current);
+      }
+    };
+  }, []);
+
+  const copyNodeContentAsSecret = async (nodeId: string) => {
+    const content = nodes.find((node) => node.id === nodeId)?.content;
+    if (content === null || content === undefined || content.length === 0 || onCopySecret === null) {
+      return;
+    }
+    setContextMenu(null);
+    if (secretClipboardNoticeTimerRef.current !== null) {
+      window.clearTimeout(secretClipboardNoticeTimerRef.current);
+    }
+    try {
+      await onCopySecret(content);
+      setSecretClipboardNotice({
+        error: false,
+        message: labels.copySecretSuccess,
+      });
+    } catch {
+      setSecretClipboardNotice({ error: true, message: labels.copySecretFailed });
+    }
+    secretClipboardNoticeTimerRef.current = window.setTimeout(() => {
+      setSecretClipboardNotice(null);
+      secretClipboardNoticeTimerRef.current = null;
+    }, 6_000);
+  };
 
   useEffect(() => {
     referencesRef.current = references;
@@ -1257,6 +1300,17 @@ export default function GraphCanvas({
                 <Pencil size={16} />
                 <span>{labels.editNode}</span>
               </button>
+              {onCopySecret !== null &&
+                (nodes.find((node) => node.id === contextMenu.nodeId)?.content
+                  ?.length ?? 0) > 0 && (
+                  <button
+                    onClick={() => void copyNodeContentAsSecret(contextMenu.nodeId)}
+                    type="button"
+                  >
+                    <Copy size={16} />
+                    <span>{labels.copySecret}</span>
+                  </button>
+                )}
               <button
                 disabled={analyzingNodeId !== null}
                 onClick={() => {
@@ -1285,6 +1339,16 @@ export default function GraphCanvas({
               </button>
             </>
           )}
+        </div>
+      )}
+
+      {secretClipboardNotice !== null && (
+        <div
+          className="graph-status-toast"
+          data-error={secretClipboardNotice.error}
+          role={secretClipboardNotice.error ? "alert" : "status"}
+        >
+          {secretClipboardNotice.message}
         </div>
       )}
 
