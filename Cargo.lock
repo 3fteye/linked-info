@@ -645,6 +645,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "cloudflare-backup-worker"
+version = "0.1.0"
+dependencies = [
+ "linked-info-backup-port",
+ "serde",
+ "serde_json",
+ "subtle",
+ "uuid",
+ "worker",
+ "worker-macros",
+]
+
+[[package]]
 name = "cloudflare-worker"
 version = "0.1.0"
 dependencies = [
@@ -2510,6 +2523,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "linked-info-backup-port"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "sha2",
+ "thiserror 2.0.20",
+ "uuid",
+]
+
+[[package]]
 name = "linked-info-contracts"
 version = "0.1.0"
 dependencies = [
@@ -2540,10 +2563,10 @@ dependencies = [
  "tauri-plugin-dialog",
  "tauri-plugin-single-instance",
  "tokio",
-  "uuid",
-  "windows",
-  "windows-core 0.61.2",
-  "windows-future",
+ "uuid",
+ "windows",
+ "windows-core 0.61.2",
+ "windows-future",
  "windows-sys 0.61.2",
  "zeroize",
 ]

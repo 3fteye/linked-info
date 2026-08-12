@@ -20,10 +20,12 @@
 | `apps/desktop` | React、TypeScript、React Flow 和 Tauri 2 桌面应用 |
 | `apps/desktop/src-tauri` | Rust 桌面壳、本地文件持久化和单实例生命周期 |
 | `apps/cloudflare-worker` | 可选的 Cloudflare Worker HTTP 入口与 D1 绑定 |
+| `apps/cloudflare-backup-worker` | 独立的密文备份 Worker 与 R2 绑定，不复用节点 API 权限 |
 | `crates/domain` | 节点、引用和领域不变量 |
 | `crates/application` | 与存储实现无关的应用用例 |
 | `crates/contracts` | 供应商无关的 API DTO、错误码和 OpenAPI 契约 |
 | `crates/storage-port` | 存储端口接口 |
+| `crates/backup-port` | 供应商无关的密文快照与备份目标端口 |
 | `crates/storage-memory` | 测试和本地用的内存适配器 |
 | `crates/storage-d1` | Cloudflare D1 存储适配器 |
 
@@ -176,6 +178,7 @@ Worker 的 wasm 检查：
 ```powershell
 rustup target add wasm32-unknown-unknown
 cargo clippy -p cloudflare-worker --target wasm32-unknown-unknown -- -D warnings
+cargo clippy -p cloudflare-backup-worker --target wasm32-unknown-unknown -- -D warnings
 ```
 
 ## 打包
@@ -194,6 +197,8 @@ pnpm tauri build
 Cloudflare 不是桌面端的固定依赖。`apps/cloudflare-worker` 通过供应商无关的应用层和存储端口接入 D1；Cloudflare 类型不得进入领域 crate 或桌面 React 组件。
 
 当前 Worker/D1 实现是未被桌面端调用的明文节点 API，不能直接用作秘密工作区备份。首个异机备份适配器将使用 Worker 承担应用身份、授权和限流，R2 保存客户端已经加密的完整快照；D1 只在确有查询需求时保存账户、设备、版本和对象索引等最少元数据。备份通过独立 `BackupTarget` 端口接入，不能让 R2、D1 或 S3 类型进入桌面视图和加密核心。
+
+备份 Worker 与节点 API Worker 是两个部署单元。前者只接受带应用级授权的不透明加密导出，使用独立 R2 binding，并通过流式请求体写入对象；后者继续只承担现有图节点 API。第一版备份对象直接依赖 R2 强一致列表和对象元数据，不创建没有实际查询用途的 D1 表。
 
 仓库没有包含远程数据库 ID、API 令牌或已部署地址。`wrangler.jsonc` 中的 D1 `database_id` 保持为 `local`，只有实际创建远程资源时才由部署者在自己的环境中配置。不要提交 `.env`、Wrangler 登录状态、令牌或数据库导出。
 

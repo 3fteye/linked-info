@@ -42,6 +42,7 @@ jobs:
       - name: Lint core crates
         run: >-
           cargo clippy
+          -p linked-info-backup-port
           -p linked-info-contracts
           -p linked-info-domain
           -p linked-info-storage-port
@@ -52,6 +53,7 @@ jobs:
       - name: Test core crates
         run: >-
           cargo test
+          -p linked-info-backup-port
           -p linked-info-contracts
           -p linked-info-domain
           -p linked-info-storage-port
@@ -59,7 +61,11 @@ jobs:
           -p linked-info-application
 
       - name: Check Cloudflare Worker
-        run: cargo clippy -p cloudflare-worker --target wasm32-unknown-unknown -- -D warnings
+        run: >-
+          cargo clippy
+          -p cloudflare-worker
+          -p cloudflare-backup-worker
+          --target wasm32-unknown-unknown -- -D warnings
 
       - name: Install pnpm
         uses: pnpm/action-setup@f520eceda224fe1a4aed5a2a27a194379a409996 # v6
