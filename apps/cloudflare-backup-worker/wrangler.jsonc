@@ -13,7 +13,5 @@
   "observability": {
     "enabled": true
   },
-  "build": {
-    "command": "cargo install -q \"worker-build@^0.8\" && worker-build --release"
-  }
+  "no_bundle": true
 }

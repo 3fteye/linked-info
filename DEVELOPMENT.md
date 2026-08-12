@@ -200,6 +200,8 @@ Cloudflare 不是桌面端的固定依赖。`apps/cloudflare-worker` 通过供�
 
 备份 Worker 与节点 API Worker 是两个部署单元。前者只接受带应用级授权的不透明加密导出，使用独立 R2 binding，并通过流式请求体写入对象；后者继续只承担现有图节点 API。第一版备份对象直接依赖 R2 强一致列表和对象元数据，不创建没有实际查询用途的 D1 表。
 
+备份 Worker 的 `wrangler.jsonc` 不包含隐式 Rust 构建命令，避免部署命令在开发机意外编译工具链。手动 `Cloudflare backup Worker build` Actions 工作流固定安装 `worker-build 0.8.0` 并上传三天有效的预编译 `build/`；下载产物到 Worker 目录后，先执行 `npm run check:deploy`，确认无误再执行 `npm run deploy`。Wrangler 版本由该目录的 `package-lock.json` 固定。
+
 仓库没有包含远程数据库 ID、API 令牌或已部署地址。`wrangler.jsonc` 中的 D1 `database_id` 保持为 `local`，只有实际创建远程资源时才由部署者在自己的环境中配置。不要提交 `.env`、Wrangler 登录状态、令牌或数据库导出。
 
 ## 修改约定

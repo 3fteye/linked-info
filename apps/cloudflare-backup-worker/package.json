@@ -1,0 +1,12 @@
+{
+  "name": "linked-info-cloudflare-backup-worker",
+  "private": true,
+  "scripts": {
+    "check:deploy": "wrangler deploy --dry-run",
+    "deploy": "wrangler deploy",
+    "whoami": "wrangler whoami"
+  },
+  "devDependencies": {
+    "wrangler": "4.122.0"
+  }
+}
