@@ -14,6 +14,11 @@ export interface OffsiteBackupTarget {
   lastVerifiedAtMs: number | null;
   lastRestoreTestAtMs: number | null;
   maximumUploadBytes: number | null;
+  automaticEnabled: boolean;
+  automaticIntervalHours: number;
+  automaticPending: boolean;
+  lastAutomaticAttemptAtMs: number | null;
+  lastAutomaticError: string | null;
 }
 
 export type S3ProviderTemplate =
@@ -65,6 +70,12 @@ export interface OffsiteBackupVerification {
   downloadedBytes: number;
 }
 
+export interface AutomaticBackupOutcome {
+  targetId: string;
+  uploaded: boolean;
+  error: string | null;
+}
+
 export interface OffsiteBackupService {
   readonly available: boolean;
   inspectTargets(): Promise<OffsiteBackupTarget[]>;
@@ -80,6 +91,13 @@ export interface OffsiteBackupService {
     authorization: string;
   }): Promise<OffsiteBackupTarget>;
   removeTarget(targetId: string, authorization: string): Promise<void>;
+  updateAutomaticSettings(
+    targetId: string,
+    enabled: boolean,
+    intervalHours: number,
+  ): Promise<OffsiteBackupTarget>;
+  markAutomaticPending(): Promise<OffsiteBackupTarget[]>;
+  runDueAutomatic(contents: string): Promise<AutomaticBackupOutcome[]>;
   create(targetId: string, contents: string): Promise<OffsiteBackupSnapshot>;
   list(
     targetId: string,
@@ -124,6 +142,23 @@ export const tauriOffsiteBackupService: OffsiteBackupService = {
       targetId,
       authorization,
     });
+  },
+  updateAutomaticSettings(targetId, enabled, intervalHours) {
+    return invoke<OffsiteBackupTarget>(
+      "update_offsite_backup_automatic_settings",
+      { targetId, enabled, intervalHours },
+    );
+  },
+  markAutomaticPending() {
+    return invoke<OffsiteBackupTarget[]>(
+      "mark_automatic_offsite_backup_pending",
+    );
+  },
+  runDueAutomatic(contents) {
+    return invoke<AutomaticBackupOutcome[]>(
+      "run_due_automatic_offsite_backups",
+      { contents },
+    );
   },
   create(targetId, contents) {
     return invoke<OffsiteBackupSnapshot>("create_offsite_backup", {
@@ -219,6 +254,15 @@ export const unavailableOffsiteBackupService: OffsiteBackupService = {
     return unavailable();
   },
   async removeTarget() {
+    return unavailable();
+  },
+  async updateAutomaticSettings() {
+    return unavailable();
+  },
+  async markAutomaticPending() {
+    return unavailable();
+  },
+  async runDueAutomatic() {
     return unavailable();
   },
   async create() {

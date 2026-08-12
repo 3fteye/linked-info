@@ -1494,6 +1494,36 @@ h1 {
   font-size: 11px;
 }
 
+.offsite-automatic-settings {
+  display: flex;
+  align-items: center;
+  margin-top: 5px;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+}
+
+.offsite-automatic-settings > label:last-child {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: #525c55;
+  font-size: 11px;
+}
+
+.offsite-automatic-settings select {
+  min-height: 29px;
+  padding: 0 24px 0 8px;
+  border: 1px solid #d9ded9;
+  border-radius: 5px;
+  color: #303632;
+  background: #ffffff;
+  font: inherit;
+}
+
+.offsite-target-summary .offsite-automatic-error {
+  color: #933f35;
+}
+
 .offsite-entry-actions {
   display: flex;
   flex: none;

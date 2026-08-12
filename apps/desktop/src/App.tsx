@@ -189,6 +189,7 @@ interface SmartReferenceResult {
 
 interface WorkspaceUpdateOptions {
   flushImmediately?: boolean;
+  affectsOffsiteBackup?: boolean;
   recordHistory?: boolean;
 }
 
@@ -380,6 +381,9 @@ function App({
   const [offsitePage, setOffsitePage] = useState<OffsiteBackupPage | null>(null);
   const [offsiteBusy, setOffsiteBusy] = useState(false);
   const [offsiteMessage, setOffsiteMessage] = useState<string | null>(null);
+  const automaticOffsiteRunningRef = useRef(false);
+  const automaticOffsiteRevisionRef = useRef(0);
+  const automaticOffsiteMarkedRevisionRef = useRef(0);
   const [appNotice, setAppNotice] = useState<string | null>(null);
   const appNoticeTimerRef = useRef<number | null>(null);
   const [offsiteProvider, setOffsiteProvider] = useState<
@@ -659,11 +663,7 @@ function App({
   }, [persistenceReady, t, workspaceBackupHistory]);
 
   useEffect(() => {
-    if (
-      activeView !== "settings" ||
-      !workspaceSecurityStatus.encrypted ||
-      !offsiteBackup.available
-    ) {
+    if (!workspaceSecurityStatus.encrypted || !offsiteBackup.available) {
       return;
     }
     let active = true;
@@ -690,7 +690,30 @@ function App({
     return () => {
       active = false;
     };
-  }, [activeView, offsiteBackup, t, workspaceSecurityStatus.encrypted]);
+  }, [offsiteBackup, t, workspaceSecurityStatus.encrypted]);
+
+  useEffect(() => {
+    if (
+      !persistenceReady ||
+      !workspaceSecurityStatus.encrypted ||
+      !offsiteBackup.available
+    ) {
+      return;
+    }
+    void requestAutomaticOffsiteBackup(
+      automaticOffsiteRevisionRef.current >
+        automaticOffsiteMarkedRevisionRef.current,
+      automaticOffsiteRevisionRef.current,
+    );
+    const timer = window.setInterval(() => {
+      void requestAutomaticOffsiteBackup(
+        automaticOffsiteRevisionRef.current >
+          automaticOffsiteMarkedRevisionRef.current,
+        automaticOffsiteRevisionRef.current,
+      );
+    }, 5 * 60 * 1_000);
+    return () => window.clearInterval(timer);
+  }, [offsiteBackup, persistenceReady, workspaceSecurityStatus.encrypted]);
 
   useEffect(() => {
     if (activeView !== "settings" || selectedOffsiteTargetId === null) {
@@ -831,11 +854,18 @@ function App({
     }
     workspaceRef.current = workspace;
     const captureAutomaticBackup = workspaceChangedInSessionRef.current;
+    const automaticOffsiteRevision = automaticOffsiteRevisionRef.current;
     const saveTimer = window.setTimeout(
       () => {
         void persistence
           .save(workspace)
           .then(async () => {
+            if (
+              workspaceSecurityStatus.encrypted &&
+              automaticOffsiteRevision > automaticOffsiteMarkedRevisionRef.current
+            ) {
+              void requestAutomaticOffsiteBackup(true, automaticOffsiteRevision);
+            }
             if (!captureAutomaticBackup || !workspaceBackupHistory.available) {
               return;
             }
@@ -854,7 +884,14 @@ function App({
       300,
     );
     return () => window.clearTimeout(saveTimer);
-  }, [persistence, persistenceReady, t, workspace, workspaceBackupHistory]);
+  }, [
+    persistence,
+    persistenceReady,
+    t,
+    workspace,
+    workspaceBackupHistory,
+    workspaceSecurityStatus.encrypted,
+  ]);
 
   useEffect(() => {
     if (!persistenceReady) {
@@ -1564,6 +1601,9 @@ function App({
       return current;
     }
     workspaceChangedInSessionRef.current = true;
+    if (options.affectsOffsiteBackup !== false) {
+      automaticOffsiteRevisionRef.current += 1;
+    }
     if (options.recordHistory) {
       recordHistory(captureWorkspaceHistory(current), captureWorkspaceHistory(next));
     }
@@ -1603,6 +1643,7 @@ function App({
   function applyHistoryState(state: WorkspaceHistoryState) {
     const next = restoreWorkspaceHistory(state, workspaceRef.current.viewport);
     workspaceChangedInSessionRef.current = true;
+    automaticOffsiteRevisionRef.current += 1;
     workspaceRef.current = next;
     setWorkspace(next);
     setEditingNodeId(null);
@@ -1836,7 +1877,7 @@ function App({
         current.viewport.zoom === viewport.zoom
           ? current
           : { ...current, viewport },
-      { flushImmediately: true },
+      { flushImmediately: true, affectsOffsiteBackup: false },
     );
   }
 
@@ -2373,6 +2414,91 @@ function App({
     }
   }
 
+  async function requestAutomaticOffsiteBackup(
+    markPending: boolean,
+    markedRevision = automaticOffsiteRevisionRef.current,
+  ) {
+    if (
+      automaticOffsiteRunningRef.current ||
+      !workspaceSecurityStatus.encrypted ||
+      !offsiteBackup.available
+    ) {
+      return;
+    }
+    automaticOffsiteRunningRef.current = true;
+    let pendingMarkCompleted = !markPending;
+    try {
+      if (markPending) {
+        const targets = await offsiteBackup.markAutomaticPending();
+        pendingMarkCompleted = true;
+        automaticOffsiteMarkedRevisionRef.current = Math.max(
+          automaticOffsiteMarkedRevisionRef.current,
+          markedRevision,
+        );
+        setOffsiteTargets(targets);
+      }
+      const outcomes = await offsiteBackup.runDueAutomatic(
+        serializeWorkspaceExport(workspaceRef.current),
+      );
+      if (outcomes.length > 0) {
+        setOffsiteTargets(await offsiteBackup.inspectTargets());
+      }
+    } catch {
+      // Automatic backup failures stay isolated from local persistence. Rust keeps
+      // the target pending and records a bounded provider error for Settings.
+    } finally {
+      automaticOffsiteRunningRef.current = false;
+      if (
+        pendingMarkCompleted &&
+        automaticOffsiteRevisionRef.current >
+        automaticOffsiteMarkedRevisionRef.current
+      ) {
+        void requestAutomaticOffsiteBackup(
+          true,
+          automaticOffsiteRevisionRef.current,
+        );
+      }
+    }
+  }
+
+  async function updateAutomaticOffsiteSettings(
+    targetId: string,
+    enabled: boolean,
+    intervalHours: number,
+  ) {
+    if (offsiteBusy) {
+      return;
+    }
+    setOffsiteBusy(true);
+    setOffsiteMessage(null);
+    try {
+      const updated = await offsiteBackup.updateAutomaticSettings(
+        targetId,
+        enabled,
+        intervalHours,
+      );
+      setOffsiteTargets((targets) =>
+        targets.map((target) => (target.id === updated.id ? updated : target)),
+      );
+      showAppNotice(
+        enabled
+          ? t("offsiteBackup.automaticEnabled")
+          : t("offsiteBackup.automaticDisabled"),
+      );
+      if (enabled) {
+        void requestAutomaticOffsiteBackup(false);
+      }
+    } catch (error) {
+      setOffsiteMessage(
+        t("offsiteBackup.errors.automaticSettings", {
+          reason: errorReason(error),
+        }),
+      );
+    } finally {
+      setOffsiteBusy(false);
+    }
+  }
+
   async function createOffsiteSnapshot() {
     if (selectedOffsiteTargetId === null || offsiteBusy) {
       return;
@@ -2535,6 +2661,7 @@ function App({
         await persistence.save(pendingWorkspaceReplacement.workspace);
       }
       workspaceChangedInSessionRef.current = true;
+      automaticOffsiteRevisionRef.current += 1;
       workspaceReplacementGenerationRef.current += 1;
       workspaceRef.current = pendingWorkspaceReplacement.workspace;
       setWorkspace(pendingWorkspaceReplacement.workspace);
@@ -3786,6 +3913,62 @@ function App({
                                     size: formatByteCount(
                                       selectedOffsiteTarget.maximumUploadBytes,
                                     ),
+                                  })}
+                                </small>
+                              )}
+                              <div className="offsite-automatic-settings">
+                                <label className="switch-setting">
+                                  <input
+                                    checked={selectedOffsiteTarget.automaticEnabled}
+                                    disabled={offsiteBusy}
+                                    onChange={(event) =>
+                                      void updateAutomaticOffsiteSettings(
+                                        selectedOffsiteTarget.id,
+                                        event.target.checked,
+                                        selectedOffsiteTarget.automaticIntervalHours,
+                                      )
+                                    }
+                                    type="checkbox"
+                                  />
+                                  {t("offsiteBackup.automatic")}
+                                </label>
+                                <label>
+                                  <span>{t("offsiteBackup.automaticInterval")}</span>
+                                  <select
+                                    disabled={
+                                      offsiteBusy ||
+                                      !selectedOffsiteTarget.automaticEnabled
+                                    }
+                                    onChange={(event) =>
+                                      void updateAutomaticOffsiteSettings(
+                                        selectedOffsiteTarget.id,
+                                        true,
+                                        Number(event.target.value),
+                                      )
+                                    }
+                                    value={selectedOffsiteTarget.automaticIntervalHours}
+                                  >
+                                    {[24, 72, 168].map((hours) => (
+                                      <option key={hours} value={hours}>
+                                        {t("offsiteBackup.automaticIntervalHours", {
+                                          count: hours,
+                                        })}
+                                      </option>
+                                    ))}
+                                  </select>
+                                </label>
+                              </div>
+                              <small>
+                                {selectedOffsiteTarget.automaticEnabled
+                                  ? selectedOffsiteTarget.automaticPending
+                                    ? t("offsiteBackup.automaticPending")
+                                    : t("offsiteBackup.automaticCurrent")
+                                  : t("offsiteBackup.automaticDescription")}
+                              </small>
+                              {selectedOffsiteTarget.lastAutomaticError !== null && (
+                                <small className="offsite-automatic-error" role="alert">
+                                  {t("offsiteBackup.automaticError", {
+                                    reason: selectedOffsiteTarget.lastAutomaticError,
                                   })}
                                 </small>
                               )}

@@ -19,7 +19,7 @@ use crate::{
     cloudflare_backup_target::CloudflareBackupTarget,
     s3_backup_target::{S3BackupTarget, S3Credentials},
     workspace_file::{
-        SensitiveOperation, WorkspaceVaultState, begin_workspace_access,
+        SensitiveOperation, WorkspaceAccessPermit, WorkspaceVaultState, begin_workspace_access,
         encrypt_offsite_workspace_snapshot, ensure_workspace_access,
         test_offsite_workspace_restore, workspace_encryption_configured, write_atomically,
     },
@@ -30,10 +30,22 @@ const CONFIG_FORMAT: &str = "linked-info-offsite-backup-targets";
 const CONFIG_VERSION: u16 = 1;
 const KEYRING_SERVICE: &str = "com.linkedinfo.desktop.backup-target";
 const MAXIMUM_TARGETS: usize = 16;
+const DEFAULT_AUTOMATIC_INTERVAL_HOURS: u32 = 24;
+const MAXIMUM_AUTOMATIC_INTERVAL_HOURS: u32 = 24 * 31;
+const AUTOMATIC_RETRY_DELAY_MS: u64 = 15 * 60 * 1_000;
 
-#[derive(Default)]
 pub struct OffsiteBackupState {
     config_lock: Arc<Mutex<()>>,
+    automatic_uploads: Arc<Mutex<HashSet<Uuid>>>,
+}
+
+impl Default for OffsiteBackupState {
+    fn default() -> Self {
+        Self {
+            config_lock: Arc::new(Mutex::new(())),
+            automatic_uploads: Arc::new(Mutex::new(HashSet::new())),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -89,6 +101,18 @@ struct BackupTargetConfig {
     last_upload_at_ms: Option<u64>,
     last_verified_at_ms: Option<u64>,
     last_restore_test_at_ms: Option<u64>,
+    #[serde(default)]
+    automatic_enabled: bool,
+    #[serde(default = "default_automatic_interval_hours")]
+    automatic_interval_hours: u32,
+    #[serde(default)]
+    automatic_revision: u64,
+    #[serde(default)]
+    automatic_uploaded_revision: u64,
+    #[serde(default)]
+    last_automatic_attempt_at_ms: Option<u64>,
+    #[serde(default)]
+    last_automatic_error: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -107,6 +131,23 @@ pub struct BackupTargetSummary {
     last_verified_at_ms: Option<u64>,
     last_restore_test_at_ms: Option<u64>,
     maximum_upload_bytes: Option<u64>,
+    automatic_enabled: bool,
+    automatic_interval_hours: u32,
+    automatic_pending: bool,
+    last_automatic_attempt_at_ms: Option<u64>,
+    last_automatic_error: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutomaticBackupOutcome {
+    target_id: Uuid,
+    uploaded: bool,
+    error: Option<String>,
+}
+
+fn default_automatic_interval_hours() -> u32 {
+    DEFAULT_AUTOMATIC_INTERVAL_HOURS
 }
 
 #[derive(Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
@@ -136,6 +177,137 @@ pub async fn inspect_offsite_backup_targets(
 ) -> Result<Vec<BackupTargetSummary>, String> {
     let config = read_config_locked(&app, &state).await?;
     config.targets.iter().map(target_summary).collect()
+}
+
+#[tauri::command]
+pub async fn update_offsite_backup_automatic_settings(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, OffsiteBackupState>,
+    vault_state: tauri::State<'_, WorkspaceVaultState>,
+    target_id: Uuid,
+    enabled: bool,
+    interval_hours: u32,
+) -> Result<BackupTargetSummary, String> {
+    let permit = begin_workspace_access(&app, &vault_state)?;
+    if !(1..=MAXIMUM_AUTOMATIC_INTERVAL_HOURS).contains(&interval_hours) {
+        return Err("offsite_backup_invalid_automatic_interval".to_owned());
+    }
+    let app_for_write = app.clone();
+    let config_lock = Arc::clone(&state.config_lock);
+    let summary = tauri::async_runtime::spawn_blocking(move || {
+        let _guard = config_lock
+            .lock()
+            .map_err(|_| "offsite_backup_config_unavailable".to_owned())?;
+        let path = config_path(&app_for_write)?;
+        let mut config = read_config(&path)?;
+        let target = config
+            .targets
+            .iter_mut()
+            .find(|target| target.id == target_id)
+            .ok_or_else(|| "offsite_backup_target_not_found".to_owned())?;
+        if enabled && !target.automatic_enabled {
+            target.automatic_revision = target
+                .automatic_revision
+                .checked_add(1)
+                .ok_or_else(|| "offsite_backup_automatic_revision_overflow".to_owned())?;
+        }
+        target.automatic_enabled = enabled;
+        target.automatic_interval_hours = interval_hours;
+        let summary = target_summary(target)?;
+        write_config(&path, &config)?;
+        Ok::<_, String>(summary)
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+    ensure_workspace_access(&app, &vault_state, permit)?;
+    Ok(summary)
+}
+
+#[tauri::command]
+pub async fn mark_automatic_offsite_backup_pending(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, OffsiteBackupState>,
+    vault_state: tauri::State<'_, WorkspaceVaultState>,
+) -> Result<Vec<BackupTargetSummary>, String> {
+    let permit = begin_workspace_access(&app, &vault_state)?;
+    let app_for_write = app.clone();
+    let config_lock = Arc::clone(&state.config_lock);
+    let summaries = tauri::async_runtime::spawn_blocking(move || {
+        let _guard = config_lock
+            .lock()
+            .map_err(|_| "offsite_backup_config_unavailable".to_owned())?;
+        let path = config_path(&app_for_write)?;
+        let mut config = read_config(&path)?;
+        let mut changed = false;
+        for target in &mut config.targets {
+            if target.automatic_enabled {
+                target.automatic_revision = target
+                    .automatic_revision
+                    .checked_add(1)
+                    .ok_or_else(|| "offsite_backup_automatic_revision_overflow".to_owned())?;
+                changed = true;
+            }
+        }
+        if changed {
+            write_config(&path, &config)?;
+        }
+        config.targets.iter().map(target_summary).collect()
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+    ensure_workspace_access(&app, &vault_state, permit)?;
+    Ok(summaries)
+}
+
+#[tauri::command]
+pub async fn run_due_automatic_offsite_backups(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, OffsiteBackupState>,
+    vault_state: tauri::State<'_, WorkspaceVaultState>,
+    contents: String,
+) -> Result<Vec<AutomaticBackupOutcome>, String> {
+    let permit = begin_workspace_access(&app, &vault_state)?;
+    let now = current_time_milliseconds()?;
+    let candidates = read_config_locked(&app, &state)
+        .await?
+        .targets
+        .into_iter()
+        .filter(|target| automatic_backup_due(target, now))
+        .filter(|target| claim_automatic_upload(&state, target.id))
+        .collect::<Vec<_>>();
+    if candidates.is_empty() {
+        ensure_workspace_access(&app, &vault_state, permit)?;
+        return Ok(Vec::new());
+    }
+
+    let encrypted = match encrypt_offsite_workspace_snapshot(&app, &vault_state, contents).await {
+        Ok(encrypted) => encrypted,
+        Err(error) => {
+            for candidate in &candidates {
+                release_automatic_upload(&state, candidate.id);
+            }
+            return Err(error);
+        }
+    };
+    ensure_workspace_access(&app, &vault_state, permit)?;
+    let snapshot = BackupSnapshot::new(Uuid::new_v4(), now, encrypted.into_bytes())
+        .map_err(|_| "offsite_backup_invalid_snapshot".to_owned())?;
+    let mut outcomes = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
+        let result = run_automatic_upload(
+            &app,
+            &state,
+            &vault_state,
+            permit,
+            &candidate,
+            snapshot.clone(),
+        )
+        .await;
+        release_automatic_upload(&state, candidate.id);
+        outcomes.push(result);
+    }
+    ensure_workspace_access(&app, &vault_state, permit)?;
+    Ok(outcomes)
 }
 
 #[tauri::command]
@@ -290,6 +462,12 @@ pub async fn configure_cloudflare_backup_target(
         last_upload_at_ms: None,
         last_verified_at_ms: None,
         last_restore_test_at_ms: None,
+        automatic_enabled: false,
+        automatic_interval_hours: DEFAULT_AUTOMATIC_INTERVAL_HOURS,
+        automatic_revision: 0,
+        automatic_uploaded_revision: 0,
+        last_automatic_attempt_at_ms: None,
+        last_automatic_error: None,
     };
     let summary = target_summary(&config_target)?;
     let app_for_write = app.clone();
@@ -399,6 +577,12 @@ pub async fn configure_s3_backup_target(
         last_upload_at_ms: None,
         last_verified_at_ms: None,
         last_restore_test_at_ms: None,
+        automatic_enabled: false,
+        automatic_interval_hours: DEFAULT_AUTOMATIC_INTERVAL_HOURS,
+        automatic_revision: 0,
+        automatic_uploaded_revision: 0,
+        last_automatic_attempt_at_ms: None,
+        last_automatic_error: None,
     };
     let summary = target_summary(&config_target)?;
     let app_for_write = app.clone();
@@ -480,6 +664,7 @@ pub async fn create_offsite_backup(
 ) -> Result<BackupSnapshotMetadata, String> {
     let permit = begin_workspace_access(&app, &vault_state)?;
     let target_config = find_target(&app, &backup_state, target_id).await?;
+    let uploaded_revision = target_config.automatic_revision;
     let target = open_target(&target_config).await?;
     let encrypted = encrypt_offsite_workspace_snapshot(&app, &vault_state, contents).await?;
     ensure_workspace_access(&app, &vault_state, permit)?;
@@ -492,7 +677,12 @@ pub async fn create_offsite_backup(
     let metadata = target.upload(snapshot).await.map_err(target_error)?;
     ensure_workspace_access(&app, &vault_state, permit)?;
     update_target_status(&app, &backup_state, target_id, |config| {
-        config.last_upload_at_ms = Some(current_time_milliseconds()?);
+        record_upload_success(
+            config,
+            uploaded_revision,
+            current_time_milliseconds()?,
+            false,
+        );
         Ok(())
     })
     .await?;
@@ -718,6 +908,109 @@ async fn find_target(
         .ok_or_else(|| "offsite_backup_target_not_found".to_owned())
 }
 
+fn automatic_backup_due(target: &BackupTargetConfig, now: u64) -> bool {
+    if !target.automatic_enabled || target.automatic_revision <= target.automatic_uploaded_revision
+    {
+        return false;
+    }
+    let interval_ms = u64::from(target.automatic_interval_hours).saturating_mul(60 * 60 * 1_000);
+    let upload_due = target
+        .last_upload_at_ms
+        .is_none_or(|last| now.saturating_sub(last) >= interval_ms);
+    let retry_due = target
+        .last_automatic_attempt_at_ms
+        .is_none_or(|last| now.saturating_sub(last) >= AUTOMATIC_RETRY_DELAY_MS);
+    upload_due && retry_due
+}
+
+fn claim_automatic_upload(state: &OffsiteBackupState, target_id: Uuid) -> bool {
+    state
+        .automatic_uploads
+        .lock()
+        .map(|mut uploads| uploads.insert(target_id))
+        .unwrap_or(false)
+}
+
+fn release_automatic_upload(state: &OffsiteBackupState, target_id: Uuid) {
+    if let Ok(mut uploads) = state.automatic_uploads.lock() {
+        uploads.remove(&target_id);
+    }
+}
+
+async fn run_automatic_upload(
+    app: &tauri::AppHandle,
+    state: &OffsiteBackupState,
+    vault_state: &WorkspaceVaultState,
+    permit: Option<WorkspaceAccessPermit>,
+    target_config: &BackupTargetConfig,
+    snapshot: BackupSnapshot,
+) -> AutomaticBackupOutcome {
+    let target_id = target_config.id;
+    let result = async {
+        ensure_workspace_access(app, vault_state, permit)?;
+        let target = open_target(target_config).await?;
+        ensure_workspace_access(app, vault_state, permit)?;
+        target.upload(snapshot).await.map_err(target_error)?;
+        ensure_workspace_access(app, vault_state, permit)?;
+        let uploaded_revision = target_config.automatic_revision;
+        update_target_status(app, state, target_id, move |config| {
+            record_upload_success(
+                config,
+                uploaded_revision,
+                current_time_milliseconds()?,
+                true,
+            );
+            Ok(())
+        })
+        .await?;
+        ensure_workspace_access(app, vault_state, permit)
+    }
+    .await;
+
+    match result {
+        Ok(()) => AutomaticBackupOutcome {
+            target_id,
+            uploaded: true,
+            error: None,
+        },
+        Err(error) => {
+            let stored_error = bounded_automatic_error(&error);
+            if error != "workspace_vault_session_expired" && error != "workspace_vault_locked" {
+                let error_for_config = stored_error.clone();
+                let _ = update_target_status(app, state, target_id, move |config| {
+                    config.last_automatic_attempt_at_ms = Some(current_time_milliseconds()?);
+                    config.last_automatic_error = Some(error_for_config);
+                    Ok(())
+                })
+                .await;
+            }
+            AutomaticBackupOutcome {
+                target_id,
+                uploaded: false,
+                error: Some(stored_error),
+            }
+        }
+    }
+}
+
+fn bounded_automatic_error(error: &str) -> String {
+    error.chars().take(160).collect()
+}
+
+fn record_upload_success(
+    config: &mut BackupTargetConfig,
+    uploaded_revision: u64,
+    uploaded_at_ms: u64,
+    automatic: bool,
+) {
+    config.last_upload_at_ms = Some(uploaded_at_ms);
+    if automatic {
+        config.last_automatic_attempt_at_ms = Some(uploaded_at_ms);
+    }
+    config.automatic_uploaded_revision = config.automatic_uploaded_revision.max(uploaded_revision);
+    config.last_automatic_error = None;
+}
+
 async fn read_config_locked(
     app: &tauri::AppHandle,
     state: &OffsiteBackupState,
@@ -780,6 +1073,11 @@ fn target_summary(config: &BackupTargetConfig) -> Result<BackupTargetSummary, St
         last_verified_at_ms: config.last_verified_at_ms,
         last_restore_test_at_ms: config.last_restore_test_at_ms,
         maximum_upload_bytes,
+        automatic_enabled: config.automatic_enabled,
+        automatic_interval_hours: config.automatic_interval_hours,
+        automatic_pending: config.automatic_revision > config.automatic_uploaded_revision,
+        last_automatic_attempt_at_ms: config.last_automatic_attempt_at_ms,
+        last_automatic_error: config.last_automatic_error.clone(),
     })
 }
 
@@ -861,10 +1159,17 @@ fn validate_config(config: &OffsiteBackupConfig) -> Result<(), String> {
             || !provider_config_valid
             || Uuid::parse_str(&target.credential_id).is_err()
             || target.created_at_ms == 0
+            || !(1..=MAXIMUM_AUTOMATIC_INTERVAL_HOURS).contains(&target.automatic_interval_hours)
+            || target.automatic_uploaded_revision > target.automatic_revision
+            || target
+                .last_automatic_error
+                .as_ref()
+                .is_some_and(|error| error.is_empty() || error.chars().count() > 160)
             || [
                 target.last_upload_at_ms,
                 target.last_verified_at_ms,
                 target.last_restore_test_at_ms,
+                target.last_automatic_attempt_at_ms,
             ]
             .into_iter()
             .flatten()
@@ -992,6 +1297,12 @@ mod tests {
             last_upload_at_ms: None,
             last_verified_at_ms: None,
             last_restore_test_at_ms: None,
+            automatic_enabled: false,
+            automatic_interval_hours: DEFAULT_AUTOMATIC_INTERVAL_HOURS,
+            automatic_revision: 0,
+            automatic_uploaded_revision: 0,
+            last_automatic_attempt_at_ms: None,
+            last_automatic_error: None,
         };
         let mut duplicate = target.clone();
         duplicate.id = Uuid::new_v4();
@@ -1023,6 +1334,12 @@ mod tests {
             last_upload_at_ms: None,
             last_verified_at_ms: None,
             last_restore_test_at_ms: None,
+            automatic_enabled: false,
+            automatic_interval_hours: DEFAULT_AUTOMATIC_INTERVAL_HOURS,
+            automatic_revision: 0,
+            automatic_uploaded_revision: 0,
+            last_automatic_attempt_at_ms: None,
+            last_automatic_error: None,
         };
         let serialized = serde_json::to_string(&OffsiteBackupConfig {
             targets: vec![target],
@@ -1049,6 +1366,12 @@ mod tests {
             last_upload_at_ms: None,
             last_verified_at_ms: None,
             last_restore_test_at_ms: None,
+            automatic_enabled: false,
+            automatic_interval_hours: DEFAULT_AUTOMATIC_INTERVAL_HOURS,
+            automatic_revision: 0,
+            automatic_uploaded_revision: 0,
+            last_automatic_attempt_at_ms: None,
+            last_automatic_error: None,
         }
     }
 
@@ -1107,5 +1430,38 @@ mod tests {
 
         assert!(validate_config(&config).is_ok());
         assert!(config.targets[0].region.is_none());
+        assert!(!config.targets[0].automatic_enabled);
+        assert_eq!(
+            config.targets[0].automatic_interval_hours,
+            DEFAULT_AUTOMATIC_INTERVAL_HOURS
+        );
+    }
+
+    #[test]
+    fn automatic_backup_waits_for_changes_and_the_interval() {
+        let mut target = s3_target("linked-info/v1");
+        target.automatic_enabled = true;
+        target.automatic_revision = 2;
+        target.automatic_uploaded_revision = 1;
+        target.last_upload_at_ms = Some(1_000);
+
+        assert!(!automatic_backup_due(&target, 1_000 + 23 * 60 * 60 * 1_000));
+        assert!(automatic_backup_due(&target, 1_000 + 24 * 60 * 60 * 1_000));
+        target.automatic_uploaded_revision = 2;
+        assert!(!automatic_backup_due(&target, 1_000 + 48 * 60 * 60 * 1_000));
+    }
+
+    #[test]
+    fn completed_upload_does_not_clear_changes_made_while_it_was_running() {
+        let mut target = s3_target("linked-info/v1");
+        target.automatic_enabled = true;
+        target.automatic_revision = 5;
+        target.automatic_uploaded_revision = 2;
+
+        record_upload_success(&mut target, 3, 10_000, true);
+
+        assert_eq!(target.automatic_uploaded_revision, 3);
+        assert_eq!(target.automatic_revision, 5);
+        assert!(target_summary(&target).unwrap().automatic_pending);
     }
 }
