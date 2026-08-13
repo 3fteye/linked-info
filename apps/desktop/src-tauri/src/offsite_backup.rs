@@ -7,7 +7,7 @@ use std::{
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use linked_info_backup_port::{
     BackupListPage, BackupSnapshot, BackupSnapshotMetadata, BackupTarget, BackupTargetError,
     BackupVerification, MAX_BACKUP_PAGE_LIMIT,
