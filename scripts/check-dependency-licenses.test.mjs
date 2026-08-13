@@ -17,6 +17,20 @@ test("license review rejects a new expression until it is approved", () => {
   assert.equal(failures[0].expression, "GPL-3.0-only");
 });
 
+test("license review accepts the explicitly reviewed BSD-2-Clause expression", () => {
+  const failures = findUnapprovedLicenseGroups(
+    new Map([
+      [
+        "BSD-2-Clause",
+        [{ name: "entities", versions: ["7.0.1"], license: "BSD-2-Clause" }],
+      ],
+    ]),
+    approvedFrontendLicenseExpressions,
+  );
+
+  assert.equal(failures.length, 0);
+});
+
 test("license review rejects missing license metadata", () => {
   const failures = findUnapprovedLicenseGroups(
     new Map([["", [{ name: "example", versions: ["1.0.0"] }]]]),

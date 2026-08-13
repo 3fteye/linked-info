@@ -45,6 +45,7 @@ export const approvedRustLicenseExpressions = new Set([
 export const approvedFrontendLicenseExpressions = new Set([
   "Apache-2.0 OR MIT",
   "Apache-2.0",
+  "BSD-2-Clause",
   "BSD-3-Clause",
   "CC-BY-4.0",
   "ISC",
