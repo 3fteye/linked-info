@@ -3,6 +3,7 @@ import {
   isNodeNameAvailable,
   moveNodeLayoutToFront,
   parseWorkspaceSnapshot,
+  persistedNodeNameFromDraft,
   updateNodeLayoutPositions,
   type WorkspaceSnapshot,
 } from "./workspaceData";
@@ -92,6 +93,13 @@ describe("isNodeNameAvailable", () => {
     expect(isNodeNameAvailable(nodes, accountId, "")).toBe(true);
     expect(isNodeNameAvailable(nodes, accountId, " Account ")).toBe(true);
     expect(isNodeNameAvailable(nodes, accountId, " openai ")).toBe(false);
+  });
+});
+
+describe("persistedNodeNameFromDraft", () => {
+  it("keeps meaningful editing text but never exposes whitespace-only names to persistence", () => {
+    expect(persistedNodeNameFromDraft("   \t")).toBeNull();
+    expect(persistedNodeNameFromDraft(" OpenAI ")).toBe(" OpenAI ");
   });
 });
 

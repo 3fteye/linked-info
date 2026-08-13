@@ -48,6 +48,7 @@ unsafe extern "system" fn session_notification_proc(
             .app
             .clone();
         let was_unlocked = crate::workspace_file::revoke_workspace_access(&app, reason);
+        crate::secret_clipboard::clear_active(&app);
         if was_unlocked {
             tauri::async_runtime::spawn(async move {
                 crate::workspace_file::cleanup_locked_workspace(&app);

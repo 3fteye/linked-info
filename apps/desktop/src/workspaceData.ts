@@ -53,6 +53,10 @@ export function normalizeNodeName(name: string): string {
   return name.trim().toLowerCase();
 }
 
+export function persistedNodeNameFromDraft(name: string): string | null {
+  return name.trim().length === 0 ? null : name;
+}
+
 export function isUnnamedNode(node: InformationNode): boolean {
   return node.name === null || node.name.trim().length === 0;
 }

@@ -35,6 +35,7 @@ import {
   isUnnamedNode,
   moveNodeLayoutToFront,
   normalizeNodeName,
+  persistedNodeNameFromDraft,
   parseStoredWorkspaceText,
   type CanvasViewport,
   type InformationNode,
@@ -1913,7 +1914,7 @@ function App({
     updateWorkspace((current) => ({
       ...current,
       nodes: current.nodes.map((node) =>
-        node.id === nodeId ? { ...node, name: name.length === 0 ? null : name } : node,
+        node.id === nodeId ? { ...node, name: persistedNodeNameFromDraft(name) } : node,
       ),
     }));
     return true;

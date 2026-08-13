@@ -6,11 +6,14 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
+use hmac::{Hmac, Mac};
 use linked_info_backup_port::{
     BackupListPage, BackupSnapshot, BackupSnapshotMetadata, BackupTarget, BackupTargetError,
     BackupVerification, MAX_BACKUP_PAGE_LIMIT,
 };
 use serde::{Deserialize, Serialize};
+use sha2_11::Sha256;
 use tauri::Manager;
 use uuid::Uuid;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
@@ -28,6 +31,10 @@ use crate::{
 const CONFIG_FILE_NAME: &str = "offsite-backup-targets.json";
 const CONFIG_FORMAT: &str = "linked-info-offsite-backup-targets";
 const CONFIG_VERSION: u16 = 1;
+const AUTHENTICATED_CONFIG_FORMAT: &str = "linked-info-authenticated-offsite-backup-targets";
+const AUTHENTICATED_CONFIG_VERSION: u16 = 1;
+const CONFIG_AUTH_CREDENTIAL_ID: &str = "00000000-0000-4000-8000-000000000001";
+const CONFIG_AUTH_KEY_BYTES: usize = 32;
 const KEYRING_SERVICE: &str = "com.linkedinfo.desktop.backup-target";
 const MAXIMUM_TARGETS: usize = 16;
 const DEFAULT_AUTOMATIC_INTERVAL_HOURS: u32 = 24;
@@ -97,6 +104,15 @@ impl Default for OffsiteBackupConfig {
             targets: Vec::new(),
         }
     }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AuthenticatedOffsiteBackupConfig {
+    format: String,
+    version: u16,
+    config: OffsiteBackupConfig,
+    authentication: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -241,8 +257,11 @@ pub struct DownloadedOffsiteBackup {
 pub async fn inspect_offsite_backup_targets(
     app: tauri::AppHandle,
     state: tauri::State<'_, OffsiteBackupState>,
+    vault_state: tauri::State<'_, WorkspaceVaultState>,
 ) -> Result<Vec<BackupTargetSummary>, String> {
+    let permit = begin_workspace_access(&app, &vault_state)?;
     let config = read_config_locked(&app, &state).await?;
+    ensure_workspace_access(&app, &vault_state, permit)?;
     config.targets.iter().map(target_summary).collect()
 }
 
@@ -272,12 +291,6 @@ pub async fn update_offsite_backup_automatic_settings(
             .iter_mut()
             .find(|target| target.id == target_id)
             .ok_or_else(|| "offsite_backup_target_not_found".to_owned())?;
-        if enabled
-            && target.last_restore_test_at_ms.is_some()
-            && target.last_restore_test_snapshot_id.is_none()
-        {
-            return Err("offsite_backup_retention_requires_new_restore_drill".to_owned());
-        }
         if enabled && !target.automatic_enabled {
             target.automatic_revision = target
                 .automatic_revision
@@ -325,6 +338,7 @@ pub async fn update_offsite_backup_retention_settings(
             .iter_mut()
             .find(|target| target.id == target_id)
             .ok_or_else(|| "offsite_backup_target_not_found".to_owned())?;
+        ensure_retention_enable_allowed(target, enabled)?;
         target.retention_enabled = enabled;
         target.retention_max_snapshots = max_snapshots;
         target.retention_max_age_days = max_age_days;
@@ -1280,11 +1294,7 @@ async fn run_retention_cleanup(
         if !config.retention_enabled {
             return Ok(());
         }
-        if config.last_restore_test_at_ms.is_some()
-            && config.last_restore_test_snapshot_id.is_none()
-        {
-            return Err("offsite_backup_retention_requires_new_restore_drill".to_owned());
-        }
+        ensure_retention_enable_allowed(&config, true)?;
         ensure_workspace_access(app, vault_state, permit)?;
         let target = open_target(&config).await?;
         let snapshots = list_all_snapshots(target.as_ref()).await?;
@@ -1436,20 +1446,80 @@ fn read_config(path: &Path) -> Result<OffsiteBackupConfig, String> {
         }
         Err(error) => return Err(error.to_string()),
     };
-    let config: OffsiteBackupConfig =
+    let value: serde_json::Value =
         serde_json::from_str(&contents).map_err(|_| "offsite_backup_invalid_config".to_owned())?;
-    validate_config(&config)?;
-    Ok(config)
+    let format = value
+        .get("format")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "offsite_backup_invalid_config".to_owned())?;
+    if format == CONFIG_FORMAT {
+        if load_optional_config_auth_key()?.is_some() {
+            return Err("offsite_backup_config_authentication_failed".to_owned());
+        }
+        let config: OffsiteBackupConfig = serde_json::from_value(value)
+            .map_err(|_| "offsite_backup_invalid_config".to_owned())?;
+        validate_config(&config)?;
+        write_config(path, &config)?;
+        return Ok(config);
+    }
+    if format != AUTHENTICATED_CONFIG_FORMAT {
+        return Err("offsite_backup_invalid_config".to_owned());
+    }
+    let key = load_config_auth_key()?;
+    parse_authenticated_config(&contents, &key)
 }
 
 fn write_config(path: &Path, config: &OffsiteBackupConfig) -> Result<(), String> {
     validate_config(config)?;
-    let contents = serde_json::to_vec_pretty(config).map_err(|error| error.to_string())?;
+    let key = load_or_create_config_auth_key()?;
+    let envelope = authenticated_config(config.clone(), &key)?;
+    let contents = serde_json::to_vec_pretty(&envelope).map_err(|error| error.to_string())?;
     let parent = path
         .parent()
         .ok_or_else(|| "offsite_backup_invalid_config_path".to_owned())?;
     fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     write_atomically(path, &contents).map_err(|error| error.to_string())
+}
+
+fn config_authentication(config: &OffsiteBackupConfig, key: &[u8]) -> Result<String, String> {
+    let serialized = serde_json::to_vec(config).map_err(|error| error.to_string())?;
+    let mut mac = hmac::Hmac::<Sha256>::new_from_slice(key)
+        .map_err(|_| "offsite_backup_config_authentication_failed".to_owned())?;
+    mac.update(&serialized);
+    Ok(STANDARD_NO_PAD.encode(mac.finalize().into_bytes()))
+}
+
+fn authenticated_config(
+    config: OffsiteBackupConfig,
+    key: &[u8],
+) -> Result<AuthenticatedOffsiteBackupConfig, String> {
+    Ok(AuthenticatedOffsiteBackupConfig {
+        format: AUTHENTICATED_CONFIG_FORMAT.to_owned(),
+        version: AUTHENTICATED_CONFIG_VERSION,
+        authentication: config_authentication(&config, key)?,
+        config,
+    })
+}
+
+fn parse_authenticated_config(contents: &str, key: &[u8]) -> Result<OffsiteBackupConfig, String> {
+    let envelope: AuthenticatedOffsiteBackupConfig =
+        serde_json::from_str(contents).map_err(|_| "offsite_backup_invalid_config".to_owned())?;
+    if envelope.format != AUTHENTICATED_CONFIG_FORMAT
+        || envelope.version != AUTHENTICATED_CONFIG_VERSION
+    {
+        return Err("offsite_backup_invalid_config".to_owned());
+    }
+    validate_config(&envelope.config)?;
+    let supplied = STANDARD_NO_PAD
+        .decode(envelope.authentication)
+        .map_err(|_| "offsite_backup_config_authentication_failed".to_owned())?;
+    let serialized = serde_json::to_vec(&envelope.config).map_err(|error| error.to_string())?;
+    let mut mac = Hmac::<Sha256>::new_from_slice(key)
+        .map_err(|_| "offsite_backup_config_authentication_failed".to_owned())?;
+    mac.update(&serialized);
+    mac.verify_slice(&supplied)
+        .map_err(|_| "offsite_backup_config_authentication_failed".to_owned())?;
+    Ok(envelope.config)
 }
 
 fn validate_config(config: &OffsiteBackupConfig) -> Result<(), String> {
@@ -1498,6 +1568,7 @@ fn validate_config(config: &OffsiteBackupConfig) -> Result<(), String> {
         if !ids.insert(target.id)
             || !provider_config_valid
             || Uuid::parse_str(&target.credential_id).is_err()
+            || target.credential_id == CONFIG_AUTH_CREDENTIAL_ID
             || target.created_at_ms == 0
             || !(1..=MAXIMUM_AUTOMATIC_INTERVAL_HOURS).contains(&target.automatic_interval_hours)
             || validate_retention_settings(
@@ -1573,10 +1644,66 @@ fn validate_retention_settings(max_snapshots: u32, max_age_days: u32) -> Result<
     Ok(())
 }
 
+fn ensure_retention_enable_allowed(
+    target: &BackupTargetConfig,
+    enabled: bool,
+) -> Result<(), String> {
+    if enabled
+        && target.last_restore_test_at_ms.is_some()
+        && target.last_restore_test_snapshot_id.is_none()
+    {
+        Err("offsite_backup_retention_requires_new_restore_drill".to_owned())
+    } else {
+        Ok(())
+    }
+}
+
 fn credential_entry(credential_id: &str) -> Result<keyring::Entry, String> {
     Uuid::parse_str(credential_id).map_err(|_| "offsite_backup_invalid_credential".to_owned())?;
     keyring::Entry::new(KEYRING_SERVICE, credential_id)
         .map_err(|_| "offsite_backup_credential_unavailable".to_owned())
+}
+
+fn decode_config_auth_key(encoded: String) -> Result<Zeroizing<Vec<u8>>, String> {
+    let encoded = Zeroizing::new(encoded);
+    let decoded = STANDARD_NO_PAD
+        .decode(encoded.as_bytes())
+        .map_err(|_| "offsite_backup_config_authentication_failed".to_owned())?;
+    if decoded.len() != CONFIG_AUTH_KEY_BYTES {
+        return Err("offsite_backup_config_authentication_failed".to_owned());
+    }
+    Ok(Zeroizing::new(decoded))
+}
+
+fn load_optional_config_auth_key() -> Result<Option<Zeroizing<Vec<u8>>>, String> {
+    match credential_entry(CONFIG_AUTH_CREDENTIAL_ID)?.get_password() {
+        Ok(encoded) => decode_config_auth_key(encoded).map(Some),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(_) => Err("offsite_backup_config_authentication_failed".to_owned()),
+    }
+}
+
+fn load_config_auth_key() -> Result<Zeroizing<Vec<u8>>, String> {
+    load_optional_config_auth_key()?
+        .ok_or_else(|| "offsite_backup_config_authentication_failed".to_owned())
+}
+
+fn load_or_create_config_auth_key() -> Result<Zeroizing<Vec<u8>>, String> {
+    let entry = credential_entry(CONFIG_AUTH_CREDENTIAL_ID)?;
+    match load_optional_config_auth_key()? {
+        Some(key) => Ok(key),
+        None => {
+            let mut key = [0_u8; CONFIG_AUTH_KEY_BYTES];
+            getrandom::fill(&mut key)
+                .map_err(|_| "offsite_backup_config_authentication_failed".to_owned())?;
+            let key = Zeroizing::new(key.to_vec());
+            let encoded = Zeroizing::new(STANDARD_NO_PAD.encode(key.as_slice()));
+            entry
+                .set_password(&encoded)
+                .map_err(|_| "offsite_backup_config_authentication_failed".to_owned())?;
+            Ok(key)
+        }
+    }
 }
 
 fn store_credential(credential_id: &str, token: &str) -> Result<(), String> {
@@ -1752,6 +1879,47 @@ mod tests {
             last_retention_cleanup_at_ms: None,
             last_retention_error: None,
         }
+    }
+
+    #[test]
+    fn authenticated_config_rejects_tampered_endpoints() {
+        let key = [7_u8; CONFIG_AUTH_KEY_BYTES];
+        let config = OffsiteBackupConfig {
+            targets: vec![s3_target("linked-info/v1")],
+            ..OffsiteBackupConfig::default()
+        };
+        let envelope = authenticated_config(config.clone(), &key).unwrap();
+        let serialized = serde_json::to_string(&envelope).unwrap();
+
+        assert_eq!(
+            parse_authenticated_config(&serialized, &key)
+                .unwrap()
+                .targets[0]
+                .endpoint,
+            config.targets[0].endpoint
+        );
+
+        let mut tampered: serde_json::Value = serde_json::from_str(&serialized).unwrap();
+        tampered["config"]["targets"][0]["endpoint"] =
+            serde_json::Value::String("https://attacker.example.test/".to_owned());
+        assert_eq!(
+            parse_authenticated_config(&tampered.to_string(), &key).unwrap_err(),
+            "offsite_backup_config_authentication_failed"
+        );
+    }
+
+    #[test]
+    fn legacy_restore_drill_requires_revalidation_before_retention_is_enabled() {
+        let mut target = s3_target("linked-info/v1");
+        target.last_restore_test_at_ms = Some(42);
+
+        assert_eq!(ensure_retention_enable_allowed(&target, false), Ok(()));
+        assert_eq!(
+            ensure_retention_enable_allowed(&target, true),
+            Err("offsite_backup_retention_requires_new_restore_drill".to_owned())
+        );
+        target.last_restore_test_snapshot_id = Some(Uuid::new_v4());
+        assert_eq!(ensure_retention_enable_allowed(&target, true), Ok(()));
     }
 
     #[test]

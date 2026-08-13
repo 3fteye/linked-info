@@ -6,6 +6,7 @@ use chacha20poly1305::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashSet,
     fs::{self, OpenOptions},
     io::{self, Write},
     path::{Path, PathBuf},
@@ -35,6 +36,7 @@ const DATA_KEY_ROTATION_VAULT_FILE_NAME: &str = "workspace.vault.v1.json";
 const DATA_KEY_ROTATION_BACKUP_DIRECTORY_NAME: &str = "backups";
 const ENCRYPTED_WORKSPACE_FORMAT: &str = "linked-info-encrypted-workspace";
 const ENCRYPTED_EXPORT_FORMAT: &str = "linked-info-encrypted-workspace-export";
+const WORKSPACE_EXPORT_FORMAT: &str = "linked-info-workspace";
 const VAULT_FORMAT: &str = "linked-info-workspace-vault";
 const DATA_KEY_ROTATION_FORMAT: &str = "linked-info-data-key-rotation";
 const CRYPTO_VERSION: u32 = 1;
@@ -1395,6 +1397,8 @@ pub async fn encrypt_workspace_export(
             .lock()
             .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
         ensure_access_generation(&access_generation, Some(permit))?;
+        workspace_storage_from_export(&contents)
+            .map_err(|_| "workspace_export_invalid_data".to_owned())?;
         let metadata = store
             .read_vault_metadata()?
             .ok_or_else(|| "workspace_vault_not_configured".to_owned())?;
@@ -1422,6 +1426,8 @@ pub(crate) async fn encrypt_offsite_workspace_snapshot(
             .lock()
             .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
         ensure_access_generation(&access_generation, permit)?;
+        workspace_storage_from_export(&contents)
+            .map_err(|_| "workspace_export_invalid_data".to_owned())?;
         let metadata = store
             .read_vault_metadata()?
             .ok_or_else(|| "workspace_vault_not_configured".to_owned())?;
@@ -1442,7 +1448,7 @@ pub(crate) fn test_offsite_workspace_restore(
     ensure_restore_drill_access(access_generation, permit)?;
     let (envelope, data_key, plaintext) = open_encrypted_export(contents, password)?;
     let plaintext = Zeroizing::new(plaintext);
-    validate_storage_envelope(plaintext.as_str())
+    let expected_workspace = workspace_storage_from_export(plaintext.as_str())
         .map_err(|_| "workspace_restore_invalid_data".to_owned())?;
     ensure_restore_drill_access(access_generation, permit)?;
     let directory = std::env::temp_dir().join(format!(
@@ -1480,7 +1486,7 @@ pub(crate) fn test_offsite_workspace_restore(
                 .read(WorkspaceFileSlot::Primary, Some(&installed_key))?
                 .ok_or_else(|| "workspace_restore_drill_workspace_missing".to_owned())?,
         );
-        if installed_workspace.as_str() != plaintext.as_str() {
+        if installed_workspace.as_str() != expected_workspace {
             return Err("workspace_restore_drill_workspace_mismatch".to_owned());
         }
         ensure_restore_drill_access(access_generation, permit)?;
@@ -1550,7 +1556,7 @@ pub async fn prepare_workspace_restore(
             return Err(error);
         }
     };
-    validate_storage_envelope(&plaintext)
+    workspace_storage_from_export(&plaintext)
         .map_err(|_| "workspace_restore_invalid_data".to_owned())?;
     let id = uuid::Uuid::new_v4();
     let expires_at_milliseconds =
@@ -2317,8 +2323,8 @@ fn install_prepared_workspace_restore(
     prepared: PreparedWorkspaceRestore,
 ) -> Result<[u8; DATA_KEY_BYTES], String> {
     fs::create_dir_all(&store.base_directory).map_err(|error| error.to_string())?;
-    let plaintext = decrypt_export_payload(&prepared.envelope, &prepared.data_key)?;
-    validate_storage_envelope(&plaintext)
+    let export_plaintext = decrypt_export_payload(&prepared.envelope, &prepared.data_key)?;
+    let plaintext = workspace_storage_from_export(&export_plaintext)
         .map_err(|_| "workspace_restore_invalid_data".to_owned())?;
     let existing_primary = store
         .read_plaintext(WorkspaceFileSlot::Primary)
@@ -2872,16 +2878,199 @@ fn decrypt_export_payload(
     String::from_utf8(plaintext).map_err(|_| "workspace_export_invalid_plaintext".to_owned())
 }
 
+fn invalid_workspace_data(message: &'static str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message)
+}
+
+fn canonical_workspace_node_id(value: &serde_json::Value) -> Option<String> {
+    let value = value.as_str()?;
+    let bytes = value.as_bytes();
+    if bytes.len() != 36
+        || bytes[8] != b'-'
+        || bytes[13] != b'-'
+        || bytes[18] != b'-'
+        || bytes[23] != b'-'
+        || !(b'1'..=b'8').contains(&bytes[14])
+        || !matches!(bytes[19], b'8' | b'9' | b'a' | b'b' | b'A' | b'B')
+        || bytes
+            .iter()
+            .enumerate()
+            .any(|(index, byte)| !matches!(index, 8 | 13 | 18 | 23) && !byte.is_ascii_hexdigit())
+    {
+        return None;
+    }
+    uuid::Uuid::parse_str(value)
+        .ok()
+        .map(|id| id.hyphenated().to_string())
+}
+
+fn finite_json_number(value: Option<&serde_json::Value>) -> Option<f64> {
+    value
+        .and_then(serde_json::Value::as_f64)
+        .filter(|value| value.is_finite())
+}
+
+fn validate_workspace_snapshot(value: &serde_json::Value) -> io::Result<()> {
+    let workspace = value
+        .as_object()
+        .ok_or_else(|| invalid_workspace_data("workspace snapshot must be an object"))?;
+    let nodes = workspace
+        .get("nodes")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| invalid_workspace_data("workspace nodes must be an array"))?;
+    let layout = workspace
+        .get("layout")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| invalid_workspace_data("workspace layout must be an array"))?;
+    let references = workspace
+        .get("references")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| invalid_workspace_data("workspace references must be an array"))?;
+
+    if let Some(viewport) = workspace.get("viewport").filter(|value| !value.is_null()) {
+        let viewport = viewport
+            .as_object()
+            .ok_or_else(|| invalid_workspace_data("workspace viewport must be an object"))?;
+        let _x = finite_json_number(viewport.get("x"))
+            .ok_or_else(|| invalid_workspace_data("workspace viewport x must be finite"))?;
+        let _y = finite_json_number(viewport.get("y"))
+            .ok_or_else(|| invalid_workspace_data("workspace viewport y must be finite"))?;
+        let zoom = finite_json_number(viewport.get("zoom"))
+            .ok_or_else(|| invalid_workspace_data("workspace viewport zoom must be finite"))?;
+        if zoom <= 0.0 {
+            return Err(invalid_workspace_data(
+                "workspace viewport zoom must be positive",
+            ));
+        }
+    }
+
+    let mut node_ids = HashSet::with_capacity(nodes.len());
+    let mut normalized_names = HashSet::new();
+    for node in nodes {
+        let node = node
+            .as_object()
+            .ok_or_else(|| invalid_workspace_data("workspace node must be an object"))?;
+        let id = canonical_workspace_node_id(
+            node.get("id")
+                .ok_or_else(|| invalid_workspace_data("workspace node id is missing"))?,
+        )
+        .ok_or_else(|| invalid_workspace_data("workspace node id is invalid"))?;
+        if !node_ids.insert(id) {
+            return Err(invalid_workspace_data("workspace node ids must be unique"));
+        }
+
+        match node.get("name") {
+            Some(value) if value.is_null() => {}
+            Some(value) if value.is_string() => {
+                let name = value.as_str().unwrap_or_default().trim();
+                let normalized = name.to_lowercase();
+                if normalized.is_empty() || !normalized_names.insert(normalized) {
+                    return Err(invalid_workspace_data(
+                        "workspace non-empty node names must be unique",
+                    ));
+                }
+            }
+            _ => return Err(invalid_workspace_data("workspace node name is invalid")),
+        }
+        if !matches!(node.get("content"), Some(value) if value.is_null() || value.is_string()) {
+            return Err(invalid_workspace_data("workspace node content is invalid"));
+        }
+    }
+
+    if layout.len() != nodes.len() {
+        return Err(invalid_workspace_data(
+            "workspace layout must contain every node exactly once",
+        ));
+    }
+    let mut layout_node_ids = HashSet::with_capacity(layout.len());
+    for item in layout {
+        let item = item
+            .as_object()
+            .ok_or_else(|| invalid_workspace_data("workspace layout item must be an object"))?;
+        let node_id = canonical_workspace_node_id(
+            item.get("nodeId")
+                .ok_or_else(|| invalid_workspace_data("workspace layout node id is missing"))?,
+        )
+        .ok_or_else(|| invalid_workspace_data("workspace layout node id is invalid"))?;
+        if !node_ids.contains(&node_id) || !layout_node_ids.insert(node_id) {
+            return Err(invalid_workspace_data(
+                "workspace layout node id is invalid",
+            ));
+        }
+        finite_json_number(item.get("x"))
+            .ok_or_else(|| invalid_workspace_data("workspace layout x must be finite"))?;
+        finite_json_number(item.get("y"))
+            .ok_or_else(|| invalid_workspace_data("workspace layout y must be finite"))?;
+    }
+
+    let mut reference_keys = HashSet::with_capacity(references.len());
+    for reference in references {
+        let reference = reference
+            .as_object()
+            .ok_or_else(|| invalid_workspace_data("workspace reference must be an object"))?;
+        let source =
+            canonical_workspace_node_id(reference.get("sourceNodeId").ok_or_else(|| {
+                invalid_workspace_data("workspace reference source node id is missing")
+            })?)
+            .ok_or_else(|| {
+                invalid_workspace_data("workspace reference source node id is invalid")
+            })?;
+        let target =
+            canonical_workspace_node_id(reference.get("targetNodeId").ok_or_else(|| {
+                invalid_workspace_data("workspace reference target node id is missing")
+            })?)
+            .ok_or_else(|| {
+                invalid_workspace_data("workspace reference target node id is invalid")
+            })?;
+        if !node_ids.contains(&source)
+            || !node_ids.contains(&target)
+            || !reference_keys.insert((source, target))
+        {
+            return Err(invalid_workspace_data("workspace reference is invalid"));
+        }
+    }
+    Ok(())
+}
+
 fn validate_storage_envelope(contents: &str) -> io::Result<()> {
     let value: serde_json::Value = serde_json::from_str(contents)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    if !value.is_object() || value.get("version").and_then(serde_json::Value::as_u64) != Some(1) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
+    if value.get("version").and_then(serde_json::Value::as_u64) != Some(1) {
+        return Err(invalid_workspace_data(
             "workspace storage envelope must use version 1",
         ));
     }
-    Ok(())
+    validate_workspace_snapshot(&value)
+}
+
+fn workspace_storage_from_export(contents: &str) -> io::Result<String> {
+    let value: serde_json::Value = serde_json::from_str(contents)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    let document = value
+        .as_object()
+        .ok_or_else(|| invalid_workspace_data("workspace export must be an object"))?;
+    if document.get("format").and_then(serde_json::Value::as_str) != Some(WORKSPACE_EXPORT_FORMAT)
+        || document.get("version").and_then(serde_json::Value::as_u64) != Some(1)
+        || document
+            .get("exportedAt")
+            .and_then(serde_json::Value::as_str)
+            .is_none_or(str::is_empty)
+    {
+        return Err(invalid_workspace_data(
+            "workspace export envelope is invalid",
+        ));
+    }
+    let workspace = document
+        .get("workspace")
+        .ok_or_else(|| invalid_workspace_data("workspace export payload is missing"))?;
+    validate_workspace_snapshot(workspace)?;
+    let mut storage = workspace
+        .as_object()
+        .cloned()
+        .ok_or_else(|| invalid_workspace_data("workspace export payload must be an object"))?;
+    storage.insert("version".to_owned(), serde_json::Value::from(1));
+    serde_json::to_string(&storage)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
 pub(crate) fn write_atomically(target: &Path, contents: &[u8]) -> io::Result<()> {
@@ -3029,6 +3218,78 @@ mod tests {
             "viewport": null
         })
         .to_string()
+    }
+
+    fn workspace_export(name: &str) -> String {
+        let mut workspace: serde_json::Value =
+            serde_json::from_str(&workspace(name)).expect("test workspace must be JSON");
+        workspace
+            .as_object_mut()
+            .expect("test workspace must be an object")
+            .remove("version");
+        serde_json::json!({
+            "format": WORKSPACE_EXPORT_FORMAT,
+            "version": 1,
+            "exportedAt": "2026-08-13T00:00:00.000Z",
+            "workspace": workspace
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn storage_validation_rejects_semantically_invalid_graphs() {
+        let mut duplicate_name: serde_json::Value =
+            serde_json::from_str(&workspace("OpenAI")).unwrap();
+        duplicate_name["nodes"] = serde_json::json!([
+            {
+                "id": "11111111-1111-4111-8111-111111111111",
+                "name": "OpenAI",
+                "content": null
+            },
+            {
+                "id": "22222222-2222-4222-8222-222222222222",
+                "name": " openai ",
+                "content": null
+            }
+        ]);
+        duplicate_name["layout"] = serde_json::json!([
+            {
+                "nodeId": "11111111-1111-4111-8111-111111111111",
+                "x": 0,
+                "y": 0
+            },
+            {
+                "nodeId": "22222222-2222-4222-8222-222222222222",
+                "x": 1,
+                "y": 1
+            }
+        ]);
+        assert!(validate_storage_envelope(&duplicate_name.to_string()).is_err());
+
+        let mut dangling_reference: serde_json::Value =
+            serde_json::from_str(&workspace("OpenAI")).unwrap();
+        dangling_reference["references"] = serde_json::json!([{
+            "sourceNodeId": "11111111-1111-4111-8111-111111111111",
+            "targetNodeId": "22222222-2222-4222-8222-222222222222"
+        }]);
+        assert!(validate_storage_envelope(&dangling_reference.to_string()).is_err());
+
+        let mut incomplete_layout: serde_json::Value =
+            serde_json::from_str(&workspace("OpenAI")).unwrap();
+        incomplete_layout["layout"] = serde_json::json!([]);
+        assert!(validate_storage_envelope(&incomplete_layout.to_string()).is_err());
+    }
+
+    #[test]
+    fn export_conversion_extracts_a_valid_storage_envelope() {
+        let export = workspace_export("restored-from-offsite");
+        let storage = workspace_storage_from_export(&export).unwrap();
+        let storage_value: serde_json::Value = serde_json::from_str(&storage).unwrap();
+
+        validate_storage_envelope(&storage).unwrap();
+        assert_eq!(storage_value["version"], 1);
+        assert_eq!(storage_value["nodes"][0]["name"], "restored-from-offsite");
+        assert!(validate_storage_envelope(&export).is_err());
     }
 
     #[test]
@@ -3883,7 +4144,8 @@ mod tests {
         let directory = test_directory();
         let store = WorkspaceFileStore::new(directory.clone());
         let current = workspace("current-local-workspace");
-        let restored = workspace("restored-from-offsite");
+        let restored_export = workspace_export("restored-from-offsite");
+        let restored_storage = workspace_storage_from_export(&restored_export).unwrap();
         store
             .write_plaintext(WorkspaceFileSlot::Primary, &current)
             .unwrap();
@@ -3891,10 +4153,10 @@ mod tests {
         let source_key = random_array::<DATA_KEY_BYTES>().unwrap();
         let source_metadata =
             create_vault_metadata("correct horse battery", &source_key, Vec::new()).unwrap();
-        let encrypted = encrypt_export(&restored, &source_metadata, &source_key).unwrap();
+        let encrypted = encrypt_export(&restored_export, &source_metadata, &source_key).unwrap();
         let (envelope, opened_key, preview) =
             open_encrypted_export(&encrypted, "correct horse battery").unwrap();
-        assert_eq!(preview, restored);
+        assert_eq!(preview, restored_export);
 
         let installed_key = install_prepared_workspace_restore(
             &store,
@@ -3917,7 +4179,7 @@ mod tests {
             store
                 .read(WorkspaceFileSlot::Primary, Some(&installed_key))
                 .unwrap(),
-            Some(restored)
+            Some(restored_storage)
         );
         assert_eq!(
             store
@@ -3930,7 +4192,7 @@ mod tests {
 
     #[test]
     fn recovery_drill_installs_and_unlocks_an_isolated_fresh_vault() {
-        let restored = workspace("recovery-drill");
+        let restored = workspace_export("recovery-drill");
         let source_key = random_array::<DATA_KEY_BYTES>().unwrap();
         let source_metadata =
             create_vault_metadata("correct horse battery", &source_key, Vec::new()).unwrap();
@@ -4133,8 +4395,7 @@ mod tests {
         let target = CloudflareBackupTarget::new(&endpoint, token.to_string())
             .expect("drill target configuration must be valid");
         let password = "linked info recovery drill password";
-        let restored = serde_json::json!({
-            "version": 1,
+        let restored_workspace = serde_json::json!({
             "nodes": [
                 {
                     "id": "11111111-1111-4111-8111-111111111111",
@@ -4164,9 +4425,15 @@ mod tests {
                 "targetNodeId": "22222222-2222-4222-8222-222222222222"
             }],
             "viewport": { "x": 25, "y": 35, "zoom": 1.25 }
+        });
+        validate_workspace_snapshot(&restored_workspace).expect("drill workspace must be valid");
+        let restored = serde_json::json!({
+            "format": WORKSPACE_EXPORT_FORMAT,
+            "version": 1,
+            "exportedAt": "2026-08-13T00:00:00.000Z",
+            "workspace": restored_workspace
         })
         .to_string();
-        validate_storage_envelope(&restored).expect("drill workspace must be valid");
 
         let source_key = random_array::<DATA_KEY_BYTES>().expect("test key generation failed");
         let source_metadata = create_vault_metadata(password, &source_key, Vec::new())
