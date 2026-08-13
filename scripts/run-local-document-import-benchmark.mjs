@@ -9,13 +9,15 @@ const entityKinds = [
   "account", "service", "plan", "script", "tool", "project", "promoCode",
   "person", "organization", "other",
 ];
-const [endpoint, apiKey, outputArgument] = process.argv.slice(2);
+const [endpoint, apiKey, outputArgument, modelId = "Qwen/Qwen3-1.7B-GGUF-multistage-v2"] =
+  process.argv.slice(2);
 if (!endpoint || !apiKey || !outputArgument) {
   process.stderr.write(
-    "usage: run-local-document-import-benchmark.mjs <endpoint> <api-key> <output>\n",
+    "usage: run-local-document-import-benchmark.mjs <endpoint> <api-key> <output> [model-id]\n",
   );
   process.exit(1);
 }
+if (!modelId.trim()) throw new Error("model id must not be empty");
 
 const benchmark = JSON.parse(
   await readFile(
@@ -230,6 +232,49 @@ function validateRecords(result, entities, caseId) {
   });
 }
 
+function textContainsSensitiveRecordMarker(text) {
+  const normalized = text.toLocaleLowerCase("zh-CN");
+  return [
+    "密码", "口令", "令牌", "恢复码", "密钥", "2fa", "totp", "token",
+    "api key", "api_key", "secret", "recovery code", "backup code",
+  ].some((marker) => normalized.includes(marker));
+}
+
+function preserveSensitiveRelationshipRecord(request, entities, records, caseId) {
+  if (!textContainsSensitiveRecordMarker(request.text)) return records;
+  const accounts = entities.filter((entity) => entity.kind === "account");
+  const services = entities.filter((entity) => entity.kind === "service");
+  if (accounts.length !== 1 || services.length !== 1) return records;
+  const account = accounts[0];
+  const service = services[0];
+  const existing = records.find(
+    (record) =>
+      record.participantAliases.includes(account.alias) &&
+      record.participantAliases.includes(service.alias),
+  );
+  if (existing) {
+    existing.content = request.text.trim();
+    return records;
+  }
+  if (entities.length + records.length >= maximumNodes) {
+    throw new Error(`${caseId} cannot preserve a sensitive relationship within the node limit`);
+  }
+  const existingNames = new Set(
+    [...entities, ...records].map((item) => normalizedName(item.name)),
+  );
+  const name = [
+    `${account.name} 的 ${service.name} 登录记录`,
+    `${account.name} 的 ${service.name} 凭据记录`,
+  ].find((candidate) => [...candidate].length <= 160 && !existingNames.has(normalizedName(candidate)));
+  if (!name) throw new Error(`${caseId} cannot name the sensitive relationship record`);
+  records.push({
+    name,
+    content: request.text.trim(),
+    participantAliases: [account.alias, service.alias],
+  });
+  return records;
+}
+
 function buildReferenceNodes(entities, records) {
   const entityNodeAlias = new Map(
     entities.map((entity, index) => [entity.alias, `N${String(index + 1).padStart(2, "0")}`]),
@@ -282,6 +327,25 @@ function validateReferences(result, nodes, caseId) {
   });
 }
 
+function completeRequiredRecordReferences(nodes, references) {
+  const completed = [];
+  const pairs = new Set();
+  const sourceCounts = new Map();
+  const add = (sourceAlias, targetAlias) => {
+    const pair = `${sourceAlias}\0${targetAlias}`;
+    const count = sourceCounts.get(sourceAlias) ?? 0;
+    if (pairs.has(pair) || count >= maximumReferencesPerNode) return;
+    pairs.add(pair);
+    sourceCounts.set(sourceAlias, count + 1);
+    completed.push({ sourceAlias, targetAlias });
+  };
+  for (const node of nodes.filter((node) => node.kind === "record")) {
+    for (const targetAlias of node.participantAliases) add(node.alias, targetAlias);
+  }
+  for (const reference of references) add(reference.sourceAlias, reference.targetAlias);
+  return completed;
+}
+
 function assembleNodes(nodes, references) {
   const nodeByAlias = new Map(nodes.map((node) => [node.alias, node]));
   const targets = new Map();
@@ -300,7 +364,7 @@ function assembleNodes(nodes, references) {
 const predictions = {
   schemaVersion: 1,
   datasetId: benchmark.datasetId,
-  modelId: "Qwen/Qwen3-1.7B-GGUF-multistage-v2",
+  modelId,
   cases: [],
   failures: [],
 };
@@ -333,7 +397,18 @@ for (let index = 0; index < benchmark.cases.length; index += 1) {
       recordSchema(entities.map((entity) => entity.alias)),
       recordRequest,
     );
-    const records = validateRecords(recordResult, entities, item.id);
+    const records = validateRecords(
+      {
+        records: preserveSensitiveRelationshipRecord(
+          recordRequest,
+          entities,
+          validateRecords(recordResult, entities, item.id),
+          item.id,
+        ),
+      },
+      entities,
+      item.id,
+    );
     const nodes = buildReferenceNodes(entities, records);
 
     stage = "reference";
@@ -350,7 +425,16 @@ for (let index = 0; index < benchmark.cases.length; index += 1) {
       referenceSchema(nodes.map((node) => node.alias)),
       referenceRequest,
     );
-    const references = validateReferences(referenceResult, nodes, item.id);
+    const references = validateReferences(
+      {
+        references: completeRequiredRecordReferences(
+          nodes,
+          validateReferences(referenceResult, nodes, item.id),
+        ),
+      },
+      nodes,
+      item.id,
+    );
     predictions.cases.push({ id: item.id, nodes: assembleNodes(nodes, references) });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

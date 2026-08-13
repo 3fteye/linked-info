@@ -112,8 +112,8 @@ flowchart LR
 - `llmReview.ts` 负责从第一层结果与正式引用中构建有界候选、分配临时编号并验证模型响应；React 不接触 llama.cpp 的端口或进程。
 - `LlmGateway` 是视图依赖的供应商无关边界。本地 Tauri 适配器使用 `review_local_references` 命令；远端 LLM 仍是以后可选适配器，不进入本轮实现。
 - Rust 只接受最多 24 个候选、每个候选最多两条示例和有限长度文本，并再次验证编号与分组互斥。模型只生成 `selectedAliases` 和 `uncertainAliases`；Rust 根据两个数组是否均为空唯一推导 `noMatch`，避免冗余字段自相矛盾。无效响应直接失败，不修改正式引用。
-- 本地运行时固定为 llama.cpp `b10344` CPU 构建；GitHub Actions 下载对应平台产物并校验 SHA-256，再作为 Tauri resource 打包。Windows 便携产物把整个 `llama-runtime` 目录放在 EXE 旁边，不能只复制 `llama-server.exe` 而遗漏动态库。
-- 本地模型固定为 `Qwen/Qwen3-1.7B-GGUF` revision `90862c4b9d2787eaed51d12237eafdfe7c5f6077` 的 `Qwen3-1.7B-Q8_0.gguf`。Rust 按固定大小和 SHA-256 校验下载，模型只进入系统应用缓存。
+- 本地运行时固定为 llama.cpp `b10344` CPU 构建；GitHub Actions 下载对应平台产物并校验 SHA-256，再作为 Tauri resource 打包。Windows 便携产物把整个 `llama-runtime` 目录放在 EXE 旁边，不能只复制 `llama-server.exe` 而遗漏动态库。正式应用与质量基准统一使用随机种子 `42`，避免默认 `-1` 让相同模型和提示在不同运行间产生不可归因的波动。
+- 本地 LLM 可选模型固定为 `Qwen/Qwen3-1.7B-GGUF` revision `90862c4b9d2787eaed51d12237eafdfe7c5f6077` 的 `Qwen3-1.7B-Q8_0.gguf`，以及 `Qwen/Qwen3-4B-GGUF` revision `bc640142c66e1fdd12af0bd68f40445458f3869b` 的 `Qwen3-4B-Q8_0.gguf`。Rust 对每个文件按独立固定大小和 SHA-256 校验下载，模型只进入系统应用缓存；1.7B 保持默认，4B 用于质量优先的可选对比。
 - llama.cpp 只监听 `127.0.0.1`，使用每次启动随机生成的 API key，关闭 Web UI、思考模式和上下文滚动；推理线程最多为 4，并至少给系统保留一个逻辑核心。
 - 同一时间只允许一个本地 LLM 下载、加载或推理任务。禁用功能与正常退出都必须结束 sidecar，不能遗留后台进程。
 - 智能引用写回时必须重新验证当前工作区中的源节点和目标节点；异步分析使用的旧快照不能直接越过当前数据边界。
@@ -152,7 +152,7 @@ node scripts/document-import-benchmark.mjs score artifacts/document-import-bench
 
 正式 Rust 导入路径与本地模型评测共用 `fixtures/document-import-prompt.json` 中每个阶段的系统提示和完整示例。修改该契约后必须重新跑固定夹具并保留前后报告；不能只根据少数肉眼样例判断改进。实际运行器命令只用于开发机上已经下载且校验过的本地模型，端点和临时 API key 由调用者启动的独立 llama.cpp 进程提供，结果仍写入 `artifacts/`。
 
-当前提示契约采用三阶段结构：`entity` 只找具体对象，`record` 只生成多对象关系记录，`reference` 只在带编号候选之间选择有向引用。Rust 对每阶段分别应用 JSON Schema、响应复验和 3,000 token 输入预算，随后组装成前端已有的文档导入响应；引用阶段不再重复发送原文，任一阶段失败都不会返回部分结果。评测器必须走同样三阶段和相同契约，不能用简化脚本冒充正式路径。单阶段历史基线仍记录在开发计划中，用于衡量拆分是否真的改善质量。
+当前提示契约采用三阶段结构：`entity` 只找具体对象，`record` 只生成多对象关系记录，`reference` 只在带编号候选之间选择有向引用。Rust 对每阶段分别应用 JSON Schema、响应复验和 3,000 token 输入预算，随后组装成前端已有的文档导入响应；引用阶段不再重复发送原文，任一阶段失败都不会返回部分结果。模型记录输出通过两项确定性规则后才进入引用阶段：关系记录必定引用其 `participantAliases`；唯一账号与唯一服务的文本若包含敏感标记，必须存在关系记录且内容使用原始分段全文，秘密值不能成为名称。评测器必须执行相同后处理，不能用简化脚本冒充正式路径。单阶段历史基线仍记录在开发计划中，用于衡量拆分是否真的改善质量。
 
 离线评测器遇到某个用例的阶段失败时，将该用例记录为空预测并在预测 JSON 的 `failures` 中保存用例 ID、失败阶段和非敏感错误原因，然后继续其余夹具。正式应用不会这样跳过单个分段：任何分段失败都会终止当前文档分析并丢弃整份内存草稿。评测器的继续执行只用于获得完整质量报告，不能复制到正式导入语义。
 

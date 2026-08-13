@@ -239,6 +239,11 @@ export const resources = {
                 description: "面向中英文信息归类的本地 CPU 模型。精度高于更激进的低比特量化，适合作为第一版复核模型。",
                 limitation: "实际下载约 1.71 GiB，推理还需要额外内存和 CPU 时间；老旧双核设备可能较慢。",
               },
+              qwen3_4B: {
+                name: "Qwen3 4B Q8",
+                description: "参数更多的本地 CPU 模型，用于文档拆分、关系记录和引用判断，适合在质量优先时使用。",
+                limitation: "实际下载约 3.99 GiB，运行内存与 CPU 时间明显高于 1.7B；低内存设备可能无法稳定加载。",
+              },
             },
           },
           download: {
@@ -817,6 +822,11 @@ export const resources = {
                 name: "Qwen3 1.7B Q8",
                 description: "A local CPU model for Chinese and English information classification. Q8 preserves more quality than aggressive low-bit quantization.",
                 limitation: "The download is about 1.71 GiB and inference needs additional memory and CPU time. Older dual-core systems may be slow.",
+              },
+              qwen3_4B: {
+                name: "Qwen3 4B Q8",
+                description: "A larger local CPU model for document decomposition, relationship records, and reference decisions when quality matters more than speed.",
+                limitation: "The download is about 3.99 GiB and it needs substantially more memory and CPU time than 1.7B. Low-memory devices may not load it reliably.",
               },
             },
           },

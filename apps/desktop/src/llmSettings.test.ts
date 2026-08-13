@@ -23,6 +23,15 @@ describe("LLM settings", () => {
       enabled: true,
       localModel: "Qwen/Qwen3-1.7B-GGUF",
     });
+    expect(
+      parseLlmSettings({
+        enabled: true,
+        localModel: "Qwen/Qwen3-4B-GGUF",
+      }),
+    ).toEqual({
+      enabled: true,
+      localModel: "Qwen/Qwen3-4B-GGUF",
+    });
   });
 
   it("updates through the same boundary validation", () => {

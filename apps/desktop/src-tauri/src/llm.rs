@@ -48,8 +48,6 @@ const DOCUMENT_IMPORT_ENTITY_KINDS: &[&str] = &[
     "other",
 ];
 const MAXIMUM_DOWNLOAD_RETRIES: usize = 5;
-const MODEL_SHA256: &str = "061b54daade076b5d3362dac252678d17da8c68f07560be70818cace6590cb1a";
-
 struct LocalLlmModelSpec {
     id: &'static str,
     repository: &'static str,
@@ -59,14 +57,24 @@ struct LocalLlmModelSpec {
     sha256: &'static str,
 }
 
-static LOCAL_LLM_MODELS: &[LocalLlmModelSpec] = &[LocalLlmModelSpec {
-    id: "Qwen/Qwen3-1.7B-GGUF",
-    repository: "Qwen/Qwen3-1.7B-GGUF",
-    revision: "90862c4b9d2787eaed51d12237eafdfe7c5f6077",
-    file_name: "Qwen3-1.7B-Q8_0.gguf",
-    size: 1_834_426_016,
-    sha256: MODEL_SHA256,
-}];
+static LOCAL_LLM_MODELS: &[LocalLlmModelSpec] = &[
+    LocalLlmModelSpec {
+        id: "Qwen/Qwen3-1.7B-GGUF",
+        repository: "Qwen/Qwen3-1.7B-GGUF",
+        revision: "90862c4b9d2787eaed51d12237eafdfe7c5f6077",
+        file_name: "Qwen3-1.7B-Q8_0.gguf",
+        size: 1_834_426_016,
+        sha256: "061b54daade076b5d3362dac252678d17da8c68f07560be70818cace6590cb1a",
+    },
+    LocalLlmModelSpec {
+        id: "Qwen/Qwen3-4B-GGUF",
+        repository: "Qwen/Qwen3-4B-GGUF",
+        revision: "bc640142c66e1fdd12af0bd68f40445458f3869b",
+        file_name: "Qwen3-4B-Q8_0.gguf",
+        size: 4_280_404_704,
+        sha256: "8c2f07f26af9747e41988551106f149b03eb9b5cb6df636027b6bf6278473300",
+    },
+];
 
 #[derive(Clone, Copy, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1066,6 +1074,8 @@ fn start_local_llm_server(
             "--no-webui",
             "--parallel",
             "1",
+            "--seed",
+            "42",
             "--ctx-size",
             "4096",
             "--n-predict",
@@ -1448,6 +1458,91 @@ fn validate_document_import_records(
     Ok(())
 }
 
+fn text_contains_sensitive_record_marker(text: &str) -> bool {
+    let normalized = text.to_lowercase();
+    [
+        "密码",
+        "口令",
+        "令牌",
+        "恢复码",
+        "密钥",
+        "2fa",
+        "totp",
+        "token",
+        "api key",
+        "api_key",
+        "secret",
+        "recovery code",
+        "backup code",
+    ]
+    .iter()
+    .any(|marker| normalized.contains(marker))
+}
+
+fn preserve_sensitive_relationship_record(
+    request: &DocumentImportRecordRequest,
+    response: &mut DocumentImportRecordResponse,
+) -> Result<(), String> {
+    if !text_contains_sensitive_record_marker(&request.text) {
+        return Ok(());
+    }
+    let accounts = request
+        .entities
+        .iter()
+        .filter(|entity| entity.kind == "account")
+        .collect::<Vec<_>>();
+    let services = request
+        .entities
+        .iter()
+        .filter(|entity| entity.kind == "service")
+        .collect::<Vec<_>>();
+    if accounts.len() != 1 || services.len() != 1 {
+        return Ok(());
+    }
+    let account = accounts[0];
+    let service = services[0];
+    if let Some(record) = response.records.iter_mut().find(|record| {
+        record.participant_aliases.contains(&account.alias)
+            && record.participant_aliases.contains(&service.alias)
+    }) {
+        record.content = request.text.trim().to_owned();
+        return Ok(());
+    }
+    if request.entities.len() + response.records.len() >= MAXIMUM_IMPORT_NODES {
+        return Err(
+            "local document import cannot preserve sensitive relationship within the node limit"
+                .to_owned(),
+        );
+    }
+    let existing_names = request
+        .entities
+        .iter()
+        .map(|entity| entity.name.trim().to_lowercase())
+        .chain(
+            response
+                .records
+                .iter()
+                .map(|record| record.name.trim().to_lowercase()),
+        )
+        .collect::<HashSet<_>>();
+    let candidates = [
+        format!("{} 的 {} 登录记录", account.name, service.name),
+        format!("{} 的 {} 凭据记录", account.name, service.name),
+    ];
+    let name = candidates
+        .into_iter()
+        .find(|name| name.chars().count() <= 160 && !existing_names.contains(&name.to_lowercase()))
+        .ok_or_else(|| {
+            "local document import cannot name the sensitive relationship record".to_owned()
+        })?;
+    response.records.push(DocumentImportRecord {
+        name,
+        content: request.text.trim().to_owned(),
+        participant_aliases: vec![account.alias.clone(), service.alias.clone()],
+    });
+    Ok(())
+}
+
 fn validate_document_import_reference_request(
     request: &DocumentImportReferenceRequest,
 ) -> Result<(), String> {
@@ -1530,6 +1625,47 @@ fn validate_document_import_references(
         }
     }
     Ok(())
+}
+
+fn complete_required_record_references(
+    request: &DocumentImportReferenceRequest,
+    response: &DocumentImportReferenceResponse,
+) -> DocumentImportReferenceResponse {
+    let mut references = Vec::new();
+    let mut pairs = HashSet::<(String, String)>::new();
+    let mut source_counts = std::collections::HashMap::<String, usize>::new();
+    for node in request.nodes.iter().filter(|node| node.kind == "record") {
+        for target_alias in &node.participant_aliases {
+            if pairs.insert((node.alias.clone(), target_alias.clone())) {
+                *source_counts.entry(node.alias.clone()).or_default() += 1;
+                references.push(DocumentImportReference {
+                    source_alias: node.alias.clone(),
+                    target_alias: target_alias.clone(),
+                });
+            }
+        }
+    }
+    for reference in &response.references {
+        let pair = (
+            reference.source_alias.clone(),
+            reference.target_alias.clone(),
+        );
+        if pairs.contains(&pair)
+            || source_counts
+                .get(&reference.source_alias)
+                .copied()
+                .unwrap_or(0)
+                >= 12
+        {
+            continue;
+        }
+        pairs.insert(pair);
+        *source_counts
+            .entry(reference.source_alias.clone())
+            .or_default() += 1;
+        references.push(reference.clone());
+    }
+    DocumentImportReferenceResponse { references }
 }
 
 fn import_named_content_schema() -> serde_json::Value {
@@ -1882,7 +2018,7 @@ where
         .iter()
         .map(|entity| entity.alias.clone())
         .collect::<Vec<_>>();
-    let records = request_structured_local_import::<DocumentImportRecordResponse>(
+    let mut records = request_structured_local_import::<DocumentImportRecordResponse>(
         connection,
         "linked_info_document_records",
         document_import_record_schema(&entity_aliases),
@@ -1892,6 +2028,8 @@ where
     )
     .await?;
     ensure_access()?;
+    validate_document_import_records(&record_request, &records)?;
+    preserve_sensitive_relationship_record(&record_request, &mut records)?;
     validate_document_import_records(&record_request, &records)?;
 
     let nodes = reference_nodes(&entities, &records);
@@ -1926,6 +2064,8 @@ where
     )
     .await?;
     ensure_access()?;
+    validate_document_import_references(&reference_request, &references)?;
+    let references = complete_required_record_references(&reference_request, &references);
     validate_document_import_references(&reference_request, &references)?;
     assemble_document_import_response(&reference_request.nodes, &references)
 }
@@ -2395,15 +2535,78 @@ mod tests {
                 target_alias: "N01".to_owned(),
             }],
         };
-        let response = assemble_document_import_response(&nodes, &references)
+        let reference_request = DocumentImportReferenceRequest {
+            source_name: "示例订阅.txt".to_owned(),
+            chunk_index: 0,
+            chunk_count: 1,
+            nodes,
+        };
+        let references = complete_required_record_references(&reference_request, &references);
+        let response = assemble_document_import_response(&reference_request.nodes, &references)
             .expect("valid stages should assemble");
         let record = response
             .nodes
             .iter()
             .find(|node| node.name.contains("使用记录"))
             .expect("assembled response should contain the record");
-        assert_eq!(record.reference_names, vec!["omega@example.invalid"]);
+        assert_eq!(
+            record.reference_names,
+            vec!["omega@example.invalid", "Nebula Drive"]
+        );
         assert!(response.nodes[0].reference_names.is_empty());
+    }
+
+    #[test]
+    fn document_import_preserves_sensitive_relationship_content_without_secret_names() {
+        let request = DocumentImportRecordRequest {
+            source_name: "凭据.txt".to_owned(),
+            chunk_index: 0,
+            chunk_count: 1,
+            text: "user@example.invalid 的 Example Auth 密码 TEST-ONLY，恢复码 INVALID-CODE。"
+                .to_owned(),
+            entities: vec![
+                DocumentImportAliasedEntity {
+                    alias: "E01".to_owned(),
+                    kind: "account".to_owned(),
+                    name: "user@example.invalid".to_owned(),
+                    content: None,
+                },
+                DocumentImportAliasedEntity {
+                    alias: "E02".to_owned(),
+                    kind: "service".to_owned(),
+                    name: "Example Auth".to_owned(),
+                    content: None,
+                },
+            ],
+        };
+        let mut response = DocumentImportRecordResponse {
+            records: Vec::new(),
+        };
+        preserve_sensitive_relationship_record(&request, &mut response)
+            .expect("sensitive relationship should be preserved");
+        validate_document_import_records(&request, &response)
+            .expect("preserved record should remain within import bounds");
+        assert_eq!(response.records.len(), 1);
+        assert_eq!(response.records[0].participant_aliases, vec!["E01", "E02"]);
+        assert_eq!(response.records[0].content, request.text);
+        assert!(!response.records[0].name.contains("TEST-ONLY"));
+        assert!(!response.records[0].name.contains("INVALID-CODE"));
+    }
+
+    #[test]
+    fn local_llm_catalog_pins_distinct_verified_model_files() {
+        assert_eq!(LOCAL_LLM_MODELS.len(), 2);
+        let mut ids = HashSet::new();
+        for spec in LOCAL_LLM_MODELS {
+            assert!(ids.insert(spec.id));
+            assert!(spec.size > 0);
+            assert_eq!(spec.sha256.len(), 64);
+            assert!(
+                spec.sha256
+                    .chars()
+                    .all(|character| character.is_ascii_hexdigit())
+            );
+        }
     }
 
     #[test]

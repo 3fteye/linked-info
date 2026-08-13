@@ -1,4 +1,7 @@
-export const localLlmModelIds = ["Qwen/Qwen3-1.7B-GGUF"] as const;
+export const localLlmModelIds = [
+  "Qwen/Qwen3-1.7B-GGUF",
+  "Qwen/Qwen3-4B-GGUF",
+] as const;
 
 export type LocalLlmModelId = (typeof localLlmModelIds)[number];
 
@@ -12,7 +15,7 @@ export interface LocalLlmModelDefinition {
   repository: string;
   revision: string;
   runtime: string;
-  translationKey: "qwen3_1_7B";
+  translationKey: "qwen3_1_7B" | "qwen3_4B";
 }
 
 export type LocalLlmPhase =
@@ -66,6 +69,18 @@ export const localLlmModels: readonly LocalLlmModelDefinition[] = [
     revision: "90862c4b9d2787eaed51d12237eafdfe7c5f6077",
     runtime: "llama.cpp b10344 CPU",
     translationKey: "qwen3_1_7B",
+  },
+  {
+    id: "Qwen/Qwen3-4B-GGUF",
+    contextTokens: 4_096,
+    downloadBytes: 4_280_404_704,
+    fileName: "Qwen3-4B-Q8_0.gguf",
+    license: "Apache-2.0",
+    quantization: "Q8_0",
+    repository: "Qwen/Qwen3-4B-GGUF",
+    revision: "bc640142c66e1fdd12af0bd68f40445458f3869b",
+    runtime: "llama.cpp b10344 CPU",
+    translationKey: "qwen3_4B",
   },
 ];
 
