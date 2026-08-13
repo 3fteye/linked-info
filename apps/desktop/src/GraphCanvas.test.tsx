@@ -155,4 +155,19 @@ describe("InformationNodeCard", () => {
 
     expect(container.textContent).toContain("182 incoming references folded");
   });
+
+  it("loads full content only when a preview node enters editing", () => {
+    const fullContent = "x".repeat(10_000);
+    renderCard(
+      root,
+      cardProps({
+        content: `${fullContent.slice(0, 600)}…`,
+        editing: false,
+      }),
+    );
+
+    renderCard(root, cardProps({ content: fullContent, editing: true }));
+
+    expect(container.querySelector("textarea")?.value).toBe(fullContent);
+  });
 });

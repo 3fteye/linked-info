@@ -58,7 +58,7 @@ import {
   referenceTargetCreationName,
   shouldCreateMissingReferenceTarget,
 } from "./referenceSearch";
-import { NodeContentHost } from "./contentProcessor";
+import { NodeContentHost, canvasContentPreview } from "./contentProcessor";
 import { buildCanvasReferencePresentation } from "./canvasReferencePresentation";
 import {
   nodeEditorDraft,
@@ -203,6 +203,7 @@ export function InformationNodeCard({
   const nodeRef = useRef<HTMLElement>(null);
   const nameInputRef = useRef<HTMLInputElement>(null);
   const [draft, setDraft] = useState(() => nodeEditorDraft(data.name, data.content));
+  const wasEditingRef = useRef(data.editing);
 
   useEffect(() => {
     if (data.editing) {
@@ -210,6 +211,13 @@ export function InformationNodeCard({
     }
 
     setDraft(nodeEditorDraft(data.name, data.content));
+  }, [data.content, data.editing, data.name]);
+
+  useLayoutEffect(() => {
+    if (data.editing && !wasEditingRef.current) {
+      setDraft(nodeEditorDraft(data.name, data.content));
+    }
+    wasEditingRef.current = data.editing;
   }, [data.content, data.editing, data.name]);
 
   useLayoutEffect(() => {
@@ -651,7 +659,10 @@ export default function GraphCanvas({
               )),
           data: {
             name: node.name,
-            content: node.content,
+            content:
+              editingNodeId === node.id
+                ? node.content
+                : canvasContentPreview(node.content),
             contentProcessorId: contentProcessorByNodeId[node.id] ?? null,
             contentLabel: labels.content,
             contentPlaceholder: labels.contentPlaceholder,
