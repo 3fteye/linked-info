@@ -150,7 +150,11 @@ node scripts/document-import-benchmark.mjs template artifacts/document-import-be
 node scripts/document-import-benchmark.mjs score artifacts/document-import-benchmark/predictions.json
 ```
 
-正式 Rust 导入路径与本地模型评测共用 `fixtures/document-import-prompt.json` 中的系统提示和两个完整示例。修改该契约后必须重新跑固定夹具并保留前后报告；不能只根据少数肉眼样例判断改进。实际运行器命令只用于开发机上已经下载且校验过的本地模型，端点和临时 API key 由调用者启动的独立 llama.cpp 进程提供，结果仍写入 `artifacts/`。
+正式 Rust 导入路径与本地模型评测共用 `fixtures/document-import-prompt.json` 中每个阶段的系统提示和完整示例。修改该契约后必须重新跑固定夹具并保留前后报告；不能只根据少数肉眼样例判断改进。实际运行器命令只用于开发机上已经下载且校验过的本地模型，端点和临时 API key 由调用者启动的独立 llama.cpp 进程提供，结果仍写入 `artifacts/`。
+
+当前提示契约采用三阶段结构：`entity` 只找具体对象，`record` 只生成多对象关系记录，`reference` 只在带编号候选之间选择有向引用。Rust 对每阶段分别应用 JSON Schema、响应复验和 3,000 token 输入预算，随后组装成前端已有的文档导入响应；引用阶段不再重复发送原文，任一阶段失败都不会返回部分结果。评测器必须走同样三阶段和相同契约，不能用简化脚本冒充正式路径。单阶段历史基线仍记录在开发计划中，用于衡量拆分是否真的改善质量。
+
+离线评测器遇到某个用例的阶段失败时，将该用例记录为空预测并在预测 JSON 的 `failures` 中保存用例 ID、失败阶段和非敏感错误原因，然后继续其余夹具。正式应用不会这样跳过单个分段：任何分段失败都会终止当前文档分析并丢弃整份内存草稿。评测器的继续执行只用于获得完整质量报告，不能复制到正式导入语义。
 
 公开数据转换器只读取使用者已经从官方来源下载的文件，并把派生评测集写入 `artifacts/`。CLUENER 输入是每行一个 `{ text, label }` 的 JSON 文件；DocRED 输入是官方 JSON 数组：
 

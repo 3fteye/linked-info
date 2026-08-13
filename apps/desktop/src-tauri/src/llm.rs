@@ -32,8 +32,21 @@ const MAXIMUM_CANDIDATE_COUNT: usize = 24;
 const MAXIMUM_EXISTING_REFERENCE_COUNT: usize = 12;
 const MAXIMUM_EXAMPLE_COUNT: usize = 2;
 const MAXIMUM_ESTIMATED_REQUEST_TOKENS: usize = 3_000;
+const MAXIMUM_ESTIMATED_IMPORT_INPUT_TOKENS: usize = 3_000;
 const MAXIMUM_IMPORT_CHUNK_CHARACTERS: usize = 1_800;
 const MAXIMUM_IMPORT_NODES: usize = 24;
+const DOCUMENT_IMPORT_ENTITY_KINDS: &[&str] = &[
+    "account",
+    "service",
+    "plan",
+    "script",
+    "tool",
+    "project",
+    "promoCode",
+    "person",
+    "organization",
+    "other",
+];
 const MAXIMUM_DOWNLOAD_RETRIES: usize = 5;
 const MODEL_SHA256: &str = "061b54daade076b5d3362dac252678d17da8c68f07560be70818cace6590cb1a";
 
@@ -168,14 +181,123 @@ pub struct LocalDocumentImportResponse {
 #[serde(rename_all = "camelCase")]
 struct DocumentImportPromptContract {
     schema_version: u32,
-    system_prompt: String,
-    examples: Vec<DocumentImportPromptExample>,
+    entity: DocumentImportEntityPrompt,
+    record: DocumentImportRecordPrompt,
+    reference: DocumentImportReferencePrompt,
 }
 
 #[derive(Deserialize)]
-struct DocumentImportPromptExample {
+#[serde(rename_all = "camelCase")]
+struct DocumentImportEntityPrompt {
+    system_prompt: String,
+    examples: Vec<DocumentImportEntityExample>,
+}
+
+#[derive(Deserialize)]
+struct DocumentImportEntityExample {
     request: LocalDocumentImportRequest,
-    response: LocalDocumentImportResponse,
+    response: DocumentImportEntityResponse,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+struct DocumentImportEntity {
+    kind: String,
+    name: String,
+    content: Option<String>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+struct DocumentImportEntityResponse {
+    entities: Vec<DocumentImportEntity>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DocumentImportAliasedEntity {
+    alias: String,
+    kind: String,
+    name: String,
+    content: Option<String>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DocumentImportRecordRequest {
+    source_name: String,
+    chunk_index: usize,
+    chunk_count: usize,
+    text: String,
+    entities: Vec<DocumentImportAliasedEntity>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DocumentImportRecordPrompt {
+    system_prompt: String,
+    examples: Vec<DocumentImportRecordExample>,
+}
+
+#[derive(Deserialize)]
+struct DocumentImportRecordExample {
+    request: DocumentImportRecordRequest,
+    response: DocumentImportRecordResponse,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DocumentImportRecord {
+    name: String,
+    content: String,
+    participant_aliases: Vec<String>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+struct DocumentImportRecordResponse {
+    records: Vec<DocumentImportRecord>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DocumentImportReferenceNode {
+    alias: String,
+    kind: String,
+    name: String,
+    content: Option<String>,
+    participant_aliases: Vec<String>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DocumentImportReferenceRequest {
+    source_name: String,
+    chunk_index: usize,
+    chunk_count: usize,
+    nodes: Vec<DocumentImportReferenceNode>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DocumentImportReferencePrompt {
+    system_prompt: String,
+    examples: Vec<DocumentImportReferenceExample>,
+}
+
+#[derive(Deserialize)]
+struct DocumentImportReferenceExample {
+    request: DocumentImportReferenceRequest,
+    response: DocumentImportReferenceResponse,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DocumentImportReference {
+    source_alias: String,
+    target_alias: String,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+struct DocumentImportReferenceResponse {
+    references: Vec<DocumentImportReference>,
 }
 
 #[derive(Serialize)]
@@ -1042,13 +1164,35 @@ fn summary_valid(summary: &LlmNodeSummary, content_limit: usize) -> bool {
     (name_length > 0 || content_length > 0) && name_length <= 160 && content_length <= content_limit
 }
 
-fn estimated_review_request_tokens(request: &LocalLlmReviewRequest) -> usize {
-    serde_json::to_string(request)
-        .expect("local LLM request types are serializable")
+fn estimated_text_tokens(value: &str) -> usize {
+    value
         .chars()
         .map(|character| if character.is_ascii() { 0.25_f64 } else { 1.0 })
         .sum::<f64>()
         .ceil() as usize
+}
+
+fn estimated_review_request_tokens(request: &LocalLlmReviewRequest) -> usize {
+    estimated_text_tokens(
+        &serde_json::to_string(request).expect("local LLM request types are serializable"),
+    )
+}
+
+fn estimated_import_prompt_tokens(
+    system_prompt: &str,
+    example_pairs: &[(String, String)],
+    request_json: &str,
+) -> usize {
+    let message_count = 2 + example_pairs.len() * 2;
+    16 + message_count * 4
+        + estimated_text_tokens(system_prompt)
+        + estimated_text_tokens(request_json)
+        + example_pairs
+            .iter()
+            .map(|(request, response)| {
+                estimated_text_tokens(request) + estimated_text_tokens(response)
+            })
+            .sum::<usize>()
 }
 
 fn validate_review_request(request: &LocalLlmReviewRequest) -> Result<(), String> {
@@ -1204,31 +1348,271 @@ fn validate_document_import_response(response: &LocalDocumentImportResponse) -> 
     Ok(())
 }
 
-fn document_import_response_schema() -> serde_json::Value {
+fn validate_document_import_entities(
+    response: &DocumentImportEntityResponse,
+) -> Result<(), String> {
+    if response.entities.len() > MAXIMUM_IMPORT_NODES {
+        return Err("local document import returned too many entities".to_owned());
+    }
+    let mut names = HashSet::new();
+    if response.entities.iter().any(|entity| {
+        let name = entity.name.trim();
+        !DOCUMENT_IMPORT_ENTITY_KINDS.contains(&entity.kind.as_str())
+            || name.is_empty()
+            || name.chars().count() > 160
+            || !names.insert(name.to_lowercase())
+            || entity
+                .content
+                .as_deref()
+                .is_some_and(|content| content.chars().count() > 2_400)
+    }) {
+        return Err("local document import entity is invalid".to_owned());
+    }
+    Ok(())
+}
+
+fn import_alias_valid(alias: &str, prefix: char) -> bool {
+    alias.len() == 3
+        && alias.starts_with(prefix)
+        && alias[1..]
+            .chars()
+            .all(|character| character.is_ascii_digit())
+}
+
+fn validate_document_import_record_request(
+    request: &DocumentImportRecordRequest,
+) -> Result<(), String> {
+    validate_document_import_request(&LocalDocumentImportRequest {
+        source_name: request.source_name.clone(),
+        chunk_index: request.chunk_index,
+        chunk_count: request.chunk_count,
+        text: request.text.clone(),
+    })?;
+    if request.entities.len() > MAXIMUM_IMPORT_NODES {
+        return Err("local document import record request has invalid entities".to_owned());
+    }
+    let mut aliases = HashSet::new();
+    let mut names = HashSet::new();
+    if request.entities.iter().any(|entity| {
+        let name = entity.name.trim();
+        !import_alias_valid(&entity.alias, 'E')
+            || !aliases.insert(entity.alias.as_str())
+            || !DOCUMENT_IMPORT_ENTITY_KINDS.contains(&entity.kind.as_str())
+            || name.is_empty()
+            || name.chars().count() > 160
+            || !names.insert(name.to_lowercase())
+            || entity
+                .content
+                .as_deref()
+                .is_some_and(|content| content.chars().count() > 2_400)
+    }) {
+        return Err("local document import record request has invalid entities".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_document_import_records(
+    request: &DocumentImportRecordRequest,
+    response: &DocumentImportRecordResponse,
+) -> Result<(), String> {
+    if request.entities.len() + response.records.len() > MAXIMUM_IMPORT_NODES {
+        return Err("local document import returned too many combined nodes".to_owned());
+    }
+    let allowed_aliases = request
+        .entities
+        .iter()
+        .map(|entity| entity.alias.as_str())
+        .collect::<HashSet<_>>();
+    let mut names = request
+        .entities
+        .iter()
+        .map(|entity| entity.name.trim().to_lowercase())
+        .collect::<HashSet<_>>();
+    for record in &response.records {
+        let name = record.name.trim();
+        let content = record.content.trim();
+        let mut participants = HashSet::new();
+        if name.is_empty()
+            || name.chars().count() > 160
+            || !names.insert(name.to_lowercase())
+            || content.is_empty()
+            || content.chars().count() > 2_400
+            || !(2..=12).contains(&record.participant_aliases.len())
+            || record.participant_aliases.iter().any(|alias| {
+                !allowed_aliases.contains(alias.as_str()) || !participants.insert(alias)
+            })
+        {
+            return Err("local document import record is invalid".to_owned());
+        }
+    }
+    Ok(())
+}
+
+fn validate_document_import_reference_request(
+    request: &DocumentImportReferenceRequest,
+) -> Result<(), String> {
+    let source_length = request.source_name.chars().count();
+    if source_length == 0
+        || source_length > 240
+        || request.chunk_count == 0
+        || request.chunk_count > 64
+        || request.chunk_index >= request.chunk_count
+        || request.nodes.len() > MAXIMUM_IMPORT_NODES
+    {
+        return Err("local document import reference request has invalid nodes".to_owned());
+    }
+    let aliases = request
+        .nodes
+        .iter()
+        .map(|node| node.alias.as_str())
+        .collect::<HashSet<_>>();
+    if aliases.len() != request.nodes.len() {
+        return Err("local document import reference request repeats aliases".to_owned());
+    }
+    let mut names = HashSet::new();
+    for node in &request.nodes {
+        let name = node.name.trim();
+        let mut participants = HashSet::new();
+        if !import_alias_valid(&node.alias, 'N')
+            || !(node.kind == "record"
+                || DOCUMENT_IMPORT_ENTITY_KINDS.contains(&node.kind.as_str()))
+            || name.is_empty()
+            || name.chars().count() > 160
+            || !names.insert(name.to_lowercase())
+            || node
+                .content
+                .as_deref()
+                .is_some_and(|content| content.chars().count() > 2_400)
+            || (node.kind != "record" && !node.participant_aliases.is_empty())
+            || (node.kind == "record" && !(2..=12).contains(&node.participant_aliases.len()))
+            || node
+                .participant_aliases
+                .iter()
+                .any(|alias| !aliases.contains(alias.as_str()) || !participants.insert(alias))
+        {
+            return Err("local document import reference request has invalid nodes".to_owned());
+        }
+    }
+    Ok(())
+}
+
+fn validate_document_import_references(
+    request: &DocumentImportReferenceRequest,
+    response: &DocumentImportReferenceResponse,
+) -> Result<(), String> {
+    if response.references.len() > MAXIMUM_IMPORT_NODES * 12 {
+        return Err("local document import returned too many references".to_owned());
+    }
+    let aliases = request
+        .nodes
+        .iter()
+        .map(|node| node.alias.as_str())
+        .collect::<HashSet<_>>();
+    let mut pairs = HashSet::new();
+    let mut source_counts = std::collections::HashMap::<&str, usize>::new();
+    for reference in &response.references {
+        if reference.source_alias == reference.target_alias
+            || !aliases.contains(reference.source_alias.as_str())
+            || !aliases.contains(reference.target_alias.as_str())
+            || !pairs.insert((
+                reference.source_alias.as_str(),
+                reference.target_alias.as_str(),
+            ))
+        {
+            return Err("local document import reference is invalid".to_owned());
+        }
+        let count = source_counts
+            .entry(reference.source_alias.as_str())
+            .or_default();
+        *count += 1;
+        if *count > 12 {
+            return Err("local document import node has too many references".to_owned());
+        }
+    }
+    Ok(())
+}
+
+fn import_named_content_schema() -> serde_json::Value {
     json!({
         "type": "object",
         "properties": {
-            "nodes": {
+            "kind": {
+                "type": "string",
+                "enum": DOCUMENT_IMPORT_ENTITY_KINDS
+            },
+            "name": { "type": "string", "minLength": 1, "maxLength": 160 },
+            "content": { "type": ["string", "null"], "maxLength": 2400 }
+        },
+        "required": ["kind", "name", "content"],
+        "additionalProperties": false
+    })
+}
+
+fn document_import_entity_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "entities": {
                 "type": "array",
                 "maxItems": MAXIMUM_IMPORT_NODES,
+                "items": import_named_content_schema()
+            }
+        },
+        "required": ["entities"],
+        "additionalProperties": false
+    })
+}
+
+fn document_import_record_schema(entity_aliases: &[String]) -> serde_json::Value {
+    let maximum_records = MAXIMUM_IMPORT_NODES.saturating_sub(entity_aliases.len());
+    json!({
+        "type": "object",
+        "properties": {
+            "records": {
+                "type": "array",
+                "maxItems": maximum_records,
                 "items": {
                     "type": "object",
                     "properties": {
                         "name": { "type": "string", "minLength": 1, "maxLength": 160 },
-                        "content": { "type": ["string", "null"], "maxLength": 2400 },
-                        "referenceNames": {
+                        "content": { "type": "string", "minLength": 1, "maxLength": 2400 },
+                        "participantAliases": {
                             "type": "array",
+                            "minItems": 2,
                             "maxItems": 12,
-                            "items": { "type": "string", "minLength": 1, "maxLength": 160 },
+                            "items": { "type": "string", "enum": entity_aliases },
                             "uniqueItems": true
                         }
                     },
-                    "required": ["name", "content", "referenceNames"],
+                    "required": ["name", "content", "participantAliases"],
                     "additionalProperties": false
                 }
             }
         },
-        "required": ["nodes"],
+        "required": ["records"],
+        "additionalProperties": false
+    })
+}
+
+fn document_import_reference_schema(node_aliases: &[String]) -> serde_json::Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "references": {
+                "type": "array",
+                "maxItems": MAXIMUM_IMPORT_NODES * 12,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "sourceAlias": { "type": "string", "enum": node_aliases },
+                        "targetAlias": { "type": "string", "enum": node_aliases }
+                    },
+                    "required": ["sourceAlias", "targetAlias"],
+                    "additionalProperties": false
+                }
+            }
+        },
+        "required": ["references"],
         "additionalProperties": false
     })
 }
@@ -1238,51 +1622,146 @@ fn document_import_prompt_contract() -> Result<DocumentImportPromptContract, Str
         "../../../../fixtures/document-import-prompt.json"
     ))
     .map_err(|error| format!("document import prompt contract is invalid: {error}"))?;
-    if contract.schema_version != 1
-        || contract.system_prompt.trim().is_empty()
-        || contract.examples.len() != 2
+    if contract.schema_version != 2
+        || contract.entity.system_prompt.trim().is_empty()
+        || contract.record.system_prompt.trim().is_empty()
+        || contract.reference.system_prompt.trim().is_empty()
+        || contract.entity.examples.is_empty()
+        || contract.record.examples.is_empty()
+        || contract.reference.examples.is_empty()
     {
         return Err("document import prompt contract is outside the supported bounds".to_owned());
     }
-    for example in &contract.examples {
+    for example in &contract.entity.examples {
         validate_document_import_request(&example.request)?;
-        validate_document_import_response(&example.response)?;
+        validate_document_import_entities(&example.response)?;
+    }
+    for example in &contract.record.examples {
+        validate_document_import_record_request(&example.request)?;
+        validate_document_import_records(&example.request, &example.response)?;
+    }
+    for example in &contract.reference.examples {
+        validate_document_import_reference_request(&example.request)?;
+        validate_document_import_references(&example.request, &example.response)?;
     }
     Ok(contract)
 }
 
-async fn request_local_document_import(
-    connection: &LocalLlmConnection,
-    request: &LocalDocumentImportRequest,
+fn aliased_entities(response: &DocumentImportEntityResponse) -> Vec<DocumentImportAliasedEntity> {
+    response
+        .entities
+        .iter()
+        .enumerate()
+        .map(|(index, entity)| DocumentImportAliasedEntity {
+            alias: format!("E{:02}", index + 1),
+            kind: entity.kind.clone(),
+            name: entity.name.trim().to_owned(),
+            content: entity
+                .content
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned),
+        })
+        .collect()
+}
+
+fn reference_nodes(
+    entities: &[DocumentImportAliasedEntity],
+    records: &DocumentImportRecordResponse,
+) -> Vec<DocumentImportReferenceNode> {
+    let entity_node_aliases = entities
+        .iter()
+        .enumerate()
+        .map(|(index, entity)| (entity.alias.as_str(), format!("N{:02}", index + 1)))
+        .collect::<std::collections::HashMap<_, _>>();
+    let mut nodes = entities
+        .iter()
+        .enumerate()
+        .map(|(index, entity)| DocumentImportReferenceNode {
+            alias: format!("N{:02}", index + 1),
+            kind: entity.kind.clone(),
+            name: entity.name.clone(),
+            content: entity.content.clone(),
+            participant_aliases: Vec::new(),
+        })
+        .collect::<Vec<_>>();
+    nodes.extend(records.records.iter().enumerate().map(|(index, record)| {
+        DocumentImportReferenceNode {
+            alias: format!("N{:02}", entities.len() + index + 1),
+            kind: "record".to_owned(),
+            name: record.name.trim().to_owned(),
+            content: Some(record.content.trim().to_owned()),
+            participant_aliases: record
+                .participant_aliases
+                .iter()
+                .filter_map(|alias| entity_node_aliases.get(alias.as_str()).cloned())
+                .collect(),
+        }
+    }));
+    nodes
+}
+
+fn assemble_document_import_response(
+    nodes: &[DocumentImportReferenceNode],
+    references: &DocumentImportReferenceResponse,
 ) -> Result<LocalDocumentImportResponse, String> {
-    let request_json = serde_json::to_string(request)
-        .map_err(|error| format!("cannot serialize local document import request: {error}"))?;
-    let prompt = document_import_prompt_contract()?;
-    let example_requests = prompt
-        .examples
+    let names = nodes
         .iter()
-        .map(|example| serde_json::to_string(&example.request))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| format!("cannot serialize document import example request: {error}"))?;
-    let example_responses = prompt
-        .examples
-        .iter()
-        .map(|example| serde_json::to_string(&example.response))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| format!("cannot serialize document import example response: {error}"))?;
+        .map(|node| (node.alias.as_str(), node.name.as_str()))
+        .collect::<std::collections::HashMap<_, _>>();
+    let mut targets = std::collections::HashMap::<&str, Vec<String>>::new();
+    for reference in &references.references {
+        let target_name = names
+            .get(reference.target_alias.as_str())
+            .ok_or_else(|| "local document import reference target is unknown".to_owned())?;
+        targets
+            .entry(reference.source_alias.as_str())
+            .or_default()
+            .push((*target_name).to_owned());
+    }
+    let response = LocalDocumentImportResponse {
+        nodes: nodes
+            .iter()
+            .map(|node| LocalDocumentImportNode {
+                name: node.name.clone(),
+                content: node.content.clone(),
+                reference_names: targets.remove(node.alias.as_str()).unwrap_or_default(),
+            })
+            .collect(),
+    };
+    validate_document_import_response(&response)?;
+    Ok(response)
+}
+
+async fn request_structured_local_import<T: for<'de> Deserialize<'de>>(
+    connection: &LocalLlmConnection,
+    schema_name: &str,
+    schema: serde_json::Value,
+    system_prompt: &str,
+    example_pairs: &[(String, String)],
+    request_json: &str,
+) -> Result<T, String> {
+    if estimated_import_prompt_tokens(system_prompt, example_pairs, request_json)
+        > MAXIMUM_ESTIMATED_IMPORT_INPUT_TOKENS
+    {
+        return Err(format!(
+            "local document import stage {schema_name} exceeds the context budget"
+        ));
+    }
     let response_format = json!({
         "type": "json_schema",
         "json_schema": {
-            "name": "linked_info_document_import",
+            "name": schema_name,
             "strict": true,
-            "schema": document_import_response_schema()
+            "schema": schema
         }
     });
     let mut messages = vec![ChatMessage {
         role: "system",
-        content: &prompt.system_prompt,
+        content: system_prompt,
     }];
-    for (example_request, example_response) in example_requests.iter().zip(&example_responses) {
+    for (example_request, example_response) in example_pairs {
         messages.push(ChatMessage {
             role: "user",
             content: example_request,
@@ -1294,7 +1773,7 @@ async fn request_local_document_import(
     }
     messages.push(ChatMessage {
         role: "user",
-        content: &request_json,
+        content: request_json,
     });
     let body = ChatCompletionRequest {
         model: "linked-info-local",
@@ -1330,10 +1809,125 @@ async fn request_local_document_import(
         .first()
         .and_then(|choice| choice.message.content.as_deref())
         .ok_or_else(|| "local document import response did not contain content".to_owned())?;
-    let result = serde_json::from_str::<LocalDocumentImportResponse>(content)
-        .map_err(|error| format!("local document import response is invalid: {error}"))?;
-    validate_document_import_response(&result)?;
-    Ok(result)
+    serde_json::from_str::<T>(content)
+        .map_err(|error| format!("local document import response is invalid: {error}"))
+}
+
+fn serialize_import_examples<Request: Serialize, Response: Serialize>(
+    examples: impl Iterator<Item = (Request, Response)>,
+) -> Result<Vec<(String, String)>, String> {
+    examples
+        .map(|(request, response)| {
+            Ok((
+                serde_json::to_string(&request).map_err(|error| {
+                    format!("cannot serialize document import example request: {error}")
+                })?,
+                serde_json::to_string(&response).map_err(|error| {
+                    format!("cannot serialize document import example response: {error}")
+                })?,
+            ))
+        })
+        .collect()
+}
+
+async fn request_local_document_import<EnsureAccess>(
+    connection: &LocalLlmConnection,
+    request: &LocalDocumentImportRequest,
+    mut ensure_access: EnsureAccess,
+) -> Result<LocalDocumentImportResponse, String>
+where
+    EnsureAccess: FnMut() -> Result<(), String>,
+{
+    let prompt = document_import_prompt_contract()?;
+    let entity_examples = serialize_import_examples(
+        prompt
+            .entity
+            .examples
+            .iter()
+            .map(|example| (&example.request, &example.response)),
+    )?;
+    let request_json = serde_json::to_string(request)
+        .map_err(|error| format!("cannot serialize local document import request: {error}"))?;
+    ensure_access()?;
+    let entities = request_structured_local_import::<DocumentImportEntityResponse>(
+        connection,
+        "linked_info_document_entities",
+        document_import_entity_schema(),
+        &prompt.entity.system_prompt,
+        &entity_examples,
+        &request_json,
+    )
+    .await?;
+    ensure_access()?;
+    validate_document_import_entities(&entities)?;
+    let entities = aliased_entities(&entities);
+    let record_request = DocumentImportRecordRequest {
+        source_name: request.source_name.clone(),
+        chunk_index: request.chunk_index,
+        chunk_count: request.chunk_count,
+        text: request.text.clone(),
+        entities: entities.clone(),
+    };
+    validate_document_import_record_request(&record_request)?;
+    let record_examples = serialize_import_examples(
+        prompt
+            .record
+            .examples
+            .iter()
+            .map(|example| (&example.request, &example.response)),
+    )?;
+    let record_request_json = serde_json::to_string(&record_request)
+        .map_err(|error| format!("cannot serialize document import record request: {error}"))?;
+    let entity_aliases = entities
+        .iter()
+        .map(|entity| entity.alias.clone())
+        .collect::<Vec<_>>();
+    let records = request_structured_local_import::<DocumentImportRecordResponse>(
+        connection,
+        "linked_info_document_records",
+        document_import_record_schema(&entity_aliases),
+        &prompt.record.system_prompt,
+        &record_examples,
+        &record_request_json,
+    )
+    .await?;
+    ensure_access()?;
+    validate_document_import_records(&record_request, &records)?;
+
+    let nodes = reference_nodes(&entities, &records);
+    let reference_request = DocumentImportReferenceRequest {
+        source_name: request.source_name.clone(),
+        chunk_index: request.chunk_index,
+        chunk_count: request.chunk_count,
+        nodes,
+    };
+    validate_document_import_reference_request(&reference_request)?;
+    let reference_examples = serialize_import_examples(
+        prompt
+            .reference
+            .examples
+            .iter()
+            .map(|example| (&example.request, &example.response)),
+    )?;
+    let reference_request_json = serde_json::to_string(&reference_request)
+        .map_err(|error| format!("cannot serialize document import reference request: {error}"))?;
+    let node_aliases = reference_request
+        .nodes
+        .iter()
+        .map(|node| node.alias.clone())
+        .collect::<Vec<_>>();
+    let references = request_structured_local_import::<DocumentImportReferenceResponse>(
+        connection,
+        "linked_info_document_references",
+        document_import_reference_schema(&node_aliases),
+        &prompt.reference.system_prompt,
+        &reference_examples,
+        &reference_request_json,
+    )
+    .await?;
+    ensure_access()?;
+    validate_document_import_references(&reference_request, &references)?;
+    assemble_document_import_response(&reference_request.nodes, &references)
 }
 
 async fn request_local_llm_review(
@@ -1530,7 +2124,10 @@ pub async fn extract_local_document_import(
     let connection = ensure_local_llm_server(&app, &state, spec, &model_path).await?;
     crate::workspace_file::ensure_workspace_access(&app, &vault_state, access_permit)?;
     emit_local_llm_progress(&app, spec, LocalLlmPhase::Inferencing, spec.size, None);
-    let response = request_local_document_import(&connection, &request).await;
+    let response = request_local_document_import(&connection, &request, || {
+        crate::workspace_file::ensure_workspace_access(&app, &vault_state, access_permit)
+    })
+    .await;
     crate::workspace_file::ensure_workspace_access(&app, &vault_state, access_permit)?;
     match response {
         Ok(response) => {
@@ -1678,12 +2275,135 @@ mod tests {
     }
 
     #[test]
-    fn document_import_prompt_contract_uses_two_valid_examples() {
+    fn document_import_prompt_contract_uses_three_valid_stages() {
         let contract = document_import_prompt_contract().expect("prompt contract should be valid");
-        assert_eq!(contract.schema_version, 1);
-        assert_eq!(contract.examples.len(), 2);
-        assert!(contract.system_prompt.contains("普通记录节点"));
-        assert!(contract.system_prompt.contains("密码、令牌、恢复码"));
+        assert_eq!(contract.schema_version, 2);
+        assert_eq!(contract.entity.examples.len(), 5);
+        assert_eq!(contract.record.examples.len(), 2);
+        assert_eq!(contract.reference.examples.len(), 2);
+        assert!(contract.entity.system_prompt.contains("密码、令牌、恢复码"));
+        assert!(contract.record.system_prompt.contains("普通记录节点"));
+        assert!(contract.reference.system_prompt.contains("不能创建、改名"));
+    }
+
+    #[test]
+    fn document_import_stage_budget_counts_prompt_examples_and_request() {
+        let contract = document_import_prompt_contract().expect("prompt contract should be valid");
+        let examples = serialize_import_examples(
+            contract
+                .entity
+                .examples
+                .iter()
+                .map(|example| (&example.request, &example.response)),
+        )
+        .expect("prompt examples should serialize");
+        let normal_request = serde_json::to_string(&LocalDocumentImportRequest {
+            source_name: "资料.txt".to_owned(),
+            chunk_index: 0,
+            chunk_count: 1,
+            text: "账号 A 使用 OpenAI。".to_owned(),
+        })
+        .expect("request should serialize");
+        assert!(
+            estimated_import_prompt_tokens(
+                &contract.entity.system_prompt,
+                &examples,
+                &normal_request,
+            ) < MAXIMUM_ESTIMATED_IMPORT_INPUT_TOKENS
+        );
+
+        let oversized_request = serde_json::to_string(&LocalDocumentImportRequest {
+            source_name: "资料.txt".to_owned(),
+            chunk_index: 0,
+            chunk_count: 1,
+            text: "超".repeat(MAXIMUM_ESTIMATED_IMPORT_INPUT_TOKENS),
+        })
+        .expect("request should serialize");
+        assert!(
+            estimated_import_prompt_tokens(
+                &contract.entity.system_prompt,
+                &examples,
+                &oversized_request,
+            ) > MAXIMUM_ESTIMATED_IMPORT_INPUT_TOKENS
+        );
+    }
+
+    #[test]
+    fn document_import_stage_aliases_are_validated_before_assembly() {
+        let contract = document_import_prompt_contract().expect("prompt contract should be valid");
+        let record_example = &contract.record.examples[0];
+        let mut invalid_record = record_example.response.clone();
+        invalid_record.records[0].participant_aliases = vec!["E01".to_owned()];
+        assert!(
+            validate_document_import_records(&record_example.request, &invalid_record).is_err()
+        );
+
+        let reference_example = &contract.reference.examples[0];
+        let mut invalid_reference = reference_example.response.clone();
+        invalid_reference.references.push(DocumentImportReference {
+            source_alias: "N99".to_owned(),
+            target_alias: "N01".to_owned(),
+        });
+        assert!(
+            validate_document_import_references(&reference_example.request, &invalid_reference)
+                .is_err()
+        );
+
+        let mut duplicate_reference = reference_example.response.clone();
+        duplicate_reference
+            .references
+            .push(duplicate_reference.references[0].clone());
+        assert!(
+            validate_document_import_references(&reference_example.request, &duplicate_reference)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn document_import_stage_assembly_preserves_record_direction_and_empty_results() {
+        let empty_entities = DocumentImportEntityResponse {
+            entities: Vec::new(),
+        };
+        assert!(validate_document_import_entities(&empty_entities).is_ok());
+        let entities = aliased_entities(&empty_entities);
+        let empty_records = DocumentImportRecordResponse {
+            records: Vec::new(),
+        };
+        let nodes = reference_nodes(&entities, &empty_records);
+        let empty_response = assemble_document_import_response(
+            &nodes,
+            &DocumentImportReferenceResponse {
+                references: Vec::new(),
+            },
+        )
+        .expect("empty stages should produce an empty response");
+        assert!(empty_response.nodes.is_empty());
+
+        let contract = document_import_prompt_contract().expect("prompt contract should be valid");
+        let record_example = &contract.record.examples[0];
+        let entities = record_example.request.entities.clone();
+        let nodes = reference_nodes(&entities, &record_example.response);
+        let record_alias = nodes
+            .iter()
+            .find(|node| node.kind == "record")
+            .expect("example should contain a record")
+            .alias
+            .clone();
+        let references = DocumentImportReferenceResponse {
+            references: vec![DocumentImportReference {
+                source_alias: record_alias,
+                target_alias: "N01".to_owned(),
+            }],
+        };
+        let response = assemble_document_import_response(&nodes, &references)
+            .expect("valid stages should assemble");
+        let record = response
+            .nodes
+            .iter()
+            .find(|node| node.name.contains("使用记录"))
+            .expect("assembled response should contain the record");
+        assert_eq!(record.reference_names, vec!["omega@example.invalid"]);
+        assert!(response.nodes[0].reference_names.is_empty());
     }
 
     #[test]
