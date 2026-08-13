@@ -140,6 +140,27 @@ flowchart LR
 
 每次确认导入都会建立来源节点，保存来源名称、SHA-256、导入时间、模型标识和完整原文；所选候选统一引用该来源。精确匹配到已有非空名称时只建立匹配/引用，不修改已有节点内容。文件正文、节点正文和模型响应不得进入普通日志或远端服务；第一版不提供远端 LLM 文档导入。
 
+### 文档导入评测
+
+固定合成夹具位于 `fixtures/document-import-benchmark/`。它只包含原创虚构资料，不读取真实工作区；标准答案用于衡量节点、引用和事实覆盖，不会自动写入应用。运行夹具校验和预测评分：
+
+```powershell
+node scripts/document-import-benchmark.mjs validate
+node scripts/document-import-benchmark.mjs template artifacts/document-import-benchmark/predictions.json
+node scripts/document-import-benchmark.mjs score artifacts/document-import-benchmark/predictions.json
+```
+
+正式 Rust 导入路径与本地模型评测共用 `fixtures/document-import-prompt.json` 中的系统提示和两个完整示例。修改该契约后必须重新跑固定夹具并保留前后报告；不能只根据少数肉眼样例判断改进。实际运行器命令只用于开发机上已经下载且校验过的本地模型，端点和临时 API key 由调用者启动的独立 llama.cpp 进程提供，结果仍写入 `artifacts/`。
+
+公开数据转换器只读取使用者已经从官方来源下载的文件，并把派生评测集写入 `artifacts/`。CLUENER 输入是每行一个 `{ text, label }` 的 JSON 文件；DocRED 输入是官方 JSON 数组：
+
+```powershell
+node scripts/prepare-public-document-import-benchmark.mjs cluener <train.json> artifacts/document-import-benchmark/cluener.json 30
+node scripts/prepare-public-document-import-benchmark.mjs docred <train_annotated.json> artifacts/document-import-benchmark/docred.json 30
+```
+
+公开标注只覆盖特定任务：CLUENER 不提供引用答案，DocRED 也不是个人笔记。不要把这些结果单独当作产品准确率；变更模型或提示词时应同时比较固定合成夹具和公开补充集。第三方原文、转换结果及模型预测不得提交到仓库。
+
 ## 开发环境
 
 CI 当前使用：

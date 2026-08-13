@@ -94,6 +94,15 @@ jobs:
       - name: Test sensitive logging policy
         run: node --test scripts/check-sensitive-logging.test.mjs
 
+      - name: Test document import benchmark scorer
+        run: >-
+          node --test
+          scripts/document-import-benchmark.test.mjs
+          scripts/prepare-public-document-import-benchmark.test.mjs
+
+      - name: Validate document import benchmark fixtures
+        run: node scripts/document-import-benchmark.mjs validate
+
       - name: Check sensitive logging boundary
         run: node scripts/check-sensitive-logging.mjs
 

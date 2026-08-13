@@ -2,6 +2,7 @@
 **/target/
 **/node_modules/
 **/dist/
+artifacts/
 **/.wrangler/
 apps/cloudflare-backup-worker/build/
 *.log
