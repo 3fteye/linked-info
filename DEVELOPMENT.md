@@ -180,6 +180,8 @@ CI 当前使用：
 
 开发阶段的自动检查和打包统一在 `windows-latest` 运行，与当前实际使用环境一致。源码继续保持供应商与视图边界解耦；macOS、Linux 构建在正式支持对应平台时恢复。
 
+Windows 开发包下载后不得让用户快捷方式直接指向带提交号的产物目录。统一运行 `scripts/sync-latest-windows-package.ps1`：脚本只接受 GitHub Actions 中已成功的 `Desktop packages` 运行，校验包内 SHA-256 和 `llama-runtime` 后，将 `artifacts/linked-info-current` 目录联接原子切换到该版本。桌面快捷方式始终指向 `linked-info-current/linked-info-desktop.exe`；以后切换构建时不再修改或重新寻找快捷方式。脚本遇到普通目录占用保留名称、校验失败或不完整产物时必须失败关闭，不得覆盖该目录。
+
 ### 桌面前端
 
 ```powershell

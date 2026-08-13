@@ -81,6 +81,8 @@ Windows 便携版尚未进行商业代码签名，系统可能显示 SmartScreen
 
 文字输入框获得焦点时仍使用系统原生的文字编辑快捷键。
 
+开发构建使用固定的 `artifacts/linked-info-current/linked-info-desktop.exe` 作为本机运行入口。维护者下载新的 Windows Actions 产物后运行 `scripts/sync-latest-windows-package.ps1`，它会先验证构建状态、SHA-256 与本地模型运行时，再切换该固定入口；桌面快捷方式不应直接指向带提交号的历史产物目录。
+
 ## 数据与隐私
 
 正式桌面端把工作区保存在系统应用数据目录下，应用标识为 `com.linkedinfo.desktop`。Windows 上已经验证的路径是：
