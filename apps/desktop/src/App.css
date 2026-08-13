@@ -790,6 +790,16 @@ h1 {
   border-top: 1px solid #edf0ed;
 }
 
+.graph-node-collapsed-references {
+  margin: 0;
+  padding: 7px 10px 9px;
+  border-top: 1px solid #edf0ed;
+  color: #6c756e;
+  background: #fafcfb;
+  font-size: 10px;
+  line-height: 1.4;
+}
+
 .graph-node-references-label {
   color: #778079;
   font-size: 9px;
@@ -1543,6 +1553,15 @@ h1 {
 }
 
 .offsite-target-form .secondary-button {
+  justify-self: start;
+}
+
+.offsite-target-create-form {
+  display: grid;
+  gap: 10px;
+}
+
+.offsite-target-create-form .secondary-button {
   justify-self: start;
 }
 

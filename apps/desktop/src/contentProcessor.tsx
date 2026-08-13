@@ -55,6 +55,15 @@ export const contentProcessorRegistry = new ContentProcessorRegistry([
   textContentProcessor,
 ]);
 
+export const maximumCanvasContentPreviewCharacters = 600;
+
+export function canvasContentPreview(text: string | null): string | null {
+  if (text === null || text.length <= maximumCanvasContentPreviewCharacters) {
+    return text;
+  }
+  return `${text.slice(0, maximumCanvasContentPreviewCharacters)}…`;
+}
+
 interface NodeContentHostProps {
   className?: string;
   content: string | null;
@@ -74,7 +83,9 @@ export function NodeContentHost({
 }: NodeContentHostProps) {
   const resolved = contentProcessorRegistry.resolve(processorId);
   const presentation = resolved.processor.present(content);
-  const rendered = presentation.text || emptyContent;
+  const presentedText =
+    variant === "canvas" ? canvasContentPreview(presentation.text) : presentation.text;
+  const rendered = presentedText || emptyContent;
   if (hideWhenEmpty && (presentation.text === null || presentation.text.length === 0)) {
     return null;
   }

@@ -1464,6 +1464,8 @@ function App({
           ? t("security.passwordBlocked")
           : reason === "workspace_vault_password_rate_limited"
             ? t("security.passwordRateLimited")
+            : reason === "offsite_backup_retention_requires_new_restore_drill"
+              ? t("offsiteBackup.errors.retentionRequiresRestoreDrill")
             : t("security.operationFailed", { reason }),
       );
       try {
@@ -4637,31 +4639,6 @@ function App({
                           )}
                         </>
                       )}
-                      <div className="remote-embedding-fields offsite-target-form">
-                        <strong>{t("offsiteBackup.addTarget")}</strong>
-                        <label>
-                          <span>{t("offsiteBackup.targetName")}</span>
-                          <input
-                            disabled={offsiteBusy}
-                            maxLength={80}
-                            onChange={(event) =>
-                              setOffsiteTargetName(event.target.value)
-                            }
-                            value={offsiteTargetName}
-                          />
-                        </label>
-                        {renderOffsiteConnectionFields()}
-                        <button
-                          className="secondary-button"
-                          disabled={offsiteBusy || !offsiteBackup.available}
-                          onClick={requestOffsiteTargetConfiguration}
-                          type="button"
-                        >
-                          <Cloud aria-hidden="true" size={15} />
-                          {t("offsiteBackup.connect")}
-                        </button>
-                      </div>
-                      <small>{t("offsiteBackup.passwordHistoryWarning")}</small>
                     </>
                   )}
                   {offsiteMessage !== null && (
@@ -4669,6 +4646,41 @@ function App({
                   )}
                 </div>
               </div>
+              {workspaceSecurityStatus.encrypted && (
+                <div className="setting-row data-setting-row">
+                  <div className="setting-label">
+                    <Plus size={18} />
+                    <div className="setting-label-copy">
+                      <span>{t("offsiteBackup.addTarget")}</span>
+                      <small>{t("offsiteBackup.addTargetDescription")}</small>
+                    </div>
+                  </div>
+                  <div className="offsite-backup-settings">
+                    <div className="remote-embedding-fields offsite-target-create-form">
+                      <label>
+                        <span>{t("offsiteBackup.targetName")}</span>
+                        <input
+                          disabled={offsiteBusy}
+                          maxLength={80}
+                          onChange={(event) => setOffsiteTargetName(event.target.value)}
+                          value={offsiteTargetName}
+                        />
+                      </label>
+                      {renderOffsiteConnectionFields()}
+                      <button
+                        className="secondary-button"
+                        disabled={offsiteBusy || !offsiteBackup.available}
+                        onClick={requestOffsiteTargetConfiguration}
+                        type="button"
+                      >
+                        <Cloud aria-hidden="true" size={15} />
+                        {t("offsiteBackup.connect")}
+                      </button>
+                    </div>
+                    <small>{t("offsiteBackup.passwordHistoryWarning")}</small>
+                  </div>
+                </div>
+              )}
             </section>
           ) : activeView === "canvas" ? (
             <GraphCanvas
@@ -4711,6 +4723,8 @@ function App({
                 namePlaceholder: t("editor.namePlaceholder"),
                 noContent: t("nodes.noContent"),
                 references: t("references.list"),
+                collapsedIncomingReferences: (count) =>
+                  t("references.collapsedIncoming", { count }),
                 referenceSearchCreate: (name) =>
                   t("references.searchCreate", { name }),
                 referenceSearchCreateHint: t("references.searchCreateHint"),

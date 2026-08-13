@@ -32,6 +32,7 @@ function cardProps(overrides: Record<string, unknown> = {}): NodeProps<any> {
       nameLabel: "Name",
       namePlaceholder: "Name",
       referencedTargets: [],
+      collapsedIncomingReferenceLabel: null,
       referencesLabel: "References",
       unnamedLabel: "Unnamed",
       filterActive: false,
@@ -141,5 +142,17 @@ describe("InformationNodeCard", () => {
     });
 
     expect(props.data.onCommit).not.toHaveBeenCalled();
+  });
+
+  it("shows when dense incoming edges are folded by the canvas view", () => {
+    renderCard(
+      root,
+      cardProps({
+        collapsedIncomingReferenceLabel: "182 incoming references folded",
+        editing: false,
+      }),
+    );
+
+    expect(container.textContent).toContain("182 incoming references folded");
   });
 });

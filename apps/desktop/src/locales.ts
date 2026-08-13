@@ -76,6 +76,7 @@ export const resources = {
         searchPlaceholder: "按节点名称搜索",
         sourceHandle: "拖动以引用其他节点",
         targetHandle: "拖到这里建立引用",
+        collapsedIncoming: "为保持画布流畅，已折叠 {{count}} 条入站连接线；使用本节点的筛选按钮可查看全部来源节点。",
       },
       documentImport: {
         action: "导入文档",
@@ -504,6 +505,7 @@ export const resources = {
         destroyTargetConfirm: "删除全部并移除",
         targetDestroyed: "已删除 {{count}} 个远端快照并移除目标。",
         addTarget: "添加备份目标",
+        addTargetDescription: "配置一个新的独立远端保存位置。连接信息和凭据只属于这个目标，保存前需要重新验证身份。",
         targetName: "目标名称",
         provider: "连接方式",
         providers: {
@@ -558,6 +560,7 @@ export const resources = {
           upload: "异机备份上传失败：{{reason}}",
           verify: "远端快照完整校验失败：{{reason}}",
           restoreDrill: "远端快照恢复演练失败：{{reason}}",
+          retentionRequiresRestoreDrill: "保留规则尚未修改。启用自动清理前，请先对这个目标的一份现有快照完成一次恢复演练；演练成功后再重新启用保留规则。",
           automaticSettings: "无法更新自动异机备份设置：{{reason}}",
           download: "无法下载远端快照：{{reason}}",
           destroyPartial: "已删除 {{count}} 个快照，但随后失败（{{reason}}）。目标和凭据仍保留，可刷新后重试。",
@@ -664,6 +667,7 @@ export const resources = {
         searchPlaceholder: "Search by node name",
         sourceHandle: "Drag to reference another node",
         targetHandle: "Drop here to create a reference",
+        collapsedIncoming: "{{count}} incoming edge(s) are folded to keep the canvas responsive. Use this node’s filter button to see every source node.",
       },
       documentImport: {
         action: "Import document",
@@ -1092,6 +1096,7 @@ export const resources = {
         destroyTargetConfirm: "Delete all and remove",
         targetDestroyed: "Deleted {{count}} remote snapshots and removed the target.",
         addTarget: "Add a backup target",
+        addTargetDescription: "Configure a new independent remote storage location. Its connection details and credentials belong only to this target, and saving requires reauthentication.",
         targetName: "Target name",
         provider: "Connection type",
         providers: {
@@ -1146,6 +1151,7 @@ export const resources = {
           upload: "Offsite backup upload failed: {{reason}}",
           verify: "Remote snapshot verification failed: {{reason}}",
           restoreDrill: "Remote snapshot recovery drill failed: {{reason}}",
+          retentionRequiresRestoreDrill: "The retention rule was not changed. Before enabling automatic cleanup, run a recovery drill on an existing snapshot for this target, then enable retention again.",
           automaticSettings: "Could not update automatic offsite backup settings: {{reason}}",
           download: "Could not download the remote snapshot: {{reason}}",
           destroyPartial: "Deleted {{count}} snapshots, then failed ({{reason}}). The target and credentials are still available; refresh and retry.",

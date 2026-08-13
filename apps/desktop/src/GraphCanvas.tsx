@@ -59,6 +59,7 @@ import {
   shouldCreateMissingReferenceTarget,
 } from "./referenceSearch";
 import { NodeContentHost } from "./contentProcessor";
+import { buildCanvasReferencePresentation } from "./canvasReferencePresentation";
 import {
   nodeEditorDraft,
   shouldCommitNodeEditor,
@@ -79,6 +80,7 @@ interface InformationNodeData extends Record<string, unknown> {
   nameLabel: string;
   namePlaceholder: string;
   referencedTargets: Array<{ filterActive: boolean; id: string; label: string }>;
+  collapsedIncomingReferenceLabel: string | null;
   referencesLabel: string;
   unnamedLabel: string;
   filterActive: boolean;
@@ -115,6 +117,7 @@ interface GraphLabels {
   namePlaceholder: string;
   noContent: string;
   references: string;
+  collapsedIncomingReferences: (count: number) => string;
   referenceSearchEmpty: string;
   referenceSearchCreate: (name: string) => string;
   referenceSearchCreateHint: string;
@@ -349,6 +352,11 @@ export function InformationNodeCard({
             ))}
           </div>
         </section>
+      )}
+      {data.collapsedIncomingReferenceLabel !== null && (
+        <p className="graph-node-collapsed-references">
+          {data.collapsedIncomingReferenceLabel}
+        </p>
       )}
       <Handle
         className="graph-handle graph-handle-source"
@@ -586,6 +594,11 @@ export default function GraphCanvas({
     return result;
   }, [nodes, references]);
 
+  const canvasReferencePresentation = useMemo(
+    () => buildCanvasReferencePresentation(references),
+    [references],
+  );
+
   const referenceSearchCandidates = useMemo(() => {
     if (referenceSearch === null) {
       return [];
@@ -654,6 +667,11 @@ export default function GraphCanvas({
                 label: referencedNodeLabel(target, labels.unnamed, labels.noContent),
               }))
               .sort((left, right) => left.label.localeCompare(right.label)),
+            collapsedIncomingReferenceLabel: (() => {
+              const count =
+                canvasReferencePresentation.collapsedIncomingByTarget.get(node.id) ?? 0;
+              return count === 0 ? null : labels.collapsedIncomingReferences(count);
+            })(),
             referencesLabel: labels.references,
             unnamedLabel: labels.unnamed,
             filterActive: referenceFilterNodeIdSet.has(node.id),
@@ -671,6 +689,7 @@ export default function GraphCanvas({
     });
   }, [
     contentProcessorByNodeId,
+    canvasReferencePresentation,
     editingNodeId,
     labels,
     layoutByNode,
@@ -697,7 +716,7 @@ export default function GraphCanvas({
       const selectedEdgeIds = new Set(
         current.filter((edge) => edge.selected).map((edge) => edge.id),
       );
-      return references.map((reference) => {
+      return canvasReferencePresentation.visibleReferences.map((reference) => {
         const id = edgeId(reference);
         return {
           id,
@@ -712,7 +731,7 @@ export default function GraphCanvas({
         };
       });
     });
-  }, [flowNodes, references, setFlowEdges]);
+  }, [canvasReferencePresentation, flowNodes, setFlowEdges]);
 
   useEffect(() => {
     if (contextMenu === null) {
@@ -1066,6 +1085,7 @@ export default function GraphCanvas({
         minZoom={0.25}
         nodeTypes={nodeTypes}
         nodes={flowNodes}
+        onlyRenderVisibleElements
         onConnect={handleConnect}
         onConnectEnd={handleConnectEnd}
         onConnectStart={(_event, params) => {

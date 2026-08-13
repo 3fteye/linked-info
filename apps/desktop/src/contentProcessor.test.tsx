@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   ContentProcessorRegistry,
+  canvasContentPreview,
   contentProcessorRegistry,
+  maximumCanvasContentPreviewCharacters,
   textContentProcessor,
 } from "./contentProcessor";
 
@@ -30,5 +32,13 @@ describe("content processor registry", () => {
       () => new ContentProcessorRegistry([textContentProcessor, textContentProcessor]),
     ).toThrow("duplicate");
     expect(() => new ContentProcessorRegistry([])).toThrow("required");
+  });
+
+  it("bounds canvas preview text without changing stored content", () => {
+    const content = "a".repeat(maximumCanvasContentPreviewCharacters + 500);
+    const preview = canvasContentPreview(content);
+
+    expect(preview).toBe(`${"a".repeat(maximumCanvasContentPreviewCharacters)}…`);
+    expect(content).toHaveLength(maximumCanvasContentPreviewCharacters + 500);
   });
 });
