@@ -21,8 +21,10 @@ import {
 import { unavailableEmbeddingVectorCache } from "./embeddingCache";
 import { localEmbeddingSettingsStore } from "./embeddingSettings";
 import {
+  tauriDocumentImportLlmGateway,
   tauriLlmGateway,
   tauriLocalLlmRuntime,
+  unavailableDocumentImportLlmGateway,
   unavailableLlmGateway,
   unavailableLocalLlmRuntime,
 } from "./llmBridge";
@@ -74,6 +76,9 @@ const localEmbeddingRuntime = runningInTauri
   ? tauriLocalEmbeddingRuntime
   : unavailableLocalEmbeddingRuntime;
 const llmGateway = runningInTauri ? tauriLlmGateway : unavailableLlmGateway;
+const documentImportLlmGateway = runningInTauri
+  ? tauriDocumentImportLlmGateway
+  : unavailableDocumentImportLlmGateway;
 const localLlmRuntime = runningInTauri
   ? tauriLocalLlmRuntime
   : unavailableLocalLlmRuntime;
@@ -95,6 +100,7 @@ ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
     <WorkspaceSecurityGate security={workspaceSecurity}>
       {(workspaceSecurityStatus, updateWorkspaceSecurityStatus) => (
         <App
+          documentImportLlmGateway={documentImportLlmGateway}
           embeddingGateway={embeddingGateway}
           embeddingVectorCache={embeddingVectorCache}
           embeddingSettingsStore={localEmbeddingSettingsStore}

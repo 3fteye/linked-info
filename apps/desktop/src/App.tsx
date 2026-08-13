@@ -28,6 +28,16 @@ import {
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import GraphCanvas from "./GraphCanvas";
+import DocumentImportDialog from "./DocumentImportDialog";
+import {
+  buildDocumentImportWorkspace,
+  mergeDocumentImportCandidates,
+  splitDocumentForImport,
+  type DocumentImportCandidate,
+  type DocumentImportDraft,
+  type DocumentImportLlmGateway,
+} from "./documentImport";
+import { importTextDocument } from "./documentImportBridge";
 import { NodeContentHost } from "./contentProcessor";
 import { supportedLanguages, type SupportedLanguage } from "./locales";
 import {
@@ -172,6 +182,7 @@ type PendingOffsiteSensitiveAction =
     };
 
 interface AppProps {
+  documentImportLlmGateway: DocumentImportLlmGateway;
   embeddingGateway: EmbeddingGateway;
   embeddingVectorCache: EmbeddingVectorCache;
   embeddingSettingsStore: EmbeddingSettingsStore;
@@ -297,6 +308,7 @@ function nodeFilterLabel(
 }
 
 function App({
+  documentImportLlmGateway,
   embeddingGateway,
   embeddingVectorCache,
   embeddingSettingsStore,
@@ -319,6 +331,7 @@ function App({
   const workspaceRef = useRef(workspace);
   const skipUnmountFlushRef = useRef(false);
   const workspaceReplacementGenerationRef = useRef(0);
+  const documentImportCancelledRef = useRef(false);
   const workspaceChangedInSessionRef = useRef(false);
   const [persistenceReady, setPersistenceReady] = useState(false);
   const [primaryStorageProblem, setPrimaryStorageProblem] = useState<string | null>(null);
@@ -341,6 +354,21 @@ function App({
   const [pendingWorkspaceReplacement, setPendingWorkspaceReplacement] =
     useState<PendingWorkspaceReplacement | null>(null);
   const [backupStatus, setBackupStatus] = useState<string | null>(null);
+  const [documentImportOpen, setDocumentImportOpen] = useState(false);
+  const [documentImportSourceName, setDocumentImportSourceName] = useState("");
+  const [documentImportSourceText, setDocumentImportSourceText] = useState("");
+  const [documentImportDraft, setDocumentImportDraft] =
+    useState<DocumentImportDraft | null>(null);
+  const [documentImportPreview, setDocumentImportPreview] = useState<{
+    draft: DocumentImportDraft;
+    workspace: WorkspaceSnapshot;
+  } | null>(null);
+  const [documentImportBusy, setDocumentImportBusy] = useState(false);
+  const [documentImportProgress, setDocumentImportProgress] = useState<{
+    current: number;
+    total: number;
+  } | null>(null);
+  const [documentImportError, setDocumentImportError] = useState<string | null>(null);
   const [automaticBackupHistory, setAutomaticBackupHistory] =
     useState<WorkspaceBackupHistoryStatus | null>(null);
   const [automaticBackupHistoryLoading, setAutomaticBackupHistoryLoading] =
@@ -509,6 +537,193 @@ function App({
       setAppNotice(null);
       appNoticeTimerRef.current = null;
     }, 6_000);
+  }
+
+  function openDocumentImport() {
+    documentImportCancelledRef.current = false;
+    setDocumentImportOpen(true);
+    setDocumentImportDraft(null);
+    setDocumentImportPreview(null);
+    setDocumentImportSourceName("");
+    setDocumentImportSourceText("");
+    setDocumentImportError(null);
+    setDocumentImportProgress(null);
+  }
+
+  function discardDocumentImport() {
+    documentImportCancelledRef.current = true;
+    setDocumentImportOpen(false);
+    setDocumentImportDraft(null);
+    setDocumentImportSourceName("");
+    setDocumentImportSourceText("");
+    setDocumentImportError(null);
+    setDocumentImportProgress(null);
+    if (documentImportBusy) void localLlmRuntime.stop();
+  }
+
+  async function chooseDocumentImportFile() {
+    if (documentImportBusy) return;
+    setDocumentImportError(null);
+    try {
+      const file = await importTextDocument();
+      if (file === null) return;
+      setDocumentImportSourceName(file.name);
+      setDocumentImportSourceText(file.text);
+    } catch (error) {
+      setDocumentImportError(
+        t("documentImport.errors.file", { reason: errorReason(error) }),
+      );
+    }
+  }
+
+  async function analyzeDocumentImport() {
+    if (documentImportBusy) return;
+    const sourceText = documentImportSourceText;
+    if (sourceText.trim().length === 0) return;
+    setDocumentImportBusy(true);
+    documentImportCancelledRef.current = false;
+    setDocumentImportError(null);
+    setLocalLlmProgress(null);
+    const replacementGeneration = workspaceReplacementGenerationRef.current;
+    try {
+      const chunks = splitDocumentForImport(sourceText);
+      const sourceName = documentImportSourceName.trim() || t("documentImport.pastedSource");
+      const responses = [];
+      for (let index = 0; index < chunks.length; index += 1) {
+        if (documentImportCancelledRef.current) {
+          throw new Error("document_import_cancelled");
+        }
+        setDocumentImportProgress({ current: index + 1, total: chunks.length });
+        responses.push(
+          await documentImportLlmGateway.extractChunk(llmSettings.localModel, {
+            sourceName,
+            chunkIndex: index,
+            chunkCount: chunks.length,
+            text: chunks[index],
+          }),
+        );
+      }
+      if (documentImportCancelledRef.current) {
+        throw new Error("document_import_cancelled");
+      }
+      if (replacementGeneration !== workspaceReplacementGenerationRef.current) {
+        throw new Error("document_import_outdated");
+      }
+      const sourceHash = await crypto.subtle.digest(
+        "SHA-256",
+        new TextEncoder().encode(sourceText),
+      );
+      const hash = Array.from(new Uint8Array(sourceHash), (value) =>
+        value.toString(16).padStart(2, "0"),
+      ).join("");
+      setDocumentImportDraft({
+        sourceNodeId: crypto.randomUUID(),
+        sourceName,
+        sourceText,
+        sourceHash: hash,
+        importedAtMs: Date.now(),
+        modelId: llmSettings.localModel,
+        candidates: mergeDocumentImportCandidates(responses, workspaceRef.current),
+      });
+    } catch (error) {
+      const reason = errorReason(error);
+      if (documentImportCancelledRef.current || reason === "document_import_cancelled") {
+        return;
+      }
+      setDocumentImportError(
+        reason === "documentImportTooLarge" || reason === "documentImportTooManyChunks"
+          ? t(`documentImport.errors.${reason}`)
+          : t("documentImport.errors.analysis", { reason }),
+      );
+    } finally {
+      setDocumentImportBusy(false);
+      setDocumentImportProgress(null);
+    }
+  }
+
+  function updateDocumentImportCandidate(
+    candidateId: string,
+    patch: Partial<DocumentImportCandidate>,
+  ) {
+    setDocumentImportDraft((current) =>
+      current === null
+        ? null
+        : {
+            ...current,
+            candidates: current.candidates.map((candidate) => {
+              if (candidate.id !== candidateId) return candidate;
+              const next = { ...candidate, ...patch };
+              if (patch.name !== undefined) {
+                const normalizedName = normalizeNodeName(patch.name);
+                next.matchedNodeId =
+                  workspaceRef.current.nodes.find(
+                    (node) =>
+                      node.name !== null &&
+                      normalizeNodeName(node.name) === normalizedName,
+                  )?.id ?? null;
+              }
+              return next;
+            }),
+          },
+    );
+    setDocumentImportError(null);
+  }
+
+  function previewDocumentImport() {
+    if (documentImportDraft === null) return;
+    try {
+      const result = buildDocumentImportWorkspace(
+        workspaceRef.current,
+        documentImportDraft,
+      );
+      setDocumentImportPreview({
+        draft: documentImportDraft,
+        workspace: result.workspace,
+      });
+      setDocumentImportOpen(false);
+      setDocumentImportError(null);
+    } catch (error) {
+      setDocumentImportError(
+        t("documentImport.errors.draft", { reason: errorReason(error) }),
+      );
+    }
+  }
+
+  function cancelDocumentImportPreview() {
+    setDocumentImportPreview(null);
+    setDocumentImportOpen(true);
+  }
+
+  function confirmDocumentImport() {
+    if (documentImportPreview === null) return;
+    try {
+      const result = buildDocumentImportWorkspace(
+        workspaceRef.current,
+        documentImportPreview.draft,
+      );
+      updateWorkspace(() => result.workspace, {
+        flushImmediately: true,
+        recordHistory: true,
+      });
+      setDocumentImportPreview(null);
+      setDocumentImportDraft(null);
+      setDocumentImportSourceName("");
+      setDocumentImportSourceText("");
+      setActiveView("canvas");
+      showAppNotice(
+        t("documentImport.success", {
+          nodes: result.addedNodeCount,
+          matched: result.matchedNodeCount,
+          references: result.addedReferenceCount,
+        }),
+      );
+    } catch (error) {
+      setDocumentImportPreview(null);
+      setDocumentImportOpen(true);
+      setDocumentImportError(
+        t("documentImport.errors.outdated", { reason: errorReason(error) }),
+      );
+    }
   }
 
   useEffect(() => {
@@ -2966,8 +3181,7 @@ function App({
     (analyzingNodeId !== null && embeddingSettings.provider === "local");
   const localLlmTaskRunning =
     preparingLocalLlmModelId !== null ||
-    (analyzingNodeId !== null &&
-      llmSettings.enabled &&
+    ((documentImportBusy || (analyzingNodeId !== null && llmSettings.enabled)) &&
       localLlmProgress !== null &&
       !["ready", "cancelled", "failed"].includes(localLlmProgress.phase));
   const localModelTaskRunning =
@@ -3047,7 +3261,9 @@ function App({
           <div className="workspace-heading">
             <p className="section-label">{t("workspace.label")}</p>
             <h1>
-              {pendingWorkspaceReplacement !== null
+              {documentImportPreview !== null
+                ? t("documentImport.previewTitle")
+                : pendingWorkspaceReplacement !== null
                 ? t("backup.preview.title")
                 : activeView === "settings"
                   ? t("navigation.settings")
@@ -3055,7 +3271,9 @@ function App({
             </h1>
           </div>
 
-          {activeView !== "settings" && pendingWorkspaceReplacement === null && (
+          {activeView !== "settings" &&
+            pendingWorkspaceReplacement === null &&
+            documentImportPreview === null && (
             <div className="workspace-actions">
               <label className="search-field">
                 <Search aria-hidden="true" size={16} />
@@ -3138,6 +3356,14 @@ function App({
                 {t("workspace.itemCount", { count: filteredNodes.length })}
               </span>
               <button
+                className="secondary-button"
+                onClick={openDocumentImport}
+                type="button"
+              >
+                <Upload size={16} />
+                <span>{t("documentImport.action")}</span>
+              </button>
+              <button
                 className="primary-button header-create-button"
                 onClick={() => createNode()}
                 type="button"
@@ -3150,7 +3376,36 @@ function App({
         </header>
 
         <div className="workspace-content">
-          {pendingWorkspaceReplacement !== null ? (
+          {documentImportPreview !== null ? (
+            <WorkspaceRestorePreview
+              current={workspace}
+              labels={{
+                title: t("documentImport.previewTitle"),
+                source: documentImportPreview.draft.sourceName,
+                before: t("documentImport.previewBefore"),
+                after: t("documentImport.previewAfter"),
+                overlay: t("backup.preview.overlay"),
+                cancel: t("actions.cancel"),
+                confirm: t("documentImport.confirm"),
+                identical: t("backup.preview.identical"),
+                added: t("backup.preview.added"),
+                removed: t("backup.preview.removed"),
+                modified: t("backup.preview.modified"),
+                moved: t("backup.preview.moved"),
+                stacking: t("backup.preview.stacking"),
+                beforePosition: t("backup.preview.beforePosition"),
+                unnamed: t("nodes.unnamed"),
+                noContent: t("nodes.noContent"),
+                legendAdded: t("documentImport.legendAdded"),
+                legendRemoved: t("backup.preview.legendRemoved"),
+                legendModified: t("backup.preview.legendModified"),
+                legendMoved: t("backup.preview.legendMoved"),
+              }}
+              onCancel={cancelDocumentImportPreview}
+              onConfirm={confirmDocumentImport}
+              replacement={documentImportPreview.workspace}
+            />
+          ) : pendingWorkspaceReplacement !== null ? (
             <WorkspaceRestorePreview
               current={workspace}
               labels={{
@@ -4954,6 +5209,50 @@ function App({
             </footer>
           </section>
         </div>
+      )}
+
+      {documentImportOpen && (
+        <DocumentImportDialog
+          busy={documentImportBusy}
+          draft={documentImportDraft}
+          error={documentImportError}
+          labels={{
+            title: t("documentImport.title"),
+            description: t("documentImport.description"),
+            sourceName: t("documentImport.sourceName"),
+            sourceNamePlaceholder: t("documentImport.sourceNamePlaceholder"),
+            sourceText: t("documentImport.sourceText"),
+            sourceTextPlaceholder: t("documentImport.sourceTextPlaceholder"),
+            chooseFile: t("documentImport.chooseFile"),
+            analyze: t("documentImport.analyze"),
+            analyzing: t("documentImport.analyzing"),
+            cancel: t("actions.cancel"),
+            close: t("actions.close"),
+            draftTitle: t("documentImport.draftTitle"),
+            draftDescription: t("documentImport.draftDescription"),
+            preview: t("documentImport.preview"),
+            selectedCount: (count) => t("documentImport.selectedCount", { count }),
+            existingMatch: t("documentImport.existingMatch"),
+            newNode: t("documentImport.newNode"),
+            existingReadOnly: t("documentImport.existingReadOnly"),
+            content: t("editor.content"),
+            references: t("references.list"),
+            referencesPlaceholder: t("documentImport.referencesPlaceholder"),
+            noCandidates: t("documentImport.noCandidates"),
+          }}
+          onAnalyze={() => void analyzeDocumentImport()}
+          onCancel={() => {
+            discardDocumentImport();
+          }}
+          onChooseFile={() => void chooseDocumentImportFile()}
+          onPreview={previewDocumentImport}
+          onSourceNameChange={setDocumentImportSourceName}
+          onSourceTextChange={setDocumentImportSourceText}
+          onUpdateCandidate={updateDocumentImportCandidate}
+          progress={documentImportProgress}
+          sourceName={documentImportSourceName}
+          sourceText={documentImportSourceText}
+        />
       )}
 
       {securityDialog !== null && (

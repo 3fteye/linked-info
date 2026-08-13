@@ -7,6 +7,11 @@ import type {
   LocalLlmProgress,
   LocalLlmRuntime,
 } from "./localLlmModels";
+import type {
+  DocumentImportChunkRequest,
+  DocumentImportChunkResponse,
+  DocumentImportLlmGateway,
+} from "./documentImport";
 
 const localLlmProgressEvent = "linked-info://local-llm-progress";
 
@@ -17,6 +22,15 @@ export const tauriLlmGateway: LlmGateway = {
     }
     return invoke("review_local_references", {
       modelId: configuration.modelId,
+      request,
+    });
+  },
+};
+
+export const tauriDocumentImportLlmGateway: DocumentImportLlmGateway = {
+  extractChunk(modelId, request) {
+    return invoke<DocumentImportChunkResponse>("extract_local_document_import", {
+      modelId,
       request,
     });
   },
@@ -45,6 +59,12 @@ export const tauriLocalLlmRuntime: LocalLlmRuntime = {
 export const unavailableLlmGateway: LlmGateway = {
   review() {
     return Promise.reject(new Error("LLM review is only available in the desktop runtime"));
+  },
+};
+
+export const unavailableDocumentImportLlmGateway: DocumentImportLlmGateway = {
+  extractChunk(_modelId, _request: DocumentImportChunkRequest) {
+    return Promise.reject(new Error("document import requires the desktop runtime"));
   },
 };
 
