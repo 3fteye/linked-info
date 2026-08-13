@@ -1,5 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { localWorkspacePersistence } from "./workspaceStore";
+import {
+  localWorkspacePersistence,
+  parseStoredWorkspaceText,
+} from "./workspaceStore";
 import type { WorkspaceSnapshot } from "./workspaceData";
 
 const workspaceKey = "linked-info.workspace.v1";
@@ -40,6 +43,7 @@ function validWorkspace(): WorkspaceSnapshot {
     layout: [{ nodeId, x: 10, y: 20 }],
     references: [],
     viewport: { x: 12, y: 34, zoom: 0.8 },
+    view: { contentProcessorByNodeId: {} },
   };
 }
 
@@ -56,10 +60,17 @@ describe("localWorkspacePersistence", () => {
       layout: [],
       references: [],
       viewport: null,
+      view: { contentProcessorByNodeId: {} },
     });
     expect(await localWorkspacePersistence.load()).toEqual({
       status: "ready",
-      workspace: { nodes: [], layout: [], references: [], viewport: null },
+      workspace: {
+        nodes: [],
+        layout: [],
+        references: [],
+        viewport: null,
+        view: { contentProcessorByNodeId: {} },
+      },
     });
   });
 
@@ -74,6 +85,16 @@ describe("localWorkspacePersistence", () => {
     });
   });
 
+  it("migrates version 1 storage to version 2 view metadata", () => {
+    const workspace = validWorkspace();
+    const { view: _view, ...versionOne } = workspace;
+    const result = parseStoredWorkspaceText(
+      JSON.stringify({ version: 1, ...versionOne }),
+    );
+
+    expect(result).toEqual({ status: "ready", workspace });
+  });
+
   it("returns unreadable primary data verbatim without overwriting it", async () => {
     const raw = "{broken-json";
     localStorage.setItem(workspaceKey, raw);
@@ -86,7 +107,7 @@ describe("localWorkspacePersistence", () => {
   });
 
   it("preserves an unsupported local format version for recovery", async () => {
-    const raw = JSON.stringify({ version: 2, ...validWorkspace() });
+    const raw = JSON.stringify({ version: 3, ...validWorkspace() });
     localStorage.setItem(workspaceKey, raw);
 
     expect(await localWorkspacePersistence.load()).toEqual({

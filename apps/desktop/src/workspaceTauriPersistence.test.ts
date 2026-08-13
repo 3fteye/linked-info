@@ -18,6 +18,7 @@ function validWorkspace(name = "OpenAI"): WorkspaceSnapshot {
     layout: [{ nodeId, x: 10, y: 20 }],
     references: [],
     viewport: null,
+    view: { contentProcessorByNodeId: {} },
   };
 }
 
@@ -57,7 +58,7 @@ describe("createTauriWorkspacePersistence", () => {
 
     expect(await persistence.load()).toEqual({ status: "ready", workspace });
     expect(JSON.parse(bridge.files.get("primary") ?? "null")).toEqual({
-      version: 1,
+      version: 2,
       ...workspace,
     });
     expect(legacy.removed).toEqual(["primary"]);

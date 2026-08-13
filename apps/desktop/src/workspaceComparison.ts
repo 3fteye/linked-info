@@ -8,11 +8,23 @@ export interface WorkspaceComparison {
   removedReferences: number;
   changedLayouts: number;
   viewportChanged: boolean;
+  viewMetadataChanged: boolean;
   identical: boolean;
 }
 
 function referenceKey(sourceNodeId: string, targetNodeId: string): string {
   return `${sourceNodeId}\0${targetNodeId}`;
+}
+
+function stringRecordsEqual(
+  left: Readonly<Record<string, string>>,
+  right: Readonly<Record<string, string>>,
+): boolean {
+  const leftKeys = Object.keys(left);
+  return (
+    leftKeys.length === Object.keys(right).length &&
+    leftKeys.every((key) => left[key] === right[key])
+  );
 }
 
 export function compareWorkspaces(
@@ -33,7 +45,9 @@ export function compareWorkspaces(
       addedNodes += 1;
     } else if (
       currentNode.name !== node.name ||
-      currentNode.content !== node.content
+      currentNode.content !== node.content ||
+      current.view.contentProcessorByNodeId[nodeId] !==
+        replacement.view.contentProcessorByNodeId[nodeId]
     ) {
       modifiedNodes += 1;
     }
@@ -103,6 +117,10 @@ export function compareWorkspaces(
     current.viewport?.x !== replacement.viewport?.x ||
     current.viewport?.y !== replacement.viewport?.y ||
     current.viewport?.zoom !== replacement.viewport?.zoom;
+  const viewMetadataChanged = !stringRecordsEqual(
+    current.view.contentProcessorByNodeId,
+    replacement.view.contentProcessorByNodeId,
+  );
   const identical =
     addedNodes === 0 &&
     removedNodes === 0 &&
@@ -110,7 +128,8 @@ export function compareWorkspaces(
     addedReferences === 0 &&
     removedReferences === 0 &&
     changedLayouts === 0 &&
-    !viewportChanged;
+    !viewportChanged &&
+    !viewMetadataChanged;
 
   return {
     addedNodes,
@@ -120,6 +139,7 @@ export function compareWorkspaces(
     removedReferences,
     changedLayouts,
     viewportChanged,
+    viewMetadataChanged,
     identical,
   };
 }

@@ -4,12 +4,14 @@ import type {
   NodeLayout,
   NodeReference,
   WorkspaceSnapshot,
+  WorkspaceViewMetadata,
 } from "./workspaceData";
 
 export interface WorkspaceHistoryState {
   nodes: InformationNode[];
   layout: NodeLayout[];
   references: NodeReference[];
+  view: WorkspaceViewMetadata;
 }
 
 export interface WorkspaceHistoryEntry {
@@ -38,6 +40,7 @@ export function captureWorkspaceHistory(
     nodes: workspace.nodes,
     layout: workspace.layout,
     references: workspace.references,
+    view: workspace.view,
   };
 }
 

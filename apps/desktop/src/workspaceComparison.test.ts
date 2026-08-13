@@ -18,6 +18,7 @@ function workspace(): WorkspaceSnapshot {
       { nodeId: secondId, x: 30, y: 40 },
     ],
     viewport: { x: 0, y: 0, zoom: 1 },
+    view: { contentProcessorByNodeId: {} },
   };
 }
 
@@ -32,6 +33,7 @@ describe("workspace replacement comparison", () => {
       removedReferences: 0,
       changedLayouts: 0,
       viewportChanged: false,
+      viewMetadataChanged: false,
       identical: true,
     });
   });
@@ -88,6 +90,36 @@ describe("workspace replacement comparison", () => {
     expect(compareWorkspaces(current, replacement)).toMatchObject({
       viewportChanged: true,
       identical: false,
+    });
+  });
+
+  it("does not treat content processor metadata changes as identical", () => {
+    const current = workspace();
+    const replacement = workspace();
+    replacement.view.contentProcessorByNodeId[firstId] = "plugin.example";
+
+    expect(compareWorkspaces(current, replacement)).toMatchObject({
+      modifiedNodes: 1,
+      viewMetadataChanged: true,
+      identical: false,
+    });
+  });
+
+  it("ignores JSON key insertion order when comparing view metadata", () => {
+    const current = workspace();
+    const replacement = workspace();
+    current.view.contentProcessorByNodeId = {
+      [firstId]: "plugin.first",
+      [secondId]: "plugin.second",
+    };
+    replacement.view.contentProcessorByNodeId = {
+      [secondId]: "plugin.second",
+      [firstId]: "plugin.first",
+    };
+
+    expect(compareWorkspaces(current, replacement)).toMatchObject({
+      viewMetadataChanged: false,
+      identical: true,
     });
   });
 });

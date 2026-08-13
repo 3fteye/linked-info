@@ -207,7 +207,10 @@ function nodeDifferences(
       modified:
         before !== undefined &&
         after !== undefined &&
-        (before.name !== after.name || before.content !== after.content),
+        (before.name !== after.name ||
+          before.content !== after.content ||
+          current.view.contentProcessorByNodeId[nodeId] !==
+            replacement.view.contentProcessorByNodeId[nodeId]),
       moved:
         beforeLayout !== undefined &&
         afterLayout !== undefined &&

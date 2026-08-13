@@ -21,15 +21,21 @@ export interface CanvasViewport {
   zoom: number;
 }
 
+export interface WorkspaceViewMetadata {
+  contentProcessorByNodeId: Record<string, string>;
+}
+
 export interface WorkspaceSnapshot {
   nodes: InformationNode[];
   layout: NodeLayout[];
   references: NodeReference[];
   viewport: CanvasViewport | null;
+  view: WorkspaceViewMetadata;
 }
 
 const uuidPattern =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const contentProcessorIdPattern = /^[a-z0-9][a-z0-9._-]{0,127}$/;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -46,7 +52,13 @@ function canonicalNodeId(value: unknown): string | null {
 }
 
 export function emptyWorkspace(): WorkspaceSnapshot {
-  return { nodes: [], layout: [], references: [], viewport: null };
+  return {
+    nodes: [],
+    layout: [],
+    references: [],
+    viewport: null,
+    view: { contentProcessorByNodeId: {} },
+  };
 }
 
 export function normalizeNodeName(name: string): string {
@@ -122,7 +134,10 @@ export function updateNodeLayoutPositions(
   return changed ? updated : layout;
 }
 
-export function parseWorkspaceSnapshot(value: unknown): WorkspaceSnapshot | null {
+function parseWorkspaceSnapshotValue(
+  value: unknown,
+  allowMissingView: boolean,
+): WorkspaceSnapshot | null {
   if (
     !isRecord(value) ||
     !Array.isArray(value.nodes) ||
@@ -227,5 +242,63 @@ export function parseWorkspaceSnapshot(value: unknown): WorkspaceSnapshot | null
     references.push({ sourceNodeId, targetNodeId });
   }
 
-  return { nodes, layout, references, viewport };
+  let contentProcessorByNodeId: Record<string, string> = {};
+  if (!allowMissingView && value.view !== undefined) {
+    if (
+      !isRecord(value.view) ||
+      !isRecord(value.view.contentProcessorByNodeId)
+    ) {
+      return null;
+    }
+    contentProcessorByNodeId = {};
+    for (const [rawNodeId, processorId] of Object.entries(
+      value.view.contentProcessorByNodeId,
+    )) {
+      const nodeId = canonicalNodeId(rawNodeId);
+      if (
+        nodeId === null ||
+        !nodeIds.has(nodeId) ||
+        Object.prototype.hasOwnProperty.call(contentProcessorByNodeId, nodeId) ||
+        typeof processorId !== "string" ||
+        processorId === "text" ||
+        !contentProcessorIdPattern.test(processorId)
+      ) {
+        return null;
+      }
+      contentProcessorByNodeId[nodeId] = processorId;
+    }
+  } else if (!allowMissingView) {
+    return null;
+  }
+
+  return {
+    nodes,
+    layout,
+    references,
+    viewport,
+    view: { contentProcessorByNodeId },
+  };
+}
+
+export function parseWorkspaceSnapshot(value: unknown): WorkspaceSnapshot | null {
+  return parseWorkspaceSnapshotValue(value, false);
+}
+
+export function migrateWorkspaceSnapshotV1(
+  value: unknown,
+): WorkspaceSnapshot | null {
+  return parseWorkspaceSnapshotValue(value, true);
+}
+
+export function removeNodesFromWorkspaceView(
+  view: WorkspaceViewMetadata,
+  deletedNodeIds: ReadonlySet<string>,
+): WorkspaceViewMetadata {
+  const entries = Object.entries(view.contentProcessorByNodeId).filter(
+    ([nodeId]) => !deletedNodeIds.has(nodeId),
+  );
+  if (entries.length === Object.keys(view.contentProcessorByNodeId).length) {
+    return view;
+  }
+  return { contentProcessorByNodeId: Object.fromEntries(entries) };
 }

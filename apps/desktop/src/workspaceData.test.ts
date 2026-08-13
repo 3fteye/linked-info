@@ -23,6 +23,7 @@ function validWorkspace(): WorkspaceSnapshot {
     ],
     references: [{ sourceNodeId: accountId, targetNodeId: serviceId }],
     viewport: { x: 100, y: -50, zoom: 1.25 },
+    view: { contentProcessorByNodeId: {} },
   };
 }
 
@@ -83,6 +84,17 @@ describe("parseWorkspaceSnapshot", () => {
     const invalid = validWorkspace();
     invalid.viewport = { x: 0, y: 0, zoom: 0 };
     expect(parseWorkspaceSnapshot(invalid)).toBeNull();
+  });
+
+  it("preserves unknown content processor ids and rejects dangling selections", () => {
+    const workspace = validWorkspace();
+    workspace.view.contentProcessorByNodeId[accountId] = "plugin.example";
+    expect(parseWorkspaceSnapshot(workspace)?.view).toEqual(workspace.view);
+
+    workspace.view.contentProcessorByNodeId[
+      "33333333-3333-4333-8333-333333333333"
+    ] = "plugin.example";
+    expect(parseWorkspaceSnapshot(workspace)).toBeNull();
   });
 });
 

@@ -28,6 +28,7 @@ import {
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import GraphCanvas from "./GraphCanvas";
+import { NodeContentHost } from "./contentProcessor";
 import { supportedLanguages, type SupportedLanguage } from "./locales";
 import {
   emptyWorkspace,
@@ -36,6 +37,7 @@ import {
   moveNodeLayoutToFront,
   normalizeNodeName,
   persistedNodeNameFromDraft,
+  removeNodesFromWorkspaceView,
   parseStoredWorkspaceText,
   type CanvasViewport,
   type InformationNode,
@@ -1875,6 +1877,7 @@ function App({
             !deletedNodeIds.has(reference.sourceNodeId) &&
             !deletedNodeIds.has(reference.targetNodeId),
         ),
+        view: removeNodesFromWorkspaceView(current.view, deletedNodeIds),
       }),
       { flushImmediately: true, recordHistory: true },
     );
@@ -4424,6 +4427,7 @@ function App({
                 unnamed: t("nodes.unnamed"),
               }}
               layout={workspace.layout}
+              contentProcessorByNodeId={workspace.view.contentProcessorByNodeId}
               nameConflictNodeIds={nameConflictNodeIds}
               nodes={workspace.nodes}
               onAnalyzeNode={(nodeId) => void analyzeNodeReferences(nodeId)}
@@ -4470,7 +4474,14 @@ function App({
                       <strong data-unnamed={isUnnamedNode(node)}>
                         {node.name ?? t("nodes.unnamed")}
                       </strong>
-                      <span>{node.content ?? t("nodes.noContent")}</span>
+                      <NodeContentHost
+                        content={node.content}
+                        emptyContent={t("nodes.noContent")}
+                        processorId={
+                          workspace.view.contentProcessorByNodeId[node.id] ?? null
+                        }
+                        variant="list"
+                      />
                     </button>
                   ))}
                 </div>

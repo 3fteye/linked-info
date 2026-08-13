@@ -1,0 +1,70 @@
+// @vitest-environment happy-dom
+import { act } from "react";
+import { createRoot, type Root } from "react-dom/client";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import WorkspaceSecurityGate from "./WorkspaceSecurityGate";
+import type {
+  WorkspaceSecurity,
+  WorkspaceSecurityStatus,
+} from "./workspaceSecurity";
+
+const unlocked: WorkspaceSecurityStatus = {
+  encrypted: true,
+  locked: false,
+  systemUnlockAvailable: false,
+  systemUnlockEnabled: false,
+  idleTimeoutMinutes: 15,
+};
+
+function security(listenerRef: { current: ((reason: string) => void) | null }) {
+  return {
+    available: true,
+    inspect: vi.fn(async () => unlocked),
+    subscribeLocked: vi.fn(async (listener: (reason: string) => void) => {
+      listenerRef.current = listener;
+      return () => {
+        listenerRef.current = null;
+      };
+    }),
+    recordActivity: vi.fn(async () => undefined),
+  } as unknown as WorkspaceSecurity;
+}
+
+describe("WorkspaceSecurityGate", () => {
+  let container: HTMLDivElement;
+  let root: Root;
+
+  beforeEach(() => {
+    (
+      globalThis as typeof globalThis & {
+        IS_REACT_ACT_ENVIRONMENT: boolean;
+      }
+    ).IS_REACT_ACT_ENVIRONMENT = true;
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+  });
+
+  afterEach(() => {
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it("unmounts unlocked content immediately after a Rust lock event", async () => {
+    const listenerRef = { current: null as ((reason: string) => void) | null };
+    const workspaceSecurity = security(listenerRef);
+    await act(async () => {
+      root.render(
+        <WorkspaceSecurityGate security={workspaceSecurity}>
+          {() => <div data-testid="secret-content">secret</div>}
+        </WorkspaceSecurityGate>,
+      );
+    });
+    expect(container.querySelector('[data-testid="secret-content"]')).not.toBeNull();
+
+    act(() => listenerRef.current?.("windows_session_locked"));
+
+    expect(container.querySelector('[data-testid="secret-content"]')).toBeNull();
+    expect(container.querySelector(".security-gate")).not.toBeNull();
+  });
+});

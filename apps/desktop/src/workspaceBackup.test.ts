@@ -10,6 +10,7 @@ function validWorkspace(): WorkspaceSnapshot {
     layout: [{ nodeId, x: 10, y: 20 }],
     references: [],
     viewport: { x: 120, y: -80, zoom: 1.4 },
+    view: { contentProcessorByNodeId: {} },
   };
 }
 
@@ -37,7 +38,7 @@ describe("workspace backup", () => {
       parseWorkspaceExport(
         JSON.stringify({
           format: "linked-info-workspace",
-          version: 2,
+          version: 3,
           exportedAt: new Date().toISOString(),
           workspace: validWorkspace(),
         }),
@@ -62,5 +63,20 @@ describe("workspace backup", () => {
     expect(() => serializeWorkspaceExport(workspace)).toThrow(
       "refusing to export an invalid workspace snapshot",
     );
+  });
+
+  it("imports version 1 exports through the workspace migration chain", () => {
+    const workspace = validWorkspace();
+    const { view: _view, ...versionOne } = workspace;
+    const result = parseWorkspaceExport(
+      JSON.stringify({
+        format: "linked-info-workspace",
+        version: 1,
+        exportedAt: new Date().toISOString(),
+        workspace: versionOne,
+      }),
+    );
+
+    expect(result).toMatchObject({ ok: true, workspace });
   });
 });

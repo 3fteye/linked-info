@@ -18,6 +18,7 @@ function workspace(): WorkspaceSnapshot {
     layout: [{ nodeId, x: 10, y: 20 }],
     references: [],
     viewport: { x: 100, y: -50, zoom: 1.2 },
+    view: { contentProcessorByNodeId: {} },
   };
 }
 
@@ -49,6 +50,19 @@ describe("workspace history", () => {
     };
 
     expect(workspaceHistoryStatesEqual(before, after)).toBe(false);
+  });
+
+  it("includes content processor choices in undoable state", () => {
+    const before = captureWorkspaceHistory(workspace());
+    const after = {
+      ...before,
+      view: {
+        contentProcessorByNodeId: { [nodeId]: "plugin.example" },
+      },
+    };
+
+    expect(workspaceHistoryStatesEqual(before, after)).toBe(false);
+    expect(restoreWorkspaceHistory(after, null).view).toEqual(after.view);
   });
 
   it("steps backward and forward through an operation", () => {

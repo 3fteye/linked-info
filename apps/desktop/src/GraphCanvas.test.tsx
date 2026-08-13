@@ -1,0 +1,145 @@
+// @vitest-environment happy-dom
+import { act } from "react";
+import { createRoot, type Root } from "react-dom/client";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ReactFlowProvider, type NodeProps } from "@xyflow/react";
+import { InformationNodeCard } from "./GraphCanvas";
+
+const nodeId = "11111111-1111-4111-8111-111111111111";
+
+function cardProps(overrides: Record<string, unknown> = {}): NodeProps<any> {
+  return {
+    id: nodeId,
+    type: "information",
+    selected: false,
+    dragging: false,
+    draggable: true,
+    selectable: true,
+    deletable: false,
+    isConnectable: true,
+    zIndex: 0,
+    positionAbsoluteX: 0,
+    positionAbsoluteY: 0,
+    data: {
+      name: "Node",
+      content: "a".repeat(2_000),
+      contentProcessorId: null,
+      contentLabel: "Content",
+      contentPlaceholder: "Content",
+      editing: true,
+      nameConflict: false,
+      nameConflictLabel: "Conflict",
+      nameLabel: "Name",
+      namePlaceholder: "Name",
+      referencedTargets: [],
+      referencesLabel: "References",
+      unnamedLabel: "Unnamed",
+      filterActive: false,
+      filterByNodeLabel: "Filter",
+      removeNodeFilterLabel: "Remove filter",
+      sourceLabel: "Source",
+      targetLabel: "Target",
+      onCommit: vi.fn(),
+      onContentChange: vi.fn(),
+      onNameChange: vi.fn(() => true),
+      onToggleReferenceFilter: vi.fn(),
+      ...overrides,
+    },
+  } as NodeProps<any>;
+}
+
+function input(
+  element: HTMLTextAreaElement | HTMLInputElement,
+  value: string,
+  caret = value.length,
+) {
+  const descriptor = Object.getOwnPropertyDescriptor(
+    element instanceof HTMLTextAreaElement
+      ? HTMLTextAreaElement.prototype
+      : HTMLInputElement.prototype,
+    "value",
+  );
+  descriptor?.set?.call(element, value);
+  element.setSelectionRange(caret, caret);
+  element.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
+function renderCard(root: Root, props: NodeProps<any>) {
+  act(() =>
+    root.render(
+      <ReactFlowProvider>
+        <InformationNodeCard {...props} />
+      </ReactFlowProvider>,
+    ),
+  );
+}
+
+describe("InformationNodeCard", () => {
+  let container: HTMLDivElement;
+  let root: Root;
+
+  beforeEach(() => {
+    (
+      globalThis as typeof globalThis & {
+        IS_REACT_ACT_ENVIRONMENT: boolean;
+      }
+    ).IS_REACT_ACT_ENVIRONMENT = true;
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+  });
+
+  afterEach(() => {
+    act(() => root.unmount());
+    container.remove();
+    vi.useRealTimers();
+  });
+
+  it("preserves the caret while editing long content in the middle", () => {
+    const props = cardProps();
+    renderCard(root, props);
+    const textarea = container.querySelector("textarea")!;
+    textarea.focus();
+    textarea.setSelectionRange(1, 1);
+
+    const edited = `${textarea.value.slice(0, 1)}x${textarea.value.slice(1)}`;
+    act(() => input(textarea, edited, 2));
+    renderCard(root, cardProps({ content: edited }));
+
+    expect(textarea.selectionStart).toBe(2);
+    expect(props.data.onContentChange).toHaveBeenLastCalledWith(
+      nodeId,
+      expect.stringMatching(/^ax/),
+    );
+  });
+
+  it("preserves Enter, Shift+Enter, and Backspace results at the caret", () => {
+    const props = cardProps({ content: "ab" });
+    renderCard(root, props);
+    const textarea = container.querySelector("textarea")!;
+    textarea.focus();
+
+    act(() => input(textarea, "a\nb"));
+    expect(textarea.value).toBe("a\nb");
+    act(() => input(textarea, "a\n\nb"));
+    expect(textarea.value).toBe("a\n\nb");
+    act(() => input(textarea, "a\nb"));
+    expect(textarea.value).toBe("a\nb");
+  });
+
+  it("does not commit while focus moves between fields inside the node", () => {
+    vi.useFakeTimers();
+    const props = cardProps({ content: "content" });
+    renderCard(root, props);
+    const name = container.querySelector("input")!;
+    const textarea = container.querySelector("textarea")!;
+
+    act(() => {
+      name.focus();
+      textarea.focus();
+      vi.runAllTimers();
+    });
+
+    expect(props.data.onCommit).not.toHaveBeenCalled();
+  });
+});

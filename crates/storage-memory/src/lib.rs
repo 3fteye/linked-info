@@ -7,6 +7,10 @@ use linked_info_domain::{Node, NodeId, Reference};
 use linked_info_storage_port::GraphStore;
 use thiserror::Error;
 
+fn sort_nodes(nodes: &mut [Node]) {
+    nodes.sort_by_cached_key(|node| (node.normalized_name(), node.id()));
+}
+
 #[derive(Debug, Default)]
 struct MemoryGraphState {
     nodes: HashMap<NodeId, Node>,
@@ -33,7 +37,7 @@ impl GraphStore for MemoryGraphStore {
     async fn list_nodes(&self, offset: u32, limit: u32) -> Result<Vec<Node>, Self::Error> {
         let state = self.state.read().expect("memory store lock poisoned");
         let mut nodes: Vec<_> = state.nodes.values().cloned().collect();
-        nodes.sort_by_key(Node::normalized_name);
+        sort_nodes(&mut nodes);
         Ok(paginate(nodes, offset, limit))
     }
 
@@ -47,7 +51,7 @@ impl GraphStore for MemoryGraphStore {
         let state = self.state.read().expect("memory store lock poisoned");
         let mut nodes: Vec<_> = state.nodes.values().cloned().collect();
         nodes.retain(|node| node.normalized_name().unwrap_or_default().contains(&query));
-        nodes.sort_by_key(Node::normalized_name);
+        sort_nodes(&mut nodes);
         Ok(paginate(nodes, offset, limit))
     }
 
@@ -125,7 +129,7 @@ impl GraphStore for MemoryGraphStore {
                     .ok_or(MemoryStoreError::NodeNotFound(reference.source_node_id()))
             })
             .collect::<Result<_, _>>()?;
-        nodes.sort_by_key(Node::normalized_name);
+        sort_nodes(&mut nodes);
         Ok(paginate(nodes, offset, limit))
     }
 
@@ -148,7 +152,7 @@ impl GraphStore for MemoryGraphStore {
                     .ok_or(MemoryStoreError::NodeNotFound(reference.target_node_id()))
             })
             .collect::<Result<_, _>>()?;
-        nodes.sort_by_key(Node::normalized_name);
+        sort_nodes(&mut nodes);
         Ok(paginate(nodes, offset, limit))
     }
 
@@ -253,5 +257,25 @@ mod tests {
             store.delete_node(missing_id).await,
             Err(MemoryStoreError::NodeNotFound(missing_id))
         );
+    }
+
+    #[tokio::test]
+    async fn unnamed_node_pagination_has_a_stable_id_tiebreaker() {
+        let store = MemoryGraphStore::default();
+        let first = Node::restore(
+            "11111111-1111-4111-8111-111111111111".parse().unwrap(),
+            None,
+            None,
+        );
+        let second = Node::restore(
+            "22222222-2222-4222-8222-222222222222".parse().unwrap(),
+            None,
+            None,
+        );
+        store.save_node(second.clone()).await.unwrap();
+        store.save_node(first.clone()).await.unwrap();
+
+        assert_eq!(store.list_nodes(0, 1).await.unwrap(), vec![first]);
+        assert_eq!(store.list_nodes(1, 1).await.unwrap(), vec![second]);
     }
 }

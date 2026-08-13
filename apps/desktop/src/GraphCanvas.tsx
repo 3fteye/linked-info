@@ -58,11 +58,19 @@ import {
   referenceTargetCreationName,
   shouldCreateMissingReferenceTarget,
 } from "./referenceSearch";
+import { NodeContentHost } from "./contentProcessor";
+import {
+  nodeEditorDraft,
+  shouldCommitNodeEditor,
+  updateNodeEditorContent,
+  updateNodeEditorName,
+} from "./nodeEditorState";
 import "@xyflow/react/dist/style.css";
 
 interface InformationNodeData extends Record<string, unknown> {
   name: string | null;
   content: string | null;
+  contentProcessorId: string | null;
   contentLabel: string;
   contentPlaceholder: string;
   editing: boolean;
@@ -127,6 +135,7 @@ interface GraphCanvasProps {
   nodes: InformationNode[];
   layout: NodeLayout[];
   references: NodeReference[];
+  contentProcessorByNodeId: Readonly<Record<string, string>>;
   viewport: CanvasViewport | null;
   editingNodeId: string | null;
   canRedo: boolean;
@@ -183,21 +192,21 @@ interface ReferenceSearchState {
   top: number;
 }
 
-function InformationNodeCard({ id, data, selected }: NodeProps<InformationFlowNode>) {
+export function InformationNodeCard({
+  id,
+  data,
+  selected,
+}: NodeProps<InformationFlowNode>) {
   const nodeRef = useRef<HTMLElement>(null);
   const nameInputRef = useRef<HTMLInputElement>(null);
-  const [nameValue, setNameValue] = useState(data.name ?? "");
-  const [contentValue, setContentValue] = useState(data.content ?? "");
-  const [draftNameConflict, setDraftNameConflict] = useState(false);
+  const [draft, setDraft] = useState(() => nodeEditorDraft(data.name, data.content));
 
   useEffect(() => {
     if (data.editing) {
       return;
     }
 
-    setNameValue(data.name ?? "");
-    setContentValue(data.content ?? "");
-    setDraftNameConflict(false);
+    setDraft(nodeEditorDraft(data.name, data.content));
   }, [data.content, data.editing, data.name]);
 
   useLayoutEffect(() => {
@@ -220,7 +229,7 @@ function InformationNodeCard({ id, data, selected }: NodeProps<InformationFlowNo
     }
 
     window.setTimeout(() => {
-      if (draftNameConflict) {
+      if (!shouldCommitNodeEditor(draft, false)) {
         return;
       }
       const nodeElement = nodeRef.current;
@@ -250,17 +259,19 @@ function InformationNodeCard({ id, data, selected }: NodeProps<InformationFlowNo
           <>
             <GripVertical aria-hidden="true" className="graph-node-drag-handle" size={15} />
             <input
-              aria-invalid={data.nameConflict || draftNameConflict}
+              aria-invalid={data.nameConflict || draft.nameConflict}
               aria-label={data.nameLabel}
               autoFocus
               className="nodrag nowheel graph-node-name-input"
               onChange={(event) => {
-                setNameValue(event.target.value);
-                setDraftNameConflict(!data.onNameChange(id, event.target.value));
+                const name = event.target.value;
+                setDraft((current) =>
+                  updateNodeEditorName(current, name, data.onNameChange(id, name)),
+                );
               }}
               placeholder={data.namePlaceholder}
               ref={nameInputRef}
-              value={nameValue}
+              value={draft.name}
             />
           </>
         ) : (
@@ -291,22 +302,28 @@ function InformationNodeCard({ id, data, selected }: NodeProps<InformationFlowNo
             aria-label={data.contentLabel}
             className="nodrag nowheel graph-node-content-input"
             onChange={(event) => {
-              setContentValue(event.target.value);
-              data.onContentChange(id, event.target.value);
+              const content = event.target.value;
+              setDraft((current) => updateNodeEditorContent(current, content));
+              data.onContentChange(id, content);
             }}
             placeholder={data.contentPlaceholder}
             rows={4}
-            value={contentValue}
+            value={draft.content}
           />
-          {(data.nameConflict || draftNameConflict) && (
+          {(data.nameConflict || draft.nameConflict) && (
             <span className="graph-node-error" role="alert">
               {data.nameConflictLabel}
             </span>
           )}
         </div>
       ) : (
-        data.content !== null &&
-        data.content.length > 0 && <p className="graph-node-content">{data.content}</p>
+        <NodeContentHost
+          className="graph-node-content"
+          content={data.content}
+          hideWhenEmpty
+          processorId={data.contentProcessorId}
+          variant="canvas"
+        />
       )}
       {data.referencedTargets.length > 0 && (
         <section aria-label={data.referencesLabel} className="graph-node-references">
@@ -394,6 +411,7 @@ function referencedNodeLabel(
 
 export default function GraphCanvas({
   analyzingNodeId,
+  contentProcessorByNodeId,
   nodes,
   layout,
   references,
@@ -621,6 +639,7 @@ export default function GraphCanvas({
           data: {
             name: node.name,
             content: node.content,
+            contentProcessorId: contentProcessorByNodeId[node.id] ?? null,
             contentLabel: labels.content,
             contentPlaceholder: labels.contentPlaceholder,
             editing: editingNodeId === node.id,
@@ -651,6 +670,7 @@ export default function GraphCanvas({
       });
     });
   }, [
+    contentProcessorByNodeId,
     editingNodeId,
     labels,
     layoutByNode,

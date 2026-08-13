@@ -37,6 +37,7 @@ const DATA_KEY_ROTATION_BACKUP_DIRECTORY_NAME: &str = "backups";
 const ENCRYPTED_WORKSPACE_FORMAT: &str = "linked-info-encrypted-workspace";
 const ENCRYPTED_EXPORT_FORMAT: &str = "linked-info-encrypted-workspace-export";
 const WORKSPACE_EXPORT_FORMAT: &str = "linked-info-workspace";
+const CURRENT_WORKSPACE_STORAGE_VERSION: u64 = 2;
 const VAULT_FORMAT: &str = "linked-info-workspace-vault";
 const DATA_KEY_ROTATION_FORMAT: &str = "linked-info-data-key-rotation";
 const CRYPTO_VERSION: u32 = 1;
@@ -623,9 +624,9 @@ impl WorkspaceFileStore {
     }
 
     fn write_plaintext(&self, slot: WorkspaceFileSlot, contents: &str) -> io::Result<()> {
-        validate_storage_envelope(contents)?;
+        let normalized = normalize_storage_envelope(contents)?;
         fs::create_dir_all(&self.base_directory)?;
-        write_atomically(&self.path(slot), contents.as_bytes())
+        write_atomically(&self.path(slot), normalized.as_bytes())
     }
 
     fn write(
@@ -634,11 +635,11 @@ impl WorkspaceFileStore {
         contents: &str,
         data_key: Option<&[u8; DATA_KEY_BYTES]>,
     ) -> Result<(), String> {
-        validate_storage_envelope(contents).map_err(|error| error.to_string())?;
+        let normalized = normalize_storage_envelope(contents).map_err(|error| error.to_string())?;
         fs::create_dir_all(&self.base_directory).map_err(|error| error.to_string())?;
         let serialized = match data_key {
-            Some(key) => encrypt_workspace_file(contents, slot, key)?,
-            None => contents.to_owned(),
+            Some(key) => encrypt_workspace_file(&normalized, slot, key)?,
+            None => normalized,
         };
         write_atomically(&self.path(slot), serialized.as_bytes()).map_err(|e| e.to_string())
     }
@@ -2299,12 +2300,13 @@ fn migrate_plaintext_store(
             .read_plaintext(slot)
             .map_err(|error| error.to_string())?
         {
-            validate_storage_envelope(&contents).map_err(|error| error.to_string())?;
-            let encrypted = encrypt_workspace_file(&contents, slot, &data_key)?;
+            let normalized =
+                normalize_storage_envelope(&contents).map_err(|error| error.to_string())?;
+            let encrypted = encrypt_workspace_file(&normalized, slot, &data_key)?;
             write_atomically(&store.pending_path(slot), encrypted.as_bytes())
                 .map_err(|error| error.to_string())?;
             let verified = decrypt_workspace_file(&encrypted, slot, &data_key)?;
-            if verified != contents {
+            if verified != normalized {
                 return Err("workspace_vault_migration_verification_failed".to_owned());
             }
             migrated_slots.push(slot);
@@ -2349,6 +2351,7 @@ fn install_prepared_workspace_restore(
 
     let mut migrated_slots = vec![WorkspaceFileSlot::Primary];
     if let Some(recovery) = recovery {
+        let recovery = normalize_storage_envelope(&recovery).map_err(|error| error.to_string())?;
         let encrypted_recovery =
             encrypt_workspace_file(&recovery, WorkspaceFileSlot::Recovery, &prepared.data_key)?;
         write_atomically(
@@ -2684,7 +2687,8 @@ fn prepare_data_key_rotation(
             let plaintext = store
                 .read(slot, Some(previous_data_key))?
                 .ok_or_else(|| "workspace_vault_rotation_workspace_missing".to_owned())?;
-            validate_storage_envelope(&plaintext).map_err(|error| error.to_string())?;
+            let plaintext =
+                normalize_storage_envelope(&plaintext).map_err(|error| error.to_string())?;
             let encrypted = encrypt_workspace_file(&plaintext, slot, next_data_key)?;
             write_atomically(
                 &store.data_key_rotation_slot_path(slot),
@@ -2712,7 +2716,7 @@ fn prepare_data_key_rotation(
                             backup.id
                         )
                     })?;
-            validate_storage_envelope(&plaintext).map_err(|_| {
+            let plaintext = normalize_storage_envelope(&plaintext).map_err(|_| {
                 format!(
                     "workspace_vault_data_key_rotation_invalid_backup:{}",
                     backup.id
@@ -2786,6 +2790,7 @@ fn prepare_backup_migration(
         let contents = WorkspaceFileStore::read_text_path(&backup.path)
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "workspace_backup_missing".to_owned())?;
+        let contents = normalize_storage_envelope(&contents).map_err(|error| error.to_string())?;
         let encrypted = encrypt_workspace_file(&contents, WorkspaceFileSlot::Primary, data_key)?;
         let pending_path = pending_directory.join(format!("{}.json", backup.id));
         write_atomically(&pending_path, encrypted.as_bytes()).map_err(|error| error.to_string())?;
@@ -2910,7 +2915,10 @@ fn finite_json_number(value: Option<&serde_json::Value>) -> Option<f64> {
         .filter(|value| value.is_finite())
 }
 
-fn validate_workspace_snapshot(value: &serde_json::Value) -> io::Result<()> {
+fn validate_workspace_snapshot(
+    value: &serde_json::Value,
+    allow_missing_view: bool,
+) -> io::Result<()> {
     let workspace = value
         .as_object()
         .ok_or_else(|| invalid_workspace_data("workspace snapshot must be an object"))?;
@@ -3029,18 +3037,72 @@ fn validate_workspace_snapshot(value: &serde_json::Value) -> io::Result<()> {
             return Err(invalid_workspace_data("workspace reference is invalid"));
         }
     }
+
+    match workspace.get("view").filter(|_| !allow_missing_view) {
+        Some(view) => {
+            let processors = view
+                .as_object()
+                .and_then(|view| view.get("contentProcessorByNodeId"))
+                .and_then(serde_json::Value::as_object)
+                .ok_or_else(|| invalid_workspace_data("workspace view metadata is invalid"))?;
+            let mut processor_node_ids = HashSet::with_capacity(processors.len());
+            for (node_id, processor_id) in processors {
+                let canonical_node_id =
+                    canonical_workspace_node_id(&serde_json::Value::String(node_id.to_owned()))
+                        .ok_or_else(|| {
+                            invalid_workspace_data("workspace processor node id is invalid")
+                        })?;
+                let processor_id = processor_id.as_str().ok_or_else(|| {
+                    invalid_workspace_data("workspace content processor id is invalid")
+                })?;
+                if !node_ids.contains(&canonical_node_id)
+                    || !processor_node_ids.insert(canonical_node_id)
+                    || processor_id == "text"
+                    || processor_id.is_empty()
+                    || processor_id.len() > 128
+                    || !processor_id.bytes().enumerate().all(|(index, byte)| {
+                        byte.is_ascii_lowercase()
+                            || byte.is_ascii_digit()
+                            || (index > 0 && matches!(byte, b'.' | b'_' | b'-'))
+                    })
+                {
+                    return Err(invalid_workspace_data(
+                        "workspace content processor selection is invalid",
+                    ));
+                }
+            }
+        }
+        None if allow_missing_view => {}
+        None => return Err(invalid_workspace_data("workspace view metadata is missing")),
+    }
     Ok(())
 }
 
 fn validate_storage_envelope(contents: &str) -> io::Result<()> {
-    let value: serde_json::Value = serde_json::from_str(contents)
+    normalize_storage_envelope(contents).map(|_| ())
+}
+
+fn normalize_storage_envelope(contents: &str) -> io::Result<String> {
+    let mut value: serde_json::Value = serde_json::from_str(contents)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    if value.get("version").and_then(serde_json::Value::as_u64) != Some(1) {
+    let version = value.get("version").and_then(serde_json::Value::as_u64);
+    if !matches!(version, Some(1) | Some(CURRENT_WORKSPACE_STORAGE_VERSION)) {
         return Err(invalid_workspace_data(
-            "workspace storage envelope must use version 1",
+            "workspace storage envelope version is unsupported",
         ));
     }
-    validate_workspace_snapshot(&value)
+    validate_workspace_snapshot(&value, version == Some(1))?;
+    if version == Some(1) {
+        let workspace = value
+            .as_object_mut()
+            .ok_or_else(|| invalid_workspace_data("workspace snapshot must be an object"))?;
+        workspace.insert(
+            "view".to_owned(),
+            serde_json::json!({ "contentProcessorByNodeId": {} }),
+        );
+    }
+    value["version"] = serde_json::Value::from(CURRENT_WORKSPACE_STORAGE_VERSION);
+    serde_json::to_string(&value).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
 fn workspace_storage_from_export(contents: &str) -> io::Result<String> {
@@ -3050,7 +3112,10 @@ fn workspace_storage_from_export(contents: &str) -> io::Result<String> {
         .as_object()
         .ok_or_else(|| invalid_workspace_data("workspace export must be an object"))?;
     if document.get("format").and_then(serde_json::Value::as_str) != Some(WORKSPACE_EXPORT_FORMAT)
-        || document.get("version").and_then(serde_json::Value::as_u64) != Some(1)
+        || !matches!(
+            document.get("version").and_then(serde_json::Value::as_u64),
+            Some(1) | Some(2)
+        )
         || document
             .get("exportedAt")
             .and_then(serde_json::Value::as_str)
@@ -3063,12 +3128,25 @@ fn workspace_storage_from_export(contents: &str) -> io::Result<String> {
     let workspace = document
         .get("workspace")
         .ok_or_else(|| invalid_workspace_data("workspace export payload is missing"))?;
-    validate_workspace_snapshot(workspace)?;
+    let export_version = document
+        .get("version")
+        .and_then(serde_json::Value::as_u64)
+        .expect("validated export version");
+    validate_workspace_snapshot(workspace, export_version == 1)?;
     let mut storage = workspace
         .as_object()
         .cloned()
         .ok_or_else(|| invalid_workspace_data("workspace export payload must be an object"))?;
-    storage.insert("version".to_owned(), serde_json::Value::from(1));
+    if export_version == 1 {
+        storage.insert(
+            "view".to_owned(),
+            serde_json::json!({ "contentProcessorByNodeId": {} }),
+        );
+    }
+    storage.insert(
+        "version".to_owned(),
+        serde_json::Value::from(CURRENT_WORKSPACE_STORAGE_VERSION),
+    );
     serde_json::to_string(&storage)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
@@ -3203,7 +3281,7 @@ mod tests {
 
     fn workspace(name: &str) -> String {
         serde_json::json!({
-            "version": 1,
+            "version": CURRENT_WORKSPACE_STORAGE_VERSION,
             "nodes": [{
                 "id": "11111111-1111-4111-8111-111111111111",
                 "name": name,
@@ -3215,7 +3293,8 @@ mod tests {
                 "y": 20
             }],
             "references": [],
-            "viewport": null
+            "viewport": null,
+            "view": { "contentProcessorByNodeId": {} }
         })
         .to_string()
     }
@@ -3229,7 +3308,7 @@ mod tests {
             .remove("version");
         serde_json::json!({
             "format": WORKSPACE_EXPORT_FORMAT,
-            "version": 1,
+            "version": 2,
             "exportedAt": "2026-08-13T00:00:00.000Z",
             "workspace": workspace
         })
@@ -3281,13 +3360,40 @@ mod tests {
     }
 
     #[test]
+    fn shared_workspace_contract_matches_rust_validation() {
+        let contract: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../fixtures/workspace-contract.json"
+        )))
+        .expect("shared workspace contract must be JSON");
+        let cases = contract["cases"]
+            .as_array()
+            .expect("shared contract cases must be an array");
+
+        for fixture in cases {
+            let name = fixture["name"].as_str().expect("fixture name");
+            let valid = fixture["valid"].as_bool().expect("fixture validity");
+            let storage = serde_json::to_string(&fixture["storage"]).unwrap();
+            let normalized = normalize_storage_envelope(&storage);
+            assert_eq!(normalized.is_ok(), valid, "fixture {name}");
+            if let Ok(normalized) = normalized {
+                let normalized: serde_json::Value = serde_json::from_str(&normalized).unwrap();
+                assert_eq!(
+                    normalized["version"], CURRENT_WORKSPACE_STORAGE_VERSION,
+                    "fixture {name} must migrate to the current version"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn export_conversion_extracts_a_valid_storage_envelope() {
         let export = workspace_export("restored-from-offsite");
         let storage = workspace_storage_from_export(&export).unwrap();
         let storage_value: serde_json::Value = serde_json::from_str(&storage).unwrap();
 
         validate_storage_envelope(&storage).unwrap();
-        assert_eq!(storage_value["version"], 1);
+        assert_eq!(storage_value["version"], CURRENT_WORKSPACE_STORAGE_VERSION);
         assert_eq!(storage_value["nodes"][0]["name"], "restored-from-offsite");
         assert!(validate_storage_envelope(&export).is_err());
     }
@@ -4424,12 +4530,14 @@ mod tests {
                 "sourceNodeId": "11111111-1111-4111-8111-111111111111",
                 "targetNodeId": "22222222-2222-4222-8222-222222222222"
             }],
-            "viewport": { "x": 25, "y": 35, "zoom": 1.25 }
+            "viewport": { "x": 25, "y": 35, "zoom": 1.25 },
+            "view": { "contentProcessorByNodeId": {} }
         });
-        validate_workspace_snapshot(&restored_workspace).expect("drill workspace must be valid");
+        validate_workspace_snapshot(&restored_workspace, false)
+            .expect("drill workspace must be valid");
         let restored = serde_json::json!({
             "format": WORKSPACE_EXPORT_FORMAT,
-            "version": 1,
+            "version": 2,
             "exportedAt": "2026-08-13T00:00:00.000Z",
             "workspace": restored_workspace
         })
