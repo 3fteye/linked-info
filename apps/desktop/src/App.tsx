@@ -367,6 +367,7 @@ function App({
     workspace: WorkspaceSnapshot;
   } | null>(null);
   const [documentImportBusy, setDocumentImportBusy] = useState(false);
+  const [documentImportExternalLoading, setDocumentImportExternalLoading] = useState(false);
   const [documentImportProgress, setDocumentImportProgress] = useState<{
     current: number;
     total: number;
@@ -580,7 +581,8 @@ function App({
   }
 
   async function chooseExternalDocumentImportDraft() {
-    if (documentImportBusy) return;
+    if (documentImportBusy || documentImportExternalLoading) return;
+    setDocumentImportExternalLoading(true);
     setDocumentImportError(null);
     try {
       const file = await importDocumentDraft();
@@ -614,6 +616,8 @@ function App({
       setDocumentImportError(
         t("documentImport.errors.externalDraft", { reason: errorReason(error) }),
       );
+    } finally {
+      setDocumentImportExternalLoading(false);
     }
   }
 
@@ -5266,12 +5270,15 @@ function App({
             sourceTextPlaceholder: t("documentImport.sourceTextPlaceholder"),
             chooseFile: t("documentImport.chooseFile"),
             chooseExternalDraft: t("documentImport.chooseExternalDraft"),
+            loadingExternalDraft: t("documentImport.loadingExternalDraft"),
             analyze: t("documentImport.analyze"),
             analyzing: t("documentImport.analyzing"),
             cancel: t("actions.cancel"),
             close: t("actions.close"),
             draftTitle: t("documentImport.draftTitle"),
             draftDescription: t("documentImport.draftDescription"),
+            draftLoaded: (source, count, selected) =>
+              t("documentImport.draftLoaded", { source, count, selected }),
             preview: t("documentImport.preview"),
             selectedCount: (count) => t("documentImport.selectedCount", { count }),
             existingMatch: t("documentImport.existingMatch"),
@@ -5292,6 +5299,7 @@ function App({
           onSourceNameChange={setDocumentImportSourceName}
           onSourceTextChange={setDocumentImportSourceText}
           onUpdateCandidate={updateDocumentImportCandidate}
+          loadingExternalDraft={documentImportExternalLoading}
           progress={documentImportProgress}
           sourceName={documentImportSourceName}
           sourceText={documentImportSourceText}

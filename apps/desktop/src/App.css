@@ -1872,11 +1872,22 @@ h1 {
 }
 
 .document-import-progress,
+.document-import-loaded-status,
 .document-import-error,
 .document-import-empty {
   margin: 12px 0 0;
   color: #536159;
   font-size: 12px;
+}
+
+.document-import-loaded-status {
+  margin: 12px 0 0;
+  padding: 10px 12px;
+  border: 1px solid #b9d2c2;
+  border-radius: 7px;
+  color: #275e43;
+  background: #f2f8f4;
+  line-height: 1.5;
 }
 
 .document-import-error {

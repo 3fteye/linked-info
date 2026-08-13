@@ -11,12 +11,14 @@ export interface DocumentImportDialogLabels {
   sourceTextPlaceholder: string;
   chooseFile: string;
   chooseExternalDraft: string;
+  loadingExternalDraft: string;
   analyze: string;
   analyzing: string;
   cancel: string;
   close: string;
   draftTitle: string;
   draftDescription: string;
+  draftLoaded: (source: string, count: number, selected: number) => string;
   preview: string;
   selectedCount: (count: number) => string;
   existingMatch: string;
@@ -33,6 +35,7 @@ interface DocumentImportDialogProps {
   draft: DocumentImportDraft | null;
   error: string | null;
   labels: DocumentImportDialogLabels;
+  loadingExternalDraft: boolean;
   progress: { current: number; total: number } | null;
   sourceName: string;
   sourceText: string;
@@ -94,6 +97,7 @@ export default function DocumentImportDialog({
   draft,
   error,
   labels,
+  loadingExternalDraft,
   progress,
   sourceName,
   sourceText,
@@ -162,6 +166,9 @@ export default function DocumentImportDialog({
               </div>
               <strong>{labels.selectedCount(selectedCount)}</strong>
             </header>
+            <p className="document-import-loaded-status" role="status">
+              {labels.draftLoaded(draft.sourceName, draft.candidates.length, selectedCount)}
+            </p>
             {draft.candidates.length === 0 ? (
               <p className="document-import-empty">{labels.noCandidates}</p>
             ) : (
@@ -229,13 +236,13 @@ export default function DocumentImportDialog({
         <footer className="document-import-actions">
           {draft === null && (
             <div className="document-import-file-actions">
-              <button className="secondary-button" disabled={busy} onClick={onChooseFile} type="button">
+              <button className="secondary-button" disabled={busy || loadingExternalDraft} onClick={onChooseFile} type="button">
                 <Upload aria-hidden="true" size={15} />
                 {labels.chooseFile}
               </button>
-              <button className="secondary-button" disabled={busy} onClick={onChooseExternalDraft} type="button">
+              <button className="secondary-button" disabled={busy || loadingExternalDraft} onClick={onChooseExternalDraft} type="button">
                 <FileJson aria-hidden="true" size={15} />
-                {labels.chooseExternalDraft}
+                {loadingExternalDraft ? labels.loadingExternalDraft : labels.chooseExternalDraft}
               </button>
             </div>
           )}
@@ -246,7 +253,7 @@ export default function DocumentImportDialog({
           {draft === null ? (
             <button
               className="primary-button"
-              disabled={busy || sourceText.trim().length === 0}
+              disabled={busy || loadingExternalDraft || sourceText.trim().length === 0}
               onClick={onAnalyze}
               type="button"
             >
