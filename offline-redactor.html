@@ -1,0 +1,1296 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'none'; img-src data:; font-src 'none'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'"
+    />
+    <meta name="referrer" content="no-referrer" />
+    <title>关联信息 · 离线文本脱敏</title>
+    <style>
+      :root {
+        color-scheme: light;
+        font-family:
+          Inter, "Segoe UI", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+        --bg: #f4f6f3;
+        --surface: #ffffff;
+        --surface-soft: #eef3ef;
+        --border: #d8dfd9;
+        --border-strong: #b8c6bb;
+        --text: #18211b;
+        --muted: #647068;
+        --accent: #237a52;
+        --accent-strong: #17643f;
+        --accent-soft: #e0f0e6;
+        --warning: #7a4d0b;
+        --warning-bg: #fff6df;
+        --danger: #a23a36;
+        --shadow: 0 8px 30px rgba(24, 44, 31, 0.08);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-width: 320px;
+        min-height: 100vh;
+        color: var(--text);
+        background:
+          radial-gradient(circle at 8% 0%, rgba(68, 139, 98, 0.11), transparent 28rem),
+          var(--bg);
+      }
+
+      button,
+      textarea,
+      input {
+        font: inherit;
+      }
+
+      button,
+      .file-button {
+        min-height: 40px;
+        border: 1px solid var(--border-strong);
+        border-radius: 9px;
+        padding: 0 14px;
+        color: var(--text);
+        background: var(--surface);
+        cursor: pointer;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 7px;
+        transition: 120ms ease;
+      }
+
+      button:hover,
+      .file-button:hover {
+        border-color: var(--accent);
+        background: var(--surface-soft);
+      }
+
+      button:focus-visible,
+      textarea:focus-visible,
+      input:focus-visible,
+      .file-button:focus-within {
+        outline: 3px solid rgba(35, 122, 82, 0.2);
+        outline-offset: 2px;
+      }
+
+      button.primary {
+        border-color: var(--accent);
+        color: white;
+        background: var(--accent);
+      }
+
+      button.primary:hover {
+        background: var(--accent-strong);
+      }
+
+      button.danger {
+        color: var(--danger);
+      }
+
+      button:disabled {
+        opacity: 0.48;
+        cursor: not-allowed;
+      }
+
+      .shell {
+        width: min(1480px, calc(100% - 32px));
+        margin: 0 auto;
+        padding: 26px 0 48px;
+      }
+
+      header {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 24px;
+        margin-bottom: 18px;
+      }
+
+      h1,
+      h2,
+      h3,
+      p {
+        margin-top: 0;
+      }
+
+      h1 {
+        margin-bottom: 7px;
+        font-size: clamp(24px, 3vw, 34px);
+        line-height: 1.2;
+        letter-spacing: -0.02em;
+      }
+
+      h2 {
+        margin-bottom: 6px;
+        font-size: 18px;
+      }
+
+      h3 {
+        margin-bottom: 10px;
+        font-size: 15px;
+      }
+
+      .subtitle,
+      .hint,
+      .small {
+        color: var(--muted);
+      }
+
+      .subtitle {
+        max-width: 760px;
+        margin-bottom: 0;
+        line-height: 1.65;
+      }
+
+      .offline-badge {
+        flex: 0 0 auto;
+        border: 1px solid #a8c9b4;
+        border-radius: 999px;
+        padding: 8px 12px;
+        color: var(--accent-strong);
+        background: var(--accent-soft);
+        font-size: 13px;
+        font-weight: 700;
+      }
+
+      .notice {
+        margin-bottom: 18px;
+        border: 1px solid #ead49b;
+        border-radius: 12px;
+        padding: 13px 15px;
+        color: var(--warning);
+        background: var(--warning-bg);
+        line-height: 1.55;
+      }
+
+      .workspace {
+        display: grid;
+        grid-template-columns: minmax(240px, 300px) minmax(0, 1fr);
+        gap: 16px;
+        align-items: start;
+      }
+
+      .card {
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        background: rgba(255, 255, 255, 0.96);
+        box-shadow: var(--shadow);
+      }
+
+      .options {
+        position: sticky;
+        top: 16px;
+        padding: 18px;
+      }
+
+      .option-list {
+        display: grid;
+        gap: 8px;
+        margin: 16px 0 20px;
+      }
+
+      .check-row {
+        display: grid;
+        grid-template-columns: 20px 1fr;
+        gap: 9px;
+        align-items: start;
+        border-radius: 8px;
+        padding: 7px 5px;
+        line-height: 1.35;
+        cursor: pointer;
+      }
+
+      .check-row:hover {
+        background: var(--surface-soft);
+      }
+
+      .check-row input {
+        width: 17px;
+        height: 17px;
+        margin: 1px 0 0;
+        accent-color: var(--accent);
+      }
+
+      .check-row span span {
+        display: block;
+        margin-top: 2px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .custom-terms {
+        width: 100%;
+        min-height: 110px;
+        resize: vertical;
+      }
+
+      textarea {
+        width: 100%;
+        border: 1px solid var(--border-strong);
+        border-radius: 10px;
+        padding: 12px 13px;
+        color: var(--text);
+        background: #fbfcfb;
+        font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+        font-size: 13px;
+        line-height: 1.6;
+        tab-size: 2;
+      }
+
+      .main-card {
+        overflow: hidden;
+      }
+
+      .toolbar {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        border-bottom: 1px solid var(--border);
+        padding: 13px 16px;
+        background: #fafbfa;
+      }
+
+      .toolbar-group {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+
+      .file-button input {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+      }
+
+      .editors {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        min-height: 540px;
+      }
+
+      .editor-pane {
+        display: flex;
+        min-width: 0;
+        flex-direction: column;
+        padding: 16px;
+      }
+
+      .editor-pane + .editor-pane {
+        border-left: 1px solid var(--border);
+      }
+
+      .pane-head {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 9px;
+      }
+
+      .pane-head h2 {
+        margin: 0;
+      }
+
+      .editor-pane > textarea {
+        flex: 1;
+        min-height: 470px;
+        resize: vertical;
+      }
+
+      #redactedText {
+        background: #f3f8f4;
+      }
+
+      .status-bar {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 9px;
+        border-top: 1px solid var(--border);
+        padding: 12px 16px;
+        background: #fafbfa;
+      }
+
+      .stat {
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        padding: 5px 10px;
+        color: var(--muted);
+        background: white;
+        font-size: 12px;
+      }
+
+      .stat strong {
+        color: var(--text);
+      }
+
+      .details-card,
+      .restore-card {
+        margin-top: 16px;
+        padding: 18px;
+      }
+
+      .details-head,
+      .restore-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+      }
+
+      .mapping-wrap {
+        overflow-x: auto;
+        margin-top: 14px;
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 13px;
+      }
+
+      th,
+      td {
+        border-bottom: 1px solid var(--border);
+        padding: 9px 8px;
+        text-align: left;
+        vertical-align: top;
+      }
+
+      th {
+        color: var(--muted);
+        font-weight: 600;
+      }
+
+      td code {
+        white-space: nowrap;
+        color: var(--accent-strong);
+      }
+
+      .secret-value {
+        max-width: 620px;
+        overflow-wrap: anywhere;
+        font-family: "Cascadia Code", Consolas, monospace;
+      }
+
+      .restore-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 14px;
+        margin-top: 14px;
+      }
+
+      .restore-grid textarea {
+        min-height: 210px;
+        resize: vertical;
+      }
+
+      .restore-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-top: 12px;
+      }
+
+      .empty {
+        padding: 18px 4px 4px;
+        color: var(--muted);
+      }
+
+      .sr-only {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+      }
+
+      @media (max-width: 980px) {
+        .workspace {
+          grid-template-columns: 1fr;
+        }
+
+        .options {
+          position: static;
+        }
+
+        .option-list {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+      }
+
+      @media (max-width: 720px) {
+        .shell {
+          width: min(100% - 20px, 1480px);
+          padding-top: 16px;
+        }
+
+        header,
+        .editors,
+        .restore-grid {
+          display: block;
+        }
+
+        .offline-badge {
+          margin-top: 12px;
+          width: fit-content;
+        }
+
+        .editor-pane + .editor-pane {
+          border-top: 1px solid var(--border);
+          border-left: 0;
+        }
+
+        .editor-pane > textarea {
+          min-height: 300px;
+        }
+
+        .restore-grid textarea {
+          margin-bottom: 12px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="shell">
+      <header>
+        <div>
+          <h1>离线文本脱敏</h1>
+          <p class="subtitle">
+            在本机浏览器内把秘密和个人标识替换为稳定占位符，再将脱敏结果发给远程模型。映射只保存在当前页面内存中。
+          </p>
+        </div>
+        <div class="offline-badge">● 完全离线 · 无网络请求</div>
+      </header>
+
+      <div class="notice" role="note">
+        <strong>重要：</strong>自动检测不可能保证零遗漏。发送前必须人工通读右侧结果；姓名、内部项目名、特殊账号和其他业务敏感词请加入“自定义词”。复制后还要考虑系统剪贴板历史与跨设备同步。
+      </div>
+
+      <section class="workspace">
+        <aside class="card options" aria-labelledby="optionsTitle">
+          <h2 id="optionsTitle">检测范围</h2>
+          <p class="hint small">默认开启适合秘密文档的高置信规则。</p>
+
+          <div class="option-list">
+            <label class="check-row">
+              <input id="credentialsOption" type="checkbox" checked />
+              <span>密码与令牌<span>无冒号字段、高熵 Key、代理凭据、邮箱----密码----2FA、私钥与恢复码</span></span>
+            </label>
+            <label class="check-row">
+              <input id="promoCodesOption" type="checkbox" checked />
+              <span>优惠码与兑换码<span>带标签的码，以及独立成行的 12～24 位大写字母数字码</span></span>
+            </label>
+            <label class="check-row">
+              <input id="accountsOption" type="checkbox" checked />
+              <span>账号标识<span>邮箱，以及“账号/用户名/登录名”字段</span></span>
+            </label>
+            <label class="check-row">
+              <input id="phonesOption" type="checkbox" checked />
+              <span>电话号码<span>中国大陆手机号及常见国际号码</span></span>
+            </label>
+            <label class="check-row">
+              <input id="identityOption" type="checkbox" checked />
+              <span>证件与银行卡号<span>中国居民身份证、连续银行卡号</span></span>
+            </label>
+            <label class="check-row">
+              <input id="networkOption" type="checkbox" checked />
+              <span>网络标识<span>IPv4 地址及 URL 中常见秘密参数</span></span>
+            </label>
+            <label class="check-row">
+              <input id="pathOption" type="checkbox" checked />
+              <span>本机路径用户名<span>保留路径结构，只替换用户目录名称</span></span>
+            </label>
+          </div>
+
+          <h3>自定义词（每行一个）</h3>
+          <textarea
+            id="customTerms"
+            class="custom-terms"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="真实姓名&#10;内部项目代号&#10;不希望发出的公司名"
+          ></textarea>
+          <label class="check-row">
+            <input id="customCaseInsensitive" type="checkbox" checked />
+            <span>自定义词忽略大小写</span>
+          </label>
+        </aside>
+
+        <section class="card main-card" aria-labelledby="editorTitle">
+          <div class="toolbar">
+            <div class="toolbar-group">
+              <label class="file-button">
+                读取本地文本文件
+                <input
+                  id="fileInput"
+                  type="file"
+                  accept=".txt,.md,.json,.csv,.log,.yaml,.yml,text/plain,application/json"
+                />
+              </label>
+              <button id="sampleButton" type="button">填入合成示例</button>
+            </div>
+            <div class="toolbar-group">
+              <button id="redactButton" class="primary" type="button">开始脱敏</button>
+              <button id="clearButton" class="danger" type="button">清空全部</button>
+            </div>
+          </div>
+
+          <div class="editors" id="editorTitle">
+            <div class="editor-pane">
+              <div class="pane-head">
+                <h2>原文（仅当前页面）</h2>
+                <span id="sourceCount" class="small">0 字符</span>
+              </div>
+              <textarea
+                id="sourceText"
+                autocomplete="off"
+                spellcheck="false"
+                placeholder="在这里粘贴待脱敏内容……"
+              ></textarea>
+            </div>
+
+            <div class="editor-pane">
+              <div class="pane-head">
+                <h2>脱敏结果（发送这一份）</h2>
+                <span id="resultCount" class="small">0 字符</span>
+              </div>
+              <textarea
+                id="redactedText"
+                autocomplete="off"
+                spellcheck="false"
+                readonly
+                placeholder="脱敏结果会显示在这里。发送前请逐行检查。"
+              ></textarea>
+            </div>
+          </div>
+
+          <div class="status-bar" aria-live="polite">
+            <span class="stat">替换项：<strong id="replacementCount">0</strong></span>
+            <span class="stat">类型：<strong id="typeCount">0</strong></span>
+            <span class="stat">状态：<strong id="statusText">尚未处理</strong></span>
+            <button id="copyButton" type="button" disabled>复制脱敏文本</button>
+            <button id="downloadButton" type="button" disabled>下载脱敏文本</button>
+          </div>
+        </section>
+      </section>
+
+      <section class="card details-card" aria-labelledby="mappingTitle">
+        <div class="details-head">
+          <div>
+            <h2 id="mappingTitle">本地替换映射</h2>
+            <p class="hint small">默认隐藏原值。此映射不会保存、下载或复制。</p>
+          </div>
+          <button id="toggleMappingButton" type="button" disabled>显示映射</button>
+        </div>
+        <div id="mappingContainer" hidden></div>
+      </section>
+
+      <section class="card restore-card" aria-labelledby="restoreTitle">
+        <div class="restore-head">
+          <div>
+            <h2 id="restoreTitle">本地还原远程结果</h2>
+            <p class="hint small">
+              要求远程模型保留 <code>[[LI_…]]</code> 占位符，然后把它的输出粘到左侧。还原只使用本次脱敏的内存映射。
+            </p>
+          </div>
+        </div>
+        <div class="restore-grid">
+          <div>
+            <label for="remoteText"><strong>带占位符的远程输出</strong></label>
+            <textarea
+              id="remoteText"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="把远程模型返回的内容粘贴到这里……"
+            ></textarea>
+          </div>
+          <div>
+            <label for="restoredText"><strong>本地还原结果</strong></label>
+            <textarea
+              id="restoredText"
+              autocomplete="off"
+              spellcheck="false"
+              readonly
+              placeholder="还原结果会显示在这里，不要再发回远程服务。"
+            ></textarea>
+          </div>
+        </div>
+        <div class="restore-actions">
+          <button id="restoreButton" class="primary" type="button" disabled>在本地还原</button>
+          <button id="downloadRestoredButton" type="button" disabled>下载本地还原结果</button>
+          <span id="restoreStatus" class="small" aria-live="polite">需要先完成一次脱敏</span>
+        </div>
+      </section>
+    </main>
+
+    <script>
+      "use strict";
+
+      const TYPE_LABELS = Object.freeze({
+        PRIVATE_KEY: "私钥",
+        TOTP: "TOTP / 2FA",
+        RECOVERY: "恢复码",
+        PASSWORD: "密码",
+        TOKEN: "令牌 / 密钥",
+        PROMO_CODE: "优惠码 / 兑换码",
+        ACCOUNT: "账号标识",
+        EMAIL: "邮箱",
+        PHONE: "电话",
+        IDENTITY: "证件号",
+        BANK_CARD: "银行卡号",
+        IP: "IP 地址",
+        URL_SECRET: "URL 秘密参数",
+        PATH_USER: "路径用户名",
+        CUSTOM: "自定义词",
+      });
+
+      const PLACEHOLDER_PATTERN = /\[\[LI_[A-Z_]+_\d{3}\]\]/g;
+
+      function escapeRegExp(value) {
+        return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      }
+
+      function createRedactionState() {
+        const entries = [];
+        const byValue = new Map();
+        const counters = new Map();
+
+        function replaceValue(type, rawValue) {
+          const value = String(rawValue ?? "");
+          if (!value || PLACEHOLDER_PATTERN.test(value)) {
+            PLACEHOLDER_PATTERN.lastIndex = 0;
+            return value;
+          }
+          PLACEHOLDER_PATTERN.lastIndex = 0;
+
+          const existing = byValue.get(value);
+          if (existing) return existing;
+
+          const next = (counters.get(type) ?? 0) + 1;
+          counters.set(type, next);
+          const placeholder = `[[LI_${type}_${String(next).padStart(3, "0")}]]`;
+          entries.push({ placeholder, type, value });
+          byValue.set(value, placeholder);
+          return placeholder;
+        }
+
+        return { entries, replaceValue };
+      }
+
+      function isInsidePlaceholder(text, offset) {
+        const lastOpen = text.lastIndexOf("[[LI_", offset);
+        const lastClose = text.lastIndexOf("]]", offset);
+        return lastOpen > lastClose;
+      }
+
+      function replaceQuotedField(text, pattern, type, state) {
+        return text.replace(pattern, (match, prefix, doubleQuoted, singleQuoted, bare, offset, input) => {
+          if (isInsidePlaceholder(input, offset)) return match;
+          if (doubleQuoted !== undefined) {
+            return `${prefix}"${state.replaceValue(type, doubleQuoted)}"`;
+          }
+          if (singleQuoted !== undefined) {
+            return `${prefix}'${state.replaceValue(type, singleQuoted)}'`;
+          }
+          return `${prefix}${state.replaceValue(type, bare)}`;
+        });
+      }
+
+      function replaceWholeCapture(text, pattern, type, state) {
+        return text.replace(pattern, (match, prefix, value, offset, input) => {
+          if (isInsidePlaceholder(input, offset)) return match;
+          return `${prefix}${state.replaceValue(type, value.trim())}`;
+        });
+      }
+
+      function redactCustomTerms(text, terms, caseInsensitive, state) {
+        const uniqueTerms = [...new Set(terms.map((term) => term.trim()).filter(Boolean))].sort(
+          (left, right) => right.length - left.length,
+        );
+        for (const term of uniqueTerms) {
+          const flags = caseInsensitive ? "giu" : "gu";
+          text = text.replace(new RegExp(escapeRegExp(term), flags), (match) =>
+            state.replaceValue("CUSTOM", match),
+          );
+        }
+        return text;
+      }
+
+      function replaceTrimmedValue(field, type, state) {
+        const leading = field.match(/^\s*/u)?.[0] ?? "";
+        const trailing = field.match(/\s*$/u)?.[0] ?? "";
+        const end = trailing.length ? field.length - trailing.length : field.length;
+        const value = field.slice(leading.length, end);
+        return value ? `${leading}${state.replaceValue(type, value)}${trailing}` : field;
+      }
+
+      function isLikelyTotpSecret(value) {
+        const normalized = value.trim();
+        return /^[A-Z2-7]{16,64}$/iu.test(normalized) && normalized.length % 8 === 0;
+      }
+
+      function redactDashSeparatedCredentialRows(text, state) {
+        const emailPattern = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,63}\b/giu;
+        return text.replace(/^[^\r\n]*----[^\r\n]*$/gmu, (line) => {
+          const parts = line.split(/(----+)/u);
+          const valueIndexes = parts.map((_, index) => index).filter((index) => index % 2 === 0);
+          const accountIndex = valueIndexes.find((index) => {
+            emailPattern.lastIndex = 0;
+            return emailPattern.test(parts[index]);
+          });
+          emailPattern.lastIndex = 0;
+          if (accountIndex === undefined) return line;
+
+          parts[accountIndex] = parts[accountIndex].replace(emailPattern, (value) =>
+            state.replaceValue("EMAIL", value),
+          );
+          emailPattern.lastIndex = 0;
+
+          const passwordIndex = accountIndex + 2;
+          if (passwordIndex < parts.length) {
+            parts[passwordIndex] = replaceTrimmedValue(parts[passwordIndex], "PASSWORD", state);
+          }
+
+          const totpIndex = passwordIndex + 2;
+          if (totpIndex < parts.length && isLikelyTotpSecret(parts[totpIndex])) {
+            parts[totpIndex] = replaceTrimmedValue(parts[totpIndex], "TOTP", state);
+          }
+
+          return parts.join("");
+        });
+      }
+
+      function redactCredentials(text, state) {
+        text = text.replace(
+          /-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----/g,
+          (value) => state.replaceValue("PRIVATE_KEY", value),
+        );
+
+        text = text.replace(/otpauth:\/\/[^\s<>"']+/giu, (value) => state.replaceValue("TOTP", value));
+
+        text = text.replace(
+          /^([ \t]*(?:\[[0-9A-Fa-f:]+\]|[^:\s]+):\d{1,5}:)([^:\s]+):([^\s]+)([^\r\n]*)$/gmu,
+          (match, prefix, account, password, suffix) =>
+            `${prefix}${state.replaceValue("ACCOUNT", account)}:${state.replaceValue("PASSWORD", password)}${suffix}`,
+        );
+
+        text = replaceQuotedField(
+          text,
+          /((?:(?:\b(?:2fa|totp)\b\s*(?:密钥|secret)?)|二次验证(?:密钥)?|双重验证(?:密钥)?|动态口令密钥)\s*(?:(?:[:：=]|是)\s*)?)(?:"([^"\r\n]+)"|'([^'\r\n]+)'|([^\s,，;；]+))/giu,
+          "TOTP",
+          state,
+        );
+
+        text = replaceWholeCapture(
+          text,
+          /((?:恢复码|备用码|备份码|\b(?:recovery\s*codes?|backup\s*codes?)\b)\s*(?:(?:[:：=]|是)\s*)?)([^\r\n]+)/giu,
+          "RECOVERY",
+          state,
+        );
+
+        text = replaceQuotedField(
+          text,
+          /((?:密码|口令|登录密码|\b(?:password|passcode|pwd)\b)\s*(?:(?:[:：=]|是)\s*)?)(?:"([^"\r\n]+)"|'([^'\r\n]+)'|([^\s,，;；]+))/giu,
+          "PASSWORD",
+          state,
+        );
+
+        text = replaceQuotedField(
+          text,
+          /((?:\b(?:api[\s_-]*key|access[\s_-]*token|refresh[\s_-]*token|client[\s_-]*secret|access[\s_-]*key|secret[\s_-]*key|auth(?:orization)?[\s_-]*token|session[\s_-]*(?:id|token)|cookie)\b|令牌|访问密钥|密钥|客户端密钥|会话令牌|授权码)\s*(?:(?:[:：=]|是)\s*)?)(?:"([^"\r\n]+)"|'([^'\r\n]+)'|([^\s,，;；]+))/giu,
+          "TOKEN",
+          state,
+        );
+
+        text = text.replace(/(Bearer\s+)([A-Za-z0-9._~+\/-]{12,})/giu, (match, prefix, value) => {
+          return `${prefix}${state.replaceValue("TOKEN", value)}`;
+        });
+
+        const tokenPatterns = [
+          /\bsk-[A-Za-z0-9_-]{16,}\b/g,
+          /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}\b/g,
+          /\bgithub_pat_[A-Za-z0-9_]{20,}\b/g,
+          /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g,
+          /\bAKIA[0-9A-Z]{16}\b/g,
+          /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g,
+        ];
+        for (const pattern of tokenPatterns) {
+          text = text.replace(pattern, (value) => state.replaceValue("TOKEN", value));
+        }
+
+        return text;
+      }
+
+      function redactPromoCodes(text, state) {
+        text = replaceQuotedField(
+          text,
+          /((?:优惠码|兑换码|促销码|邀请码|\b(?:coupon(?:\s*code)?|promo(?:\s*code)?)\b)\s*(?:(?:[:：=]|是)\s*)?)(?:"([^"\r\n]+)"|'([^'\r\n]+)'|([^\s,，;；]+))/giu,
+          "PROMO_CODE",
+          state,
+        );
+
+        return text.replace(
+          /^([ \t]*)(?=[A-Z0-9]{12,24}(?:[ \t]|$))(?=[A-Z0-9]*[A-Z])(?=[A-Z0-9]*\d)([A-Z0-9]{12,24})([^\r\n]*)$/gmu,
+          (match, prefix, value, suffix) =>
+            `${prefix}${state.replaceValue("PROMO_CODE", value)}${suffix}`,
+        );
+      }
+
+      function redactUnlabeledCredentials(text, state) {
+        text = text.replace(
+          /\b[A-Z2-7]{16,64}\b/gi,
+          (value) =>
+            /[2-7]/u.test(value) || (value === value.toUpperCase() && value.length % 8 === 0)
+              ? state.replaceValue("TOTP", value)
+              : value,
+        );
+        text = text.replace(
+          /\b(?=[A-Za-z0-9_-]{32,}\b)(?=[A-Za-z0-9_-]*[A-Za-z])(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{32,}\b/g,
+          (value) => state.replaceValue("TOKEN", value),
+        );
+        return text.replace(/[^\s,，;；]{10,128}/g, (value) => {
+          if (
+            value.includes("[[LI_") ||
+            /^(?:https?|otpauth):\/\//iu.test(value) ||
+            value.includes("\\") ||
+            value.includes("/")
+          ) {
+            return value;
+          }
+          const characterClasses = [/[a-z]/.test(value), /[A-Z]/.test(value), /\d/.test(value), /[^A-Za-z0-9]/.test(value)].filter(Boolean).length;
+          return characterClasses >= 3 && /[A-Za-z]/.test(value) && /\d/.test(value)
+            ? state.replaceValue("PASSWORD", value)
+            : value;
+        });
+      }
+
+      function redactAccounts(text, state) {
+        text = replaceQuotedField(
+          text,
+          /((?:账号|账户|用户名|登录名|\b(?:account|username|login)\b)\s*(?:[:：=]|是)\s*)(?:"([^"\r\n]+)"|'([^'\r\n]+)'|([^\s,，;；]+))/giu,
+          "ACCOUNT",
+          state,
+        );
+        return text.replace(
+          /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,63}\b/giu,
+          (value) => state.replaceValue("EMAIL", value),
+        );
+      }
+
+      function redactPhones(text, state) {
+        text = text.replace(/(?<!\d)(?:\+?86[-\s]?)?1[3-9]\d{9}(?!\d)/g, (value) =>
+          state.replaceValue("PHONE", value),
+        );
+        return text.replace(/(?<![\dA-Za-z])\+[1-9]\d{0,2}(?:[-\s()]?\d){7,13}(?!\d)/g, (value) =>
+          state.replaceValue("PHONE", value),
+        );
+      }
+
+      function redactIdentity(text, state) {
+        text = text.replace(/(?<!\d)\d{17}[0-9Xx](?!\d)/g, (value) =>
+          state.replaceValue("IDENTITY", value),
+        );
+        return text.replace(/(?<!\d)(?:\d[ -]?){15,18}\d(?!\d)/g, (value) => {
+          const digits = value.replace(/\D/g, "");
+          return digits.length >= 16 && digits.length <= 19
+            ? state.replaceValue("BANK_CARD", value)
+            : value;
+        });
+      }
+
+      function isValidIpv4(value) {
+        return value.split(".").every((part) => Number(part) >= 0 && Number(part) <= 255);
+      }
+
+      function redactNetwork(text, state) {
+        text = text.replace(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g, (value) =>
+          isValidIpv4(value) ? state.replaceValue("IP", value) : value,
+        );
+        return text.replace(
+          /([?&](?:token|key|api_key|apikey|secret|password|passwd|pwd|code|signature|sig|auth)=)([^&#\s]+)/giu,
+          (match, prefix, value) => `${prefix}${state.replaceValue("URL_SECRET", value)}`,
+        );
+      }
+
+      function redactPathUsers(text, state) {
+        return text.replace(
+          /((?:[A-Za-z]:\\Users\\|\/home\/|\/Users\/))([^\\/\r\n\s]+)/g,
+          (match, prefix, value) => `${prefix}${state.replaceValue("PATH_USER", value)}`,
+        );
+      }
+
+      function redactText(source, options = {}) {
+        const state = createRedactionState();
+        let text = String(source ?? "");
+
+        text = redactCustomTerms(
+          text,
+          options.customTerms ?? [],
+          options.customCaseInsensitive !== false,
+          state,
+        );
+        if (options.credentials !== false && options.accounts !== false) {
+          text = redactDashSeparatedCredentialRows(text, state);
+        }
+        if (options.credentials !== false) text = redactCredentials(text, state);
+        if (options.accounts !== false) text = redactAccounts(text, state);
+        if (options.promoCodes !== false) text = redactPromoCodes(text, state);
+        if (options.credentials !== false) text = redactUnlabeledCredentials(text, state);
+        if (options.phones !== false) text = redactPhones(text, state);
+        if (options.identity !== false) text = redactIdentity(text, state);
+        if (options.network !== false) text = redactNetwork(text, state);
+        if (options.pathUsers !== false) text = redactPathUsers(text, state);
+
+        return { text, entries: state.entries };
+      }
+
+      function restoreText(source, entries) {
+        let text = String(source ?? "");
+        let restoredCount = 0;
+        for (const entry of entries ?? []) {
+          if (!text.includes(entry.placeholder)) continue;
+          const occurrences = text.split(entry.placeholder).length - 1;
+          text = text.split(entry.placeholder).join(entry.value);
+          restoredCount += occurrences;
+        }
+        const unresolved = text.match(PLACEHOLDER_PATTERN) ?? [];
+        PLACEHOLDER_PATTERN.lastIndex = 0;
+        return { text, restoredCount, unresolvedCount: unresolved.length };
+      }
+
+      function restoreStructuredText(source, entries) {
+        const input = String(source ?? "");
+        try {
+          const parsed = JSON.parse(input);
+          let restoredCount = 0;
+          let unresolvedCount = 0;
+          const visit = (value) => {
+            if (typeof value === "string") {
+              const result = restoreText(value, entries);
+              restoredCount += result.restoredCount;
+              unresolvedCount += result.unresolvedCount;
+              return result.text;
+            }
+            if (Array.isArray(value)) return value.map(visit);
+            if (value !== null && typeof value === "object") {
+              return Object.fromEntries(
+                Object.entries(value).map(([key, child]) => [visit(key), visit(child)]),
+              );
+            }
+            return value;
+          };
+          return {
+            text: `${JSON.stringify(visit(parsed), null, 2)}\n`,
+            restoredCount,
+            unresolvedCount,
+            format: "json",
+          };
+        } catch {
+          return { ...restoreText(input, entries), format: "text" };
+        }
+      }
+
+      globalThis.LinkedInfoRedactor = Object.freeze({
+        redactText,
+        restoreText,
+        restoreStructuredText,
+      });
+
+      if (typeof document !== "undefined") {
+        const elements = {
+          source: document.getElementById("sourceText"),
+          result: document.getElementById("redactedText"),
+          customTerms: document.getElementById("customTerms"),
+          customCaseInsensitive: document.getElementById("customCaseInsensitive"),
+          credentials: document.getElementById("credentialsOption"),
+          promoCodes: document.getElementById("promoCodesOption"),
+          accounts: document.getElementById("accountsOption"),
+          phones: document.getElementById("phonesOption"),
+          identity: document.getElementById("identityOption"),
+          network: document.getElementById("networkOption"),
+          pathUsers: document.getElementById("pathOption"),
+          redact: document.getElementById("redactButton"),
+          clear: document.getElementById("clearButton"),
+          sample: document.getElementById("sampleButton"),
+          copy: document.getElementById("copyButton"),
+          download: document.getElementById("downloadButton"),
+          file: document.getElementById("fileInput"),
+          sourceCount: document.getElementById("sourceCount"),
+          resultCount: document.getElementById("resultCount"),
+          replacementCount: document.getElementById("replacementCount"),
+          typeCount: document.getElementById("typeCount"),
+          status: document.getElementById("statusText"),
+          toggleMapping: document.getElementById("toggleMappingButton"),
+          mapping: document.getElementById("mappingContainer"),
+          remote: document.getElementById("remoteText"),
+          restored: document.getElementById("restoredText"),
+          restore: document.getElementById("restoreButton"),
+          downloadRestored: document.getElementById("downloadRestoredButton"),
+          restoreStatus: document.getElementById("restoreStatus"),
+        };
+
+        let currentEntries = [];
+        let mappingVisible = false;
+        let restoredFormat = "text";
+
+        function updateCounts() {
+          elements.sourceCount.textContent = `${elements.source.value.length.toLocaleString()} 字符`;
+          elements.resultCount.textContent = `${elements.result.value.length.toLocaleString()} 字符`;
+        }
+
+        function selectedOptions() {
+          return {
+            credentials: elements.credentials.checked,
+            promoCodes: elements.promoCodes.checked,
+            accounts: elements.accounts.checked,
+            phones: elements.phones.checked,
+            identity: elements.identity.checked,
+            network: elements.network.checked,
+            pathUsers: elements.pathUsers.checked,
+            customTerms: elements.customTerms.value.split(/\r?\n/),
+            customCaseInsensitive: elements.customCaseInsensitive.checked,
+          };
+        }
+
+        function maskValue(value) {
+          const chars = Array.from(value);
+          if (chars.length <= 2) return "••";
+          if (chars.length <= 8) return `${chars[0]}••••${chars.at(-1)}`;
+          return `${chars.slice(0, 2).join("")}••••••${chars.slice(-2).join("")}`;
+        }
+
+        function renderMapping() {
+          elements.mapping.replaceChildren();
+          if (!currentEntries.length) {
+            const empty = document.createElement("div");
+            empty.className = "empty";
+            empty.textContent = "本次没有生成替换映射。";
+            elements.mapping.append(empty);
+            return;
+          }
+
+          const wrap = document.createElement("div");
+          wrap.className = "mapping-wrap";
+          const table = document.createElement("table");
+          const head = document.createElement("thead");
+          const headRow = document.createElement("tr");
+          for (const label of ["占位符", "类型", "原值（本机显示）"]) {
+            const cell = document.createElement("th");
+            cell.textContent = label;
+            headRow.append(cell);
+          }
+          head.append(headRow);
+          table.append(head);
+
+          const body = document.createElement("tbody");
+          for (const entry of currentEntries) {
+            const row = document.createElement("tr");
+            const placeholderCell = document.createElement("td");
+            const code = document.createElement("code");
+            code.textContent = entry.placeholder;
+            placeholderCell.append(code);
+
+            const typeCell = document.createElement("td");
+            typeCell.textContent = TYPE_LABELS[entry.type] ?? entry.type;
+
+            const valueCell = document.createElement("td");
+            valueCell.className = "secret-value";
+            valueCell.textContent = mappingVisible ? entry.value : maskValue(entry.value);
+            row.append(placeholderCell, typeCell, valueCell);
+            body.append(row);
+          }
+          table.append(body);
+          wrap.append(table);
+          elements.mapping.append(wrap);
+        }
+
+        function setProcessedState(entries) {
+          currentEntries = entries;
+          const types = new Set(entries.map((entry) => entry.type));
+          elements.replacementCount.textContent = String(entries.length);
+          elements.typeCount.textContent = String(types.size);
+          elements.copy.disabled = !elements.result.value;
+          elements.download.disabled = !elements.result.value;
+          elements.toggleMapping.disabled = entries.length === 0;
+          elements.restore.disabled = entries.length === 0;
+          elements.restoreStatus.textContent = entries.length
+            ? "映射已在当前页面内存中准备好"
+            : "本次没有可用于还原的映射";
+          renderMapping();
+        }
+
+        function runRedaction() {
+          if (!elements.source.value) {
+            elements.status.textContent = "请先输入原文";
+            elements.source.focus();
+            return;
+          }
+          const result = redactText(elements.source.value, selectedOptions());
+          elements.result.value = result.text;
+          setProcessedState(result.entries);
+          elements.status.textContent = result.entries.length
+            ? "已完成，请人工检查右侧"
+            : "未发现匹配项，仍需人工检查";
+          updateCounts();
+        }
+
+        function clearAll() {
+          for (const element of [
+            elements.source,
+            elements.result,
+            elements.customTerms,
+            elements.remote,
+            elements.restored,
+          ]) {
+            element.value = "";
+          }
+          elements.file.value = "";
+          currentEntries = [];
+          mappingVisible = false;
+          elements.mapping.hidden = true;
+          elements.toggleMapping.textContent = "显示映射";
+          elements.toggleMapping.disabled = true;
+          elements.copy.disabled = true;
+          elements.download.disabled = true;
+          elements.restore.disabled = true;
+          elements.downloadRestored.disabled = true;
+          elements.replacementCount.textContent = "0";
+          elements.typeCount.textContent = "0";
+          elements.status.textContent = "已清空页面内存";
+          elements.restoreStatus.textContent = "需要先完成一次脱敏";
+          elements.mapping.replaceChildren();
+          updateCounts();
+          elements.source.focus();
+        }
+
+        async function copyRedacted() {
+          try {
+            await navigator.clipboard.writeText(elements.result.value);
+            elements.status.textContent = "已复制脱敏文本；注意系统剪贴板历史";
+          } catch {
+            elements.result.focus();
+            elements.result.select();
+            elements.status.textContent = "浏览器拒绝剪贴板权限，已选中文本，请手动复制";
+          }
+        }
+
+        function downloadRedacted() {
+          const blob = new Blob([elements.result.value], { type: "text/plain;charset=utf-8" });
+          const url = URL.createObjectURL(blob);
+          const anchor = document.createElement("a");
+          anchor.href = url;
+          anchor.download = "redacted-text.txt";
+          anchor.click();
+          URL.revokeObjectURL(url);
+          elements.status.textContent = "已下载仅含占位符的脱敏文本";
+        }
+
+        function restoreRemoteResult() {
+          if (!elements.remote.value) {
+            elements.restoreStatus.textContent = "请先粘贴带占位符的远程输出";
+            elements.remote.focus();
+            return;
+          }
+          const result = restoreStructuredText(elements.remote.value, currentEntries);
+          elements.restored.value = result.text;
+          restoredFormat = result.format;
+          elements.downloadRestored.disabled = !result.text;
+          elements.restoreStatus.textContent = result.unresolvedCount
+            ? `已还原 ${result.restoredCount} 处，仍有 ${result.unresolvedCount} 个未知占位符`
+            : `已在本地还原 ${result.restoredCount} 处，占位符全部识别${result.format === "json" ? "；JSON 转义已安全处理" : ""}`;
+        }
+
+        function downloadRestoredResult() {
+          const mime = restoredFormat === "json" ? "application/json" : "text/plain";
+          const extension = restoredFormat === "json" ? "json" : "txt";
+          const blob = new Blob([elements.restored.value], { type: `${mime};charset=utf-8` });
+          const url = URL.createObjectURL(blob);
+          const anchor = document.createElement("a");
+          anchor.href = url;
+          anchor.download = `linked-info-restored-draft.${extension}`;
+          anchor.click();
+          URL.revokeObjectURL(url);
+          elements.restoreStatus.textContent = "已下载仅在本地还原后的结果";
+        }
+
+        elements.source.addEventListener("input", () => {
+          elements.status.textContent = "原文已变化，需要重新脱敏";
+          updateCounts();
+        });
+        elements.redact.addEventListener("click", runRedaction);
+        elements.clear.addEventListener("click", clearAll);
+        elements.copy.addEventListener("click", copyRedacted);
+        elements.download.addEventListener("click", downloadRedacted);
+        elements.restore.addEventListener("click", restoreRemoteResult);
+        elements.downloadRestored.addEventListener("click", downloadRestoredResult);
+
+        elements.toggleMapping.addEventListener("click", () => {
+          mappingVisible = !mappingVisible;
+          elements.mapping.hidden = !mappingVisible;
+          elements.toggleMapping.textContent = mappingVisible ? "隐藏映射" : "显示映射";
+          renderMapping();
+        });
+
+        elements.file.addEventListener("change", async () => {
+          const [file] = elements.file.files ?? [];
+          if (!file) return;
+          if (file.size > 20 * 1024 * 1024) {
+            elements.status.textContent = "文件超过 20 MiB，为避免浏览器卡顿已拒绝读取";
+            elements.file.value = "";
+            return;
+          }
+          try {
+            elements.source.value = await file.text();
+            elements.status.textContent = `已在本地读取 ${file.name}，尚未脱敏`;
+            updateCounts();
+          } catch {
+            elements.status.textContent = "本地文件读取失败";
+          }
+        });
+
+        elements.sample.addEventListener("click", () => {
+          elements.source.value = [
+            "个人资料整理（以下全部是虚构示例）",
+            "账号：zeta@example.invalid",
+            "用户名：demo-user-42",
+            "密码 Synthetic-Pass!2026 codex p",
+            "a7qd953gpxdbd86pndkffspcuc28kqsrbmfog9yt",
+            "2fa JBSWY3DPEHPK3PXP codex p",
+            "恢复码：ABCD-EFGH, IJKL-MNOP, QRST-UVWX",
+            "proxy.example.invalid:8443:demo-user:Fake-Proxy-Pass!",
+            "AB4D6F8H2K9M3P5R",
+            "管理地址：https://example.invalid/admin?token=fake-query-secret-2026",
+            "服务器：192.0.2.25",
+            "手机：+86 13800138000",
+            "脚本路径：C:\\Users\\ExampleUser\\Documents\\refresh-token.ps1",
+            "内部项目代号：Amber Finch（可用左侧自定义词测试）",
+          ].join("\n");
+          elements.customTerms.value = "Amber Finch";
+          elements.status.textContent = "已填入完全虚构的合成示例";
+          updateCounts();
+        });
+
+        window.addEventListener("pagehide", () => {
+          clearAll();
+        });
+
+        updateCounts();
+      }
+    </script>
+  </body>
+</html>

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { FileText, Sparkles, Upload, X } from "lucide-react";
+import { FileJson, FileText, Sparkles, Upload, X } from "lucide-react";
 import type { DocumentImportCandidate, DocumentImportDraft } from "./documentImport";
 
 export interface DocumentImportDialogLabels {
@@ -10,6 +10,7 @@ export interface DocumentImportDialogLabels {
   sourceText: string;
   sourceTextPlaceholder: string;
   chooseFile: string;
+  chooseExternalDraft: string;
   analyze: string;
   analyzing: string;
   cancel: string;
@@ -38,6 +39,7 @@ interface DocumentImportDialogProps {
   onAnalyze: () => void;
   onCancel: () => void;
   onChooseFile: () => void;
+  onChooseExternalDraft: () => void;
   onPreview: () => void;
   onSourceNameChange: (value: string) => void;
   onSourceTextChange: (value: string) => void;
@@ -98,6 +100,7 @@ export default function DocumentImportDialog({
   onAnalyze,
   onCancel,
   onChooseFile,
+  onChooseExternalDraft,
   onPreview,
   onSourceNameChange,
   onSourceTextChange,
@@ -225,10 +228,16 @@ export default function DocumentImportDialog({
         {error !== null && <p className="document-import-error" role="alert">{error}</p>}
         <footer className="document-import-actions">
           {draft === null && (
-            <button className="secondary-button" disabled={busy} onClick={onChooseFile} type="button">
-              <Upload aria-hidden="true" size={15} />
-              {labels.chooseFile}
-            </button>
+            <div className="document-import-file-actions">
+              <button className="secondary-button" disabled={busy} onClick={onChooseFile} type="button">
+                <Upload aria-hidden="true" size={15} />
+                {labels.chooseFile}
+              </button>
+              <button className="secondary-button" disabled={busy} onClick={onChooseExternalDraft} type="button">
+                <FileJson aria-hidden="true" size={15} />
+                {labels.chooseExternalDraft}
+              </button>
+            </div>
           )}
           <span />
           <button className="secondary-button" onClick={onCancel} type="button">

@@ -3,9 +3,11 @@ import type { LocalLlmModelId } from "./localLlmModels";
 
 export const maximumDocumentImportCharacters = 120_000;
 export const maximumDocumentImportChunks = 64;
+export const externalDocumentImportKind = "linked-info-document-import-draft";
 const maximumChunkCharacters = 1_800;
 const chunkOverlapCharacters = 160;
 const maximumCandidateContentCharacters = 6_000;
+const maximumExternalDraftCandidates = maximumDocumentImportChunks * 24;
 
 export interface DocumentImportChunkRequest {
   sourceName: string;
@@ -46,8 +48,14 @@ export interface DocumentImportDraft {
   sourceText: string;
   sourceHash: string;
   importedAtMs: number;
-  modelId: LocalLlmModelId;
+  modelId: LocalLlmModelId | "external";
   candidates: DocumentImportCandidate[];
+}
+
+export interface ExternalDocumentImportFile {
+  sourceName: string;
+  sourceText: string;
+  responses: DocumentImportChunkResponse[];
 }
 
 export interface DocumentImportBuildResult {
@@ -101,6 +109,124 @@ export function splitDocumentForImport(text: string): string[] {
     throw new Error("documentImportTooManyChunks");
   }
   return chunks;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function invalidExternalDraft(): never {
+  throw new Error("documentImportInvalidExternalDraft");
+}
+
+export function parseExternalDocumentImportFile(text: string): ExternalDocumentImportFile {
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    return invalidExternalDraft();
+  }
+  if (
+    !isRecord(value) ||
+    value.schemaVersion !== 1 ||
+    value.kind !== externalDocumentImportKind ||
+    typeof value.sourceName !== "string" ||
+    value.sourceName.trim().length === 0 ||
+    Array.from(value.sourceName).length > 240 ||
+    typeof value.sourceText !== "string" ||
+    value.sourceText.trim().length === 0 ||
+    Array.from(value.sourceText).length > maximumDocumentImportCharacters ||
+    !Array.isArray(value.responses) ||
+    value.responses.length === 0 ||
+    value.responses.length > maximumDocumentImportChunks
+  ) {
+    return invalidExternalDraft();
+  }
+
+  let candidateCount = 0;
+  const responses: DocumentImportChunkResponse[] = value.responses.map((response) => {
+    if (!isRecord(response) || !Array.isArray(response.nodes) || response.nodes.length > 24) {
+      return invalidExternalDraft();
+    }
+    candidateCount += response.nodes.length;
+    const nodes = response.nodes.map((node): DocumentImportCandidateOutput => {
+      if (
+        !isRecord(node) ||
+        typeof node.name !== "string" ||
+        node.name.trim().length === 0 ||
+        Array.from(node.name).length > 160 ||
+        (node.content !== null && typeof node.content !== "string") ||
+        (typeof node.content === "string" &&
+          Array.from(node.content).length > maximumCandidateContentCharacters) ||
+        !Array.isArray(node.referenceNames) ||
+        node.referenceNames.length > 12 ||
+        node.referenceNames.some(
+          (referenceName) =>
+            typeof referenceName !== "string" ||
+            referenceName.trim().length === 0 ||
+            Array.from(referenceName).length > 160,
+        )
+      ) {
+        return invalidExternalDraft();
+      }
+      return {
+        name: node.name,
+        content: node.content as string | null,
+        referenceNames: node.referenceNames as string[],
+      };
+    });
+    return { nodes };
+  });
+  if (candidateCount === 0 || candidateCount > maximumExternalDraftCandidates) {
+    return invalidExternalDraft();
+  }
+  return {
+    sourceName: value.sourceName.trim(),
+    sourceText: value.sourceText,
+    responses,
+  };
+}
+
+export function validateExternalDocumentImportReferences(
+  candidates: DocumentImportCandidate[],
+  workspace: WorkspaceSnapshot,
+): void {
+  const availableNames = new Set(
+    [
+      ...workspace.nodes.map((node) => node.name),
+      ...candidates.map((candidate) => candidate.name),
+    ]
+      .filter((name): name is string => name !== null)
+      .map(normalizeNodeName),
+  );
+  if (
+    candidates.some((candidate) =>
+      candidate.referenceNames.some(
+        (referenceName) => !availableNames.has(normalizeNodeName(referenceName)),
+      ),
+    )
+  ) {
+    invalidExternalDraft();
+  }
+}
+
+export function validateExternalDocumentImportIsRestored(
+  external: ExternalDocumentImportFile,
+): void {
+  const placeholderPattern = /\[\[LI_[A-Z_]+_\d{3}\]\]/u;
+  if (
+    placeholderPattern.test(external.sourceText) ||
+    external.responses.some((response) =>
+      response.nodes.some(
+        (node) =>
+          placeholderPattern.test(node.name) ||
+          (node.content !== null && placeholderPattern.test(node.content)) ||
+          node.referenceNames.some((referenceName) => placeholderPattern.test(referenceName)),
+      ),
+    )
+  ) {
+    throw new Error("documentImportContainsPlaceholders");
+  }
 }
 
 function mergeContent(left: string | null, right: string | null): string | null {
@@ -229,7 +355,7 @@ export function buildDocumentImportWorkspace(
     `导入时间：${new Date(draft.importedAtMs).toISOString()}`,
     `原始来源：${draft.sourceName}`,
     `SHA-256：${draft.sourceHash}`,
-    `本地模型：${draft.modelId}`,
+    `分析方式：${draft.modelId === "external" ? "外部分析草稿" : `本地模型 ${draft.modelId}`}`,
     "",
     "--- 原始内容 ---",
     draft.sourceText,

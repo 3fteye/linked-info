@@ -32,12 +32,15 @@ import DocumentImportDialog from "./DocumentImportDialog";
 import {
   buildDocumentImportWorkspace,
   mergeDocumentImportCandidates,
+  parseExternalDocumentImportFile,
   splitDocumentForImport,
+  validateExternalDocumentImportReferences,
+  validateExternalDocumentImportIsRestored,
   type DocumentImportCandidate,
   type DocumentImportDraft,
   type DocumentImportLlmGateway,
 } from "./documentImport";
-import { importTextDocument } from "./documentImportBridge";
+import { importDocumentDraft, importTextDocument } from "./documentImportBridge";
 import { NodeContentHost } from "./contentProcessor";
 import { supportedLanguages, type SupportedLanguage } from "./locales";
 import {
@@ -572,6 +575,44 @@ function App({
     } catch (error) {
       setDocumentImportError(
         t("documentImport.errors.file", { reason: errorReason(error) }),
+      );
+    }
+  }
+
+  async function chooseExternalDocumentImportDraft() {
+    if (documentImportBusy) return;
+    setDocumentImportError(null);
+    try {
+      const file = await importDocumentDraft();
+      if (file === null) return;
+      const external = parseExternalDocumentImportFile(file.text);
+      validateExternalDocumentImportIsRestored(external);
+      const candidates = mergeDocumentImportCandidates(
+        external.responses,
+        workspaceRef.current,
+      );
+      validateExternalDocumentImportReferences(candidates, workspaceRef.current);
+      const sourceHash = await crypto.subtle.digest(
+        "SHA-256",
+        new TextEncoder().encode(external.sourceText),
+      );
+      const hash = Array.from(new Uint8Array(sourceHash), (value) =>
+        value.toString(16).padStart(2, "0"),
+      ).join("");
+      setDocumentImportSourceName(external.sourceName);
+      setDocumentImportSourceText(external.sourceText);
+      setDocumentImportDraft({
+        sourceNodeId: crypto.randomUUID(),
+        sourceName: external.sourceName,
+        sourceText: external.sourceText,
+        sourceHash: hash,
+        importedAtMs: Date.now(),
+        modelId: "external",
+        candidates,
+      });
+    } catch (error) {
+      setDocumentImportError(
+        t("documentImport.errors.externalDraft", { reason: errorReason(error) }),
       );
     }
   }
@@ -5224,6 +5265,7 @@ function App({
             sourceText: t("documentImport.sourceText"),
             sourceTextPlaceholder: t("documentImport.sourceTextPlaceholder"),
             chooseFile: t("documentImport.chooseFile"),
+            chooseExternalDraft: t("documentImport.chooseExternalDraft"),
             analyze: t("documentImport.analyze"),
             analyzing: t("documentImport.analyzing"),
             cancel: t("actions.cancel"),
@@ -5245,6 +5287,7 @@ function App({
             discardDocumentImport();
           }}
           onChooseFile={() => void chooseDocumentImportFile()}
+          onChooseExternalDraft={() => void chooseExternalDocumentImportDraft()}
           onPreview={previewDocumentImport}
           onSourceNameChange={setDocumentImportSourceName}
           onSourceTextChange={setDocumentImportSourceText}

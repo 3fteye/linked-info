@@ -4,6 +4,7 @@ use tauri_plugin_dialog::DialogExt;
 
 const MAXIMUM_TRANSFER_BYTES: usize = 256 * 1024 * 1024;
 const MAXIMUM_DOCUMENT_IMPORT_BYTES: u64 = 1024 * 1024;
+const MAXIMUM_DOCUMENT_DRAFT_BYTES: u64 = 8 * 1024 * 1024;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -141,6 +142,52 @@ pub async fn import_text_document(
     Ok(result)
 }
 
+#[tauri::command]
+pub async fn import_document_draft(
+    app: tauri::AppHandle,
+    vault_state: tauri::State<'_, crate::workspace_file::WorkspaceVaultState>,
+) -> Result<Option<ImportedDocumentFile>, String> {
+    let permit = crate::workspace_file::begin_workspace_access(&app, &vault_state)?;
+    let dialog_app = app.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let Some(selection) = dialog_app
+            .dialog()
+            .file()
+            .add_filter("Linked Info import draft", &["json"])
+            .blocking_pick_file()
+        else {
+            return Ok(None);
+        };
+        let path = selection
+            .into_path()
+            .map_err(|_| "document_import_invalid_path".to_owned())?;
+        let size = fs::metadata(&path)
+            .map_err(|error| error.to_string())?
+            .len();
+        if size > MAXIMUM_DOCUMENT_DRAFT_BYTES {
+            return Err("document_import_draft_too_large".to_owned());
+        }
+        let extension = path
+            .extension()
+            .and_then(OsStr::to_str)
+            .map(str::to_ascii_lowercase);
+        if extension.as_deref() != Some("json") {
+            return Err("document_import_unsupported_type".to_owned());
+        }
+        let text =
+            fs::read_to_string(&path).map_err(|_| "document_import_invalid_utf8".to_owned())?;
+        let name = path
+            .file_name()
+            .map(|value| value.to_string_lossy().into_owned())
+            .ok_or_else(|| "document_import_invalid_path".to_owned())?;
+        Ok(Some(ImportedDocumentFile { name, text }))
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+    crate::workspace_file::ensure_workspace_access(&app, &vault_state, permit)?;
+    Ok(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -155,5 +202,7 @@ mod tests {
     #[test]
     fn document_import_limit_is_smaller_than_workspace_transfer_limit() {
         assert!(MAXIMUM_DOCUMENT_IMPORT_BYTES < MAXIMUM_TRANSFER_BYTES as u64);
+        assert!(MAXIMUM_DOCUMENT_IMPORT_BYTES < MAXIMUM_DOCUMENT_DRAFT_BYTES);
+        assert!(MAXIMUM_DOCUMENT_DRAFT_BYTES < MAXIMUM_TRANSFER_BYTES as u64);
     }
 }

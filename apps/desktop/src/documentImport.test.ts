@@ -2,7 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   buildDocumentImportWorkspace,
   mergeDocumentImportCandidates,
+  parseExternalDocumentImportFile,
   splitDocumentForImport,
+  validateExternalDocumentImportReferences,
+  validateExternalDocumentImportIsRestored,
   type DocumentImportDraft,
 } from "./documentImport";
 import { emptyWorkspace, type WorkspaceSnapshot } from "./workspaceData";
@@ -32,6 +35,70 @@ describe("document import", () => {
     expect(candidates).toHaveLength(1);
     expect(candidates[0].matchedNodeId).toBe(existing.nodes[0].id);
     expect(candidates[0].referenceNames).toEqual(["服务"]);
+  });
+
+  it("parses a bounded external analysis draft and validates its references", () => {
+    const external = parseExternalDocumentImportFile(
+      JSON.stringify({
+        schemaVersion: 1,
+        kind: "linked-info-document-import-draft",
+        sourceName: "accounts.txt",
+        sourceText: "redacted source",
+        responses: [
+          {
+            nodes: [
+              { name: "账号 A", content: "记录", referenceNames: ["OpenAI"] },
+            ],
+          },
+        ],
+      }),
+    );
+    const candidates = mergeDocumentImportCandidates(external.responses, existing);
+    expect(external.sourceName).toBe("accounts.txt");
+    expect(() => validateExternalDocumentImportReferences(candidates, existing)).not.toThrow();
+  });
+
+  it("rejects malformed external drafts and unknown reference targets", () => {
+    expect(() => parseExternalDocumentImportFile("{}"))
+      .toThrow("documentImportInvalidExternalDraft");
+    const external = parseExternalDocumentImportFile(
+      JSON.stringify({
+        schemaVersion: 1,
+        kind: "linked-info-document-import-draft",
+        sourceName: "accounts.txt",
+        sourceText: "redacted source",
+        responses: [
+          {
+            nodes: [
+              { name: "账号 A", content: null, referenceNames: ["不存在"] },
+            ],
+          },
+        ],
+      }),
+    );
+    const candidates = mergeDocumentImportCandidates(external.responses, existing);
+    expect(() => validateExternalDocumentImportReferences(candidates, existing))
+      .toThrow("documentImportInvalidExternalDraft");
+  });
+
+  it("rejects an external draft until local placeholders have been restored", () => {
+    const external = parseExternalDocumentImportFile(
+      JSON.stringify({
+        schemaVersion: 1,
+        kind: "linked-info-document-import-draft",
+        sourceName: "accounts.txt",
+        sourceText: "[[LI_EMAIL_001]]",
+        responses: [
+          {
+            nodes: [
+              { name: "账号：[[LI_EMAIL_001]]", content: null, referenceNames: [] },
+            ],
+          },
+        ],
+      }),
+    );
+    expect(() => validateExternalDocumentImportIsRestored(external))
+      .toThrow("documentImportContainsPlaceholders");
   });
 
   it("builds one incremental workspace transaction with source provenance", () => {

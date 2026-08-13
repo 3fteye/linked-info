@@ -1887,6 +1887,12 @@ h1 {
   margin-top: 18px;
 }
 
+.document-import-file-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .document-import-actions > span {
   flex: 1;
 }

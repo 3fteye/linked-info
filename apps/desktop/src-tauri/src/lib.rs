@@ -75,6 +75,7 @@ pub fn run() {
             embedding::inspect_local_embedding_models,
             embedding::prepare_local_embedding_model,
             file_transfer::export_workspace_transfer,
+            file_transfer::import_document_draft,
             file_transfer::import_workspace_transfer,
             file_transfer::import_text_document,
             llm::cancel_local_llm_download,
