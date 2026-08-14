@@ -401,6 +401,13 @@ export function finalizeNodeDragLayout(
   return moveNodeLayoutToFront(positionedLayout, frontNodeId);
 }
 
+export function renderedEdgesForViewportGesture(
+  edges: Edge[],
+  viewportGestureActive: boolean,
+): Edge[] {
+  return viewportGestureActive ? [] : edges;
+}
+
 function isTextEntryTarget(target: EventTarget | null): boolean {
   return (
     target instanceof HTMLInputElement ||
@@ -500,6 +507,7 @@ export default function GraphCanvas({
   const [flowNodes, setFlowNodes, applyNodeChanges] =
     useNodesState<InformationFlowNode>([]);
   const [flowEdges, setFlowEdges, applyEdgeChanges] = useEdgesState<Edge>([]);
+  const [viewportGestureActive, setViewportGestureActive] = useState(false);
   const flowNodesRef = useRef(flowNodes);
   flowNodesRef.current = flowNodes;
   const normalizedSearch = searchTerm.trim().toLowerCase();
@@ -1149,7 +1157,7 @@ export default function GraphCanvas({
           style: { stroke: "#7a8c82", strokeWidth: 1.8 },
         }}
         deleteKeyCode={["Backspace", "Delete"]}
-        edges={flowEdges}
+        edges={renderedEdgesForViewportGesture(flowEdges, viewportGestureActive)}
         edgesReconnectable={false}
         elevateNodesOnSelect={false}
         defaultViewport={viewport ?? defaultCanvasViewport}
@@ -1174,7 +1182,11 @@ export default function GraphCanvas({
         onNodeDragStart={(_event, node) => bringFlowNodeToFront(node.id)}
         onNodeDragStop={handleNodeDragStop}
         onNodesChange={handleNodesChange}
-        onMoveEnd={(_event, nextViewport) => onViewportChange(nextViewport)}
+        onMoveStart={() => setViewportGestureActive(true)}
+        onMoveEnd={(_event, nextViewport) => {
+          setViewportGestureActive(false);
+          onViewportChange(nextViewport);
+        }}
         onPaneClick={() => setContextMenu(null)}
         onPaneContextMenu={handlePaneContextMenu}
         panOnDrag={[0, 1]}
