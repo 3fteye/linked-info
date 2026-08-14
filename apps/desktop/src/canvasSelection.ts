@@ -15,6 +15,10 @@ export interface CanvasSelectionNode extends CanvasSelectionPoint {
   width: number;
 }
 
+export interface SelectableCanvasNode extends CanvasSelectionNode {
+  selected: boolean;
+}
+
 export function canvasSelectionRectangle(
   start: CanvasSelectionPoint,
   end: CanvasSelectionPoint,
@@ -46,6 +50,26 @@ export function nodesFullyInsideCanvasSelection(
     }
   }
   return selected;
+}
+
+export function selectedCanvasNodeBoundary(
+  nodes: readonly SelectableCanvasNode[],
+  padding = 12,
+): CanvasSelectionRectangle | null {
+  const selected = nodes.filter((node) => node.selected && !node.hidden);
+  if (selected.length < 2) {
+    return null;
+  }
+  const left = Math.min(...selected.map((node) => node.x));
+  const top = Math.min(...selected.map((node) => node.y));
+  const right = Math.max(...selected.map((node) => node.x + node.width));
+  const bottom = Math.max(...selected.map((node) => node.y + node.height));
+  return {
+    x: left - padding,
+    y: top - padding,
+    width: right - left + padding * 2,
+    height: bottom - top + padding * 2,
+  };
 }
 
 function autoPanAxisDelta(

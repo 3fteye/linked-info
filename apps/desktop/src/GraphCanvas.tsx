@@ -74,6 +74,7 @@ import {
   canvasSelectionAutoPanDelta,
   canvasSelectionRectangle,
   nodesFullyInsideCanvasSelection,
+  selectedCanvasNodeBoundary,
   type CanvasSelectionPoint,
   type CanvasSelectionRectangle,
 } from "./canvasSelection";
@@ -769,6 +770,21 @@ export default function GraphCanvas({
   const movingReferencePaths = useMemo(
     () => buildBatchedReferencePaths(movingReferenceCurves, selectedReferenceId),
     [movingReferenceCurves, selectedReferenceId],
+  );
+  const selectedNodeBoundary = useMemo(
+    () =>
+      selectedCanvasNodeBoundary(
+        flowNodes.map((node) => ({
+          height: node.measured?.height ?? node.height ?? 92,
+          hidden: node.hidden === true,
+          id: node.id,
+          selected: node.selected === true,
+          width: node.measured?.width ?? node.width ?? 270,
+          x: node.position.x,
+          y: node.position.y,
+        })),
+      ),
+    [flowNodes],
   );
 
   const referenceSearchCandidates = useMemo(() => {
@@ -1574,6 +1590,17 @@ export default function GraphCanvas({
               />
             )}
           </svg>
+          {selectedNodeBoundary !== null && (
+            <div
+              aria-hidden="true"
+              className="graph-selected-nodes-boundary"
+              style={{
+                height: selectedNodeBoundary.height,
+                transform: `translate(${selectedNodeBoundary.x}px, ${selectedNodeBoundary.y}px)`,
+                width: selectedNodeBoundary.width,
+              }}
+            />
+          )}
         </ViewportPortal>
         <Background
           color="#d0d8d2"

@@ -888,6 +888,15 @@ h1 {
   stroke-width: 2.6;
 }
 
+.graph-selected-nodes-boundary {
+  position: absolute;
+  box-sizing: border-box;
+  pointer-events: none;
+  border: 2px dashed #2d7d58;
+  border-radius: 8px;
+  background: rgb(45 125 88 / 6%);
+}
+
 .graph-controls.react-flow__controls,
 .graph-minimap.react-flow__minimap {
   overflow: hidden;

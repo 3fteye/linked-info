@@ -3,6 +3,7 @@ import {
   canvasSelectionAutoPanDelta,
   canvasSelectionRectangle,
   nodesFullyInsideCanvasSelection,
+  selectedCanvasNodeBoundary,
 } from "./canvasSelection";
 
 describe("canvas selection", () => {
@@ -64,5 +65,58 @@ describe("canvas selection", () => {
       x: 15,
       y: -15,
     });
+  });
+
+  it("builds one padded boundary around multiple selected visible nodes", () => {
+    expect(
+      selectedCanvasNodeBoundary(
+        [
+          {
+            id: "first",
+            x: 100,
+            y: 80,
+            width: 270,
+            height: 100,
+            hidden: false,
+            selected: true,
+          },
+          {
+            id: "second",
+            x: 500,
+            y: 300,
+            width: 270,
+            height: 120,
+            hidden: false,
+            selected: true,
+          },
+          {
+            id: "hidden",
+            x: 900,
+            y: 600,
+            width: 270,
+            height: 120,
+            hidden: true,
+            selected: true,
+          },
+        ],
+        10,
+      ),
+    ).toEqual({ x: 90, y: 70, width: 690, height: 360 });
+  });
+
+  it("does not draw a group boundary for a single selected node", () => {
+    expect(
+      selectedCanvasNodeBoundary([
+        {
+          id: "only",
+          x: 100,
+          y: 80,
+          width: 270,
+          height: 100,
+          hidden: false,
+          selected: true,
+        },
+      ]),
+    ).toBeNull();
   });
 });
