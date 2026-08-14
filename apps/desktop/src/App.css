@@ -774,6 +774,32 @@ h1 {
   gap: 7px;
 }
 
+.graph-node-content-marker-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  color: #657069;
+  font-size: 9px;
+  font-weight: 650;
+}
+
+.graph-node-content-marker-button {
+  border: 1px solid #c7d3cb;
+  border-radius: 4px;
+  padding: 3px 7px;
+  color: #245d40;
+  background: #f8fbf9;
+  font-size: 9px;
+  cursor: pointer;
+}
+
+.graph-node-content-marker-button:hover,
+.graph-node-content-marker-button:focus-visible {
+  border-color: #6f9c81;
+  background: #eaf3ed;
+}
+
 .graph-node-processor-field {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
@@ -825,16 +851,19 @@ h1 {
   -webkit-line-clamp: unset;
 }
 
-.plain-content-segment {
-  display: block;
+.graph-node-content.node-content-enhanced:not(.node-content-markdown) {
   white-space: pre-wrap;
 }
 
+.plain-content-segment {
+  display: inline;
+}
+
 .totp-content-line {
-  display: flex;
+  display: inline-flex;
   align-items: center;
   min-width: 0;
-  margin: 5px 0;
+  margin: 3px;
   gap: 6px;
   border: 1px solid #d5dfd8;
   border-radius: 5px;
@@ -888,6 +917,53 @@ h1 {
   min-width: 0;
   color: #a23f38;
   font-size: 10px;
+}
+
+.secret-content {
+  display: inline-flex;
+  max-width: 100%;
+  align-items: center;
+  margin: 3px;
+  gap: 5px;
+  border: 1px solid #d5dfd8;
+  border-radius: 5px;
+  padding: 5px 6px;
+  color: #344039;
+  background: #f5f8f6;
+  white-space: normal;
+}
+
+.secret-content-label {
+  flex: 0 0 auto;
+  color: #557063;
+  font-size: 9px;
+  font-weight: 750;
+}
+
+.secret-content-value {
+  min-width: 0;
+  overflow: hidden;
+  color: #174f35;
+  font-family: Consolas, "SFMono-Regular", monospace;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.secret-content-action {
+  flex: 0 0 auto;
+  border: 1px solid #b7c9bd;
+  border-radius: 4px;
+  padding: 3px 5px;
+  color: #245d40;
+  background: #ffffff;
+  font-size: 9px;
+  cursor: pointer;
+}
+
+.secret-content-action:hover {
+  border-color: #6f9c81;
+  background: #eaf3ed;
 }
 
 .graph-node-content.node-content-markdown > :first-child {

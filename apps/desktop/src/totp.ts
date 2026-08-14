@@ -71,16 +71,17 @@ function parseAlgorithm(value: string | null): TotpAlgorithm | null {
   return null;
 }
 
-function parseTotpValue(value: string): TotpConfiguration | null {
-  let secretText = value;
+export function parseTotpPayload(value: string): TotpConfiguration | null {
+  const trimmedValue = value.trim();
+  let secretText = trimmedValue;
   let algorithm: TotpAlgorithm = "SHA-1";
   let digits: 6 | 8 = 6;
   let period = 30;
 
-  if (/^otpauth:\/\//iu.test(value)) {
+  if (/^otpauth:\/\//iu.test(trimmedValue)) {
     let uri: URL;
     try {
-      uri = new URL(value);
+      uri = new URL(trimmedValue);
     } catch {
       return null;
     }
@@ -113,7 +114,7 @@ export function parseTotpDirectiveLine(line: string): TotpDirective | null {
   if (match === null) {
     return null;
   }
-  const configuration = parseTotpValue(match[1]);
+  const configuration = parseTotpPayload(match[1]);
   return configuration === null
     ? { valid: false }
     : { configuration, valid: true };

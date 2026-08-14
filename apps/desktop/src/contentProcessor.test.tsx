@@ -54,4 +54,15 @@ describe("content processor registry", () => {
     expect(preview).toBe(`${"a".repeat(maximumCanvasContentPreviewCharacters)}…`);
     expect(content).toHaveLength(maximumCanvasContentPreviewCharacters + 500);
   });
+
+  it("never cuts through a sensitive marker or exposes a partial payload", () => {
+    const prefix = "a".repeat(maximumCanvasContentPreviewCharacters - 20);
+    const payload = "synthetic-secret-".repeat(20);
+    const content = `${prefix}[[li:secret]]${payload}[[/li]] retained`;
+    const preview = canvasContentPreview(content);
+
+    expect(preview).toBe(`${prefix}…`);
+    expect(preview).not.toContain("synthetic-secret");
+    expect(content).toContain(payload);
+  });
 });

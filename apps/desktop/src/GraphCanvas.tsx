@@ -61,8 +61,12 @@ import {
   referenceTargetCreationName,
   shouldCreateMissingReferenceTarget,
 } from "./referenceSearch";
-import { NodeContentHost, canvasContentPreview } from "./contentProcessor";
-import type { TotpContentLabels } from "./totpContent";
+import {
+  NodeContentHost,
+  canvasContentPreview,
+  type ContentEnhancementLabels,
+} from "./contentProcessor";
+import { contentMarkerRegistry } from "./contentMarker";
 import { buildCanvasReferencePresentation } from "./canvasReferencePresentation";
 import {
   buildBatchedReferencePaths,
@@ -93,10 +97,12 @@ interface InformationNodeData extends Record<string, unknown> {
   contentProcessorId: string | null;
   contentProcessorLabel: string;
   contentProcessorOptions: readonly ContentProcessorOption[];
+  contentMarkerOptions: readonly ContentMarkerOption[];
+  markSelectionLabel: string;
   unsupportedContentProcessorLabel: (processorId: string) => string;
   contentLabel: string;
   contentPlaceholder: string;
-  enhancementLabels: TotpContentLabels;
+  enhancementLabels: ContentEnhancementLabels;
   editing: boolean;
   nameConflict: boolean;
   nameConflictLabel: string;
@@ -120,6 +126,11 @@ interface InformationNodeData extends Record<string, unknown> {
 }
 
 interface ContentProcessorOption {
+  id: string;
+  label: string;
+}
+
+interface ContentMarkerOption {
   id: string;
   label: string;
 }
@@ -150,6 +161,12 @@ interface GraphLabels {
   copySecret: string;
   copySecretFailed: string;
   copySecretSuccess: string;
+  markSelection: string;
+  secretCopy: string;
+  secretHide: string;
+  secretLabel: string;
+  secretMasked: string;
+  secretReveal: string;
   totpCopy: string;
   totpGenerating: string;
   totpInvalid: string;
@@ -186,6 +203,7 @@ interface GraphCanvasProps {
   references: NodeReference[];
   contentProcessorByNodeId: Readonly<Record<string, string>>;
   contentProcessorOptions: readonly ContentProcessorOption[];
+  contentMarkerOptions: readonly ContentMarkerOption[];
   viewport: CanvasViewport | null;
   editingNodeId: string | null;
   canRedo: boolean;
@@ -250,9 +268,14 @@ export function InformationNodeCard({
 }: NodeProps<InformationFlowNode>) {
   const nodeRef = useRef<HTMLElement>(null);
   const nameInputRef = useRef<HTMLInputElement>(null);
+  const contentInputRef = useRef<HTMLTextAreaElement>(null);
   const processorSelectRef = useRef<HTMLSelectElement>(null);
   const processorFocusTransferRef = useRef(false);
   const [draft, setDraft] = useState(() => nodeEditorDraft(data.name, data.content));
+  const [contentSelection, setContentSelection] = useState<{
+    end: number;
+    start: number;
+  } | null>(null);
   const wasEditingRef = useRef(data.editing);
 
   useEffect(() => {
@@ -261,6 +284,7 @@ export function InformationNodeCard({
     }
 
     setDraft(nodeEditorDraft(data.name, data.content));
+    setContentSelection(null);
   }, [data.content, data.editing, data.name]);
 
   useLayoutEffect(() => {
@@ -330,6 +354,34 @@ export function InformationNodeCard({
       }
       data.onCommit(id);
     }, 0);
+  };
+
+  const markSelectedContent = (markerId: string) => {
+    if (contentSelection === null) {
+      return;
+    }
+    const wrapped = contentMarkerRegistry.wrapSelection(
+      draft.content,
+      contentSelection.start,
+      contentSelection.end,
+      markerId,
+    );
+    setDraft((current) => updateNodeEditorContent(current, wrapped.content));
+    setContentSelection(null);
+    data.onContentChange(id, wrapped.content);
+    window.setTimeout(() => {
+      contentInputRef.current?.focus({ preventScroll: true });
+      contentInputRef.current?.setSelectionRange(wrapped.caret, wrapped.caret);
+    }, 0);
+  };
+
+  const captureContentSelection = (input: HTMLTextAreaElement) => {
+    const { selectionEnd, selectionStart } = input;
+    setContentSelection(
+      selectionEnd > selectionStart
+        ? { end: selectionEnd, start: selectionStart }
+        : null,
+    );
   };
 
   return (
@@ -428,12 +480,36 @@ export function InformationNodeCard({
             onChange={(event) => {
               const content = event.target.value;
               setDraft((current) => updateNodeEditorContent(current, content));
+              setContentSelection(null);
               data.onContentChange(id, content);
             }}
+            onKeyUp={(event) => captureContentSelection(event.currentTarget)}
+            onPointerUp={(event) => captureContentSelection(event.currentTarget)}
+            onSelect={(event) => captureContentSelection(event.currentTarget)}
             placeholder={data.contentPlaceholder}
+            ref={contentInputRef}
             rows={4}
             value={draft.content}
           />
+          {contentSelection !== null && (
+            <div
+              aria-label={data.markSelectionLabel}
+              className="graph-node-content-marker-toolbar"
+            >
+              <span>{data.markSelectionLabel}</span>
+              {data.contentMarkerOptions.map((option) => (
+                <button
+                  className="nodrag nowheel graph-node-content-marker-button"
+                  key={option.id}
+                  onClick={() => markSelectedContent(option.id)}
+                  onPointerDown={(event) => event.preventDefault()}
+                  type="button"
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+          )}
           {(data.nameConflict || draft.nameConflict) && (
             <span className="graph-node-error" role="alert">
               {data.nameConflictLabel}
@@ -558,6 +634,7 @@ function referencedNodeLabel(
 
 export default function GraphCanvas({
   analyzingNodeId,
+  contentMarkerOptions,
   contentProcessorByNodeId,
   contentProcessorOptions,
   nodes,
@@ -934,15 +1011,26 @@ export default function GraphCanvas({
             contentProcessorId: contentProcessorByNodeId[node.id] ?? null,
             contentProcessorLabel: labels.contentProcessor,
             contentProcessorOptions,
+            contentMarkerOptions,
+            markSelectionLabel: labels.markSelection,
             unsupportedContentProcessorLabel: labels.unsupportedContentProcessor,
             contentLabel: labels.content,
             contentPlaceholder: labels.contentPlaceholder,
             enhancementLabels: {
-              copy: labels.totpCopy,
-              generating: labels.totpGenerating,
-              invalid: labels.totpInvalid,
-              masked: labels.totpMasked,
-              remaining: labels.totpRemaining,
+              secret: {
+                copy: labels.secretCopy,
+                hide: labels.secretHide,
+                label: labels.secretLabel,
+                masked: labels.secretMasked,
+                reveal: labels.secretReveal,
+              },
+              totp: {
+                copy: labels.totpCopy,
+                generating: labels.totpGenerating,
+                invalid: labels.totpInvalid,
+                masked: labels.totpMasked,
+                remaining: labels.totpRemaining,
+              },
             },
             editing: editingNodeId === node.id,
             nameConflict: nameConflictNodeIds.has(node.id),
@@ -980,6 +1068,7 @@ export default function GraphCanvas({
       });
     });
   }, [
+    contentMarkerOptions,
     contentProcessorByNodeId,
     contentProcessorOptions,
     copyTextAsSecret,

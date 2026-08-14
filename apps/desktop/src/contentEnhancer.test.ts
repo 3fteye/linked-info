@@ -41,6 +41,53 @@ describe("content enhancement", () => {
     expect(segments[0]).toMatchObject({ kind: "text" });
   });
 
+  it("enhances known inline markers while preserving their surrounding text", () => {
+    const source = [
+      `2FA [[li:totp]]${syntheticSecret}[[/li]], note`,
+      "API [[li:secret]]synthetic-api-key[[/li]] retained",
+    ].join("\n");
+    const segments = contentEnhancerRegistry.segment(source, false);
+
+    expect(segments.map((segment) => segment.kind)).toEqual([
+      "text",
+      "totp",
+      "text",
+      "secret",
+      "text",
+    ]);
+    expect(segments.filter((segment) => segment.kind === "secret")).toEqual([
+      { kind: "secret", value: "synthetic-api-key" },
+    ]);
+  });
+
+  it("keeps multiline secret selections inside one protected enhancement", () => {
+    const source =
+      "Recovery [[li:secret]]first synthetic line\nsecond synthetic line[[/li]] retained";
+    const segments = contentEnhancerRegistry.segment(source, false);
+
+    expect(segments).toEqual([
+      { kind: "text", text: "Recovery " },
+      {
+        kind: "secret",
+        value: "first synthetic line\nsecond synthetic line",
+      },
+      { kind: "text", text: " retained" },
+    ]);
+    expect(contentForSemanticAnalysis(source)).toBe("Recovery  retained");
+  });
+
+  it("keeps inline marker examples inert inside Markdown code fences", () => {
+    const source = [
+      "```text",
+      `[[li:totp]]${syntheticSecret}[[/li]]`,
+      "[[li:secret]]synthetic-api-key[[/li]]",
+      "```",
+    ].join("\n");
+    const segments = contentEnhancerRegistry.segment(source, true);
+
+    expect(segments).toEqual([{ kind: "text", text: source }]);
+  });
+
   it("removes valid and invalid TOTP lines before semantic analysis", () => {
     const sanitized = contentForSemanticAnalysis(
       [
@@ -53,6 +100,22 @@ describe("content enhancement", () => {
 
     expect(sanitized).toBe("公开说明\n其余内容");
     expect(sanitized).not.toContain("TOTP");
+    expect(sanitized).not.toContain("jbsw");
+  });
+
+  it("removes only known sensitive marker payloads from semantic analysis", () => {
+    const sanitized = contentForSemanticAnalysis(
+      [
+        `2FA [[li:totp]]${syntheticSecret}[[/li]], note`,
+        "API [[li:secret]]synthetic-api-key[[/li]] retained",
+        "Unknown [[li:plugin-x]]payload[[/li]] retained",
+      ].join("\n"),
+    );
+
+    expect(sanitized).toBe(
+      "2FA , note\nAPI  retained\nUnknown [[li:plugin-x]]payload[[/li]] retained",
+    );
+    expect(sanitized).not.toContain("synthetic-api-key");
     expect(sanitized).not.toContain("jbsw");
   });
 

@@ -68,17 +68,50 @@ async function storedWorkspace(page: Page) {
   }, workspaceStorageKey);
 }
 
+async function markTextareaSelection(
+  page: Page,
+  selectedText: string,
+  markerLabel: string,
+) {
+  const textarea = page.locator('[data-node-id][data-editing="true"] textarea');
+  await textarea.evaluate((element, selection) => {
+    const input = element as HTMLTextAreaElement;
+    const start = input.value.indexOf(selection);
+    if (start < 0) {
+      throw new Error("synthetic selection text is missing");
+    }
+    input.focus();
+    input.setSelectionRange(start, start);
+  }, selectedText);
+  await page.keyboard.down("Shift");
+  for (let index = 0; index < selectedText.length; index += 1) {
+    await page.keyboard.press("ArrowRight");
+  }
+  await page.keyboard.up("Shift");
+  const toolbar = page.locator(".graph-node-content-marker-toolbar");
+  await expect(toolbar).toBeVisible();
+  await toolbar.getByRole("button", { exact: true, name: markerLabel }).click();
+  await expect(textarea).toHaveValue(new RegExp(`\\[\\[li:${markerLabel.toLowerCase()}`));
+}
+
 test("creating and editing a node survives a browser reload", async ({ page }) => {
   await openSyntheticWorkspace(page, gridNodes(1, 1));
-  const syntheticContent = [
+  const syntheticTotp = "jbsw y3dp ehpk 3pxp";
+  const syntheticSecret = "synthetic-api-key";
+  const unmarkedContent = [
     "# Persisted synthetic heading",
     "",
     "**Formatted content**",
     "",
-    "TOTP: jbsw y3dp ehpk 3pxp",
+    `2FA ${syntheticTotp}, retained note`,
+    "",
+    `API ${syntheticSecret} retained`,
     "",
     "<script>blocked</script>",
   ].join("\n");
+  const syntheticContent = unmarkedContent
+    .replace(syntheticTotp, `[[li:totp]]${syntheticTotp}[[/li]]`)
+    .replace(syntheticSecret, `[[li:secret]]${syntheticSecret}[[/li]]`);
 
   await page.getByTestId("create-node").click();
   const editor = page.locator('[data-node-id][data-editing="true"]');
@@ -90,7 +123,9 @@ test("creating and editing a node survives a browser reload", async ({ page }) =
   await processorSelect.selectOption("markdown");
   await page
     .locator('[data-node-id][data-editing="true"] textarea')
-    .fill(syntheticContent);
+    .fill(unmarkedContent);
+  await markTextareaSelection(page, syntheticTotp, "TOTP");
+  await markTextareaSelection(page, syntheticSecret, "Secret");
   await page.getByTestId("graph-canvas").click({ position: { x: 30, y: 30 } });
 
   await expect
@@ -120,7 +155,15 @@ test("creating and editing a node survives a browser reload", async ({ page }) =
   await expect(markdown.locator("h1")).toHaveText("Persisted synthetic heading");
   await expect(markdown.locator("strong")).toHaveText("Formatted content");
   await expect(markdown.locator(".totp-content-code")).toHaveText(/^\d{6}$/);
-  await expect(markdown).not.toContainText("jbsw");
+  await expect(markdown).toContainText("retained note");
+  await expect(markdown).not.toContainText(syntheticTotp);
+  const secret = markdown.locator(".secret-content");
+  await expect(secret).toBeVisible();
+  await expect(markdown).not.toContainText(syntheticSecret);
+  await secret.getByRole("button", { name: "Reveal" }).click();
+  await expect(secret).toContainText(syntheticSecret);
+  await secret.getByRole("button", { name: "Hide" }).click();
+  await expect(secret).not.toContainText(syntheticSecret);
   await expect(markdown.locator("script")).toHaveCount(0);
   await expect(markdown).not.toContainText("blocked");
 });

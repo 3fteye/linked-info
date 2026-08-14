@@ -32,16 +32,30 @@ function cardProps(overrides: Record<string, unknown> = {}): NodeProps<any> {
         { id: "text", label: "Plain text" },
         { id: "markdown", label: "Markdown" },
       ],
+      contentMarkerOptions: [
+        { id: "totp", label: "TOTP" },
+        { id: "secret", label: "Secret" },
+      ],
+      markSelectionLabel: "Mark selection",
       unsupportedContentProcessorLabel: (processorId: string) =>
         `Unavailable: ${processorId}`,
       contentLabel: "Content",
       contentPlaceholder: "Content",
       enhancementLabels: {
-        copy: "Copy code",
-        generating: "Generating",
-        invalid: "Invalid TOTP secret",
-        masked: "Secret hidden",
-        remaining: (seconds: number) => `${seconds}s`,
+        secret: {
+          copy: "Copy secret",
+          hide: "Hide",
+          label: "Secret",
+          masked: "Hidden",
+          reveal: "Reveal",
+        },
+        totp: {
+          copy: "Copy code",
+          generating: "Generating",
+          invalid: "Invalid TOTP secret",
+          masked: "Secret hidden",
+          remaining: (seconds: number) => `${seconds}s`,
+        },
       },
       editing: true,
       nameConflict: false,
@@ -198,6 +212,38 @@ describe("InformationNodeCard", () => {
       vi.runAllTimers();
     });
     expect(props.data.onCommit).toHaveBeenCalledWith(nodeId);
+  });
+
+  it("wraps only the selected content with the chosen extensible marker", () => {
+    vi.useFakeTimers();
+    const content = "2FA jbsw y3dp ehpk 3pxp, note";
+    const props = cardProps({ content });
+    renderCard(root, props);
+    act(() => vi.runAllTimers());
+    const textarea = container.querySelector("textarea")!;
+    const start = content.indexOf("jbsw");
+    const end = content.indexOf(", note");
+
+    act(() => {
+      textarea.focus();
+      textarea.setSelectionRange(start, end);
+      textarea.dispatchEvent(new Event("pointerup", { bubbles: true }));
+    });
+    const markerToolbar = container.querySelector(
+      ".graph-node-content-marker-toolbar",
+    );
+    expect(markerToolbar?.textContent).toContain("TOTP");
+    const totpButton = Array.from(markerToolbar?.querySelectorAll("button") ?? []).find(
+      (button) => button.textContent === "TOTP",
+    );
+    act(() => totpButton?.click());
+    act(() => vi.runAllTimers());
+
+    const marked = "2FA [[li:totp]]jbsw y3dp ehpk 3pxp[[/li]], note";
+    expect(textarea.value).toBe(marked);
+    expect(props.data.onContentChange).toHaveBeenCalledWith(nodeId, marked);
+    expect(document.activeElement).toBe(textarea);
+    expect(textarea.selectionStart).toBe(marked.indexOf(", note"));
   });
 
   it("shows when dense incoming edges are folded by the canvas view", () => {

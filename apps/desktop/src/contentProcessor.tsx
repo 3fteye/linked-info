@@ -4,11 +4,17 @@ import {
   contentEnhancerRegistry,
   type EnhancedContentSegment,
 } from "./contentEnhancer";
+import { contentMarkerRegistry } from "./contentMarker";
 import {
   maskedTotpLine,
   TotpContentLine,
   type TotpContentLabels,
 } from "./totpContent";
+import {
+  maskedSecretText,
+  SecretContent,
+  type SecretContentLabels,
+} from "./secretContent";
 
 export type ContentPresentation =
   | { kind: "text"; text: string | null }
@@ -85,18 +91,39 @@ export const contentProcessorRegistry = new ContentProcessorRegistry([
 
 export const maximumCanvasContentPreviewCharacters = 600;
 
+export interface ContentEnhancementLabels {
+  secret: SecretContentLabels;
+  totp: TotpContentLabels;
+}
+
 export function canvasContentPreview(text: string | null): string | null {
   if (text === null || text.length <= maximumCanvasContentPreviewCharacters) {
     return text;
   }
-  return `${text.slice(0, maximumCanvasContentPreviewCharacters)}…`;
+  let preview = "";
+  for (const segment of contentMarkerRegistry.segment(text)) {
+    const source = segment.kind === "text" ? segment.text : segment.marker.raw;
+    const remaining = maximumCanvasContentPreviewCharacters - preview.length;
+    if (source.length <= remaining) {
+      preview += source;
+      continue;
+    }
+    if (
+      segment.kind === "marker" &&
+      segment.marker.definition?.excludeFromSemanticAnalysis === true
+    ) {
+      return `${preview}…`;
+    }
+    return `${preview}${source.slice(0, Math.max(0, remaining))}…`;
+  }
+  return `${preview.slice(0, maximumCanvasContentPreviewCharacters)}…`;
 }
 
 interface NodeContentHostProps {
   className?: string;
   content: string | null;
   emptyContent?: ReactNode;
-  enhancementLabels: TotpContentLabels;
+  enhancementLabels: ContentEnhancementLabels;
   hideWhenEmpty?: boolean;
   onCopySecret?: (value: string) => void;
   processorId: string | null;
@@ -123,13 +150,18 @@ function SafeMarkdown({ source }: { source: string }) {
 
 function listContent(
   segments: readonly EnhancedContentSegment[],
-  labels: TotpContentLabels,
+  labels: ContentEnhancementLabels,
 ): string {
   return segments
-    .map((segment) =>
-      segment.kind === "text" ? segment.text : maskedTotpLine(labels),
-    )
-    .join("\n");
+    .map((segment) => {
+      if (segment.kind === "text") {
+        return segment.text;
+      }
+      return segment.kind === "totp"
+        ? maskedTotpLine(labels.totp)
+        : maskedSecretText(labels.secret);
+    })
+    .join("");
 }
 
 export function NodeContentHost({
@@ -187,8 +219,14 @@ export function NodeContentHost({
             {segment.kind === "totp" ? (
               <TotpContentLine
                 directive={segment.directive}
-                labels={enhancementLabels}
+                labels={enhancementLabels.totp}
                 onCopySecret={onCopySecret}
+              />
+            ) : segment.kind === "secret" ? (
+              <SecretContent
+                labels={enhancementLabels.secret}
+                onCopySecret={onCopySecret}
+                value={segment.value}
               />
             ) : presentation.kind === "markdown" ? (
               <SafeMarkdown source={segment.text} />

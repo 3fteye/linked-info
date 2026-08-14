@@ -6,11 +6,20 @@ import { contentEnhancerRegistry } from "./contentEnhancer";
 import { NodeContentHost } from "./contentProcessor";
 
 const enhancementLabels = {
-  copy: "Copy code",
-  generating: "Generating",
-  invalid: "Invalid TOTP secret",
-  masked: "Secret hidden",
-  remaining: (seconds: number) => `${seconds}s`,
+  secret: {
+    copy: "Copy secret",
+    hide: "Hide",
+    label: "Secret",
+    masked: "Hidden",
+    reveal: "Reveal",
+  },
+  totp: {
+    copy: "Copy code",
+    generating: "Generating",
+    invalid: "Invalid TOTP secret",
+    masked: "Secret hidden",
+    remaining: (seconds: number) => `${seconds}s`,
+  },
 };
 
 describe("NodeContentHost", () => {
@@ -129,5 +138,45 @@ describe("NodeContentHost", () => {
 
     expect(container.textContent).toContain("TOTP: Secret hidden");
     expect(container.textContent).not.toContain("jbsw");
+  });
+
+  it("renders inline TOTP and secret markers without exposing their payloads", () => {
+    const content = [
+      "2FA [[li:totp]]jbsw y3dp ehpk 3pxp[[/li]], note",
+      "API [[li:secret]]synthetic-api-key[[/li]]",
+    ].join("\n");
+    act(() =>
+      root.render(
+        <NodeContentHost
+          content={content}
+          enhancementLabels={enhancementLabels}
+          processorId={null}
+          variant="canvas"
+        />,
+      ),
+    );
+
+    expect(container.querySelector(".totp-content-line")).not.toBeNull();
+    expect(container.querySelector(".secret-content")).not.toBeNull();
+    expect(container.textContent).toContain("2FA ");
+    expect(container.textContent).toContain(", note");
+    expect(container.textContent).not.toContain("jbsw");
+    expect(container.textContent).not.toContain("synthetic-api-key");
+  });
+
+  it("masks every known sensitive marker in compact list rows", () => {
+    act(() =>
+      root.render(
+        <NodeContentHost
+          content="API [[li:secret]]synthetic-api-key[[/li]]"
+          enhancementLabels={enhancementLabels}
+          processorId={null}
+          variant="list"
+        />,
+      ),
+    );
+
+    expect(container.textContent).toBe("API Secret: Hidden");
+    expect(container.textContent).not.toContain("synthetic-api-key");
   });
 });

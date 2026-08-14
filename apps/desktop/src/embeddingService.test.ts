@@ -103,6 +103,20 @@ describe("embedding analysis", () => {
     });
   });
 
+  it("removes inline sensitive marker payloads without dropping surrounding context", () => {
+    const protectedNode = node(
+      "protected-marker",
+      "Synthetic account",
+      "API [[li:secret]]synthetic-api-key[[/li]] retained\n2FA [[li:totp]]jbsw y3dp ehpk 3pxp[[/li]], note",
+    );
+
+    expect(nodeEmbeddingText(protectedNode)).toBe(
+      "Synthetic account\nAPI  retained\n2FA , note",
+    );
+    expect(nodeEmbeddingText(protectedNode)).not.toContain("synthetic-api-key");
+    expect(nodeEmbeddingText(protectedNode)).not.toContain("jbsw");
+  });
+
   it("samples the whole long text with a bounded number of chunks", () => {
     const result = chunkEmbeddingText("前".repeat(8000) + "尾部");
     expect(result.chunks).toHaveLength(8);

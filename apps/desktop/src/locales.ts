@@ -36,6 +36,18 @@ export const resources = {
         masked: "密钥已隐藏",
         remaining: "{{seconds}} 秒",
       },
+      secret: {
+        copy: "复制秘密",
+        hide: "隐藏",
+        label: "秘密",
+        masked: "已隐藏",
+        reveal: "显示",
+      },
+      contentMarkers: {
+        markSelection: "标记选中内容",
+        secret: "秘密",
+        totp: "TOTP",
+      },
       deleteNode: {
         title: "删除这个节点？",
         titleMultiple: "删除选中的 {{count}} 个节点？",
@@ -639,6 +651,18 @@ export const resources = {
         invalid: "Invalid TOTP secret",
         masked: "Secret hidden",
         remaining: "{{seconds}}s",
+      },
+      secret: {
+        copy: "Copy secret",
+        hide: "Hide",
+        label: "Secret",
+        masked: "Hidden",
+        reveal: "Reveal",
+      },
+      contentMarkers: {
+        markSelection: "Mark selection",
+        secret: "Secret",
+        totp: "TOTP",
       },
       deleteNode: {
         title: "Delete this node?",

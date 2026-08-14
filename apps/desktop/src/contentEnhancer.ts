@@ -1,10 +1,21 @@
-import { parseTotpDirectiveLine, type TotpDirective } from "./totp";
+import {
+  contentMarkerRegistry,
+  type ContentMarkerRegistry,
+  type ParsedContentMarker,
+} from "./contentMarker";
+import {
+  parseTotpDirectiveLine,
+  parseTotpPayload,
+  type TotpDirective,
+} from "./totp";
 
 export type EnhancedContentSegment =
   | { kind: "text"; text: string }
-  | { directive: TotpDirective; kind: "totp" };
+  | { directive: TotpDirective; kind: "totp" }
+  | { kind: "secret"; value: string };
 
 export interface ContentEnhancer {
+  readonly excludeFromSemanticAnalysis: boolean;
   readonly id: string;
   matchLine(line: string): EnhancedContentSegment | null;
 }
@@ -34,7 +45,10 @@ function closesMarkdownFence(line: string, fence: MarkdownFence): boolean {
 }
 
 export class ContentEnhancerRegistry {
-  constructor(private readonly enhancers: readonly ContentEnhancer[]) {
+  constructor(
+    private readonly enhancers: readonly ContentEnhancer[],
+    private readonly markerRegistry: ContentMarkerRegistry = contentMarkerRegistry,
+  ) {
     const ids = new Set<string>();
     for (const enhancer of enhancers) {
       if (ids.has(enhancer.id)) {
@@ -46,49 +60,138 @@ export class ContentEnhancerRegistry {
 
   segment(source: string, markdown: boolean): EnhancedContentSegment[] {
     const segments: EnhancedContentSegment[] = [];
-    const textLines: string[] = [];
-    let fence: MarkdownFence | null = null;
 
-    const flushText = () => {
-      if (textLines.length === 0) {
+    const appendText = (text: string) => {
+      if (text.length === 0) {
         return;
       }
-      segments.push({ kind: "text", text: textLines.join("\n") });
-      textLines.length = 0;
+      const previous = segments[segments.length - 1];
+      if (previous?.kind === "text") {
+        previous.text += text;
+      } else {
+        segments.push({ kind: "text", text });
+      }
     };
 
-    for (const line of source.split(/\r?\n/u)) {
-      if (markdown && fence !== null) {
-        textLines.push(line);
+    const appendLegacyText = (text: string) => {
+      for (const [lineIndex, line] of text.split(/\r?\n/u).entries()) {
+        if (lineIndex > 0) {
+          appendText("\n");
+        }
+        const enhanced = this.enhancers
+          .map((enhancer) => enhancer.matchLine(line))
+          .find((candidate): candidate is EnhancedContentSegment => candidate !== null);
+        if (enhanced === undefined) {
+          appendText(line);
+        } else {
+          segments.push(enhanced);
+        }
+      }
+    };
+
+    const appendUnprotectedText = (text: string) => {
+      for (const markerSegment of this.markerRegistry.segment(text)) {
+        if (markerSegment.kind === "text") {
+          appendLegacyText(markerSegment.text);
+          continue;
+        }
+        const enhanced = enhancedMarker(markerSegment.marker);
+        if (enhanced === null) {
+          appendText(markerSegment.marker.raw);
+        } else {
+          segments.push(enhanced);
+        }
+      }
+    };
+
+    if (!markdown) {
+      appendUnprotectedText(source);
+      return segments;
+    }
+
+    let fence: MarkdownFence | null = null;
+    let region = "";
+    for (const [lineIndex, line] of source.split(/\r?\n/u).entries()) {
+      const piece = `${lineIndex > 0 ? "\n" : ""}${line}`;
+      if (fence !== null) {
+        region += piece;
         if (closesMarkdownFence(line, fence)) {
+          appendText(region);
+          region = "";
           fence = null;
         }
         continue;
       }
-      if (markdown) {
-        const opening = openingMarkdownFence(line);
-        if (opening !== null) {
-          fence = opening;
-          textLines.push(line);
-          continue;
-        }
-      }
-      const enhanced = this.enhancers
-        .map((enhancer) => enhancer.matchLine(line))
-        .find((candidate): candidate is EnhancedContentSegment => candidate !== null);
-      if (enhanced === undefined) {
-        textLines.push(line);
+      const opening = openingMarkdownFence(line);
+      if (opening === null) {
+        region += piece;
         continue;
       }
-      flushText();
-      segments.push(enhanced);
+      appendUnprotectedText(region);
+      region = piece;
+      fence = opening;
     }
-    flushText();
+    if (fence === null) {
+      appendUnprotectedText(region);
+    } else {
+      appendText(region);
+    }
     return segments;
+  }
+
+  semanticText(content: string): string | null {
+    const withoutSensitiveMarkers = this.markerRegistry
+      .segment(content)
+      .map((segment) => {
+        if (segment.kind === "text") {
+          return segment.text;
+        }
+        if (segment.marker.definition === null) {
+          return segment.marker.raw;
+        }
+        return segment.marker.definition.excludeFromSemanticAnalysis
+          ? ""
+          : segment.marker.payload;
+      })
+      .join("");
+    const lines: string[] = [];
+    for (const line of withoutSensitiveMarkers.split(/\r?\n/u)) {
+      const excludedLegacyLine = this.enhancers.some(
+        (enhancer) =>
+          enhancer.excludeFromSemanticAnalysis && enhancer.matchLine(line) !== null,
+      );
+      if (excludedLegacyLine) {
+        continue;
+      }
+      const semanticLine = line.trim();
+      if (semanticLine.length > 0) {
+        lines.push(semanticLine);
+      }
+    }
+    const text = lines.join("\n").trim();
+    return text.length === 0 ? null : text;
   }
 }
 
+function enhancedMarker(marker: ParsedContentMarker): EnhancedContentSegment | null {
+  if (marker.id === "secret") {
+    return { kind: "secret", value: marker.payload };
+  }
+  if (marker.id === "totp") {
+    const configuration = parseTotpPayload(marker.payload);
+    return {
+      directive:
+        configuration === null
+          ? { valid: false }
+          : { configuration, valid: true },
+      kind: "totp",
+    };
+  }
+  return null;
+}
+
 export const totpContentEnhancer: ContentEnhancer = {
+  excludeFromSemanticAnalysis: true,
   id: "totp-line",
   matchLine(line) {
     const directive = parseTotpDirectiveLine(line);
@@ -104,13 +207,5 @@ export function contentForSemanticAnalysis(content: string | null): string | nul
   if (content === null) {
     return null;
   }
-  const text = contentEnhancerRegistry
-    .segment(content, false)
-    .filter((segment): segment is Extract<EnhancedContentSegment, { kind: "text" }> =>
-      segment.kind === "text",
-    )
-    .map((segment) => segment.text)
-    .join("\n")
-    .trim();
-  return text.length === 0 ? null : text;
+  return contentEnhancerRegistry.semanticText(content);
 }

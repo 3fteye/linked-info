@@ -45,6 +45,7 @@ import {
   NodeContentHost,
   contentProcessorRegistry,
 } from "./contentProcessor";
+import { contentMarkerRegistry } from "./contentMarker";
 import { supportedLanguages, type SupportedLanguage } from "./locales";
 import {
   emptyWorkspace,
@@ -1144,13 +1145,36 @@ function App({
     [t],
   );
 
-  const totpContentLabels = useMemo(
+  const contentMarkerOptions = useMemo(
+    () =>
+      contentMarkerRegistry.list().map((marker) => ({
+        id: marker.id,
+        label:
+          marker.id === "totp"
+            ? t("contentMarkers.totp")
+            : marker.id === "secret"
+              ? t("contentMarkers.secret")
+              : marker.id,
+      })),
+    [t],
+  );
+
+  const contentEnhancementLabels = useMemo(
     () => ({
-      copy: t("totp.copy"),
-      generating: t("totp.generating"),
-      invalid: t("totp.invalid"),
-      masked: t("totp.masked"),
-      remaining: (seconds: number) => t("totp.remaining", { seconds }),
+      secret: {
+        copy: t("secret.copy"),
+        hide: t("secret.hide"),
+        label: t("secret.label"),
+        masked: t("secret.masked"),
+        reveal: t("secret.reveal"),
+      },
+      totp: {
+        copy: t("totp.copy"),
+        generating: t("totp.generating"),
+        invalid: t("totp.invalid"),
+        masked: t("totp.masked"),
+        remaining: (seconds: number) => t("totp.remaining", { seconds }),
+      },
     }),
     [t],
   );
@@ -4768,11 +4792,17 @@ function App({
                     (secretClipboardStatus?.clearAfterMs ?? 45_000) / 1_000,
                   ),
                 }),
-                totpCopy: totpContentLabels.copy,
-                totpGenerating: totpContentLabels.generating,
-                totpInvalid: totpContentLabels.invalid,
-                totpMasked: totpContentLabels.masked,
-                totpRemaining: totpContentLabels.remaining,
+                markSelection: t("contentMarkers.markSelection"),
+                secretCopy: contentEnhancementLabels.secret.copy,
+                secretHide: contentEnhancementLabels.secret.hide,
+                secretLabel: contentEnhancementLabels.secret.label,
+                secretMasked: contentEnhancementLabels.secret.masked,
+                secretReveal: contentEnhancementLabels.secret.reveal,
+                totpCopy: contentEnhancementLabels.totp.copy,
+                totpGenerating: contentEnhancementLabels.totp.generating,
+                totpInvalid: contentEnhancementLabels.totp.invalid,
+                totpMasked: contentEnhancementLabels.totp.masked,
+                totpRemaining: contentEnhancementLabels.totp.remaining,
                 editNode: t("actions.editNode"),
                 deleteNode: t("actions.deleteNode"),
                 deleteNodeBody: (names) =>
@@ -4810,6 +4840,7 @@ function App({
               layout={workspace.layout}
               contentProcessorByNodeId={workspace.view.contentProcessorByNodeId}
               contentProcessorOptions={contentProcessorOptions}
+              contentMarkerOptions={contentMarkerOptions}
               nameConflictNodeIds={nameConflictNodeIds}
               nodes={workspace.nodes}
               onAnalyzeNode={(nodeId) => void analyzeNodeReferences(nodeId)}
@@ -4860,7 +4891,7 @@ function App({
                       <NodeContentHost
                         content={node.content}
                         emptyContent={t("nodes.noContent")}
-                        enhancementLabels={totpContentLabels}
+                        enhancementLabels={contentEnhancementLabels}
                         processorId={
                           workspace.view.contentProcessorByNodeId[node.id] ?? null
                         }

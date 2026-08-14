@@ -95,6 +95,30 @@ describe("local LLM review preparation", () => {
     expect(serialized).not.toContain("TOTP");
   });
 
+  it("removes inline sensitive marker payloads from every local LLM summary", () => {
+    const protectedNodes = nodes.map((current) =>
+      current.id === "source" || current.id === "gmail"
+        ? {
+            ...current,
+            content:
+              "API [[li:secret]]synthetic-api-key[[/li]] retained\n2FA [[li:totp]]jbsw y3dp ehpk 3pxp[[/li]], note",
+          }
+        : current,
+    );
+    const prepared = prepareLlmReview(
+      "source",
+      protectedNodes,
+      references,
+      analysis,
+    );
+    const serialized = JSON.stringify(prepared?.request);
+
+    expect(serialized).toContain("retained");
+    expect(serialized).toContain("note");
+    expect(serialized).not.toContain("synthetic-api-key");
+    expect(serialized).not.toContain("jbsw");
+  });
+
   it("maps only valid temporary aliases back to node ids", () => {
     const prepared = prepareLlmReview("source", nodes, references, analysis)!;
 
