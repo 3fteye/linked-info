@@ -644,6 +644,16 @@ h1 {
   cursor: grabbing;
 }
 
+.graph-canvas-selection {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 10;
+  pointer-events: none;
+  border: 1px solid #2d7d58;
+  background: rgb(45 125 88 / 10%);
+}
+
 .graph-node {
   position: relative;
   width: 270px;

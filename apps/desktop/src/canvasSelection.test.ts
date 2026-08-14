@@ -1,0 +1,68 @@
+import { describe, expect, it } from "vitest";
+import {
+  canvasSelectionAutoPanDelta,
+  canvasSelectionRectangle,
+  nodesFullyInsideCanvasSelection,
+} from "./canvasSelection";
+
+describe("canvas selection", () => {
+  it("normalizes a rectangle dragged in any direction", () => {
+    expect(canvasSelectionRectangle({ x: 80, y: 60 }, { x: 20, y: 10 })).toEqual({
+      x: 20,
+      y: 10,
+      width: 60,
+      height: 50,
+    });
+  });
+
+  it("selects only fully enclosed visible nodes", () => {
+    const rectangle = canvasSelectionRectangle({ x: 0, y: 0 }, { x: 200, y: 200 });
+    expect(
+      nodesFullyInsideCanvasSelection(
+        [
+          { id: "inside", x: 10, y: 10, width: 50, height: 50, hidden: false },
+          { id: "partial", x: 180, y: 20, width: 50, height: 50, hidden: false },
+          { id: "hidden", x: 20, y: 20, width: 50, height: 50, hidden: true },
+          { id: "outside", x: 300, y: 300, width: 50, height: 50, hidden: false },
+        ],
+        rectangle,
+      ),
+    ).toEqual(new Set(["inside"]));
+  });
+
+  it("does not select unrendered nodes outside a narrow auto-panned column", () => {
+    const nodes = Array.from({ length: 500 }, (_, index) => {
+      const column = index % 10;
+      const row = Math.floor(index / 10);
+      return {
+        id: `node-${index}`,
+        x: 100 + column * 310,
+        y: 100 + row * 170,
+        width: 270,
+        height: 92,
+        hidden: false,
+      };
+    });
+    const selected = nodesFullyInsideCanvasSelection(nodes, {
+      x: 30,
+      y: 30,
+      width: 360,
+      height: 800,
+    });
+    expect(selected).toEqual(
+      new Set(["node-0", "node-10", "node-20", "node-30"]),
+    );
+  });
+
+  it("pans toward nearby canvas edges and stops in the center", () => {
+    const size = { width: 800, height: 600 };
+    expect(canvasSelectionAutoPanDelta({ x: 400, y: 300 }, size)).toEqual({
+      x: 0,
+      y: 0,
+    });
+    expect(canvasSelectionAutoPanDelta({ x: 0, y: 600 }, size)).toEqual({
+      x: 15,
+      y: -15,
+    });
+  });
+});

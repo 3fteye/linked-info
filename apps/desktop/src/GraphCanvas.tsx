@@ -71,6 +71,13 @@ import {
   referenceCurveId,
 } from "./batchedReferenceLayer";
 import {
+  canvasSelectionAutoPanDelta,
+  canvasSelectionRectangle,
+  nodesFullyInsideCanvasSelection,
+  type CanvasSelectionPoint,
+  type CanvasSelectionRectangle,
+} from "./canvasSelection";
+import {
   nodeEditorDraft,
   shouldCommitNodeEditor,
   updateNodeEditorContent,
@@ -105,6 +112,15 @@ interface InformationNodeData extends Record<string, unknown> {
 }
 
 type InformationFlowNode = Node<InformationNodeData, "information">;
+
+interface CanvasSelectionGesture {
+  animationFrameId: number | null;
+  currentClient: CanvasSelectionPoint;
+  moved: boolean;
+  pointerId: number;
+  startClient: CanvasSelectionPoint;
+  startFlow: CanvasSelectionPoint;
+}
 
 interface GraphLabels {
   analyzingNode: string;
@@ -494,6 +510,7 @@ export default function GraphCanvas({
     startX: number;
     startY: number;
   } | null>(null);
+  const canvasSelectionGestureRef = useRef<CanvasSelectionGesture | null>(null);
   const referencesRef = useRef(references);
   const [flowInstance, setFlowInstance] =
     useState<ReactFlowInstance<InformationFlowNode, Edge> | null>(null);
@@ -509,6 +526,8 @@ export default function GraphCanvas({
     useState<ReferenceSearchState | null>(null);
   const [selectedReferenceId, setSelectedReferenceId] = useState<string | null>(null);
   const [draggingNodeIds, setDraggingNodeIds] = useState<string[]>([]);
+  const [canvasSelection, setCanvasSelection] =
+    useState<CanvasSelectionRectangle | null>(null);
   const [flowNodes, setFlowNodes, applyNodeChanges] =
     useNodesState<InformationFlowNode>([]);
   const flowNodesRef = useRef(flowNodes);
@@ -519,6 +538,10 @@ export default function GraphCanvas({
     return () => {
       if (secretClipboardNoticeTimerRef.current !== null) {
         window.clearTimeout(secretClipboardNoticeTimerRef.current);
+      }
+      const selectionGesture = canvasSelectionGestureRef.current;
+      if (selectionGesture?.animationFrameId != null) {
+        window.cancelAnimationFrame(selectionGesture.animationFrameId);
       }
     };
   }, []);
@@ -1203,9 +1226,150 @@ export default function GraphCanvas({
     }
   }, [flowInstance, onCreateNode]);
 
+  const updateCanvasSelectionGesture = useCallback(
+    (gesture: CanvasSelectionGesture, currentViewport?: Viewport) => {
+      const bounds = containerRef.current?.getBoundingClientRect();
+      if (bounds === undefined || flowInstance === null) {
+        return;
+      }
+      const viewportForSelection = currentViewport ?? flowInstance.getViewport();
+      const endFlow = {
+        x:
+          (gesture.currentClient.x - bounds.left - viewportForSelection.x) /
+          viewportForSelection.zoom,
+        y:
+          (gesture.currentClient.y - bounds.top - viewportForSelection.y) /
+          viewportForSelection.zoom,
+      };
+      const flowRectangle = canvasSelectionRectangle(gesture.startFlow, endFlow);
+      const selectedNodeIds = nodesFullyInsideCanvasSelection(
+        flowNodesRef.current.map((node) => ({
+          height: node.measured?.height ?? node.height ?? 92,
+          hidden: node.hidden === true,
+          id: node.id,
+          width: node.measured?.width ?? node.width ?? 270,
+          x: node.position.x,
+          y: node.position.y,
+        })),
+        flowRectangle,
+      );
+      setFlowNodes((current) => {
+        let changed = false;
+        const next = current.map((node) => {
+          const selected = selectedNodeIds.has(node.id);
+          if (Boolean(node.selected) === selected) {
+            return node;
+          }
+          changed = true;
+          return { ...node, selected };
+        });
+        return changed ? next : current;
+      });
+
+      const startScreen = {
+        x: gesture.startFlow.x * viewportForSelection.zoom + viewportForSelection.x,
+        y: gesture.startFlow.y * viewportForSelection.zoom + viewportForSelection.y,
+      };
+      const currentScreen = {
+        x: gesture.currentClient.x - bounds.left,
+        y: gesture.currentClient.y - bounds.top,
+      };
+      setCanvasSelection(canvasSelectionRectangle(startScreen, currentScreen));
+    },
+    [flowInstance, setFlowNodes],
+  );
+
+  const startCanvasSelectionAutoPan = useCallback(
+    (gesture: CanvasSelectionGesture) => {
+      const step = () => {
+        if (canvasSelectionGestureRef.current !== gesture || !gesture.moved) {
+          gesture.animationFrameId = null;
+          return;
+        }
+        const bounds = containerRef.current?.getBoundingClientRect();
+        if (bounds !== undefined && flowInstance !== null) {
+          const delta = canvasSelectionAutoPanDelta(
+            {
+              x: gesture.currentClient.x - bounds.left,
+              y: gesture.currentClient.y - bounds.top,
+            },
+            { height: bounds.height, width: bounds.width },
+          );
+          if (delta.x !== 0 || delta.y !== 0) {
+            const currentViewport = flowInstance.getViewport();
+            const nextViewport = {
+              x: currentViewport.x + delta.x,
+              y: currentViewport.y + delta.y,
+              zoom: currentViewport.zoom,
+            };
+            void flowInstance.setViewport(nextViewport, { duration: 0 });
+            updateCanvasSelectionGesture(gesture, nextViewport);
+          }
+        }
+        gesture.animationFrameId = window.requestAnimationFrame(step);
+      };
+      gesture.animationFrameId = window.requestAnimationFrame(step);
+    },
+    [flowInstance, updateCanvasSelectionGesture],
+  );
+
+  const finishCanvasSelectionGesture = useCallback(
+    (event: ReactPointerEvent<HTMLDivElement>, cancelled: boolean) => {
+      const gesture = canvasSelectionGestureRef.current;
+      if (gesture === null || gesture.pointerId !== event.pointerId) {
+        return false;
+      }
+      if (!cancelled) {
+        gesture.currentClient = { x: event.clientX, y: event.clientY };
+      }
+      if (gesture.animationFrameId !== null) {
+        window.cancelAnimationFrame(gesture.animationFrameId);
+      }
+      if (gesture.moved) {
+        updateCanvasSelectionGesture(gesture);
+      }
+      canvasSelectionGestureRef.current = null;
+      setCanvasSelection(null);
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      return true;
+    },
+    [updateCanvasSelectionGesture],
+  );
+
   const handleCanvasPointerDownCapture = useCallback(
     (event: ReactPointerEvent<HTMLDivElement>) => {
       const target = event.target instanceof Element ? event.target : null;
+      const selectionSurface =
+        target !== null &&
+        (target.classList.contains("react-flow__pane") ||
+          target.closest(".react-flow__background") !== null);
+      if (
+        event.button === 0 &&
+        event.shiftKey &&
+        selectionSurface &&
+        flowInstance !== null
+      ) {
+        const startClient = { x: event.clientX, y: event.clientY };
+        canvasPointerGestureRef.current = null;
+        canvasSelectionGestureRef.current = {
+          animationFrameId: null,
+          currentClient: startClient,
+          moved: false,
+          pointerId: event.pointerId,
+          startClient,
+          startFlow: flowInstance.screenToFlowPosition(startClient),
+        };
+        setContextMenu(null);
+        setSelectedReferenceId(null);
+        event.currentTarget.setPointerCapture(event.pointerId);
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
       if (
         event.button !== 0 ||
         event.shiftKey ||
@@ -1226,11 +1390,34 @@ export default function GraphCanvas({
         startY: event.clientY,
       };
     },
-    [],
+    [flowInstance],
   );
 
   const handleCanvasPointerMoveCapture = useCallback(
     (event: ReactPointerEvent<HTMLDivElement>) => {
+      const selectionGesture = canvasSelectionGestureRef.current;
+      if (
+        selectionGesture !== null &&
+        selectionGesture.pointerId === event.pointerId
+      ) {
+        selectionGesture.currentClient = { x: event.clientX, y: event.clientY };
+        if (
+          !selectionGesture.moved &&
+          Math.hypot(
+            event.clientX - selectionGesture.startClient.x,
+            event.clientY - selectionGesture.startClient.y,
+          ) > 4
+        ) {
+          selectionGesture.moved = true;
+          updateCanvasSelectionGesture(selectionGesture);
+          startCanvasSelectionAutoPan(selectionGesture);
+        } else if (selectionGesture.moved) {
+          updateCanvasSelectionGesture(selectionGesture);
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
       const gesture = canvasPointerGestureRef.current;
       if (gesture === null || gesture.pointerId !== event.pointerId || gesture.moved) {
         return;
@@ -1241,7 +1428,23 @@ export default function GraphCanvas({
         gesture.moved = true;
       }
     },
-    [],
+    [startCanvasSelectionAutoPan, updateCanvasSelectionGesture],
+  );
+
+  const handleCanvasPointerUpCapture = useCallback(
+    (event: ReactPointerEvent<HTMLDivElement>) => {
+      finishCanvasSelectionGesture(event, false);
+    },
+    [finishCanvasSelectionGesture],
+  );
+
+  const handleCanvasPointerCancelCapture = useCallback(
+    (event: ReactPointerEvent<HTMLDivElement>) => {
+      if (!finishCanvasSelectionGesture(event, true)) {
+        canvasPointerGestureRef.current = null;
+      }
+    },
+    [finishCanvasSelectionGesture],
   );
 
   const handleCanvasClickCapture = useCallback(
@@ -1281,11 +1484,10 @@ export default function GraphCanvas({
       className="graph-canvas"
       onClickCapture={handleCanvasClickCapture}
       onContextMenu={(event) => event.preventDefault()}
-      onPointerCancelCapture={() => {
-        canvasPointerGestureRef.current = null;
-      }}
+      onPointerCancelCapture={handleCanvasPointerCancelCapture}
       onPointerDownCapture={handleCanvasPointerDownCapture}
       onPointerMoveCapture={handleCanvasPointerMoveCapture}
+      onPointerUpCapture={handleCanvasPointerUpCapture}
       ref={containerRef}
     >
       <ReactFlow<InformationFlowNode, Edge>
@@ -1338,6 +1540,7 @@ export default function GraphCanvas({
         panOnDrag={[0, 1]}
         proOptions={{ hideAttribution: true }}
         multiSelectionKeyCode={["Control", "Shift"]}
+        selectionKeyCode={null}
         zoomOnDoubleClick={false}
         zIndexMode="manual"
       >
@@ -1427,6 +1630,18 @@ export default function GraphCanvas({
           </button>
         </Panel>
       </ReactFlow>
+
+      {canvasSelection !== null && (
+        <div
+          aria-hidden="true"
+          className="graph-canvas-selection"
+          style={{
+            height: canvasSelection.height,
+            transform: `translate(${canvasSelection.x}px, ${canvasSelection.y}px)`,
+            width: canvasSelection.width,
+          }}
+        />
+      )}
 
       {referenceSearch !== null && (
         <div
