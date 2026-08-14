@@ -1,12 +1,13 @@
 import type { ReactNode } from "react";
+import ReactMarkdown from "react-markdown";
 
-export interface ContentPresentation {
-  kind: "text";
-  text: string | null;
-}
+export type ContentPresentation =
+  | { kind: "text"; text: string | null }
+  | { kind: "markdown"; source: string | null };
 
 export interface ContentProcessor {
   readonly id: string;
+  readonly version: number;
   present(content: string | null): ContentPresentation;
 }
 
@@ -42,17 +43,35 @@ export class ContentProcessorRegistry {
       supported: requestedId === null || processor !== undefined,
     };
   }
+
+  has(processorId: string): boolean {
+    return this.processors.has(processorId);
+  }
+
+  list(): readonly ContentProcessor[] {
+    return Array.from(this.processors.values());
+  }
 }
 
 export const textContentProcessor: ContentProcessor = {
   id: "text",
+  version: 1,
   present(content) {
     return { kind: "text", text: content };
   },
 };
 
+export const markdownContentProcessor: ContentProcessor = {
+  id: "markdown",
+  version: 1,
+  present(content) {
+    return { kind: "markdown", source: content };
+  },
+};
+
 export const contentProcessorRegistry = new ContentProcessorRegistry([
   textContentProcessor,
+  markdownContentProcessor,
 ]);
 
 export const maximumCanvasContentPreviewCharacters = 600;
@@ -83,21 +102,47 @@ export function NodeContentHost({
 }: NodeContentHostProps) {
   const resolved = contentProcessorRegistry.resolve(processorId);
   const presentation = resolved.processor.present(content);
-  const presentedText =
-    variant === "canvas" ? canvasContentPreview(presentation.text) : presentation.text;
+  const source =
+    presentation.kind === "text" ? presentation.text : presentation.source;
+  const presentedText = variant === "canvas" ? canvasContentPreview(source) : source;
   const rendered = presentedText || emptyContent;
-  if (hideWhenEmpty && (presentation.text === null || presentation.text.length === 0)) {
+  if (hideWhenEmpty && (source === null || source.length === 0)) {
     return null;
   }
   const sharedProps = {
-    className,
+    className: [
+      className,
+      "node-content-host",
+      presentation.kind === "markdown" ? "node-content-markdown" : null,
+    ]
+      .filter(Boolean)
+      .join(" "),
     "data-content-processor": resolved.processor.id,
     "data-content-processor-supported": resolved.supported,
     "data-requested-content-processor": resolved.requestedId ?? undefined,
   };
-  return variant === "canvas" ? (
-    <p {...sharedProps}>{rendered}</p>
-  ) : (
-    <span {...sharedProps}>{rendered}</span>
+  if (variant === "list" || presentation.kind === "text" || !presentedText) {
+    return variant === "canvas" ? (
+      <p {...sharedProps}>{rendered}</p>
+    ) : (
+      <span {...sharedProps}>{rendered}</span>
+    );
+  }
+  return (
+    <div {...sharedProps}>
+      <ReactMarkdown
+        components={{
+          a: ({ children }) => <span className="markdown-link-text">{children}</span>,
+          img: ({ alt }) => (
+            <span className="markdown-image-placeholder">
+              {alt ? `[${alt}]` : "[image]"}
+            </span>
+          ),
+        }}
+        skipHtml
+      >
+        {presentedText}
+      </ReactMarkdown>
+    </div>
   );
 }

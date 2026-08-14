@@ -90,6 +90,9 @@ interface InformationNodeData extends Record<string, unknown> {
   name: string | null;
   content: string | null;
   contentProcessorId: string | null;
+  contentProcessorLabel: string;
+  contentProcessorOptions: readonly ContentProcessorOption[];
+  unsupportedContentProcessorLabel: (processorId: string) => string;
   contentLabel: string;
   contentPlaceholder: string;
   editing: boolean;
@@ -108,8 +111,14 @@ interface InformationNodeData extends Record<string, unknown> {
   targetLabel: string;
   onCommit: (nodeId: string) => void;
   onContentChange: (nodeId: string, content: string) => void;
+  onContentProcessorChange: (nodeId: string, processorId: string) => void;
   onNameChange: (nodeId: string, name: string) => boolean;
   onToggleReferenceFilter: (nodeId: string) => void;
+}
+
+interface ContentProcessorOption {
+  id: string;
+  label: string;
 }
 
 type InformationFlowNode = Node<InformationNodeData, "information">;
@@ -133,6 +142,8 @@ interface GraphLabels {
   deleteNodeTitle: (count: number) => string;
   content: string;
   contentPlaceholder: string;
+  contentProcessor: string;
+  unsupportedContentProcessor: (processorId: string) => string;
   copySecret: string;
   copySecretFailed: string;
   copySecretSuccess: string;
@@ -166,6 +177,7 @@ interface GraphCanvasProps {
   layout: NodeLayout[];
   references: NodeReference[];
   contentProcessorByNodeId: Readonly<Record<string, string>>;
+  contentProcessorOptions: readonly ContentProcessorOption[];
   viewport: CanvasViewport | null;
   editingNodeId: string | null;
   canRedo: boolean;
@@ -189,6 +201,7 @@ interface GraphCanvasProps {
   onLayoutChange: (layout: NodeLayout[]) => void;
   onNodeCommit: (nodeId: string) => void;
   onNodeContentChange: (nodeId: string, content: string) => void;
+  onNodeContentProcessorChange: (nodeId: string, processorId: string) => void;
   onNodeBringToFront: (nodeId: string) => void;
   onNodeNameChange: (nodeId: string, name: string) => boolean;
   onReferencesChange: (references: NodeReference[]) => void;
@@ -337,6 +350,28 @@ export function InformationNodeCard({
       </header>
       {data.editing ? (
         <div className="graph-node-editor">
+          <label className="graph-node-processor-field">
+            <span>{data.contentProcessorLabel}</span>
+            <select
+              className="nodrag nowheel graph-node-processor-select"
+              onChange={(event) => data.onContentProcessorChange(id, event.target.value)}
+              value={data.contentProcessorId ?? "text"}
+            >
+              {data.contentProcessorId !== null &&
+                !data.contentProcessorOptions.some(
+                  (option) => option.id === data.contentProcessorId,
+                ) && (
+                  <option value={data.contentProcessorId}>
+                    {data.unsupportedContentProcessorLabel(data.contentProcessorId)}
+                  </option>
+                )}
+              {data.contentProcessorOptions.map((option) => (
+                <option key={option.id} value={option.id}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
           <textarea
             aria-label={data.contentLabel}
             className="nodrag nowheel graph-node-content-input"
@@ -472,6 +507,7 @@ function referencedNodeLabel(
 export default function GraphCanvas({
   analyzingNodeId,
   contentProcessorByNodeId,
+  contentProcessorOptions,
   nodes,
   layout,
   references,
@@ -494,6 +530,7 @@ export default function GraphCanvas({
   onLayoutChange,
   onNodeCommit,
   onNodeContentChange,
+  onNodeContentProcessorChange,
   onNodeBringToFront,
   onNodeNameChange,
   onReferencesChange,
@@ -836,6 +873,9 @@ export default function GraphCanvas({
                 ? node.content
                 : canvasContentPreview(node.content),
             contentProcessorId: contentProcessorByNodeId[node.id] ?? null,
+            contentProcessorLabel: labels.contentProcessor,
+            contentProcessorOptions,
+            unsupportedContentProcessorLabel: labels.unsupportedContentProcessor,
             contentLabel: labels.content,
             contentPlaceholder: labels.contentPlaceholder,
             editing: editingNodeId === node.id,
@@ -864,6 +904,7 @@ export default function GraphCanvas({
             targetLabel: labels.targetHandle,
             onCommit: onNodeCommit,
             onContentChange: onNodeContentChange,
+            onContentProcessorChange: onNodeContentProcessorChange,
             onNameChange: onNodeNameChange,
             onToggleReferenceFilter,
           },
@@ -872,6 +913,7 @@ export default function GraphCanvas({
     });
   }, [
     contentProcessorByNodeId,
+    contentProcessorOptions,
     canvasReferencePresentation,
     editingNodeId,
     hiddenNodeIdSet,
@@ -881,6 +923,7 @@ export default function GraphCanvas({
     nodes,
     onNodeCommit,
     onNodeContentChange,
+    onNodeContentProcessorChange,
     onNodeNameChange,
     onToggleReferenceFilter,
     referenceFilterNodeIdSet,

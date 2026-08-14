@@ -41,7 +41,10 @@ import {
   type DocumentImportLlmGateway,
 } from "./documentImport";
 import { importDocumentDraft, importTextDocument } from "./documentImportBridge";
-import { NodeContentHost } from "./contentProcessor";
+import {
+  NodeContentHost,
+  contentProcessorRegistry,
+} from "./contentProcessor";
 import { supportedLanguages, type SupportedLanguage } from "./locales";
 import {
   emptyWorkspace,
@@ -1127,6 +1130,20 @@ function App({
     );
   }, [workspace.nodes]);
 
+  const contentProcessorOptions = useMemo(
+    () =>
+      contentProcessorRegistry.list().map((processor) => ({
+        id: processor.id,
+        label:
+          processor.id === "text"
+            ? t("editor.contentProcessors.text")
+            : processor.id === "markdown"
+              ? t("editor.contentProcessors.markdown")
+              : processor.id,
+      })),
+    [t],
+  );
+
   useEffect(() => {
     if (!persistenceReady) {
       return;
@@ -2194,6 +2211,37 @@ function App({
           : node,
       ),
     }));
+  }
+
+  function updateNodeContentProcessor(nodeId: string, processorId: string) {
+    if (!contentProcessorRegistry.has(processorId)) {
+      return;
+    }
+    updateWorkspace((current) => {
+      if (!current.nodes.some((node) => node.id === nodeId)) {
+        return current;
+      }
+      const currentProcessorId =
+        current.view.contentProcessorByNodeId[nodeId] ?? "text";
+      if (currentProcessorId === processorId) {
+        return current;
+      }
+      const contentProcessorByNodeId = {
+        ...current.view.contentProcessorByNodeId,
+      };
+      if (processorId === "text") {
+        delete contentProcessorByNodeId[nodeId];
+      } else {
+        contentProcessorByNodeId[nodeId] = processorId;
+      }
+      return {
+        ...current,
+        view: {
+          ...current.view,
+          contentProcessorByNodeId,
+        },
+      };
+    });
   }
 
   function commitNode(nodeId: string) {
@@ -4699,6 +4747,9 @@ function App({
                 createNode: t("actions.newNode"),
                 content: t("editor.content"),
                 contentPlaceholder: t("editor.contentPlaceholder"),
+                contentProcessor: t("editor.contentProcessor"),
+                unsupportedContentProcessor: (processorId) =>
+                  t("editor.contentProcessorUnsupported", { processorId }),
                 copySecret: t("secretClipboard.copy"),
                 copySecretFailed: t("secretClipboard.failed"),
                 copySecretSuccess: t("secretClipboard.copied", {
@@ -4742,6 +4793,7 @@ function App({
               }}
               layout={workspace.layout}
               contentProcessorByNodeId={workspace.view.contentProcessorByNodeId}
+              contentProcessorOptions={contentProcessorOptions}
               nameConflictNodeIds={nameConflictNodeIds}
               nodes={workspace.nodes}
               onAnalyzeNode={(nodeId) => void analyzeNodeReferences(nodeId)}
@@ -4759,6 +4811,7 @@ function App({
               onLayoutChange={updateLayout}
               onNodeCommit={commitNode}
               onNodeContentChange={updateNodeContent}
+              onNodeContentProcessorChange={updateNodeContentProcessor}
               onNodeBringToFront={bringNodeToFront}
               onNodeNameChange={updateNodeName}
               onReferencesChange={updateReferences}

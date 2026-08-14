@@ -61,7 +61,13 @@ export const resources = {
         name: "名称",
         namePlaceholder: "名称可空",
         content: "内容",
-        contentPlaceholder: "输入纯文本内容",
+        contentPlaceholder: "输入内容",
+        contentProcessor: "内容格式",
+        contentProcessorUnsupported: "不可用：{{processorId}}",
+        contentProcessors: {
+          text: "纯文本",
+          markdown: "Markdown",
+        },
       },
       validation: {
         nameUnique: "该名称已经存在",
@@ -652,7 +658,13 @@ export const resources = {
         name: "Name",
         namePlaceholder: "Name optional",
         content: "Content",
-        contentPlaceholder: "Enter plain text content",
+        contentPlaceholder: "Enter content",
+        contentProcessor: "Content format",
+        contentProcessorUnsupported: "Unavailable: {{processorId}}",
+        contentProcessors: {
+          text: "Plain text",
+          markdown: "Markdown",
+        },
       },
       validation: {
         nameUnique: "This name already exists",

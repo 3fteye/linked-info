@@ -27,6 +27,13 @@ function cardProps(overrides: Record<string, unknown> = {}): NodeProps<any> {
       name: "Node",
       content: "a".repeat(2_000),
       contentProcessorId: null,
+      contentProcessorLabel: "Content format",
+      contentProcessorOptions: [
+        { id: "text", label: "Plain text" },
+        { id: "markdown", label: "Markdown" },
+      ],
+      unsupportedContentProcessorLabel: (processorId: string) =>
+        `Unavailable: ${processorId}`,
       contentLabel: "Content",
       contentPlaceholder: "Content",
       editing: true,
@@ -45,6 +52,7 @@ function cardProps(overrides: Record<string, unknown> = {}): NodeProps<any> {
       targetLabel: "Target",
       onCommit: vi.fn(),
       onContentChange: vi.fn(),
+      onContentProcessorChange: vi.fn(),
       onNameChange: vi.fn(() => true),
       onToggleReferenceFilter: vi.fn(),
       ...overrides,
@@ -144,6 +152,26 @@ describe("InformationNodeCard", () => {
       vi.runAllTimers();
     });
 
+    expect(props.data.onCommit).not.toHaveBeenCalled();
+  });
+
+  it("changes the content processor without leaving the node editor", () => {
+    vi.useFakeTimers();
+    const props = cardProps({ content: "# Heading" });
+    renderCard(root, props);
+    const select = container.querySelector("select")!;
+
+    act(() => {
+      select.focus();
+      select.value = "markdown";
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+      vi.runAllTimers();
+    });
+
+    expect(props.data.onContentProcessorChange).toHaveBeenCalledWith(
+      nodeId,
+      "markdown",
+    );
     expect(props.data.onCommit).not.toHaveBeenCalled();
   });
 

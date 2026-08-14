@@ -76,22 +76,44 @@ test("creating and editing a node survives a browser reload", async ({ page }) =
   await expect(editor).toBeVisible();
   await editor.locator("input").click();
   await page.keyboard.insertText("Created by browser test");
+  const processorSelect = editor.locator("select");
+  await processorSelect.focus();
+  await processorSelect.selectOption("markdown");
   await editor.locator("textarea").click();
-  await page.keyboard.insertText("Persisted synthetic content");
+  await page.keyboard.insertText(
+    "# Persisted synthetic heading\n\n**Formatted content**\n\n<script>blocked</script>",
+  );
   await page.getByTestId("graph-canvas").click({ position: { x: 30, y: 30 } });
 
   await expect
     .poll(async () => {
       const stored = await storedWorkspace(page);
-      return stored?.nodes?.find(
+      const created = stored?.nodes?.find(
         (candidate: { name?: string }) => candidate.name === "Created by browser test",
-      )?.content;
+      );
+      return created === undefined
+        ? null
+        : {
+            content: created.content,
+            processor: stored?.view?.contentProcessorByNodeId?.[created.id],
+          };
     })
-    .toBe("Persisted synthetic content");
+    .toEqual({
+      content:
+        "# Persisted synthetic heading\n\n**Formatted content**\n\n<script>blocked</script>",
+      processor: "markdown",
+    });
 
   await page.reload();
   await expect(page.locator('[data-node-id] strong', { hasText: "Created by browser test" })).toBeVisible();
-  await expect(page.getByText("Persisted synthetic content", { exact: true })).toBeVisible();
+  const createdNode = page.locator('[data-node-id]').filter({
+    has: page.locator("strong", { hasText: "Created by browser test" }),
+  });
+  const markdown = createdNode.locator('[data-content-processor="markdown"]');
+  await expect(markdown.locator("h1")).toHaveText("Persisted synthetic heading");
+  await expect(markdown.locator("strong")).toHaveText("Formatted content");
+  await expect(markdown.locator("script")).toHaveCount(0);
+  await expect(markdown).not.toContainText("blocked");
 });
 
 test("node drag and pane pan persist their geometry", async ({ page }) => {

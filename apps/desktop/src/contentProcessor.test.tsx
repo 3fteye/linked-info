@@ -3,6 +3,7 @@ import {
   ContentProcessorRegistry,
   canvasContentPreview,
   contentProcessorRegistry,
+  markdownContentProcessor,
   maximumCanvasContentPreviewCharacters,
   textContentProcessor,
 } from "./contentProcessor";
@@ -16,6 +17,18 @@ describe("content processor registry", () => {
     expect(resolved.processor.present("secret")).toEqual({
       kind: "text",
       text: "secret",
+    });
+  });
+
+  it("registers the built-in processors in stable order", () => {
+    expect(contentProcessorRegistry.list().map((processor) => processor.id)).toEqual([
+      "text",
+      "markdown",
+    ]);
+    expect(contentProcessorRegistry.has("markdown")).toBe(true);
+    expect(markdownContentProcessor.present("# Heading")).toEqual({
+      kind: "markdown",
+      source: "# Heading",
     });
   });
 
