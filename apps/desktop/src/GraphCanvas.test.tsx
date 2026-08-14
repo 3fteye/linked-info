@@ -3,7 +3,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ReactFlowProvider, type NodeProps } from "@xyflow/react";
-import { InformationNodeCard } from "./GraphCanvas";
+import { InformationNodeCard, finalizeNodeDragLayout } from "./GraphCanvas";
 
 const nodeId = "11111111-1111-4111-8111-111111111111";
 
@@ -169,5 +169,30 @@ describe("InformationNodeCard", () => {
     renderCard(root, cardProps({ content: fullContent, editing: true }));
 
     expect(container.querySelector("textarea")?.value).toBe(fullContent);
+  });
+});
+
+describe("finalizeNodeDragLayout", () => {
+  it("stores all moved positions and brings the initiating node to front once", () => {
+    const layout = [
+      { nodeId: "a", x: 0, y: 0 },
+      { nodeId: "b", x: 10, y: 10 },
+      { nodeId: "c", x: 20, y: 20 },
+    ];
+
+    expect(
+      finalizeNodeDragLayout(
+        layout,
+        [
+          { id: "a", position: { x: 100, y: 110 } },
+          { id: "b", position: { x: 120, y: 130 } },
+        ],
+        "a",
+      ),
+    ).toEqual([
+      { nodeId: "b", x: 120, y: 130 },
+      { nodeId: "c", x: 20, y: 20 },
+      { nodeId: "a", x: 100, y: 110 },
+    ]);
   });
 });

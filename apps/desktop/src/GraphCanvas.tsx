@@ -49,7 +49,10 @@ import type {
   NodeLayout,
   NodeReference,
 } from "./workspaceStore";
-import { updateNodeLayoutPositions } from "./workspaceStore";
+import {
+  moveNodeLayoutToFront,
+  updateNodeLayoutPositions,
+} from "./workspaceStore";
 import {
   appendExistingNodeReference,
   appendNodeReference,
@@ -379,6 +382,25 @@ export function InformationNodeCard({
 const nodeTypes = { information: InformationNodeCard };
 const defaultCanvasViewport: Viewport = { x: 0, y: 0, zoom: 1 };
 
+export function finalizeNodeDragLayout(
+  layout: NodeLayout[],
+  movedNodes: ReadonlyArray<{
+    id: string;
+    position: { x: number; y: number };
+  }>,
+  frontNodeId: string,
+): NodeLayout[] {
+  const positionedLayout = updateNodeLayoutPositions(
+    layout,
+    movedNodes.map((node) => ({
+      nodeId: node.id,
+      x: node.position.x,
+      y: node.position.y,
+    })),
+  );
+  return moveNodeLayoutToFront(positionedLayout, frontNodeId);
+}
+
 function isTextEntryTarget(target: EventTarget | null): boolean {
   return (
     target instanceof HTMLInputElement ||
@@ -478,6 +500,8 @@ export default function GraphCanvas({
   const [flowNodes, setFlowNodes, applyNodeChanges] =
     useNodesState<InformationFlowNode>([]);
   const [flowEdges, setFlowEdges, applyEdgeChanges] = useEdgesState<Edge>([]);
+  const flowNodesRef = useRef(flowNodes);
+  flowNodesRef.current = flowNodes;
   const normalizedSearch = searchTerm.trim().toLowerCase();
 
   useEffect(() => {
@@ -607,6 +631,37 @@ export default function GraphCanvas({
     [references],
   );
 
+  const hiddenNodeIdSet = useMemo(() => {
+    const result = new Set<string>();
+    for (const node of nodes) {
+      if (editingNodeId === node.id || referenceFilterNodeIdSet.has(node.id)) {
+        continue;
+      }
+      const referencedTargetIds = new Set(
+        (referencedNodesBySource.get(node.id) ?? []).map((target) => target.id),
+      );
+      if (
+        (unnamedOnly && node.name !== null) ||
+        (normalizedSearch.length > 0 &&
+          !(node.name ?? "").toLowerCase().includes(normalizedSearch)) ||
+        referenceFilterNodeIds.some(
+          (targetNodeId) => !referencedTargetIds.has(targetNodeId),
+        )
+      ) {
+        result.add(node.id);
+      }
+    }
+    return result;
+  }, [
+    editingNodeId,
+    nodes,
+    normalizedSearch,
+    referenceFilterNodeIds,
+    referenceFilterNodeIdSet,
+    referencedNodesBySource,
+    unnamedOnly,
+  ]);
+
   const referenceSearchCandidates = useMemo(() => {
     if (referenceSearch === null) {
       return [];
@@ -638,7 +693,6 @@ export default function GraphCanvas({
         const savedLayout = layoutByNode.get(node.id);
         const currentNode = currentById.get(node.id);
         const referencedNodes = referencedNodesBySource.get(node.id) ?? [];
-        const referencedTargetIds = new Set(referencedNodes.map((target) => target.id));
         return {
           id: node.id,
           type: "information",
@@ -648,15 +702,7 @@ export default function GraphCanvas({
             : { x: 80 + (index % 4) * 300, y: 80 + Math.floor(index / 4) * 210 },
           selected: currentNode?.selected ?? false,
           zIndex: stackOrderByNode.get(node.id) ?? index,
-          hidden:
-            editingNodeId !== node.id &&
-            !referenceFilterNodeIdSet.has(node.id) &&
-            ((unnamedOnly && node.name !== null) ||
-              (normalizedSearch.length > 0 &&
-                !(node.name ?? "").toLowerCase().includes(normalizedSearch)) ||
-              referenceFilterNodeIds.some(
-                (targetNodeId) => !referencedTargetIds.has(targetNodeId),
-              )),
+          hidden: hiddenNodeIdSet.has(node.id),
           data: {
             name: node.name,
             content:
@@ -702,26 +748,24 @@ export default function GraphCanvas({
     contentProcessorByNodeId,
     canvasReferencePresentation,
     editingNodeId,
+    hiddenNodeIdSet,
     labels,
     layoutByNode,
     nameConflictNodeIds,
     nodes,
-    normalizedSearch,
     onNodeCommit,
     onNodeContentChange,
     onNodeNameChange,
     onToggleReferenceFilter,
-    referenceFilterNodeIds,
     referenceFilterNodeIdSet,
     referencedNodesBySource,
     setFlowNodes,
     stackOrderByNode,
-    unnamedOnly,
   ]);
 
   useEffect(() => {
     const visibleNodeIds = new Set(
-      flowNodes.filter((node) => !node.hidden).map((node) => node.id),
+      nodes.filter((node) => !hiddenNodeIdSet.has(node.id)).map((node) => node.id),
     );
     setFlowEdges((current) => {
       const selectedEdgeIds = new Set(
@@ -742,7 +786,7 @@ export default function GraphCanvas({
         };
       });
     });
-  }, [canvasReferencePresentation, flowNodes, setFlowEdges]);
+  }, [canvasReferencePresentation, hiddenNodeIdSet, nodes, setFlowEdges]);
 
   useEffect(() => {
     if (contextMenu === null) {
@@ -819,7 +863,7 @@ export default function GraphCanvas({
       }
 
       if (key === "delete" || key === "backspace") {
-        const selectedNodeIds = flowNodes
+        const selectedNodeIds = flowNodesRef.current
           .filter((node) => node.selected && !node.hidden)
           .map((node) => node.id);
         if (selectedNodeIds.length > 0) {
@@ -832,13 +876,35 @@ export default function GraphCanvas({
 
     window.addEventListener("keydown", handleCanvasShortcut, true);
     return () => window.removeEventListener("keydown", handleCanvasShortcut, true);
-  }, [flowNodes, historyBlocked, onRedo, onUndo, setFlowNodes]);
+  }, [historyBlocked, onRedo, onUndo, setFlowNodes]);
 
   const handleNodesChange = useCallback(
     (changes: NodeChange<InformationFlowNode>[]) => {
       applyNodeChanges(changes);
     },
     [applyNodeChanges],
+  );
+
+  const bringFlowNodeToFront = useCallback(
+    (nodeId: string) => {
+      setFlowNodes((current) => {
+        const target = current.find((node) => node.id === nodeId);
+        if (target === undefined) {
+          return current;
+        }
+        const maximumZIndex = current.reduce(
+          (maximum, node) => Math.max(maximum, node.zIndex ?? 0),
+          0,
+        );
+        if ((target.zIndex ?? 0) >= maximumZIndex) {
+          return current;
+        }
+        return current.map((node) =>
+          node.id === nodeId ? { ...node, zIndex: maximumZIndex + 1 } : node,
+        );
+      });
+    },
+    [setFlowNodes],
   );
 
   const handleEdgesChange = useCallback(
@@ -997,13 +1063,10 @@ export default function GraphCanvas({
       draggedNodes: InformationFlowNode[],
     ) => {
       const movedNodes = draggedNodes.length > 0 ? draggedNodes : [node];
-      const nextLayout = updateNodeLayoutPositions(
+      const nextLayout = finalizeNodeDragLayout(
         layout,
-        movedNodes.map((movedNode) => ({
-          nodeId: movedNode.id,
-          x: movedNode.position.x,
-          y: movedNode.position.y,
-        })),
+        movedNodes,
+        node.id,
       );
       if (nextLayout !== layout) {
         onLayoutChange(nextLayout);
@@ -1108,7 +1171,7 @@ export default function GraphCanvas({
         onNodeContextMenu={handleNodeContextMenu}
         onNodeClick={(_event, node) => onNodeBringToFront(node.id)}
         onNodeDoubleClick={(_event, node) => onEditNode(node.id)}
-        onNodeDragStart={(_event, node) => onNodeBringToFront(node.id)}
+        onNodeDragStart={(_event, node) => bringFlowNodeToFront(node.id)}
         onNodeDragStop={handleNodeDragStop}
         onNodesChange={handleNodesChange}
         onMoveEnd={(_event, nextViewport) => onViewportChange(nextViewport)}
