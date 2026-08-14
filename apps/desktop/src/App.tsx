@@ -1144,6 +1144,17 @@ function App({
     [t],
   );
 
+  const totpContentLabels = useMemo(
+    () => ({
+      copy: t("totp.copy"),
+      generating: t("totp.generating"),
+      invalid: t("totp.invalid"),
+      masked: t("totp.masked"),
+      remaining: (seconds: number) => t("totp.remaining", { seconds }),
+    }),
+    [t],
+  );
+
   useEffect(() => {
     if (!persistenceReady) {
       return;
@@ -4757,6 +4768,11 @@ function App({
                     (secretClipboardStatus?.clearAfterMs ?? 45_000) / 1_000,
                   ),
                 }),
+                totpCopy: totpContentLabels.copy,
+                totpGenerating: totpContentLabels.generating,
+                totpInvalid: totpContentLabels.invalid,
+                totpMasked: totpContentLabels.masked,
+                totpRemaining: totpContentLabels.remaining,
                 editNode: t("actions.editNode"),
                 deleteNode: t("actions.deleteNode"),
                 deleteNodeBody: (names) =>
@@ -4844,6 +4860,7 @@ function App({
                       <NodeContentHost
                         content={node.content}
                         emptyContent={t("nodes.noContent")}
+                        enhancementLabels={totpContentLabels}
                         processorId={
                           workspace.view.contentProcessorByNodeId[node.id] ?? null
                         }

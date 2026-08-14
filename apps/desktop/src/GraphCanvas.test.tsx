@@ -36,6 +36,13 @@ function cardProps(overrides: Record<string, unknown> = {}): NodeProps<any> {
         `Unavailable: ${processorId}`,
       contentLabel: "Content",
       contentPlaceholder: "Content",
+      enhancementLabels: {
+        copy: "Copy code",
+        generating: "Generating",
+        invalid: "Invalid TOTP secret",
+        masked: "Secret hidden",
+        remaining: (seconds: number) => `${seconds}s`,
+      },
       editing: true,
       nameConflict: false,
       nameConflictLabel: "Conflict",
@@ -53,6 +60,7 @@ function cardProps(overrides: Record<string, unknown> = {}): NodeProps<any> {
       onCommit: vi.fn(),
       onContentChange: vi.fn(),
       onContentProcessorChange: vi.fn(),
+      onCopyDerivedSecret: null,
       onNameChange: vi.fn(() => true),
       onToggleReferenceFilter: vi.fn(),
       ...overrides,
@@ -159,12 +167,21 @@ describe("InformationNodeCard", () => {
     vi.useFakeTimers();
     const props = cardProps({ content: "# Heading" });
     renderCard(root, props);
-    const select = container.querySelector("select")!;
+    act(() => vi.runAllTimers());
+    let select = container.querySelector("select")!;
 
     act(() => {
       select.focus();
       select.value = "markdown";
       select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    renderCard(root, {
+      ...props,
+      data: { ...props.data, contentProcessorId: "markdown" },
+    });
+    select = container.querySelector("select")!;
+    act(() => {
+      select.blur();
       vi.runAllTimers();
     });
 
@@ -173,6 +190,14 @@ describe("InformationNodeCard", () => {
       "markdown",
     );
     expect(props.data.onCommit).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(select);
+
+    act(() => {
+      document.body.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+      select.blur();
+      vi.runAllTimers();
+    });
+    expect(props.data.onCommit).toHaveBeenCalledWith(nodeId);
   });
 
   it("shows when dense incoming edges are folded by the canvas view", () => {

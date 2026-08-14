@@ -8,6 +8,7 @@ import type {
   NodeReference,
 } from "./workspaceStore";
 import type { LocalLlmModelId } from "./localLlmModels";
+import { contentForSemanticAnalysis } from "./contentEnhancer";
 
 export interface LlmReviewNodeSummary {
   name: string | null;
@@ -126,7 +127,7 @@ function summarizeNode(
   contentLimit: number,
 ): LlmReviewNodeSummary | null {
   const name = boundedText(node.name, 160);
-  const content = boundedText(node.content, contentLimit);
+  const content = boundedText(contentForSemanticAnalysis(node.content), contentLimit);
   return name === null && content === null ? null : { name, content };
 }
 

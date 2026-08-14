@@ -818,6 +818,78 @@ h1 {
   -webkit-line-clamp: unset;
 }
 
+.graph-node-content.node-content-enhanced {
+  display: block;
+  max-height: 124px;
+  white-space: normal;
+  -webkit-line-clamp: unset;
+}
+
+.plain-content-segment {
+  display: block;
+  white-space: pre-wrap;
+}
+
+.totp-content-line {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  margin: 5px 0;
+  gap: 6px;
+  border: 1px solid #d5dfd8;
+  border-radius: 5px;
+  padding: 6px 7px;
+  color: #344039;
+  background: #f5f8f6;
+  white-space: normal;
+}
+
+.totp-content-label {
+  flex: 0 0 auto;
+  color: #557063;
+  font-size: 9px;
+  font-weight: 750;
+  letter-spacing: 0.05em;
+}
+
+.totp-content-code {
+  min-width: 0;
+  color: #174f35;
+  font-family: Consolas, "SFMono-Regular", monospace;
+  font-size: 15px;
+  font-weight: 750;
+  letter-spacing: 0.08em;
+}
+
+.totp-content-remaining {
+  flex: 0 0 auto;
+  color: #6c756f;
+  font-size: 9px;
+}
+
+.totp-content-copy {
+  flex: 0 0 auto;
+  margin-left: auto;
+  border: 1px solid #b7c9bd;
+  border-radius: 4px;
+  padding: 3px 5px;
+  color: #245d40;
+  background: #ffffff;
+  font-size: 9px;
+  cursor: pointer;
+}
+
+.totp-content-copy:hover {
+  border-color: #6f9c81;
+  background: #eaf3ed;
+}
+
+.totp-content-error {
+  min-width: 0;
+  color: #a23f38;
+  font-size: 10px;
+}
+
 .graph-node-content.node-content-markdown > :first-child {
   margin-top: 0;
 }

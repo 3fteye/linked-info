@@ -89,6 +89,20 @@ describe("embedding analysis", () => {
     expect(nodeEmbeddingText(node("2", null, "  "))).toBeNull();
   });
 
+  it("removes explicitly marked TOTP secrets before embedding and scope estimates", () => {
+    const protectedNode = node(
+      "protected",
+      "测试账号",
+      "公开说明\nTOTP: jbsw y3dp ehpk 3pxp",
+    );
+
+    expect(nodeEmbeddingText(protectedNode)).toBe("测试账号\n公开说明");
+    expect(embeddingTransmissionEstimate([protectedNode])).toEqual({
+      nodeCount: 1,
+      segmentCount: 1,
+    });
+  });
+
   it("samples the whole long text with a bounded number of chunks", () => {
     const result = chunkEmbeddingText("前".repeat(8000) + "尾部");
     expect(result.chunks).toHaveLength(8);

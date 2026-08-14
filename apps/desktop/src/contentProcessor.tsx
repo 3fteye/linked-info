@@ -1,5 +1,14 @@
-import type { ReactNode } from "react";
+import { Fragment, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
+import {
+  contentEnhancerRegistry,
+  type EnhancedContentSegment,
+} from "./contentEnhancer";
+import {
+  maskedTotpLine,
+  TotpContentLine,
+  type TotpContentLabels,
+} from "./totpContent";
 
 export type ContentPresentation =
   | { kind: "text"; text: string | null }
@@ -87,16 +96,49 @@ interface NodeContentHostProps {
   className?: string;
   content: string | null;
   emptyContent?: ReactNode;
+  enhancementLabels: TotpContentLabels;
   hideWhenEmpty?: boolean;
+  onCopySecret?: (value: string) => void;
   processorId: string | null;
   variant: "canvas" | "list";
+}
+
+function SafeMarkdown({ source }: { source: string }) {
+  return (
+    <ReactMarkdown
+      components={{
+        a: ({ children }) => <span className="markdown-link-text">{children}</span>,
+        img: ({ alt }) => (
+          <span className="markdown-image-placeholder">
+            {alt ? `[${alt}]` : "[image]"}
+          </span>
+        ),
+      }}
+      skipHtml
+    >
+      {source}
+    </ReactMarkdown>
+  );
+}
+
+function listContent(
+  segments: readonly EnhancedContentSegment[],
+  labels: TotpContentLabels,
+): string {
+  return segments
+    .map((segment) =>
+      segment.kind === "text" ? segment.text : maskedTotpLine(labels),
+    )
+    .join("\n");
 }
 
 export function NodeContentHost({
   className,
   content,
   emptyContent = null,
+  enhancementLabels,
   hideWhenEmpty = false,
+  onCopySecret,
   processorId,
   variant,
 }: NodeContentHostProps) {
@@ -105,6 +147,14 @@ export function NodeContentHost({
   const source =
     presentation.kind === "text" ? presentation.text : presentation.source;
   const presentedText = variant === "canvas" ? canvasContentPreview(source) : source;
+  const enhancedSegments =
+    presentedText === null || presentedText.length === 0
+      ? []
+      : contentEnhancerRegistry.segment(
+          presentedText,
+          presentation.kind === "markdown",
+        );
+  const hasEnhancements = enhancedSegments.some((segment) => segment.kind !== "text");
   const rendered = presentedText || emptyContent;
   if (hideWhenEmpty && (source === null || source.length === 0)) {
     return null;
@@ -114,6 +164,7 @@ export function NodeContentHost({
       className,
       "node-content-host",
       presentation.kind === "markdown" ? "node-content-markdown" : null,
+      hasEnhancements ? "node-content-enhanced" : null,
     ]
       .filter(Boolean)
       .join(" "),
@@ -121,7 +172,35 @@ export function NodeContentHost({
     "data-content-processor-supported": resolved.supported,
     "data-requested-content-processor": resolved.requestedId ?? undefined,
   };
-  if (variant === "list" || presentation.kind === "text" || !presentedText) {
+  if (variant === "list") {
+    return (
+      <span {...sharedProps}>
+        {hasEnhancements ? listContent(enhancedSegments, enhancementLabels) : rendered}
+      </span>
+    );
+  }
+  if (hasEnhancements) {
+    return (
+      <div {...sharedProps}>
+        {enhancedSegments.map((segment, index) => (
+          <Fragment key={index}>
+            {segment.kind === "totp" ? (
+              <TotpContentLine
+                directive={segment.directive}
+                labels={enhancementLabels}
+                onCopySecret={onCopySecret}
+              />
+            ) : presentation.kind === "markdown" ? (
+              <SafeMarkdown source={segment.text} />
+            ) : (
+              <span className="plain-content-segment">{segment.text}</span>
+            )}
+          </Fragment>
+        ))}
+      </div>
+    );
+  }
+  if (presentation.kind === "text" || !presentedText) {
     return variant === "canvas" ? (
       <p {...sharedProps}>{rendered}</p>
     ) : (
@@ -130,19 +209,7 @@ export function NodeContentHost({
   }
   return (
     <div {...sharedProps}>
-      <ReactMarkdown
-        components={{
-          a: ({ children }) => <span className="markdown-link-text">{children}</span>,
-          img: ({ alt }) => (
-            <span className="markdown-image-placeholder">
-              {alt ? `[${alt}]` : "[image]"}
-            </span>
-          ),
-        }}
-        skipHtml
-      >
-        {presentedText}
-      </ReactMarkdown>
+      <SafeMarkdown source={presentedText} />
     </div>
   );
 }

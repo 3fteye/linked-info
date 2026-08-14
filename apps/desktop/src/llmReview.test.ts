@@ -73,6 +73,28 @@ describe("local LLM review preparation", () => {
     ]);
   });
 
+  it("removes TOTP secret lines from every local LLM summary", () => {
+    const protectedNodes = nodes.map((current) =>
+      current.id === "source" || current.id === "gmail"
+        ? {
+            ...current,
+            content: "公开说明\nTOTP: jbsw y3dp ehpk 3pxp",
+          }
+        : current,
+    );
+    const prepared = prepareLlmReview(
+      "source",
+      protectedNodes,
+      references,
+      analysis,
+    );
+    const serialized = JSON.stringify(prepared?.request);
+
+    expect(serialized).toContain("公开说明");
+    expect(serialized).not.toContain("jbsw");
+    expect(serialized).not.toContain("TOTP");
+  });
+
   it("maps only valid temporary aliases back to node ids", () => {
     const prepared = prepareLlmReview("source", nodes, references, analysis)!;
 

@@ -19,12 +19,16 @@ export const sensitiveSourcePaths = [
   "apps/desktop/src/GraphCanvas.tsx",
   "apps/desktop/src/WorkspaceSecurityGate.tsx",
   "apps/desktop/src/DocumentImportDialog.tsx",
+  "apps/desktop/src/contentEnhancer.ts",
+  "apps/desktop/src/contentProcessor.tsx",
   "apps/desktop/src/documentImport.ts",
   "apps/desktop/src/documentImportBridge.ts",
   "apps/desktop/src/embeddingBridge.ts",
   "apps/desktop/src/llmBridge.ts",
   "apps/desktop/src/offsiteBackup.ts",
   "apps/desktop/src/secretClipboard.ts",
+  "apps/desktop/src/totp.ts",
+  "apps/desktop/src/totpContent.tsx",
   "apps/desktop/src/workspaceSecurity.ts",
 ];
 

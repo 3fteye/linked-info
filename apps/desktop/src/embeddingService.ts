@@ -1,4 +1,5 @@
 import type { InformationNode, NodeReference } from "./workspaceStore";
+import { contentForSemanticAnalysis } from "./contentEnhancer";
 import {
   embeddingSettingsFingerprint,
   type EmbeddingSettings,
@@ -112,7 +113,7 @@ function validVector(vector: number[]): Float32Array | null {
 
 export function nodeEmbeddingText(node: InformationNode): string | null {
   const name = node.name?.trim() ?? "";
-  const content = node.content?.trim() ?? "";
+  const content = contentForSemanticAnalysis(node.content) ?? "";
   if (name.length === 0 && content.length === 0) {
     return null;
   }

@@ -62,6 +62,7 @@ import {
   shouldCreateMissingReferenceTarget,
 } from "./referenceSearch";
 import { NodeContentHost, canvasContentPreview } from "./contentProcessor";
+import type { TotpContentLabels } from "./totpContent";
 import { buildCanvasReferencePresentation } from "./canvasReferencePresentation";
 import {
   buildBatchedReferencePaths,
@@ -95,6 +96,7 @@ interface InformationNodeData extends Record<string, unknown> {
   unsupportedContentProcessorLabel: (processorId: string) => string;
   contentLabel: string;
   contentPlaceholder: string;
+  enhancementLabels: TotpContentLabels;
   editing: boolean;
   nameConflict: boolean;
   nameConflictLabel: string;
@@ -112,6 +114,7 @@ interface InformationNodeData extends Record<string, unknown> {
   onCommit: (nodeId: string) => void;
   onContentChange: (nodeId: string, content: string) => void;
   onContentProcessorChange: (nodeId: string, processorId: string) => void;
+  onCopyDerivedSecret: ((value: string) => Promise<void>) | null;
   onNameChange: (nodeId: string, name: string) => boolean;
   onToggleReferenceFilter: (nodeId: string) => void;
 }
@@ -147,6 +150,11 @@ interface GraphLabels {
   copySecret: string;
   copySecretFailed: string;
   copySecretSuccess: string;
+  totpCopy: string;
+  totpGenerating: string;
+  totpInvalid: string;
+  totpMasked: string;
+  totpRemaining: (seconds: number) => string;
   editNode: string;
   empty: string;
   filterByNode: string;
@@ -242,6 +250,8 @@ export function InformationNodeCard({
 }: NodeProps<InformationFlowNode>) {
   const nodeRef = useRef<HTMLElement>(null);
   const nameInputRef = useRef<HTMLInputElement>(null);
+  const processorSelectRef = useRef<HTMLSelectElement>(null);
+  const processorFocusTransferRef = useRef(false);
   const [draft, setDraft] = useState(() => nodeEditorDraft(data.name, data.content));
   const wasEditingRef = useRef(data.editing);
 
@@ -273,17 +283,48 @@ export function InformationNodeCard({
     return () => window.clearTimeout(focusTimer);
   }, [data.editing]);
 
+  useLayoutEffect(() => {
+    if (!data.editing || !processorFocusTransferRef.current) {
+      return;
+    }
+    const processorSelect = processorSelectRef.current;
+    processorSelect?.focus({ preventScroll: true });
+  }, [data.contentProcessorId, data.editing]);
+
+  useEffect(() => {
+    if (!data.editing) {
+      return;
+    }
+    const clearProcessorFocusTransfer = (event: PointerEvent) => {
+      const nodeElement = nodeRef.current;
+      if (event.target instanceof Node && !nodeElement?.contains(event.target)) {
+        processorFocusTransferRef.current = false;
+      }
+    };
+    document.addEventListener("pointerdown", clearProcessorFocusTransfer, true);
+    return () =>
+      document.removeEventListener("pointerdown", clearProcessorFocusTransfer, true);
+  }, [data.editing]);
+
   const commitWhenLeavingNode = (event: ReactFocusEvent<HTMLElement>) => {
     const nextTarget = event.relatedTarget;
     if (nextTarget instanceof HTMLElement && event.currentTarget.contains(nextTarget)) {
       return;
     }
+    const blurredNodeElement = event.currentTarget;
 
     window.setTimeout(() => {
+      if (processorFocusTransferRef.current && nextTarget === null) {
+        processorSelectRef.current?.focus({ preventScroll: true });
+        return;
+      }
       if (!shouldCommitNodeEditor(draft, false)) {
         return;
       }
       const nodeElement = nodeRef.current;
+      if (nodeElement !== blurredNodeElement) {
+        return;
+      }
       if (nodeElement?.contains(document.activeElement)) {
         return;
       }
@@ -298,6 +339,11 @@ export function InformationNodeCard({
       data-node-id={id}
       data-selected={selected}
       onBlur={commitWhenLeavingNode}
+      onFocus={(event) => {
+        if (event.target !== processorSelectRef.current) {
+          processorFocusTransferRef.current = false;
+        }
+      }}
       ref={nodeRef}
     >
       <Handle
@@ -354,7 +400,11 @@ export function InformationNodeCard({
             <span>{data.contentProcessorLabel}</span>
             <select
               className="nodrag nowheel graph-node-processor-select"
-              onChange={(event) => data.onContentProcessorChange(id, event.target.value)}
+              onChange={(event) => {
+                processorFocusTransferRef.current = true;
+                data.onContentProcessorChange(id, event.target.value);
+              }}
+              ref={processorSelectRef}
               value={data.contentProcessorId ?? "text"}
             >
               {data.contentProcessorId !== null &&
@@ -394,7 +444,9 @@ export function InformationNodeCard({
         <NodeContentHost
           className="graph-node-content"
           content={data.content}
+          enhancementLabels={data.enhancementLabels}
           hideWhenEmpty
+          onCopySecret={data.onCopyDerivedSecret ?? undefined}
           processorId={data.contentProcessorId}
           variant="canvas"
         />
@@ -585,17 +637,15 @@ export default function GraphCanvas({
     };
   }, []);
 
-  const copyNodeContentAsSecret = async (nodeId: string) => {
-    const content = nodes.find((node) => node.id === nodeId)?.content;
-    if (content === null || content === undefined || content.length === 0 || onCopySecret === null) {
+  const copyTextAsSecret = useCallback(async (text: string) => {
+    if (text.length === 0 || onCopySecret === null) {
       return;
     }
-    setContextMenu(null);
     if (secretClipboardNoticeTimerRef.current !== null) {
       window.clearTimeout(secretClipboardNoticeTimerRef.current);
     }
     try {
-      await onCopySecret(content);
+      await onCopySecret(text);
       setSecretClipboardNotice({
         error: false,
         message: labels.copySecretSuccess,
@@ -607,6 +657,15 @@ export default function GraphCanvas({
       setSecretClipboardNotice(null);
       secretClipboardNoticeTimerRef.current = null;
     }, 6_000);
+  }, [labels.copySecretFailed, labels.copySecretSuccess, onCopySecret]);
+
+  const copyNodeContentAsSecret = async (nodeId: string) => {
+    const content = nodes.find((node) => node.id === nodeId)?.content;
+    if (content === null || content === undefined || content.length === 0) {
+      return;
+    }
+    setContextMenu(null);
+    await copyTextAsSecret(content);
   };
 
   useEffect(() => {
@@ -878,6 +937,13 @@ export default function GraphCanvas({
             unsupportedContentProcessorLabel: labels.unsupportedContentProcessor,
             contentLabel: labels.content,
             contentPlaceholder: labels.contentPlaceholder,
+            enhancementLabels: {
+              copy: labels.totpCopy,
+              generating: labels.totpGenerating,
+              invalid: labels.totpInvalid,
+              masked: labels.totpMasked,
+              remaining: labels.totpRemaining,
+            },
             editing: editingNodeId === node.id,
             nameConflict: nameConflictNodeIds.has(node.id),
             nameConflictLabel: labels.nameConflict,
@@ -905,6 +971,8 @@ export default function GraphCanvas({
             onCommit: onNodeCommit,
             onContentChange: onNodeContentChange,
             onContentProcessorChange: onNodeContentProcessorChange,
+            onCopyDerivedSecret:
+              onCopySecret === null ? null : copyTextAsSecret,
             onNameChange: onNodeNameChange,
             onToggleReferenceFilter,
           },
@@ -914,6 +982,7 @@ export default function GraphCanvas({
   }, [
     contentProcessorByNodeId,
     contentProcessorOptions,
+    copyTextAsSecret,
     canvasReferencePresentation,
     editingNodeId,
     hiddenNodeIdSet,
@@ -924,6 +993,7 @@ export default function GraphCanvas({
     onNodeCommit,
     onNodeContentChange,
     onNodeContentProcessorChange,
+    onCopySecret,
     onNodeNameChange,
     onToggleReferenceFilter,
     referenceFilterNodeIdSet,

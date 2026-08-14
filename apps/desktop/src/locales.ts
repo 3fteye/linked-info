@@ -29,6 +29,13 @@ export const resources = {
         copied: "已复制；若剪贴板没有变化，将在 {{seconds}} 秒后清除。系统剪贴板历史或跨设备同步仍可能保留副本。",
         failed: "无法使用秘密剪贴板，内容没有复制。",
       },
+      totp: {
+        copy: "复制验证码",
+        generating: "计算中…",
+        invalid: "TOTP 密钥格式无效",
+        masked: "密钥已隐藏",
+        remaining: "{{seconds}} 秒",
+      },
       deleteNode: {
         title: "删除这个节点？",
         titleMultiple: "删除选中的 {{count}} 个节点？",
@@ -625,6 +632,13 @@ export const resources = {
         copy: "Copy content as secret",
         copied: "Copied. If the clipboard does not change, it will be cleared in {{seconds}} seconds. System clipboard history or cross-device sync may still retain a copy.",
         failed: "The secret clipboard is unavailable. The content was not copied.",
+      },
+      totp: {
+        copy: "Copy code",
+        generating: "Generating…",
+        invalid: "Invalid TOTP secret",
+        masked: "Secret hidden",
+        remaining: "{{seconds}}s",
       },
       deleteNode: {
         title: "Delete this node?",

@@ -70,6 +70,15 @@ async function storedWorkspace(page: Page) {
 
 test("creating and editing a node survives a browser reload", async ({ page }) => {
   await openSyntheticWorkspace(page, gridNodes(1, 1));
+  const syntheticContent = [
+    "# Persisted synthetic heading",
+    "",
+    "**Formatted content**",
+    "",
+    "TOTP: jbsw y3dp ehpk 3pxp",
+    "",
+    "<script>blocked</script>",
+  ].join("\n");
 
   await page.getByTestId("create-node").click();
   const editor = page.locator('[data-node-id][data-editing="true"]');
@@ -79,10 +88,9 @@ test("creating and editing a node survives a browser reload", async ({ page }) =
   const processorSelect = editor.locator("select");
   await processorSelect.focus();
   await processorSelect.selectOption("markdown");
-  await editor.locator("textarea").click();
-  await page.keyboard.insertText(
-    "# Persisted synthetic heading\n\n**Formatted content**\n\n<script>blocked</script>",
-  );
+  await page
+    .locator('[data-node-id][data-editing="true"] textarea')
+    .fill(syntheticContent);
   await page.getByTestId("graph-canvas").click({ position: { x: 30, y: 30 } });
 
   await expect
@@ -99,8 +107,7 @@ test("creating and editing a node survives a browser reload", async ({ page }) =
           };
     })
     .toEqual({
-      content:
-        "# Persisted synthetic heading\n\n**Formatted content**\n\n<script>blocked</script>",
+      content: syntheticContent,
       processor: "markdown",
     });
 
@@ -112,6 +119,8 @@ test("creating and editing a node survives a browser reload", async ({ page }) =
   const markdown = createdNode.locator('[data-content-processor="markdown"]');
   await expect(markdown.locator("h1")).toHaveText("Persisted synthetic heading");
   await expect(markdown.locator("strong")).toHaveText("Formatted content");
+  await expect(markdown.locator(".totp-content-code")).toHaveText(/^\d{6}$/);
+  await expect(markdown).not.toContainText("jbsw");
   await expect(markdown.locator("script")).toHaveCount(0);
   await expect(markdown).not.toContainText("blocked");
 });

@@ -2,7 +2,16 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { contentEnhancerRegistry } from "./contentEnhancer";
 import { NodeContentHost } from "./contentProcessor";
+
+const enhancementLabels = {
+  copy: "Copy code",
+  generating: "Generating",
+  invalid: "Invalid TOTP secret",
+  masked: "Secret hidden",
+  remaining: (seconds: number) => `${seconds}s`,
+};
 
 describe("NodeContentHost", () => {
   let container: HTMLDivElement;
@@ -39,6 +48,7 @@ describe("NodeContentHost", () => {
             "",
             "![remote image](https://example.com/image.png)",
           ].join("\n")}
+          enhancementLabels={enhancementLabels}
           processorId="markdown"
           variant="canvas"
         />,
@@ -62,6 +72,7 @@ describe("NodeContentHost", () => {
       root.render(
         <NodeContentHost
           content="# Raw summary"
+          enhancementLabels={enhancementLabels}
           processorId="plugin.unavailable"
           variant="list"
         />,
@@ -76,5 +87,47 @@ describe("NodeContentHost", () => {
     expect(host?.getAttribute("data-requested-content-processor")).toBe(
       "plugin.unavailable",
     );
+  });
+
+  it("replaces only an explicit TOTP line and never exposes its secret in canvas text", () => {
+    act(() =>
+      root.render(
+        <NodeContentHost
+          content={[
+            "Account: synthetic@example.test",
+            "TOTP: jbsw y3dp ehpk 3pxp",
+            "Note: retained",
+          ].join("\n")}
+          enhancementLabels={enhancementLabels}
+          processorId={null}
+          variant="canvas"
+        />,
+      ),
+    );
+
+    expect(container.querySelector(".totp-content-line")).not.toBeNull();
+    expect(container.textContent).toContain("Account: synthetic@example.test");
+    expect(container.textContent).toContain("Note: retained");
+    expect(container.textContent).not.toContain("jbsw");
+  });
+
+  it("masks TOTP secrets in compact list rows", () => {
+    const content = "Account\nTOTP: jbsw y3dp ehpk 3pxp";
+    expect(
+      contentEnhancerRegistry.segment(content, false).map((segment) => segment.kind),
+    ).toEqual(["text", "totp"]);
+    act(() =>
+      root.render(
+        <NodeContentHost
+          content={content}
+          enhancementLabels={enhancementLabels}
+          processorId={null}
+          variant="list"
+        />,
+      ),
+    );
+
+    expect(container.textContent).toContain("TOTP: Secret hidden");
+    expect(container.textContent).not.toContain("jbsw");
   });
 });
