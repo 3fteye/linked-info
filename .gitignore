@@ -2,6 +2,8 @@
 **/target/
 **/node_modules/
 **/dist/
+**/playwright-report/
+**/test-results/
 artifacts/
 **/.wrangler/
 apps/cloudflare-backup-worker/build/

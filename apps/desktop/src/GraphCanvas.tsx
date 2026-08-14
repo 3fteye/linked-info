@@ -282,6 +282,7 @@ export function InformationNodeCard({
     <article
       className="graph-node"
       data-editing={data.editing}
+      data-node-id={id}
       data-selected={selected}
       onBlur={commitWhenLeavingNode}
       ref={nodeRef}
@@ -1498,6 +1499,7 @@ export default function GraphCanvas({
   return (
     <div
       className="graph-canvas"
+      data-testid="graph-canvas"
       onClickCapture={handleCanvasClickCapture}
       onContextMenu={(event) => event.preventDefault()}
       onPointerCancelCapture={handleCanvasPointerCancelCapture}
@@ -1594,6 +1596,7 @@ export default function GraphCanvas({
             <div
               aria-hidden="true"
               className="graph-selected-nodes-boundary"
+              data-testid="selected-node-boundary"
               style={{
                 height: selectedNodeBoundary.height,
                 transform: `translate(${selectedNodeBoundary.x}px, ${selectedNodeBoundary.y}px)`,
@@ -1649,6 +1652,7 @@ export default function GraphCanvas({
           <button
             aria-label={labels.createNode}
             className="canvas-icon-button"
+            data-testid="create-node"
             onClick={createAtCenter}
             title={labels.createNode}
             type="button"
@@ -1662,6 +1666,7 @@ export default function GraphCanvas({
         <div
           aria-hidden="true"
           className="graph-canvas-selection"
+          data-testid="canvas-selection-marquee"
           style={{
             height: canvasSelection.height,
             transform: `translate(${canvasSelection.x}px, ${canvasSelection.y}px)`,

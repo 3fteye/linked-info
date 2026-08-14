@@ -129,6 +129,10 @@ jobs:
         working-directory: apps/desktop
         run: pnpm test
 
+      - name: Test canvas interactions in Microsoft Edge
+        working-directory: apps/desktop
+        run: pnpm test:e2e
+
       - name: Build frontend
         working-directory: apps/desktop
         run: pnpm build

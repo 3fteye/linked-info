@@ -204,8 +204,13 @@ pnpm tauri dev
 ```powershell
 cd apps/desktop
 pnpm test
+pnpm test:e2e
 pnpm build
 ```
+
+`pnpm test` 运行快速的 Vitest 领域、持久化和 DOM 组件测试。`pnpm test:e2e` 启动隔离的 Vite 浏览器适配器并用 Microsoft Edge 驱动画布真实指针交互；它只向独立浏览器上下文注入虚构节点，不读取桌面工作区、导出文件或剪贴板，也不生成截图、录像或跟踪文件。当前浏览器回归基线覆盖节点创建与刷新恢复、节点拖动、画布平移、Shift 追加选择、Shift 框选、边缘自动平移、异常全选防护和多选整体边界。提交前可运行 `pnpm test:all` 串行执行两层测试和生产构建。
+
+Windows Hello、会话锁定、Rust 文件原子写入和系统安全存储不属于浏览器适配器能力，继续由 Rust/Tauri 测试与 Windows 实机验收负责；浏览器回归通过不能替代这些平台边界验证。
 
 ### Rust 检查
 
@@ -262,7 +267,7 @@ Cloudflare 不是桌面端的固定依赖。`apps/cloudflare-worker` 通过供�
 - 修改数据模型或持久化前先补充不变量测试；修复交互问题时保留可复现的回归测试。
 - 不要把本地工作区、导出备份、账号信息或任何凭据加入测试夹具和提交历史。
 
-提交前至少运行受影响范围的测试，并确保 `cargo fmt --all -- --check`、`pnpm test` 和 `pnpm build` 通过。完整检查以 [.github/workflows/ci.yml](.github/workflows/ci.yml) 为准。
+提交前至少运行受影响范围的测试，并确保 `cargo fmt --all -- --check`、`pnpm test`、`pnpm test:e2e` 和 `pnpm build` 通过。完整检查以 [.github/workflows/ci.yml](.github/workflows/ci.yml) 为准。
 
 ## 依赖许可证与 SBOM
 

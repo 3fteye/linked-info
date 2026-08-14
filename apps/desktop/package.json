@@ -7,6 +7,8 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "test": "vitest run",
+    "test:all": "pnpm test && pnpm test:e2e && pnpm build",
+    "test:e2e": "playwright test",
     "preview": "vite preview",
     "tauri": "tauri"
   },
@@ -20,6 +22,7 @@
     "react-i18next": "^16.2.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.62.1",
     "@tauri-apps/cli": "^2",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
