@@ -856,11 +856,24 @@ h1 {
   box-shadow: 0 0 0 1px #a85e22;
 }
 
-.graph-canvas .react-flow__edge-path {
-  stroke: #718279;
+.graph-canvas .react-flow__viewport-portal {
+  z-index: -1;
+  pointer-events: none;
 }
 
-.graph-canvas .react-flow__edge.selected .react-flow__edge-path {
+.graph-reference-layer {
+  position: absolute;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.graph-reference-path {
+  fill: none;
+  stroke: #718279;
+  stroke-width: 1.8;
+}
+
+.graph-reference-path-selected {
   stroke: #c36d2d;
   stroke-width: 2.6;
 }

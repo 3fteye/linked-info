@@ -6,7 +6,6 @@ import { ReactFlowProvider, type NodeProps } from "@xyflow/react";
 import {
   InformationNodeCard,
   finalizeNodeDragLayout,
-  renderedEdgesForViewportGesture,
 } from "./GraphCanvas";
 
 const nodeId = "11111111-1111-4111-8111-111111111111";
@@ -198,14 +197,5 @@ describe("finalizeNodeDragLayout", () => {
       { nodeId: "c", x: 20, y: 20 },
       { nodeId: "a", x: 100, y: 110 },
     ]);
-  });
-});
-
-describe("renderedEdgesForViewportGesture", () => {
-  it("pauses edge rendering only while the viewport is moving", () => {
-    const edges = [{ id: "a-b", source: "a", target: "b" }];
-
-    expect(renderedEdgesForViewportGesture(edges, false)).toBe(edges);
-    expect(renderedEdgesForViewportGesture(edges, true)).toEqual([]);
   });
 });

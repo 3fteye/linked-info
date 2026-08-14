@@ -7,9 +7,9 @@ import {
   Panel,
   Position,
   ReactFlow,
+  ViewportPortal,
   type Connection,
   type Edge,
-  type EdgeChange,
   type FinalConnectionState,
   type Node,
   type NodeChange,
@@ -17,7 +17,6 @@ import {
   type NodeProps,
   type ReactFlowInstance,
   type Viewport,
-  useEdgesState,
   useNodesState,
 } from "@xyflow/react";
 import {
@@ -42,6 +41,7 @@ import {
   useState,
   type FocusEvent as ReactFocusEvent,
   type MouseEvent as ReactMouseEvent,
+  type PointerEvent as ReactPointerEvent,
 } from "react";
 import type {
   CanvasViewport,
@@ -63,6 +63,13 @@ import {
 } from "./referenceSearch";
 import { NodeContentHost, canvasContentPreview } from "./contentProcessor";
 import { buildCanvasReferencePresentation } from "./canvasReferencePresentation";
+import {
+  buildBatchedReferencePaths,
+  buildReferenceCurves,
+  findReferenceCurveAtPoint,
+  partitionReferencesByMovingNodes,
+  referenceCurveId,
+} from "./batchedReferenceLayer";
 import {
   nodeEditorDraft,
   shouldCommitNodeEditor,
@@ -380,6 +387,7 @@ export function InformationNodeCard({
 }
 
 const nodeTypes = { information: InformationNodeCard };
+const noFlowEdges: Edge[] = [];
 const defaultCanvasViewport: Viewport = { x: 0, y: 0, zoom: 1 };
 
 export function finalizeNodeDragLayout(
@@ -399,13 +407,6 @@ export function finalizeNodeDragLayout(
     })),
   );
   return moveNodeLayoutToFront(positionedLayout, frontNodeId);
-}
-
-export function renderedEdgesForViewportGesture(
-  edges: Edge[],
-  viewportGestureActive: boolean,
-): Edge[] {
-  return viewportGestureActive ? [] : edges;
 }
 
 function isTextEntryTarget(target: EventTarget | null): boolean {
@@ -428,10 +429,6 @@ function canvasViewportsEqual(
       left.y === right.y &&
       left.zoom === right.zoom)
   );
-}
-
-function edgeId(reference: NodeReference): string {
-  return `reference:${reference.sourceNodeId}:${reference.targetNodeId}`;
 }
 
 function compactNodeContent(content: string | null, maxLength = 32): string {
@@ -491,6 +488,12 @@ export default function GraphCanvas({
   const referenceSearchInputRef = useRef<HTMLInputElement>(null);
   const referenceSearchPopoverRef = useRef<HTMLDivElement>(null);
   const connectionSourceRef = useRef<string | null>(null);
+  const canvasPointerGestureRef = useRef<{
+    moved: boolean;
+    pointerId: number;
+    startX: number;
+    startY: number;
+  } | null>(null);
   const referencesRef = useRef(references);
   const [flowInstance, setFlowInstance] =
     useState<ReactFlowInstance<InformationFlowNode, Edge> | null>(null);
@@ -504,10 +507,10 @@ export default function GraphCanvas({
   const secretClipboardNoticeTimerRef = useRef<number | null>(null);
   const [referenceSearch, setReferenceSearch] =
     useState<ReferenceSearchState | null>(null);
+  const [selectedReferenceId, setSelectedReferenceId] = useState<string | null>(null);
+  const [draggingNodeIds, setDraggingNodeIds] = useState<string[]>([]);
   const [flowNodes, setFlowNodes, applyNodeChanges] =
     useNodesState<InformationFlowNode>([]);
-  const [flowEdges, setFlowEdges, applyEdgeChanges] = useEdgesState<Edge>([]);
-  const [viewportGestureActive, setViewportGestureActive] = useState(false);
   const flowNodesRef = useRef(flowNodes);
   flowNodesRef.current = flowNodes;
   const normalizedSearch = searchTerm.trim().toLowerCase();
@@ -547,6 +550,17 @@ export default function GraphCanvas({
   useEffect(() => {
     referencesRef.current = references;
   }, [references]);
+
+  useEffect(() => {
+    if (
+      selectedReferenceId !== null &&
+      !references.some(
+        (reference) => referenceCurveId(reference) === selectedReferenceId,
+      )
+    ) {
+      setSelectedReferenceId(null);
+    }
+  }, [references, selectedReferenceId]);
 
   useLayoutEffect(() => {
     if (referenceSearch === null) {
@@ -670,6 +684,70 @@ export default function GraphCanvas({
     unnamedOnly,
   ]);
 
+  const liveReferenceNodeGeometry = useMemo(
+    () =>
+      flowNodes.map((node) => ({
+        height: node.measured?.height ?? node.height ?? 92,
+        hidden: node.hidden === true,
+        id: node.id,
+        width: node.measured?.width ?? node.width ?? 270,
+        x: node.position.x,
+        y: node.position.y,
+      })),
+    [flowNodes],
+  );
+  const committedReferenceNodeGeometry = useMemo(
+    () =>
+      liveReferenceNodeGeometry.map((node) => {
+        const savedLayout = layoutByNode.get(node.id);
+        return savedLayout === undefined
+          ? node
+          : { ...node, x: savedLayout.x, y: savedLayout.y };
+      }),
+    [layoutByNode, liveReferenceNodeGeometry],
+  );
+  const draggingNodeIdSet = useMemo(
+    () => new Set(draggingNodeIds),
+    [draggingNodeIds],
+  );
+  const partitionedReferences = useMemo(
+    () =>
+      partitionReferencesByMovingNodes(
+        canvasReferencePresentation.visibleReferences,
+        draggingNodeIdSet,
+      ),
+    [canvasReferencePresentation, draggingNodeIdSet],
+  );
+  const stationaryReferenceCurves = useMemo(
+    () =>
+      buildReferenceCurves(
+        partitionedReferences.stationary,
+        committedReferenceNodeGeometry,
+      ),
+    [committedReferenceNodeGeometry, partitionedReferences.stationary],
+  );
+  const movingReferenceCurves = useMemo(
+    () =>
+      buildReferenceCurves(
+        partitionedReferences.moving,
+        liveReferenceNodeGeometry,
+      ),
+    [liveReferenceNodeGeometry, partitionedReferences.moving],
+  );
+  const referenceCurves = useMemo(
+    () => [...stationaryReferenceCurves, ...movingReferenceCurves],
+    [movingReferenceCurves, stationaryReferenceCurves],
+  );
+  const stationaryReferencePaths = useMemo(
+    () =>
+      buildBatchedReferencePaths(stationaryReferenceCurves, selectedReferenceId),
+    [selectedReferenceId, stationaryReferenceCurves],
+  );
+  const movingReferencePaths = useMemo(
+    () => buildBatchedReferencePaths(movingReferenceCurves, selectedReferenceId),
+    [movingReferenceCurves, selectedReferenceId],
+  );
+
   const referenceSearchCandidates = useMemo(() => {
     if (referenceSearch === null) {
       return [];
@@ -772,31 +850,6 @@ export default function GraphCanvas({
   ]);
 
   useEffect(() => {
-    const visibleNodeIds = new Set(
-      nodes.filter((node) => !hiddenNodeIdSet.has(node.id)).map((node) => node.id),
-    );
-    setFlowEdges((current) => {
-      const selectedEdgeIds = new Set(
-        current.filter((edge) => edge.selected).map((edge) => edge.id),
-      );
-      return canvasReferencePresentation.visibleReferences.map((reference) => {
-        const id = edgeId(reference);
-        return {
-          id,
-          source: reference.sourceNodeId,
-          target: reference.targetNodeId,
-          selected: selectedEdgeIds.has(id),
-          hidden:
-            !visibleNodeIds.has(reference.sourceNodeId) ||
-            !visibleNodeIds.has(reference.targetNodeId),
-          animated: false,
-          style: { strokeWidth: 1.8 },
-        };
-      });
-    });
-  }, [canvasReferencePresentation, hiddenNodeIdSet, nodes, setFlowEdges]);
-
-  useEffect(() => {
     if (contextMenu === null) {
       return;
     }
@@ -839,6 +892,7 @@ export default function GraphCanvas({
       const modifierPressed = event.ctrlKey || event.metaKey;
       if (modifierPressed && key === "a") {
         event.preventDefault();
+        setSelectedReferenceId(null);
         setFlowNodes((current) =>
           current.map((node) => ({
             ...node,
@@ -878,13 +932,34 @@ export default function GraphCanvas({
           event.preventDefault();
           event.stopPropagation();
           setPendingDeletionNodeIds(selectedNodeIds);
+          return;
+        }
+        if (selectedReferenceId !== null) {
+          event.preventDefault();
+          event.stopPropagation();
+          const nextReferences = references.filter(
+            (reference) => referenceCurveId(reference) !== selectedReferenceId,
+          );
+          if (nextReferences.length !== references.length) {
+            referencesRef.current = nextReferences;
+            onReferencesChange(nextReferences);
+          }
+          setSelectedReferenceId(null);
         }
       }
     };
 
     window.addEventListener("keydown", handleCanvasShortcut, true);
     return () => window.removeEventListener("keydown", handleCanvasShortcut, true);
-  }, [historyBlocked, onRedo, onUndo, setFlowNodes]);
+  }, [
+    historyBlocked,
+    onRedo,
+    onReferencesChange,
+    onUndo,
+    references,
+    selectedReferenceId,
+    setFlowNodes,
+  ]);
 
   const handleNodesChange = useCallback(
     (changes: NodeChange<InformationFlowNode>[]) => {
@@ -913,21 +988,6 @@ export default function GraphCanvas({
       });
     },
     [setFlowNodes],
-  );
-
-  const handleEdgesChange = useCallback(
-    (changes: EdgeChange<Edge>[]) => {
-      applyEdgeChanges(changes);
-      const removed = new Set(
-        changes.filter((change) => change.type === "remove").map((change) => change.id),
-      );
-      if (removed.size > 0) {
-        onReferencesChange(
-          references.filter((reference) => !removed.has(edgeId(reference))),
-        );
-      }
-    },
-    [applyEdgeChanges, onReferencesChange, references],
   );
 
   const handleConnect = useCallback(
@@ -1070,6 +1130,7 @@ export default function GraphCanvas({
       node: InformationFlowNode,
       draggedNodes: InformationFlowNode[],
     ) => {
+      setDraggingNodeIds([]);
       const movedNodes = draggedNodes.length > 0 ? draggedNodes : [node];
       const nextLayout = finalizeNodeDragLayout(
         layout,
@@ -1101,6 +1162,7 @@ export default function GraphCanvas({
       if (flowInstance === null) {
         return;
       }
+      setSelectedReferenceId(null);
       const menuPosition = positionContextMenu(event.clientX, event.clientY);
       setContextMenu({
         kind: "pane",
@@ -1118,6 +1180,7 @@ export default function GraphCanvas({
     (event, node) => {
       event.preventDefault();
       event.stopPropagation();
+      setSelectedReferenceId(null);
       onNodeBringToFront(node.id);
       setContextMenu({
         kind: "node",
@@ -1140,6 +1203,74 @@ export default function GraphCanvas({
     }
   }, [flowInstance, onCreateNode]);
 
+  const handleCanvasPointerDownCapture = useCallback(
+    (event: ReactPointerEvent<HTMLDivElement>) => {
+      const target = event.target instanceof Element ? event.target : null;
+      if (
+        event.button !== 0 ||
+        event.shiftKey ||
+        event.ctrlKey ||
+        event.metaKey ||
+        target === null ||
+        target.closest(
+          ".react-flow__node, .react-flow__controls, .react-flow__minimap, .canvas-action-panel, .reference-search-popover, button, input, textarea",
+        ) !== null
+      ) {
+        canvasPointerGestureRef.current = null;
+        return;
+      }
+      canvasPointerGestureRef.current = {
+        moved: false,
+        pointerId: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+      };
+    },
+    [],
+  );
+
+  const handleCanvasPointerMoveCapture = useCallback(
+    (event: ReactPointerEvent<HTMLDivElement>) => {
+      const gesture = canvasPointerGestureRef.current;
+      if (gesture === null || gesture.pointerId !== event.pointerId || gesture.moved) {
+        return;
+      }
+      if (
+        Math.hypot(event.clientX - gesture.startX, event.clientY - gesture.startY) > 4
+      ) {
+        gesture.moved = true;
+      }
+    },
+    [],
+  );
+
+  const handleCanvasClickCapture = useCallback(
+    (event: ReactMouseEvent<HTMLDivElement>) => {
+      const gesture = canvasPointerGestureRef.current;
+      canvasPointerGestureRef.current = null;
+      if (gesture === null || gesture.moved || flowInstance === null) {
+        return;
+      }
+      const point = flowInstance.screenToFlowPosition({
+        x: event.clientX,
+        y: event.clientY,
+      });
+      const zoom = flowInstance.getViewport().zoom;
+      const selected = findReferenceCurveAtPoint(referenceCurves, point, 9 / zoom);
+      if (selected === null) {
+        setSelectedReferenceId(null);
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      setSelectedReferenceId(selected.id);
+      setFlowNodes((current) =>
+        current.map((node) => (node.selected ? { ...node, selected: false } : node)),
+      );
+    },
+    [flowInstance, referenceCurves, setFlowNodes],
+  );
+
   const visibleNodeCount = flowNodes.filter((node) => !node.hidden).length;
   const pendingDeletionNodes = pendingDeletionNodeIds
     .map((nodeId) => nodes.find((node) => node.id === nodeId))
@@ -1148,16 +1279,19 @@ export default function GraphCanvas({
   return (
     <div
       className="graph-canvas"
+      onClickCapture={handleCanvasClickCapture}
       onContextMenu={(event) => event.preventDefault()}
+      onPointerCancelCapture={() => {
+        canvasPointerGestureRef.current = null;
+      }}
+      onPointerDownCapture={handleCanvasPointerDownCapture}
+      onPointerMoveCapture={handleCanvasPointerMoveCapture}
       ref={containerRef}
     >
       <ReactFlow<InformationFlowNode, Edge>
         colorMode="light"
-        defaultEdgeOptions={{
-          style: { stroke: "#7a8c82", strokeWidth: 1.8 },
-        }}
         deleteKeyCode={["Backspace", "Delete"]}
-        edges={renderedEdgesForViewportGesture(flowEdges, viewportGestureActive)}
+        edges={noFlowEdges}
         edgesReconnectable={false}
         elevateNodesOnSelect={false}
         defaultViewport={viewport ?? defaultCanvasViewport}
@@ -1174,20 +1308,32 @@ export default function GraphCanvas({
           connectionSourceRef.current =
             params.handleType === "source" ? params.nodeId : null;
         }}
-        onEdgesChange={handleEdgesChange}
         onInit={setFlowInstance}
         onNodeContextMenu={handleNodeContextMenu}
-        onNodeClick={(_event, node) => onNodeBringToFront(node.id)}
+        onNodeClick={(_event, node) => {
+          setSelectedReferenceId(null);
+          onNodeBringToFront(node.id);
+        }}
         onNodeDoubleClick={(_event, node) => onEditNode(node.id)}
-        onNodeDragStart={(_event, node) => bringFlowNodeToFront(node.id)}
+        onNodeDragStart={(_event, node, draggedNodes) => {
+          setDraggingNodeIds(
+            Array.from(
+              new Set(
+                (draggedNodes.length > 0 ? draggedNodes : [node]).map(
+                  (draggedNode) => draggedNode.id,
+                ),
+              ),
+            ),
+          );
+          bringFlowNodeToFront(node.id);
+        }}
         onNodeDragStop={handleNodeDragStop}
         onNodesChange={handleNodesChange}
-        onMoveStart={() => setViewportGestureActive(true)}
-        onMoveEnd={(_event, nextViewport) => {
-          setViewportGestureActive(false);
-          onViewportChange(nextViewport);
+        onMoveEnd={(_event, nextViewport) => onViewportChange(nextViewport)}
+        onPaneClick={() => {
+          setContextMenu(null);
+          setSelectedReferenceId(null);
         }}
-        onPaneClick={() => setContextMenu(null)}
         onPaneContextMenu={handlePaneContextMenu}
         panOnDrag={[0, 1]}
         proOptions={{ hideAttribution: true }}
@@ -1195,6 +1341,37 @@ export default function GraphCanvas({
         zoomOnDoubleClick={false}
         zIndexMode="manual"
       >
+        <ViewportPortal>
+          <svg
+            aria-hidden="true"
+            className="graph-reference-layer"
+            height="1"
+            width="1"
+          >
+            <path
+              className="graph-reference-path"
+              d={stationaryReferencePaths.normal}
+            />
+            {stationaryReferencePaths.selected.length > 0 && (
+              <path
+                className="graph-reference-path graph-reference-path-selected"
+                d={stationaryReferencePaths.selected}
+              />
+            )}
+            {movingReferencePaths.normal.length > 0 && (
+              <path
+                className="graph-reference-path"
+                d={movingReferencePaths.normal}
+              />
+            )}
+            {movingReferencePaths.selected.length > 0 && (
+              <path
+                className="graph-reference-path graph-reference-path-selected"
+                d={movingReferencePaths.selected}
+              />
+            )}
+          </svg>
+        </ViewportPortal>
         <Background
           color="#d0d8d2"
           gap={24}
