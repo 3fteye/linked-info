@@ -44,8 +44,12 @@ export const resources = {
         reveal: "显示",
       },
       contentMarkers: {
+        current: "当前标记：{{marker}}",
+        invalidPayload: "所选内容不能标记为“{{marker}}”。",
         markSelection: "标记选中内容",
+        remove: "取消标记",
         secret: "秘密",
+        selectionConflict: "所选范围跨越了内容标记边界，请一次只处理一个完整标记。",
         totp: "TOTP",
       },
       deleteNode: {
@@ -660,8 +664,13 @@ export const resources = {
         reveal: "Reveal",
       },
       contentMarkers: {
+        current: "Current marker: {{marker}}",
+        invalidPayload: "The selection cannot be marked as {{marker}}.",
         markSelection: "Mark selection",
+        remove: "Remove marker",
         secret: "Secret",
+        selectionConflict:
+          "The selection crosses content marker boundaries. Edit one complete marker at a time.",
         totp: "TOTP",
       },
       deleteNode: {

@@ -66,7 +66,10 @@ import {
   canvasContentPreview,
   type ContentEnhancementLabels,
 } from "./contentProcessor";
-import { contentMarkerRegistry } from "./contentMarker";
+import {
+  contentMarkerRegistry,
+  type ContentMarkerSelection,
+} from "./contentMarker";
 import { buildCanvasReferencePresentation } from "./canvasReferencePresentation";
 import {
   buildBatchedReferencePaths,
@@ -98,7 +101,11 @@ interface InformationNodeData extends Record<string, unknown> {
   contentProcessorLabel: string;
   contentProcessorOptions: readonly ContentProcessorOption[];
   contentMarkerOptions: readonly ContentMarkerOption[];
+  editMarkerLabel: (markerLabel: string) => string;
   markSelectionLabel: string;
+  markerPayloadInvalidLabel: (markerLabel: string) => string;
+  markerSelectionConflictLabel: string;
+  removeMarkerLabel: string;
   unsupportedContentProcessorLabel: (processorId: string) => string;
   contentLabel: string;
   contentPlaceholder: string;
@@ -132,6 +139,7 @@ interface ContentProcessorOption {
 
 interface ContentMarkerOption {
   id: string;
+  invalidPayloadLabel: string | null;
   label: string;
 }
 
@@ -161,7 +169,11 @@ interface GraphLabels {
   copySecret: string;
   copySecretFailed: string;
   copySecretSuccess: string;
+  editMarker: (markerLabel: string) => string;
   markSelection: string;
+  markerPayloadInvalid: (markerLabel: string) => string;
+  markerSelectionConflict: string;
+  removeMarker: string;
   secretCopy: string;
   secretHide: string;
   secretLabel: string;
@@ -269,13 +281,13 @@ export function InformationNodeCard({
   const nodeRef = useRef<HTMLElement>(null);
   const nameInputRef = useRef<HTMLInputElement>(null);
   const contentInputRef = useRef<HTMLTextAreaElement>(null);
+  const contentKeyboardSelectionRef = useRef(false);
   const processorSelectRef = useRef<HTMLSelectElement>(null);
   const processorFocusTransferRef = useRef(false);
   const [draft, setDraft] = useState(() => nodeEditorDraft(data.name, data.content));
-  const [contentSelection, setContentSelection] = useState<{
-    end: number;
-    start: number;
-  } | null>(null);
+  const [contentSelection, setContentSelection] =
+    useState<ContentMarkerSelection | null>(null);
+  const [contentMarkerError, setContentMarkerError] = useState<string | null>(null);
   const wasEditingRef = useRef(data.editing);
 
   useEffect(() => {
@@ -285,6 +297,7 @@ export function InformationNodeCard({
 
     setDraft(nodeEditorDraft(data.name, data.content));
     setContentSelection(null);
+    setContentMarkerError(null);
   }, [data.content, data.editing, data.name]);
 
   useLayoutEffect(() => {
@@ -300,10 +313,12 @@ export function InformationNodeCard({
     }
 
     nameInputRef.current?.focus({ preventScroll: true });
-    const focusTimer = window.setTimeout(
-      () => nameInputRef.current?.focus({ preventScroll: true }),
-      0,
-    );
+    const focusTimer = window.setTimeout(() => {
+      const nodeElement = nodeRef.current;
+      if (nodeElement === null || !nodeElement.contains(document.activeElement)) {
+        nameInputRef.current?.focus({ preventScroll: true });
+      }
+    }, 0);
     return () => window.clearTimeout(focusTimer);
   }, [data.editing]);
 
@@ -360,27 +375,75 @@ export function InformationNodeCard({
     if (contentSelection === null) {
       return;
     }
-    const wrapped = contentMarkerRegistry.wrapSelection(
+    const option = data.contentMarkerOptions.find(
+      (candidate) => candidate.id === markerId,
+    );
+    const selectionStart =
+      contentSelection.kind === "marker"
+        ? contentSelection.located.start
+        : contentSelection.start;
+    const selectionEnd =
+      contentSelection.kind === "marker"
+        ? contentSelection.located.end
+        : contentSelection.end;
+    const result = contentMarkerRegistry.applyMarker(
       draft.content,
-      contentSelection.start,
-      contentSelection.end,
+      selectionStart,
+      selectionEnd,
       markerId,
     );
-    setDraft((current) => updateNodeEditorContent(current, wrapped.content));
+    if (!result.ok) {
+      setContentMarkerError(
+        result.reason === "conflict"
+          ? data.markerSelectionConflictLabel
+          : option?.invalidPayloadLabel ??
+              data.markerPayloadInvalidLabel(option?.label ?? markerId),
+      );
+      return;
+    }
+    setDraft((current) => updateNodeEditorContent(current, result.content));
     setContentSelection(null);
-    data.onContentChange(id, wrapped.content);
+    setContentMarkerError(null);
+    data.onContentChange(id, result.content);
     window.setTimeout(() => {
       contentInputRef.current?.focus({ preventScroll: true });
-      contentInputRef.current?.setSelectionRange(wrapped.caret, wrapped.caret);
+      contentInputRef.current?.setSelectionRange(result.caret, result.caret);
+    }, 0);
+  };
+
+  const removeSelectedMarker = () => {
+    if (contentSelection?.kind !== "marker") {
+      return;
+    }
+    const result = contentMarkerRegistry.removeMarker(
+      draft.content,
+      contentSelection.located.start,
+      contentSelection.located.end,
+    );
+    if (!result.ok) {
+      setContentMarkerError(data.markerSelectionConflictLabel);
+      return;
+    }
+    setDraft((current) => updateNodeEditorContent(current, result.content));
+    setContentSelection(null);
+    setContentMarkerError(null);
+    data.onContentChange(id, result.content);
+    window.setTimeout(() => {
+      contentInputRef.current?.focus({ preventScroll: true });
+      contentInputRef.current?.setSelectionRange(result.caret, result.caret);
     }, 0);
   };
 
   const captureContentSelection = (input: HTMLTextAreaElement) => {
     const { selectionEnd, selectionStart } = input;
-    setContentSelection(
-      selectionEnd > selectionStart
-        ? { end: selectionEnd, start: selectionStart }
-        : null,
+    const selection = contentMarkerRegistry.inspectSelection(
+      input.value,
+      selectionStart,
+      selectionEnd,
+    );
+    setContentSelection(selection);
+    setContentMarkerError(
+      selection?.kind === "conflict" ? data.markerSelectionConflictLabel : null,
     );
   };
 
@@ -477,29 +540,73 @@ export function InformationNodeCard({
           <textarea
             aria-label={data.contentLabel}
             className="nodrag nowheel graph-node-content-input"
+            onBlur={() => {
+              contentKeyboardSelectionRef.current = false;
+            }}
             onChange={(event) => {
               const content = event.target.value;
               setDraft((current) => updateNodeEditorContent(current, content));
               setContentSelection(null);
+              setContentMarkerError(null);
               data.onContentChange(id, content);
             }}
-            onKeyUp={(event) => captureContentSelection(event.currentTarget)}
-            onPointerUp={(event) => captureContentSelection(event.currentTarget)}
-            onSelect={(event) => captureContentSelection(event.currentTarget)}
+            onKeyDown={(event) => {
+              if (event.key === "Shift") {
+                contentKeyboardSelectionRef.current = true;
+              }
+            }}
+            onKeyUp={(event) => {
+              if (event.key === "Shift") {
+                contentKeyboardSelectionRef.current = false;
+                captureContentSelection(event.currentTarget);
+              } else if (!contentKeyboardSelectionRef.current) {
+                captureContentSelection(event.currentTarget);
+              }
+            }}
+            onMouseUp={(event) => {
+              contentKeyboardSelectionRef.current = false;
+              captureContentSelection(event.currentTarget);
+            }}
             placeholder={data.contentPlaceholder}
             ref={contentInputRef}
             rows={4}
             value={draft.content}
           />
-          {contentSelection !== null && (
+          {contentSelection !== null && contentSelection.kind !== "conflict" && (
             <div
-              aria-label={data.markSelectionLabel}
+              aria-label={
+                contentSelection.kind === "marker"
+                  ? data.editMarkerLabel(
+                      data.contentMarkerOptions.find(
+                        (option) =>
+                          option.id === contentSelection.located.marker.id,
+                      )?.label ?? contentSelection.located.marker.id,
+                    )
+                  : data.markSelectionLabel
+              }
               className="graph-node-content-marker-toolbar"
             >
-              <span>{data.markSelectionLabel}</span>
+              <span>
+                {contentSelection.kind === "marker"
+                  ? data.editMarkerLabel(
+                      data.contentMarkerOptions.find(
+                        (option) =>
+                          option.id === contentSelection.located.marker.id,
+                      )?.label ?? contentSelection.located.marker.id,
+                    )
+                  : data.markSelectionLabel}
+              </span>
               {data.contentMarkerOptions.map((option) => (
                 <button
+                  aria-pressed={
+                    contentSelection.kind === "marker" &&
+                    contentSelection.located.marker.id === option.id
+                  }
                   className="nodrag nowheel graph-node-content-marker-button"
+                  disabled={
+                    contentSelection.kind === "marker" &&
+                    contentSelection.located.marker.id === option.id
+                  }
                   key={option.id}
                   onClick={() => markSelectedContent(option.id)}
                   onPointerDown={(event) => event.preventDefault()}
@@ -508,7 +615,22 @@ export function InformationNodeCard({
                   {option.label}
                 </button>
               ))}
+              {contentSelection.kind === "marker" && (
+                <button
+                  className="nodrag nowheel graph-node-content-marker-button graph-node-content-marker-remove"
+                  onClick={removeSelectedMarker}
+                  onPointerDown={(event) => event.preventDefault()}
+                  type="button"
+                >
+                  {data.removeMarkerLabel}
+                </button>
+              )}
             </div>
+          )}
+          {contentMarkerError !== null && (
+            <span className="graph-node-error" role="alert">
+              {contentMarkerError}
+            </span>
           )}
           {(data.nameConflict || draft.nameConflict) && (
             <span className="graph-node-error" role="alert">
@@ -1012,7 +1134,11 @@ export default function GraphCanvas({
             contentProcessorLabel: labels.contentProcessor,
             contentProcessorOptions,
             contentMarkerOptions,
+            editMarkerLabel: labels.editMarker,
             markSelectionLabel: labels.markSelection,
+            markerPayloadInvalidLabel: labels.markerPayloadInvalid,
+            markerSelectionConflictLabel: labels.markerSelectionConflict,
+            removeMarkerLabel: labels.removeMarker,
             unsupportedContentProcessorLabel: labels.unsupportedContentProcessor,
             contentLabel: labels.content,
             contentPlaceholder: labels.contentPlaceholder,

@@ -33,10 +33,15 @@ function cardProps(overrides: Record<string, unknown> = {}): NodeProps<any> {
         { id: "markdown", label: "Markdown" },
       ],
       contentMarkerOptions: [
-        { id: "totp", label: "TOTP" },
-        { id: "secret", label: "Secret" },
+        { id: "totp", invalidPayloadLabel: "Invalid TOTP secret", label: "TOTP" },
+        { id: "secret", invalidPayloadLabel: null, label: "Secret" },
       ],
+      editMarkerLabel: (markerLabel: string) => `Current marker: ${markerLabel}`,
       markSelectionLabel: "Mark selection",
+      markerPayloadInvalidLabel: (markerLabel: string) =>
+        `Invalid ${markerLabel} payload`,
+      markerSelectionConflictLabel: "Selection crosses marker boundaries",
+      removeMarkerLabel: "Remove marker",
       unsupportedContentProcessorLabel: (processorId: string) =>
         `Unavailable: ${processorId}`,
       contentLabel: "Content",
@@ -177,6 +182,19 @@ describe("InformationNodeCard", () => {
     expect(props.data.onCommit).not.toHaveBeenCalled();
   });
 
+  it("does not steal focus back from content after the user enters a new editor", () => {
+    vi.useFakeTimers();
+    renderCard(root, cardProps({ content: "content" }));
+    const textarea = container.querySelector("textarea")!;
+
+    act(() => {
+      textarea.focus();
+      vi.runAllTimers();
+    });
+
+    expect(document.activeElement).toBe(textarea);
+  });
+
   it("changes the content processor without leaving the node editor", () => {
     vi.useFakeTimers();
     const props = cardProps({ content: "# Heading" });
@@ -227,7 +245,7 @@ describe("InformationNodeCard", () => {
     act(() => {
       textarea.focus();
       textarea.setSelectionRange(start, end);
-      textarea.dispatchEvent(new Event("pointerup", { bubbles: true }));
+      textarea.dispatchEvent(new Event("mouseup", { bubbles: true }));
     });
     const markerToolbar = container.querySelector(
       ".graph-node-content-marker-toolbar",
@@ -244,6 +262,133 @@ describe("InformationNodeCard", () => {
     expect(props.data.onContentChange).toHaveBeenCalledWith(nodeId, marked);
     expect(document.activeElement).toBe(textarea);
     expect(textarea.selectionStart).toBe(marked.indexOf(", note"));
+  });
+
+  it("captures a keyboard range once when Shift is released", () => {
+    const content = "API synthetic-secret retained";
+    renderCard(root, cardProps({ content }));
+    const textarea = container.querySelector("textarea")!;
+    const start = content.indexOf("synthetic-secret");
+
+    act(() => {
+      textarea.focus();
+      textarea.dispatchEvent(
+        new KeyboardEvent("keydown", { bubbles: true, key: "Shift" }),
+      );
+      textarea.setSelectionRange(start, start + "synthetic-secret".length);
+      textarea.dispatchEvent(
+        new KeyboardEvent("keyup", { bubbles: true, key: "Shift" }),
+      );
+    });
+
+    expect(
+      container.querySelector('.graph-node-content-marker-toolbar[aria-label="Mark selection"]'),
+    ).not.toBeNull();
+  });
+
+  it("recognizes an existing marker at the caret and changes its complete type", () => {
+    vi.useFakeTimers();
+    const content = "2FA [[li:secret]]JBSW Y3DP EHPK 3PXP[[/li]], note";
+    const props = cardProps({ content });
+    renderCard(root, props);
+    act(() => vi.runAllTimers());
+    const textarea = container.querySelector("textarea")!;
+    const caret = content.indexOf("Y3DP");
+
+    act(() => {
+      textarea.focus();
+      textarea.setSelectionRange(caret, caret);
+      textarea.dispatchEvent(new Event("mouseup", { bubbles: true }));
+    });
+    const toolbar = container.querySelector(
+      '.graph-node-content-marker-toolbar[aria-label="Current marker: Secret"]',
+    );
+    expect(toolbar).not.toBeNull();
+    expect(
+      (Array.from(toolbar!.querySelectorAll("button")).find(
+        (button) => button.textContent === "Secret",
+      ) as HTMLButtonElement).disabled,
+    ).toBe(true);
+
+    const totpButton = Array.from(toolbar!.querySelectorAll("button")).find(
+      (button) => button.textContent === "TOTP",
+    );
+    act(() => totpButton?.click());
+    act(() => vi.runAllTimers());
+
+    const changed = "2FA [[li:totp]]JBSW Y3DP EHPK 3PXP[[/li]], note";
+    expect(textarea.value).toBe(changed);
+    expect(props.data.onContentChange).toHaveBeenCalledWith(nodeId, changed);
+  });
+
+  it("removes only the marker wrapper and keeps the decoded payload", () => {
+    vi.useFakeTimers();
+    const content = String.raw`API [[li:secret]]prefix\\\[[/li]]suffix[[/li]], note`;
+    const props = cardProps({ content });
+    renderCard(root, props);
+    act(() => vi.runAllTimers());
+    const textarea = container.querySelector("textarea")!;
+    const caret = content.indexOf("prefix") + 2;
+
+    act(() => {
+      textarea.focus();
+      textarea.setSelectionRange(caret, caret);
+      textarea.dispatchEvent(new Event("mouseup", { bubbles: true }));
+    });
+    const remove = Array.from(
+      container.querySelectorAll(".graph-node-content-marker-toolbar button"),
+    ).find((button) => button.textContent === "Remove marker");
+    act(() => (remove as HTMLButtonElement | undefined)?.click());
+    act(() => vi.runAllTimers());
+
+    expect(textarea.value).toBe(String.raw`API prefix\[[/li]]suffix, note`);
+    expect(props.data.onContentChange).toHaveBeenCalledWith(
+      nodeId,
+      String.raw`API prefix\[[/li]]suffix, note`,
+    );
+  });
+
+  it("rejects invalid TOTP selections without changing the draft", () => {
+    const content = "API synthetic-api-key";
+    const props = cardProps({ content });
+    renderCard(root, props);
+    const textarea = container.querySelector("textarea")!;
+    const start = content.indexOf("synthetic");
+
+    act(() => {
+      textarea.focus();
+      textarea.setSelectionRange(start, content.length);
+      textarea.dispatchEvent(new Event("mouseup", { bubbles: true }));
+    });
+    const totp = Array.from(
+      container.querySelectorAll(".graph-node-content-marker-toolbar button"),
+    ).find((button) => button.textContent === "TOTP");
+    act(() => (totp as HTMLButtonElement | undefined)?.click());
+
+    expect(textarea.value).toBe(content);
+    expect(props.data.onContentChange).not.toHaveBeenCalled();
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe(
+      "Invalid TOTP secret",
+    );
+  });
+
+  it("rejects a selection that crosses a marker boundary", () => {
+    const content = "before [[li:secret]]value[[/li]] after";
+    const props = cardProps({ content });
+    renderCard(root, props);
+    const textarea = container.querySelector("textarea")!;
+
+    act(() => {
+      textarea.focus();
+      textarea.setSelectionRange(content.indexOf("before"), content.indexOf(" after"));
+      textarea.dispatchEvent(new Event("mouseup", { bubbles: true }));
+    });
+
+    expect(container.querySelector(".graph-node-content-marker-toolbar")).toBeNull();
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe(
+      "Selection crosses marker boundaries",
+    );
+    expect(props.data.onContentChange).not.toHaveBeenCalled();
   });
 
   it("shows when dense incoming edges are folded by the canvas view", () => {

@@ -1,6 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 
 interface SyntheticNode {
+  content?: string;
   id: string;
   name: string;
   x: number;
@@ -37,7 +38,7 @@ async function openSyntheticWorkspace(page: Page, nodes: SyntheticNode[]) {
           nodes: syntheticNodes.map((node) => ({
             id: node.id,
             name: node.name,
-            content: `Generated test content for ${node.name}`,
+            content: node.content ?? `Generated test content for ${node.name}`,
           })),
           layout: syntheticNodes.map((node) => ({
             nodeId: node.id,
@@ -68,30 +69,32 @@ async function storedWorkspace(page: Page) {
   }, workspaceStorageKey);
 }
 
-async function markTextareaSelection(
-  page: Page,
-  selectedText: string,
-  markerLabel: string,
-) {
+async function selectAllTextarea(page: Page) {
   const textarea = page.locator('[data-node-id][data-editing="true"] textarea');
-  await textarea.evaluate((element, selection) => {
+  await textarea.focus();
+  await page.keyboard.press("Control+A");
+  await expect
+    .poll(() =>
+      textarea.evaluate((element) => {
+        const input = element as HTMLTextAreaElement;
+        return input.value.slice(input.selectionStart, input.selectionEnd);
+      }),
+    )
+    .toBe(await textarea.inputValue());
+}
+
+async function placeCaretInsideTextareaText(page: Page, text: string) {
+  const textarea = page.locator('[data-node-id][data-editing="true"] textarea');
+  await textarea.evaluate((element, selectedText) => {
     const input = element as HTMLTextAreaElement;
-    const start = input.value.indexOf(selection);
+    const start = input.value.indexOf(selectedText);
     if (start < 0) {
-      throw new Error("synthetic selection text is missing");
+      throw new Error("synthetic caret target is missing");
     }
     input.focus();
     input.setSelectionRange(start, start);
-  }, selectedText);
-  await page.keyboard.down("Shift");
-  for (let index = 0; index < selectedText.length; index += 1) {
-    await page.keyboard.press("ArrowRight");
-  }
-  await page.keyboard.up("Shift");
-  const toolbar = page.locator(".graph-node-content-marker-toolbar");
-  await expect(toolbar).toBeVisible();
-  await toolbar.getByRole("button", { exact: true, name: markerLabel }).click();
-  await expect(textarea).toHaveValue(new RegExp(`\\[\\[li:${markerLabel.toLowerCase()}`));
+  }, text);
+  await page.keyboard.press("ArrowRight");
 }
 
 test("creating and editing a node survives a browser reload", async ({ page }) => {
@@ -121,11 +124,15 @@ test("creating and editing a node survives a browser reload", async ({ page }) =
   const processorSelect = editor.locator("select");
   await processorSelect.focus();
   await processorSelect.selectOption("markdown");
+  const textarea = page.locator('[data-node-id][data-editing="true"] textarea');
+  await textarea.fill(syntheticTotp);
+  await selectAllTextarea(page);
   await page
-    .locator('[data-node-id][data-editing="true"] textarea')
-    .fill(unmarkedContent);
-  await markTextareaSelection(page, syntheticTotp, "TOTP");
-  await markTextareaSelection(page, syntheticSecret, "Secret");
+    .locator(".graph-node-content-marker-toolbar")
+    .getByRole("button", { exact: true, name: "TOTP" })
+    .click();
+  await expect(textarea).toHaveValue(`[[li:totp]]${syntheticTotp}[[/li]]`);
+  await textarea.fill(syntheticContent);
   await page.getByTestId("graph-canvas").click({ position: { x: 30, y: 30 } });
 
   await expect
@@ -166,6 +173,54 @@ test("creating and editing a node survives a browser reload", async ({ page }) =
   await expect(secret).not.toContainText(syntheticSecret);
   await expect(markdown.locator("script")).toHaveCount(0);
   await expect(markdown).not.toContainText("blocked");
+});
+
+test("existing content markers can be changed or removed without nesting", async ({
+  page,
+}) => {
+  const syntheticTotp = "JBSW Y3DP EHPK 3PXP";
+  const invalidTotp = "synthetic-invalid-key";
+  const original = `valid ${syntheticTotp}; invalid ${invalidTotp}`;
+  const markedNode = {
+    content: `valid [[li:secret]]${syntheticTotp}[[/li]]; invalid ${invalidTotp}`,
+    id: syntheticId(1),
+    name: "Marker lifecycle",
+    x: 100,
+    y: 100,
+  };
+  await openSyntheticWorkspace(page, [markedNode]);
+  await node(page, markedNode.id).dblclick({ position: { x: 80, y: 24 } });
+  const textarea = page.locator('[data-node-id][data-editing="true"] textarea');
+  await expect(textarea).toBeVisible();
+  await placeCaretInsideTextareaText(page, syntheticTotp);
+  const secretToolbar = page.getByLabel("Current marker: Secret");
+  await expect(secretToolbar).toBeVisible();
+  await expect(secretToolbar.getByRole("button", { name: "Secret" })).toBeDisabled();
+  await secretToolbar.getByRole("button", { name: "TOTP" }).click();
+  await expect(textarea).toHaveValue(
+    `valid [[li:totp]]${syntheticTotp}[[/li]]; invalid ${invalidTotp}`,
+  );
+
+  await selectAllTextarea(page);
+  await expect(page.getByRole("alert")).toHaveText(
+    "The selection crosses content marker boundaries. Edit one complete marker at a time.",
+  );
+  await expect(page.locator(".graph-node-content-marker-toolbar")).toHaveCount(0);
+
+  await placeCaretInsideTextareaText(page, syntheticTotp);
+  const totpToolbar = page.getByLabel("Current marker: TOTP");
+  await expect(totpToolbar).toBeVisible();
+  await totpToolbar.getByRole("button", { name: "Remove marker" }).click();
+  await expect(textarea).toHaveValue(original);
+
+  await textarea.fill(invalidTotp);
+  await selectAllTextarea(page);
+  await page
+    .locator(".graph-node-content-marker-toolbar")
+    .getByRole("button", { name: "TOTP" })
+    .click();
+  await expect(page.getByRole("alert")).toHaveText("Invalid TOTP secret");
+  await expect(textarea).toHaveValue(invalidTotp);
 });
 
 test("node drag and pane pan persist their geometry", async ({ page }) => {

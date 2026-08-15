@@ -800,6 +800,25 @@ h1 {
   background: #eaf3ed;
 }
 
+.graph-node-content-marker-button:disabled {
+  border-color: #8fb39d;
+  color: #174b32;
+  background: #dcebe1;
+  cursor: default;
+}
+
+.graph-node-content-marker-remove {
+  border-color: #d9c3bf;
+  color: #7b3f37;
+  background: #fff9f8;
+}
+
+.graph-node-content-marker-remove:hover,
+.graph-node-content-marker-remove:focus-visible {
+  border-color: #be8379;
+  background: #faece9;
+}
+
 .graph-node-processor-field {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);

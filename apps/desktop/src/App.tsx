@@ -1149,6 +1149,8 @@ function App({
     () =>
       contentMarkerRegistry.list().map((marker) => ({
         id: marker.id,
+        invalidPayloadLabel:
+          marker.id === "totp" ? t("totp.invalid") : null,
         label:
           marker.id === "totp"
             ? t("contentMarkers.totp")
@@ -4792,7 +4794,13 @@ function App({
                     (secretClipboardStatus?.clearAfterMs ?? 45_000) / 1_000,
                   ),
                 }),
+                editMarker: (markerLabel) =>
+                  t("contentMarkers.current", { marker: markerLabel }),
                 markSelection: t("contentMarkers.markSelection"),
+                markerPayloadInvalid: (markerLabel) =>
+                  t("contentMarkers.invalidPayload", { marker: markerLabel }),
+                markerSelectionConflict: t("contentMarkers.selectionConflict"),
+                removeMarker: t("contentMarkers.remove"),
                 secretCopy: contentEnhancementLabels.secret.copy,
                 secretHide: contentEnhancementLabels.secret.hide,
                 secretLabel: contentEnhancementLabels.secret.label,

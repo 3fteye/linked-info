@@ -1,6 +1,9 @@
+import { parseTotpPayload } from "./totp";
+
 export interface ContentMarkerDefinition {
   excludeFromSemanticAnalysis: boolean;
   id: string;
+  validatePayload?: (payload: string) => boolean;
 }
 
 export interface ParsedContentMarker {
@@ -18,6 +21,43 @@ export interface WrappedContentSelection {
   caret: number;
   content: string;
 }
+
+export interface LocatedContentMarker {
+  end: number;
+  marker: ParsedContentMarker;
+  payloadEnd: number;
+  payloadStart: number;
+  start: number;
+}
+
+export type ContentMarkerSelection =
+  | {
+      end: number;
+      kind: "conflict";
+      start: number;
+    }
+  | {
+      kind: "marker";
+      located: LocatedContentMarker;
+    }
+  | {
+      end: number;
+      kind: "plain";
+      payload: string;
+      start: number;
+    };
+
+export type ContentMarkerMutationResult =
+  | {
+      caret: number;
+      content: string;
+      ok: true;
+    }
+  | {
+      markerId?: string;
+      ok: false;
+      reason: "conflict" | "invalid-payload" | "not-marker" | "selection-required";
+    };
 
 const markerOpeningPattern = /\[\[li:([a-z][a-z0-9-]*)\]\]/gu;
 const markerClosing = "[[/li]]";
@@ -83,6 +123,52 @@ function closingMarkerIndex(source: string, payloadStart: number): number | null
   return null;
 }
 
+function locateContentMarkers(
+  source: string,
+  definitionFor: (id: string) => ContentMarkerDefinition | null,
+): LocatedContentMarker[] {
+  const markers: LocatedContentMarker[] = [];
+  const openingPattern = new RegExp(
+    markerOpeningPattern.source,
+    markerOpeningPattern.flags,
+  );
+  let match: RegExpExecArray | null;
+  while ((match = openingPattern.exec(source)) !== null) {
+    const start = match.index;
+    const payloadStart = start + match[0].length;
+    const payloadEnd = closingMarkerIndex(source, payloadStart);
+    if (payloadEnd === null) {
+      break;
+    }
+    const end = payloadEnd + markerClosing.length;
+    const id = match[1];
+    markers.push({
+      end,
+      marker: {
+        definition: definitionFor(id),
+        id,
+        payload: decodedPayload(source.slice(payloadStart, payloadEnd)),
+        raw: source.slice(start, end),
+      },
+      payloadEnd,
+      payloadStart,
+      start,
+    });
+    openingPattern.lastIndex = end;
+  }
+  return markers;
+}
+
+function validSelectionRange(source: string, start: number, end: number): boolean {
+  return (
+    Number.isSafeInteger(start) &&
+    Number.isSafeInteger(end) &&
+    start >= 0 &&
+    end >= start &&
+    end <= source.length
+  );
+}
+
 export class ContentMarkerRegistry {
   private readonly definitions: ReadonlyMap<string, ContentMarkerDefinition>;
 
@@ -111,32 +197,59 @@ export class ContentMarkerRegistry {
   segment(source: string): ContentMarkerSegment[] {
     const segments: ContentMarkerSegment[] = [];
     let cursor = 0;
-    markerOpeningPattern.lastIndex = 0;
-    let match: RegExpExecArray | null;
-    while ((match = markerOpeningPattern.exec(source)) !== null) {
-      const openingStart = match.index;
-      const payloadStart = openingStart + match[0].length;
-      const closingStart = closingMarkerIndex(source, payloadStart);
-      if (closingStart === null) {
-        break;
-      }
-      appendText(segments, source.slice(cursor, openingStart));
-      const end = closingStart + markerClosing.length;
-      const id = match[1];
+    for (const located of locateContentMarkers(source, (id) => this.get(id))) {
+      appendText(segments, source.slice(cursor, located.start));
       segments.push({
         kind: "marker",
-        marker: {
-          definition: this.get(id),
-          id,
-          payload: decodedPayload(source.slice(payloadStart, closingStart)),
-          raw: source.slice(openingStart, end),
-        },
+        marker: located.marker,
       });
-      cursor = end;
-      markerOpeningPattern.lastIndex = end;
+      cursor = located.end;
     }
     appendText(segments, source.slice(cursor));
     return segments;
+  }
+
+  inspectSelection(
+    source: string,
+    selectionStart: number,
+    selectionEnd: number,
+  ): ContentMarkerSelection | null {
+    if (!validSelectionRange(source, selectionStart, selectionEnd)) {
+      throw new Error("invalid content marker selection");
+    }
+    const markers = locateContentMarkers(source, (id) => this.get(id));
+    if (selectionStart === selectionEnd) {
+      const located = markers.find(
+        (candidate) =>
+          candidate.start < selectionStart && selectionStart < candidate.end,
+      );
+      return located === undefined ? null : { kind: "marker", located };
+    }
+
+    const overlapping = markers.filter(
+      (candidate) =>
+        selectionStart < candidate.end && selectionEnd > candidate.start,
+    );
+    if (overlapping.length === 0) {
+      return {
+        end: selectionEnd,
+        kind: "plain",
+        payload: source.slice(selectionStart, selectionEnd),
+        start: selectionStart,
+      };
+    }
+    if (
+      overlapping.length === 1 &&
+      selectionStart >= overlapping[0].start &&
+      selectionEnd <= overlapping[0].end
+    ) {
+      return { kind: "marker", located: overlapping[0] };
+    }
+    return {
+      end: selectionEnd,
+      kind: "conflict",
+      start: selectionStart,
+    };
   }
 
   serialize(id: string, payload: string): string {
@@ -146,30 +259,86 @@ export class ContentMarkerRegistry {
     return `[[li:${id}]]${escapedPayload(payload)}${markerClosing}`;
   }
 
+  applyMarker(
+    content: string,
+    selectionStart: number,
+    selectionEnd: number,
+    id: string,
+  ): ContentMarkerMutationResult {
+    const definition = this.get(id);
+    if (definition === null) {
+      throw new Error(`unknown content marker id: ${id}`);
+    }
+    const selection = this.inspectSelection(
+      content,
+      selectionStart,
+      selectionEnd,
+    );
+    if (selection === null) {
+      return { ok: false, reason: "selection-required" };
+    }
+    if (selection.kind === "conflict") {
+      return { ok: false, reason: "conflict" };
+    }
+    const payload =
+      selection.kind === "marker" ? selection.located.marker.payload : selection.payload;
+    if (definition.validatePayload?.(payload) === false) {
+      return { markerId: id, ok: false, reason: "invalid-payload" };
+    }
+    const start =
+      selection.kind === "marker" ? selection.located.start : selection.start;
+    const end = selection.kind === "marker" ? selection.located.end : selection.end;
+    const marker = this.serialize(id, payload);
+    return {
+      caret: start + marker.length,
+      content: `${content.slice(0, start)}${marker}${content.slice(end)}`,
+      ok: true,
+    };
+  }
+
+  removeMarker(
+    content: string,
+    selectionStart: number,
+    selectionEnd: number,
+  ): ContentMarkerMutationResult {
+    const selection = this.inspectSelection(
+      content,
+      selectionStart,
+      selectionEnd,
+    );
+    if (selection?.kind === "conflict") {
+      return { ok: false, reason: "conflict" };
+    }
+    if (selection?.kind !== "marker") {
+      return { ok: false, reason: "not-marker" };
+    }
+    const { located } = selection;
+    return {
+      caret: located.start + located.marker.payload.length,
+      content: `${content.slice(0, located.start)}${located.marker.payload}${content.slice(located.end)}`,
+      ok: true,
+    };
+  }
+
   wrapSelection(
     content: string,
     selectionStart: number,
     selectionEnd: number,
     id: string,
   ): WrappedContentSelection {
-    if (
-      !Number.isSafeInteger(selectionStart) ||
-      !Number.isSafeInteger(selectionEnd) ||
-      selectionStart < 0 ||
-      selectionEnd <= selectionStart ||
-      selectionEnd > content.length
-    ) {
-      throw new Error("invalid content marker selection");
+    const result = this.applyMarker(content, selectionStart, selectionEnd, id);
+    if (!result.ok) {
+      throw new Error(`invalid content marker selection: ${result.reason}`);
     }
-    const marker = this.serialize(id, content.slice(selectionStart, selectionEnd));
-    return {
-      caret: selectionStart + marker.length,
-      content: `${content.slice(0, selectionStart)}${marker}${content.slice(selectionEnd)}`,
-    };
+    return result;
   }
 }
 
 export const contentMarkerRegistry = new ContentMarkerRegistry([
-  { excludeFromSemanticAnalysis: true, id: "totp" },
+  {
+    excludeFromSemanticAnalysis: true,
+    id: "totp",
+    validatePayload: (payload) => parseTotpPayload(payload) !== null,
+  },
   { excludeFromSemanticAnalysis: true, id: "secret" },
 ]);
