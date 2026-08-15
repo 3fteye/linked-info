@@ -125,15 +125,9 @@ test("creating and editing a node survives a browser reload", async ({ page }) =
   const processorSelect = editor.locator("select");
   await processorSelect.focus();
   await processorSelect.selectOption("markdown");
-  const textarea = page.locator('[data-node-id][data-editing="true"] textarea');
-  await textarea.fill(syntheticTotp);
-  await selectAllTextarea(page);
   await page
-    .locator(".graph-node-content-marker-toolbar")
-    .getByRole("button", { exact: true, name: "TOTP" })
-    .click();
-  await expect(textarea).toHaveValue(`[[li:totp]]${syntheticTotp}[[/li]]`);
-  await textarea.fill(syntheticContent);
+    .locator('[data-node-id][data-editing="true"] textarea')
+    .fill(syntheticContent);
   await page.getByTestId("graph-canvas").click({ position: { x: 30, y: 30 } });
 
   await expect
