@@ -901,18 +901,22 @@ h1 {
 }
 
 .totp-content-code {
-  min-width: 0;
+  min-width: 7ch;
   color: #174f35;
   font-family: Consolas, "SFMono-Regular", monospace;
   font-size: 15px;
   font-weight: 750;
+  font-variant-numeric: tabular-nums;
   letter-spacing: 0.08em;
 }
 
 .totp-content-remaining {
+  width: 38px;
   flex: 0 0 auto;
   color: #6c756f;
   font-size: 9px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
 }
 
 .totp-content-copy {
@@ -930,6 +934,13 @@ h1 {
 .totp-content-copy:hover {
   border-color: #6f9c81;
   background: #eaf3ed;
+}
+
+.totp-content-copy:disabled {
+  border-color: #d5dfd8;
+  color: #8b958f;
+  background: #f5f8f6;
+  cursor: wait;
 }
 
 .totp-content-error {

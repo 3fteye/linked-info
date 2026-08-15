@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   generateTotp,
   totpRemainingSeconds,
+  type TotpConfiguration,
   type TotpDirective,
 } from "./totp";
 
@@ -19,39 +20,72 @@ interface TotpContentLineProps {
   onCopySecret?: (value: string) => void;
 }
 
+function sameConfiguration(
+  left: TotpConfiguration | null,
+  right: TotpConfiguration | null,
+): boolean {
+  if (left === right) {
+    return true;
+  }
+  if (
+    left === null ||
+    right === null ||
+    left.algorithm !== right.algorithm ||
+    left.digits !== right.digits ||
+    left.period !== right.period ||
+    left.secret.length !== right.secret.length
+  ) {
+    return false;
+  }
+  return left.secret.every((value, index) => value === right.secret[index]);
+}
+
 export function TotpContentLine({
   directive,
   labels,
   onCopySecret,
 }: TotpContentLineProps) {
   const [timestampMs, setTimestampMs] = useState(() => Date.now());
-  const [code, setCode] = useState<string | null>(null);
-  const [generationFailed, setGenerationFailed] = useState(false);
-  const configuration = directive.valid ? directive.configuration : null;
+  const [generated, setGenerated] = useState<{
+    code: string;
+    configuration: TotpConfiguration;
+    counter: number;
+  } | null>(null);
+  const [failedConfiguration, setFailedConfiguration] =
+    useState<TotpConfiguration | null>(null);
+  const nextConfiguration = directive.valid ? directive.configuration : null;
+  const stableConfigurationRef = useRef<TotpConfiguration | null>(null);
+  if (!sameConfiguration(stableConfigurationRef.current, nextConfiguration)) {
+    stableConfigurationRef.current = nextConfiguration;
+  }
+  const configuration = stableConfigurationRef.current;
   const counter =
     configuration === null
       ? null
       : Math.floor(timestampMs / 1_000 / configuration.period);
+  const code =
+    generated?.configuration === configuration ? generated.code : null;
+  const codeIsCurrent = code !== null && generated?.counter === counter;
+  const generationFailed = failedConfiguration === configuration;
 
   useEffect(() => {
     if (configuration === null || counter === null) {
       return;
     }
     let active = true;
-    setCode(null);
-    setGenerationFailed(false);
+    setFailedConfiguration(null);
     void generateTotp(
       configuration,
       counter * configuration.period * 1_000,
     )
       .then((nextCode) => {
         if (active) {
-          setCode(nextCode);
+          setGenerated({ code: nextCode, configuration, counter });
         }
       })
       .catch(() => {
         if (active) {
-          setGenerationFailed(true);
+          setFailedConfiguration(configuration);
         }
       });
     return () => {
@@ -63,8 +97,21 @@ export function TotpContentLine({
     if (configuration === null) {
       return;
     }
-    const timer = window.setInterval(() => setTimestampMs(Date.now()), 500);
-    return () => window.clearInterval(timer);
+    let timer: number | null = null;
+    const scheduleNextSecond = () => {
+      const now = Date.now();
+      const delay = Math.max(50, 1_020 - (now % 1_000));
+      timer = window.setTimeout(() => {
+        setTimestampMs(Date.now());
+        scheduleNextSecond();
+      }, delay);
+    };
+    scheduleNextSecond();
+    return () => {
+      if (timer !== null) {
+        window.clearTimeout(timer);
+      }
+    };
   }, [configuration]);
 
   const remainingSeconds = useMemo(
@@ -85,7 +132,10 @@ export function TotpContentLine({
   }
 
   return (
-    <span className="totp-content-line" data-status={code === null ? "loading" : "ready"}>
+    <span
+      className="totp-content-line"
+      data-status={code === null ? "loading" : codeIsCurrent ? "ready" : "refreshing"}
+    >
       <span className="totp-content-label">TOTP</span>
       <output aria-label="TOTP" className="totp-content-code">
         {code ?? labels.generating}
@@ -95,12 +145,15 @@ export function TotpContentLine({
           {labels.remaining(remainingSeconds)}
         </span>
       )}
-      {code !== null && onCopySecret !== undefined && (
+      {onCopySecret !== undefined && (
         <button
           className="nodrag nowheel totp-content-copy"
+          disabled={!codeIsCurrent}
           onClick={(event) => {
             event.stopPropagation();
-            onCopySecret(code);
+            if (code !== null && codeIsCurrent) {
+              onCopySecret(code);
+            }
           }}
           onPointerDown={(event) => event.stopPropagation()}
           type="button"

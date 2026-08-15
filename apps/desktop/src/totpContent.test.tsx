@@ -30,6 +30,7 @@ describe("TotpContentLine", () => {
 
   afterEach(() => {
     act(() => root.unmount());
+    vi.restoreAllMocks();
     container.remove();
   });
 
@@ -73,5 +74,43 @@ describe("TotpContentLine", () => {
     expect(container.querySelector('[data-status="invalid"]')).not.toBeNull();
     expect(container.textContent).toContain(labels.invalid);
     expect(container.textContent).not.toContain("malformed-secret");
+  });
+
+  it("keeps the previous code and copy button in place while the next period loads", async () => {
+    const directive = parseTotpDirectiveLine(
+      "TOTP: otpauth://totp/Synthetic?secret=JBSWY3DPEHPK3PXP&period=1",
+    );
+    expect(directive).not.toBeNull();
+    const onCopySecret = vi.fn();
+
+    act(() => {
+      root.render(
+        <TotpContentLine
+          directive={directive!}
+          labels={labels}
+          onCopySecret={onCopySecret}
+        />,
+      );
+    });
+    await act(async () => {
+      await new Promise((resolve) => window.setTimeout(resolve, 50));
+    });
+    const firstCode = container.querySelector(".totp-content-code")?.textContent;
+    expect(firstCode).toMatch(/^\d{6}$/u);
+
+    vi.spyOn(globalThis.crypto.subtle, "sign").mockImplementation(
+      () => new Promise<ArrayBuffer>(() => undefined),
+    );
+    await act(async () => {
+      await new Promise((resolve) => window.setTimeout(resolve, 1_100));
+    });
+
+    expect(container.querySelector(".totp-content-code")?.textContent).toBe(firstCode);
+    expect(container.querySelector(".totp-content-line")?.getAttribute("data-status")).toBe(
+      "refreshing",
+    );
+    expect(
+      container.querySelector<HTMLButtonElement>(".totp-content-copy")?.disabled,
+    ).toBe(true);
   });
 });

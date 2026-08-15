@@ -8,6 +8,11 @@ interface SyntheticNode {
   y: number;
 }
 
+interface SyntheticReference {
+  sourceNodeId: string;
+  targetNodeId: string;
+}
+
 const workspaceStorageKey = "linked-info.workspace.v1";
 
 function syntheticId(index: number): string {
@@ -23,9 +28,13 @@ function gridNodes(columns: number, rows: number): SyntheticNode[] {
   }));
 }
 
-async function openSyntheticWorkspace(page: Page, nodes: SyntheticNode[]) {
+async function openSyntheticWorkspace(
+  page: Page,
+  nodes: SyntheticNode[],
+  references: SyntheticReference[] = [],
+) {
   await page.addInitScript(
-    ({ storageKey, syntheticNodes }) => {
+    ({ storageKey, syntheticNodes, syntheticReferences }) => {
       const seedMarker = `${storageKey}.playwright-seeded`;
       if (sessionStorage.getItem(seedMarker) === "true") {
         return;
@@ -45,14 +54,18 @@ async function openSyntheticWorkspace(page: Page, nodes: SyntheticNode[]) {
             x: node.x,
             y: node.y,
           })),
-          references: [],
+          references: syntheticReferences,
           viewport: { x: 0, y: 0, zoom: 1 },
           view: { contentProcessorByNodeId: {} },
         }),
       );
       sessionStorage.setItem(seedMarker, "true");
     },
-    { storageKey: workspaceStorageKey, syntheticNodes: nodes },
+    {
+      storageKey: workspaceStorageKey,
+      syntheticNodes: nodes,
+      syntheticReferences: references,
+    },
   );
   await page.goto("/");
   await expect(page.getByTestId("graph-canvas")).toBeVisible();
@@ -168,6 +181,59 @@ test("creating and editing a node survives a browser reload", async ({ page }) =
   await expect(secret).not.toContainText(syntheticSecret);
   await expect(markdown.locator("script")).toHaveCount(0);
   await expect(markdown).not.toContainText("blocked");
+});
+
+test("TOTP clock updates keep the rendered line geometry stable", async ({ page }) => {
+  await page.addInitScript(() => {
+    const startedAt = performance.now();
+    Date.now = () => 298_000 + (performance.now() - startedAt);
+  });
+  const totpNode: SyntheticNode = {
+    content:
+      "prefix prefix [[li:totp]]otpauth://totp/Synthetic?secret=JBSWY3DPEHPK3PXP&period=300[[/li]] retained",
+    id: syntheticId(1),
+    name: "Stable TOTP geometry",
+    x: 100,
+    y: 100,
+  };
+  const targetNode: SyntheticNode = {
+    id: syntheticId(2),
+    name: "Synthetic target",
+    x: 520,
+    y: 100,
+  };
+  await openSyntheticWorkspace(page, [totpNode, targetNode], [
+    { sourceNodeId: totpNode.id, targetNodeId: targetNode.id },
+  ]);
+  const line = node(page, totpNode.id).locator(".totp-content-line");
+  const referencePath = page.locator(".graph-reference-path").first();
+  await expect(line).toHaveAttribute("data-status", "ready");
+  await expect(referencePath).toHaveAttribute("d", /^M/u);
+
+  const samples = await page.evaluate(async (sourceNodeId) => {
+    const sourceNode = document.querySelector(`[data-node-id="${sourceNodeId}"]`);
+    const totpLine = sourceNode?.querySelector(".totp-content-line");
+    const path = document.querySelector(".graph-reference-path");
+    if (sourceNode === null || totpLine === null || path === null) {
+      throw new Error("synthetic TOTP geometry targets are missing");
+    }
+    const geometry: Array<{ lineWidth: number; nodeHeight: number; path: string }> = [];
+    const deadline = performance.now() + 2_500;
+    while (performance.now() < deadline) {
+      geometry.push({
+        lineWidth: totpLine.getBoundingClientRect().width,
+        nodeHeight: sourceNode.getBoundingClientRect().height,
+        path: path.getAttribute("d") ?? "",
+      });
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    }
+    return geometry;
+  }, totpNode.id);
+  const lineWidths = samples.map((sample) => sample.lineWidth);
+  const nodeHeights = samples.map((sample) => sample.nodeHeight);
+  expect(Math.max(...lineWidths) - Math.min(...lineWidths)).toBeLessThan(0.5);
+  expect(Math.max(...nodeHeights) - Math.min(...nodeHeights)).toBeLessThan(0.5);
+  expect(new Set(samples.map((sample) => sample.path)).size).toBe(1);
 });
 
 test("existing content markers can be changed or removed without nesting", async ({
