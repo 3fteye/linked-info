@@ -94,7 +94,6 @@ pub fn run() {
             offsite_backup::list_s3_recovery_backups,
             offsite_backup::list_offsite_backups,
             offsite_backup::mark_automatic_offsite_backup_pending,
-            offsite_backup::migrate_legacy_offsite_backup_target,
             offsite_backup::remove_offsite_backup_target,
             offsite_backup::run_due_automatic_offsite_backups,
             offsite_backup::test_offsite_backup_restore,

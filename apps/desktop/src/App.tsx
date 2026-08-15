@@ -195,13 +195,6 @@ type PendingOffsiteSensitiveAction =
   | { kind: "removeTarget"; targetId: string; targetName: string }
   | { kind: "destroyTarget"; targetId: string; targetName: string }
   | {
-      kind: "migrateLegacy";
-      sourceTargetId: string;
-      sourceTargetName: string;
-      destinationTargetId: string;
-      destinationTargetName: string;
-    }
-  | {
       kind: "retention";
       targetId: string;
       enabled: boolean;
@@ -457,8 +450,6 @@ function App({
   const [selectedOffsiteTargetId, setSelectedOffsiteTargetId] = useState<
     string | null
   >(null);
-  const [legacyMigrationDestinationId, setLegacyMigrationDestinationId] =
-    useState<string | null>(null);
   const [offsitePage, setOffsitePage] = useState<OffsiteBackupPage | null>(null);
   const [offsiteBusy, setOffsiteBusy] = useState(false);
   const [offsiteMessage, setOffsiteMessage] = useState<string | null>(null);
@@ -551,16 +542,6 @@ function App({
       offsiteTargets.find((target) => target.id === selectedOffsiteTargetId) ?? null,
     [offsiteTargets, selectedOffsiteTargetId],
   );
-  const s3OffsiteTargets = useMemo(
-    () => offsiteTargets.filter((target) => target.provider === "s3Compatible"),
-    [offsiteTargets],
-  );
-  const effectiveLegacyMigrationDestinationId =
-    legacyMigrationDestinationId !== null &&
-    s3OffsiteTargets.some((target) => target.id === legacyMigrationDestinationId)
-      ? legacyMigrationDestinationId
-      : (s3OffsiteTargets[0]?.id ?? null);
-
   useEffect(() => {
     return () => {
       if (appNoticeTimerRef.current !== null) {
@@ -1365,11 +1346,8 @@ function App({
     }
     if (
       securityDialog === "offsiteSensitive" &&
-      ((pendingOffsiteSensitiveAction?.kind === "destroyTarget" &&
-        offsiteConfirmationName !== pendingOffsiteSensitiveAction.targetName) ||
-        (pendingOffsiteSensitiveAction?.kind === "migrateLegacy" &&
-          offsiteConfirmationName !==
-            pendingOffsiteSensitiveAction.sourceTargetName))
+      pendingOffsiteSensitiveAction?.kind === "destroyTarget" &&
+      offsiteConfirmationName !== pendingOffsiteSensitiveAction.targetName
     ) {
       return;
     }
@@ -1422,8 +1400,6 @@ function App({
                   ? pendingOffsiteSensitiveAction?.kind === "deleteSnapshot"
                     ? "backupSnapshotDelete"
                     : pendingOffsiteSensitiveAction?.kind === "destroyTarget"
-                      ? "backupTargetDestroy"
-                    : pendingOffsiteSensitiveAction?.kind === "migrateLegacy"
                       ? "backupTargetDestroy"
                     : pendingOffsiteSensitiveAction?.kind === "retention"
                         ? "backupRetentionChange"
@@ -1524,25 +1500,6 @@ function App({
                 }),
               );
             }
-          } else if (action.kind === "migrateLegacy") {
-            const result = await offsiteBackup.migrateLegacyTarget(
-              action.sourceTargetId,
-              action.destinationTargetId,
-              offsiteConfirmationName,
-              authorization,
-            );
-            const targets = await offsiteBackup.inspectTargets();
-            setOffsiteTargets(targets);
-            setSelectedOffsiteTargetId(result.destination.id);
-            setLegacyMigrationDestinationId(null);
-            setOffsitePage(await offsiteBackup.list(result.destination.id));
-            showAppNotice(
-              t("offsiteBackup.migrationSuccess", {
-                copied: result.copiedCount,
-                deleted: result.deletedCount,
-                destination: result.destination.name,
-              }),
-            );
           } else {
             const updated = await offsiteBackup.updateRetentionSettings(
               action.targetId,
@@ -1581,9 +1538,7 @@ function App({
     } catch (error) {
       const reason = errorReason(error);
       setSecurityMessage(
-        pendingOffsiteSensitiveAction?.kind === "migrateLegacy"
-          ? t("offsiteBackup.errors.migration", { reason })
-          : reason === "workspace_vault_password_blocked"
+        reason === "workspace_vault_password_blocked"
           ? t("security.passwordBlocked")
           : reason === "workspace_vault_password_rate_limited"
             ? t("security.passwordRateLimited")
@@ -2788,30 +2743,6 @@ function App({
     setOffsiteConfirmationName("");
     setPendingOffsiteSensitiveAction(action);
     setSecurityDialog("offsiteSensitive");
-  }
-
-  function requestLegacyOffsiteMigration() {
-    if (
-      selectedOffsiteTarget?.provider !== "cloudflareWorkerR2" ||
-      effectiveLegacyMigrationDestinationId === null
-    ) {
-      setOffsiteMessage(t("offsiteBackup.errors.migrationDestinationRequired"));
-      return;
-    }
-    const destination = s3OffsiteTargets.find(
-      (target) => target.id === effectiveLegacyMigrationDestinationId,
-    );
-    if (destination === undefined) {
-      setOffsiteMessage(t("offsiteBackup.errors.migrationDestinationRequired"));
-      return;
-    }
-    requestOffsiteSensitiveAction({
-      kind: "migrateLegacy",
-      sourceTargetId: selectedOffsiteTarget.id,
-      sourceTargetName: selectedOffsiteTarget.name,
-      destinationTargetId: destination.id,
-      destinationTargetName: destination.name,
-    });
   }
 
   async function connectOffsiteRecovery() {
@@ -4541,42 +4472,26 @@ function App({
                               </small>
                               {selectedOffsiteTarget.provider ===
                                 "cloudflareWorkerR2" && (
-                                <div className="legacy-target-migration">
-                                  <strong>{t("offsiteBackup.migrationTitle")}</strong>
+                                <div className="legacy-target-cleanup">
+                                  <strong>{t("offsiteBackup.legacyCleanupTitle")}</strong>
                                   <small className="offsite-automatic-error" role="note">
                                     {t("offsiteBackup.legacyWorkerDescription")}
                                   </small>
-                                  {s3OffsiteTargets.length === 0 ? (
-                                    <small>{t("offsiteBackup.migrationCreateTargetFirst")}</small>
-                                  ) : (
-                                    <>
-                                      <label>
-                                        <span>{t("offsiteBackup.migrationDestination")}</span>
-                                        <select
-                                          disabled={offsiteBusy}
-                                          onChange={(event) =>
-                                            setLegacyMigrationDestinationId(event.target.value)
-                                          }
-                                          value={effectiveLegacyMigrationDestinationId ?? ""}
-                                        >
-                                          {s3OffsiteTargets.map((target) => (
-                                            <option key={target.id} value={target.id}>
-                                              {target.name}
-                                            </option>
-                                          ))}
-                                        </select>
-                                      </label>
-                                      <button
-                                        className="primary-button"
-                                        disabled={offsiteBusy}
-                                        onClick={requestLegacyOffsiteMigration}
-                                        type="button"
-                                      >
-                                        <RefreshCw aria-hidden="true" size={14} />
-                                        {t("offsiteBackup.migrationAction")}
-                                      </button>
-                                    </>
-                                  )}
+                                  <button
+                                    className="danger-button"
+                                    disabled={offsiteBusy}
+                                    onClick={() =>
+                                      requestOffsiteSensitiveAction({
+                                        kind: "destroyTarget",
+                                        targetId: selectedOffsiteTarget.id,
+                                        targetName: selectedOffsiteTarget.name,
+                                      })
+                                    }
+                                    type="button"
+                                  >
+                                    <Trash2 aria-hidden="true" size={14} />
+                                    {t("offsiteBackup.legacyCleanupAction")}
+                                  </button>
                                 </div>
                               )}
                               <small>
@@ -5657,9 +5572,7 @@ function App({
                           ? t("offsiteBackup.removeTargetTitle")
                         : pendingOffsiteSensitiveAction?.kind === "destroyTarget"
                           ? t("offsiteBackup.destroyTargetTitle")
-                          : pendingOffsiteSensitiveAction?.kind === "migrateLegacy"
-                            ? t("offsiteBackup.migrationConfirmTitle")
-                            : t("offsiteBackup.retentionTitle")
+                          : t("offsiteBackup.retentionTitle")
                     : t("security.exportTitle")}
             </h2>
             <p>
@@ -5687,13 +5600,6 @@ function App({
                             ? t("offsiteBackup.destroyTargetDescription", {
                                 name: pendingOffsiteSensitiveAction.targetName,
                               })
-                            : pendingOffsiteSensitiveAction?.kind === "migrateLegacy"
-                              ? t("offsiteBackup.migrationConfirmDescription", {
-                                  source:
-                                    pendingOffsiteSensitiveAction.sourceTargetName,
-                                  destination:
-                                    pendingOffsiteSensitiveAction.destinationTargetName,
-                                })
                             : t("offsiteBackup.retentionDescriptionConfirm", {
                                 count:
                                   pendingOffsiteSensitiveAction?.kind === "retention"
@@ -5765,17 +5671,12 @@ function App({
                 </>
               )}
               {securityDialog === "offsiteSensitive" &&
-                (pendingOffsiteSensitiveAction?.kind === "destroyTarget" ||
-                  pendingOffsiteSensitiveAction?.kind === "migrateLegacy") && (
+                pendingOffsiteSensitiveAction?.kind === "destroyTarget" && (
                   <>
                     <label htmlFor="offsite-target-confirmation-name">
-                      {pendingOffsiteSensitiveAction.kind === "destroyTarget"
-                        ? t("offsiteBackup.destroyTargetConfirmation", {
-                            name: pendingOffsiteSensitiveAction.targetName,
-                          })
-                        : t("offsiteBackup.migrationConfirmation", {
-                            name: pendingOffsiteSensitiveAction.sourceTargetName,
-                          })}
+                      {t("offsiteBackup.destroyTargetConfirmation", {
+                        name: pendingOffsiteSensitiveAction.targetName,
+                      })}
                     </label>
                     <input
                       autoComplete="off"
@@ -5808,12 +5709,9 @@ function App({
                     (securityDialog !== "enable" &&
                       securityCurrentPassword.length === 0) ||
                     (securityDialog === "offsiteSensitive" &&
-                      ((pendingOffsiteSensitiveAction?.kind === "destroyTarget" &&
-                        offsiteConfirmationName !==
-                          pendingOffsiteSensitiveAction.targetName) ||
-                        (pendingOffsiteSensitiveAction?.kind === "migrateLegacy" &&
-                          offsiteConfirmationName !==
-                            pendingOffsiteSensitiveAction.sourceTargetName)))
+                      pendingOffsiteSensitiveAction?.kind === "destroyTarget" &&
+                      offsiteConfirmationName !==
+                        pendingOffsiteSensitiveAction.targetName)
                   }
                   type="submit"
                 >
@@ -5834,8 +5732,6 @@ function App({
                                 ? t("offsiteBackup.removeTarget")
                                 : pendingOffsiteSensitiveAction?.kind === "destroyTarget"
                                   ? t("offsiteBackup.destroyTargetConfirm")
-                                  : pendingOffsiteSensitiveAction?.kind === "migrateLegacy"
-                                    ? t("offsiteBackup.migrationConfirm")
                                   : t("offsiteBackup.retentionConfirm")
                         : t("backup.export")}
                 </button>

@@ -222,14 +222,6 @@ pub struct DeleteAllOffsiteBackupsOutcome {
     error: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LegacyBackupMigrationOutcome {
-    copied_count: usize,
-    deleted_count: usize,
-    destination: BackupTargetSummary,
-}
-
 fn default_automatic_interval_hours() -> u32 {
     DEFAULT_AUTOMATIC_INTERVAL_HOURS
 }
@@ -711,7 +703,6 @@ pub async fn delete_all_offsite_backups_and_remove_target(
     let permit = vault_state
         .consume_sensitive_authorization(SensitiveOperation::BackupTargetDestroy, &authorization)?;
     let config = find_target(&app, &backup_state, target_id).await?;
-    ensure_s3_target(&config)?;
     if confirmation_name != config.name {
         return Err("offsite_backup_target_confirmation_mismatch".to_owned());
     }
@@ -749,72 +740,6 @@ pub async fn delete_all_offsite_backups_and_remove_target(
         deleted_count,
         target_removed: true,
         error: None,
-    })
-}
-
-#[tauri::command]
-pub async fn migrate_legacy_offsite_backup_target(
-    app: tauri::AppHandle,
-    backup_state: tauri::State<'_, OffsiteBackupState>,
-    vault_state: tauri::State<'_, WorkspaceVaultState>,
-    source_target_id: Uuid,
-    destination_target_id: Uuid,
-    confirmation_name: String,
-    authorization: String,
-) -> Result<LegacyBackupMigrationOutcome, String> {
-    if source_target_id == destination_target_id {
-        return Err("offsite_backup_migration_same_target".to_owned());
-    }
-    let _source_claim = TargetOperationClaim::acquire(&backup_state, source_target_id)?;
-    let _destination_claim = TargetOperationClaim::acquire(&backup_state, destination_target_id)?;
-    let permit = vault_state
-        .consume_sensitive_authorization(SensitiveOperation::BackupTargetDestroy, &authorization)?;
-    let source_config = find_target(&app, &backup_state, source_target_id).await?;
-    let destination_config = find_target(&app, &backup_state, destination_target_id).await?;
-    if source_config.provider != BackupProviderKind::CloudflareWorkerR2
-        || destination_config.provider != BackupProviderKind::S3Compatible
-    {
-        return Err("offsite_backup_invalid_migration_targets".to_owned());
-    }
-    if confirmation_name != source_config.name {
-        return Err("offsite_backup_target_confirmation_mismatch".to_owned());
-    }
-    ensure_workspace_access(&app, &vault_state, Some(permit))?;
-    let source = open_target(&source_config).await?;
-    let destination = open_target(&destination_config).await?;
-    let snapshots = list_all_snapshots(source.as_ref(), || {
-        ensure_workspace_access(&app, &vault_state, Some(permit))
-    })
-    .await?;
-    let copied_count =
-        copy_and_verify_snapshots(source.as_ref(), destination.as_ref(), &snapshots, || {
-            ensure_workspace_access(&app, &vault_state, Some(permit))
-        })
-        .await?;
-
-    let verified_at_ms = current_time_milliseconds()?;
-    update_target_status(&app, &backup_state, destination_target_id, move |config| {
-        if copied_count > 0 {
-            config.last_upload_at_ms = Some(verified_at_ms);
-        }
-        config.last_verified_at_ms = Some(verified_at_ms);
-        Ok(())
-    })
-    .await?;
-
-    let deleted_count = delete_migrated_snapshots(source.as_ref(), &snapshots, || {
-        ensure_workspace_access(&app, &vault_state, Some(permit))
-    })
-    .await?;
-    ensure_workspace_access(&app, &vault_state, Some(permit))?;
-    remove_target_config_and_credential(&app, &backup_state, &source_config, source_target_id)
-        .await?;
-    ensure_workspace_access(&app, &vault_state, Some(permit))?;
-    let destination = find_target(&app, &backup_state, destination_target_id).await?;
-    Ok(LegacyBackupMigrationOutcome {
-        copied_count,
-        deleted_count,
-        destination: target_summary(&destination)?,
     })
 }
 
@@ -1079,7 +1004,7 @@ fn ensure_s3_target(target: &BackupTargetConfig) -> Result<(), String> {
     if target.provider == BackupProviderKind::S3Compatible {
         Ok(())
     } else {
-        Err("offsite_backup_legacy_target_migration_required".to_owned())
+        Err("offsite_backup_legacy_target_cleanup_required".to_owned())
     }
 }
 
@@ -1141,70 +1066,6 @@ async fn list_all_snapshots(
         }
     }
     Ok(snapshots)
-}
-
-async fn copy_and_verify_snapshots(
-    source: &dyn BackupTarget,
-    destination: &dyn BackupTarget,
-    snapshots: &[BackupSnapshotMetadata],
-    mut ensure_access: impl FnMut() -> Result<(), String>,
-) -> Result<usize, String> {
-    let mut copied_count = 0;
-    for metadata in snapshots {
-        ensure_access()?;
-        let snapshot = source
-            .download(metadata.id)
-            .await
-            .map_err(target_error)?
-            .ok_or_else(|| "offsite_backup_snapshot_not_found".to_owned())?;
-        if snapshot.metadata != *metadata {
-            return Err("offsite_backup_integrity_failed".to_owned());
-        }
-
-        ensure_access()?;
-        match destination
-            .download(metadata.id)
-            .await
-            .map_err(target_error)?
-        {
-            Some(existing) if existing == snapshot => {}
-            Some(_) => return Err("offsite_backup_snapshot_conflict".to_owned()),
-            None => {
-                ensure_access()?;
-                let uploaded = destination.upload(snapshot).await.map_err(target_error)?;
-                if uploaded != *metadata {
-                    return Err("offsite_backup_integrity_failed".to_owned());
-                }
-                copied_count += 1;
-            }
-        }
-
-        ensure_access()?;
-        let verified = destination
-            .verify(metadata.id)
-            .await
-            .map_err(target_error)?;
-        if verified.metadata != *metadata || verified.downloaded_bytes != metadata.size_bytes {
-            return Err("offsite_backup_integrity_failed".to_owned());
-        }
-    }
-    Ok(copied_count)
-}
-
-async fn delete_migrated_snapshots(
-    source: &dyn BackupTarget,
-    snapshots: &[BackupSnapshotMetadata],
-    mut ensure_access: impl FnMut() -> Result<(), String>,
-) -> Result<usize, String> {
-    let mut deleted_count = 0;
-    for metadata in snapshots {
-        ensure_access()?;
-        if !source.delete(metadata.id).await.map_err(target_error)? {
-            return Err("offsite_backup_snapshot_not_found".to_owned());
-        }
-        deleted_count += 1;
-    }
-    Ok(deleted_count)
 }
 
 fn automatic_backup_due(target: &BackupTargetConfig, now: u64) -> bool {
@@ -1804,182 +1665,6 @@ fn target_error(error: BackupTargetError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
-
-    use linked_info_backup_port::{BackupTargetCapabilities, BackupTargetFuture};
-
-    #[derive(Default)]
-    struct MemoryBackupTarget {
-        snapshots: Mutex<HashMap<Uuid, BackupSnapshot>>,
-    }
-
-    impl MemoryBackupTarget {
-        fn new(snapshots: impl IntoIterator<Item = BackupSnapshot>) -> Self {
-            Self {
-                snapshots: Mutex::new(
-                    snapshots
-                        .into_iter()
-                        .map(|snapshot| (snapshot.metadata.id, snapshot))
-                        .collect(),
-                ),
-            }
-        }
-
-        fn len(&self) -> usize {
-            self.snapshots.lock().unwrap().len()
-        }
-    }
-
-    impl BackupTarget for MemoryBackupTarget {
-        fn capabilities(&self) -> BackupTargetCapabilities {
-            BackupTargetCapabilities {
-                maximum_upload_bytes: None,
-                supports_delete: true,
-            }
-        }
-
-        fn upload<'a>(
-            &'a self,
-            snapshot: BackupSnapshot,
-        ) -> BackupTargetFuture<'a, BackupSnapshotMetadata> {
-            Box::pin(async move {
-                let metadata = snapshot.metadata.clone();
-                let mut snapshots = self.snapshots.lock().unwrap();
-                match snapshots.get(&metadata.id) {
-                    Some(existing) if existing == &snapshot => Ok(metadata),
-                    Some(_) => Err(BackupTargetError::Conflict),
-                    None => {
-                        snapshots.insert(metadata.id, snapshot);
-                        Ok(metadata)
-                    }
-                }
-            })
-        }
-
-        fn list<'a>(
-            &'a self,
-            _cursor: Option<String>,
-            _limit: u16,
-        ) -> BackupTargetFuture<'a, BackupListPage> {
-            Box::pin(async move {
-                let mut items = self
-                    .snapshots
-                    .lock()
-                    .unwrap()
-                    .values()
-                    .map(|snapshot| snapshot.metadata.clone())
-                    .collect::<Vec<_>>();
-                items.sort_by_key(|metadata| std::cmp::Reverse(metadata.created_at_ms));
-                Ok(BackupListPage {
-                    items,
-                    next_cursor: None,
-                })
-            })
-        }
-
-        fn download<'a>(&'a self, id: Uuid) -> BackupTargetFuture<'a, Option<BackupSnapshot>> {
-            Box::pin(async move { Ok(self.snapshots.lock().unwrap().get(&id).cloned()) })
-        }
-
-        fn delete<'a>(&'a self, id: Uuid) -> BackupTargetFuture<'a, bool> {
-            Box::pin(async move { Ok(self.snapshots.lock().unwrap().remove(&id).is_some()) })
-        }
-
-        fn verify<'a>(&'a self, id: Uuid) -> BackupTargetFuture<'a, BackupVerification> {
-            Box::pin(async move {
-                let snapshot = self
-                    .snapshots
-                    .lock()
-                    .unwrap()
-                    .get(&id)
-                    .cloned()
-                    .ok_or(BackupTargetError::NotFound)?;
-                snapshot
-                    .verify_integrity()
-                    .map_err(|_| BackupTargetError::IntegrityFailure)?;
-                Ok(BackupVerification {
-                    downloaded_bytes: snapshot.metadata.size_bytes,
-                    metadata: snapshot.metadata,
-                })
-            })
-        }
-    }
-
-    #[test]
-    fn legacy_migration_is_idempotent_and_deletes_only_after_verification() {
-        tauri::async_runtime::block_on(async {
-            let first = BackupSnapshot::new(Uuid::new_v4(), 10, b"first".to_vec()).unwrap();
-            let second = BackupSnapshot::new(Uuid::new_v4(), 20, b"second".to_vec()).unwrap();
-            let source = MemoryBackupTarget::new([first.clone(), second.clone()]);
-            let destination = MemoryBackupTarget::new([first.clone()]);
-            let metadata = vec![first.metadata.clone(), second.metadata.clone()];
-
-            assert_eq!(
-                copy_and_verify_snapshots(&source, &destination, &metadata, || Ok(())).await,
-                Ok(1)
-            );
-            assert_eq!(destination.len(), 2);
-            assert_eq!(source.len(), 2);
-            assert_eq!(
-                copy_and_verify_snapshots(&source, &destination, &metadata, || Ok(())).await,
-                Ok(0)
-            );
-            assert_eq!(
-                delete_migrated_snapshots(&source, &metadata, || Ok(())).await,
-                Ok(2)
-            );
-            assert_eq!(source.len(), 0);
-            assert_eq!(destination.len(), 2);
-        });
-    }
-
-    #[test]
-    fn legacy_migration_conflict_preserves_the_source() {
-        tauri::async_runtime::block_on(async {
-            let id = Uuid::new_v4();
-            let source_snapshot = BackupSnapshot::new(id, 10, b"source".to_vec()).unwrap();
-            let conflicting = BackupSnapshot::new(id, 20, b"other".to_vec()).unwrap();
-            let source = MemoryBackupTarget::new([source_snapshot.clone()]);
-            let destination = MemoryBackupTarget::new([conflicting]);
-
-            assert_eq!(
-                copy_and_verify_snapshots(
-                    &source,
-                    &destination,
-                    &[source_snapshot.metadata],
-                    || Ok(()),
-                )
-                .await,
-                Err("offsite_backup_snapshot_conflict".to_owned())
-            );
-            assert_eq!(source.len(), 1);
-        });
-    }
-
-    #[test]
-    fn legacy_migration_rechecks_access_before_upload() {
-        tauri::async_runtime::block_on(async {
-            let snapshot = BackupSnapshot::new(Uuid::new_v4(), 10, b"source".to_vec()).unwrap();
-            let source = MemoryBackupTarget::new([snapshot.clone()]);
-            let destination = MemoryBackupTarget::default();
-            let mut checks = 0;
-
-            assert_eq!(
-                copy_and_verify_snapshots(&source, &destination, &[snapshot.metadata], || {
-                    checks += 1;
-                    if checks == 3 {
-                        Err("workspace_locked".to_owned())
-                    } else {
-                        Ok(())
-                    }
-                },)
-                .await,
-                Err("workspace_locked".to_owned())
-            );
-            assert_eq!(source.len(), 1);
-            assert_eq!(destination.len(), 0);
-        });
-    }
 
     #[test]
     fn config_rejects_duplicate_targets() {
@@ -2236,6 +1921,21 @@ mod tests {
         target.automatic_uploaded_revision = 1;
 
         assert!(!automatic_backup_due(&target, u64::MAX));
+    }
+
+    #[test]
+    fn legacy_worker_targets_reject_regular_s3_operations() {
+        let mut target = s3_target("linked-info/v1");
+        target.provider = BackupProviderKind::CloudflareWorkerR2;
+        target.s3_provider = None;
+        target.region = None;
+        target.bucket = None;
+        target.prefix = None;
+
+        assert_eq!(
+            ensure_s3_target(&target),
+            Err("offsite_backup_legacy_target_cleanup_required".to_owned())
+        );
     }
 
     #[test]

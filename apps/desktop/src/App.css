@@ -2528,7 +2528,7 @@ h1 {
   color: #933f35;
 }
 
-.legacy-target-migration {
+.legacy-target-cleanup {
   display: grid;
   margin-top: 7px;
   padding: 10px;
@@ -2538,30 +2538,12 @@ h1 {
   background: #fff9ed;
 }
 
-.legacy-target-migration > strong {
+.legacy-target-cleanup > strong {
   color: #754f16;
   font-size: 12px;
 }
 
-.legacy-target-migration label {
-  display: grid;
-  gap: 4px;
-  color: #5b5140;
-  font-size: 11px;
-  font-weight: 600;
-}
-
-.legacy-target-migration select {
-  min-height: 32px;
-  padding: 0 28px 0 9px;
-  border: 1px solid #d8c8a9;
-  border-radius: 6px;
-  color: #303632;
-  background: #ffffff;
-  font: inherit;
-}
-
-.legacy-target-migration .primary-button {
+.legacy-target-cleanup .danger-button {
   justify-self: start;
 }
 

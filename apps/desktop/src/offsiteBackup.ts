@@ -80,12 +80,6 @@ export interface DeleteAllOffsiteBackupsOutcome {
   error: string | null;
 }
 
-export interface LegacyBackupMigrationOutcome {
-  copiedCount: number;
-  deletedCount: number;
-  destination: OffsiteBackupTarget;
-}
-
 export interface OffsiteBackupService {
   readonly available: boolean;
   inspectTargets(): Promise<OffsiteBackupTarget[]>;
@@ -105,12 +99,6 @@ export interface OffsiteBackupService {
     confirmationName: string,
     authorization: string,
   ): Promise<DeleteAllOffsiteBackupsOutcome>;
-  migrateLegacyTarget(
-    sourceTargetId: string,
-    destinationTargetId: string,
-    confirmationName: string,
-    authorization: string,
-  ): Promise<LegacyBackupMigrationOutcome>;
   updateAutomaticSettings(
     targetId: string,
     enabled: boolean,
@@ -179,19 +167,6 @@ export const tauriOffsiteBackupService: OffsiteBackupService = {
       "delete_all_offsite_backups_and_remove_target",
       { targetId, confirmationName, authorization },
     );
-  },
-  migrateLegacyTarget(
-    sourceTargetId,
-    destinationTargetId,
-    confirmationName,
-    authorization,
-  ) {
-    return invoke<LegacyBackupMigrationOutcome>("migrate_legacy_offsite_backup_target", {
-      sourceTargetId,
-      destinationTargetId,
-      confirmationName,
-      authorization,
-    });
   },
   updateAutomaticSettings(targetId, enabled, intervalHours) {
     return invoke<OffsiteBackupTarget>(
@@ -301,9 +276,6 @@ export const unavailableOffsiteBackupService: OffsiteBackupService = {
     return unavailable();
   },
   async deleteAllAndRemoveTarget() {
-    return unavailable();
-  },
-  async migrateLegacyTarget() {
     return unavailable();
   },
   async updateAutomaticSettings() {
