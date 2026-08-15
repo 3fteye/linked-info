@@ -1,4 +1,12 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  createContext,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import {
   generateTotp,
   totpRemainingSeconds,
@@ -18,6 +26,65 @@ interface TotpContentLineProps {
   directive: TotpDirective;
   labels: TotpContentLabels;
   onCopySecret?: (value: string) => void;
+}
+
+const TotpSecondClockContext = createContext<number | null>(null);
+
+function useAlignedSecondClock(): number {
+  const sharedTimestampMs = useContext(TotpSecondClockContext);
+  const usesSharedClock = sharedTimestampMs !== null;
+  const [localTimestampMs, setLocalTimestampMs] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (usesSharedClock) {
+      return;
+    }
+    let timer: number | null = null;
+    const scheduleNextSecond = () => {
+      const now = Date.now();
+      const delay = Math.max(50, 1_020 - (now % 1_000));
+      timer = window.setTimeout(() => {
+        setLocalTimestampMs(Date.now());
+        scheduleNextSecond();
+      }, delay);
+    };
+    scheduleNextSecond();
+    return () => {
+      if (timer !== null) {
+        window.clearTimeout(timer);
+      }
+    };
+  }, [usesSharedClock]);
+
+  return sharedTimestampMs ?? localTimestampMs;
+}
+
+export function TotpSecondClockProvider({ children }: { children: ReactNode }) {
+  const [timestampMs, setTimestampMs] = useState(() => Date.now());
+
+  useEffect(() => {
+    let timer: number | null = null;
+    const scheduleNextSecond = () => {
+      const now = Date.now();
+      const delay = Math.max(50, 1_020 - (now % 1_000));
+      timer = window.setTimeout(() => {
+        setTimestampMs(Date.now());
+        scheduleNextSecond();
+      }, delay);
+    };
+    scheduleNextSecond();
+    return () => {
+      if (timer !== null) {
+        window.clearTimeout(timer);
+      }
+    };
+  }, []);
+
+  return (
+    <TotpSecondClockContext.Provider value={timestampMs}>
+      {children}
+    </TotpSecondClockContext.Provider>
+  );
 }
 
 function sameConfiguration(
@@ -45,7 +112,7 @@ export function TotpContentLine({
   labels,
   onCopySecret,
 }: TotpContentLineProps) {
-  const [timestampMs, setTimestampMs] = useState(() => Date.now());
+  const timestampMs = useAlignedSecondClock();
   const [generated, setGenerated] = useState<{
     code: string;
     configuration: TotpConfiguration;
@@ -92,27 +159,6 @@ export function TotpContentLine({
       active = false;
     };
   }, [configuration, counter]);
-
-  useEffect(() => {
-    if (configuration === null) {
-      return;
-    }
-    let timer: number | null = null;
-    const scheduleNextSecond = () => {
-      const now = Date.now();
-      const delay = Math.max(50, 1_020 - (now % 1_000));
-      timer = window.setTimeout(() => {
-        setTimestampMs(Date.now());
-        scheduleNextSecond();
-      }, delay);
-    };
-    scheduleNextSecond();
-    return () => {
-      if (timer !== null) {
-        window.clearTimeout(timer);
-      }
-    };
-  }, [configuration]);
 
   const remainingSeconds = useMemo(
     () =>

@@ -880,6 +880,7 @@ h1 {
 
 .totp-content-line {
   display: inline-flex;
+  contain: layout paint;
   align-items: center;
   min-width: 0;
   margin: 3px;

@@ -66,6 +66,7 @@ import {
   canvasContentPreview,
   type ContentEnhancementLabels,
 } from "./contentProcessor";
+import { TotpSecondClockProvider } from "./totpContent";
 import {
   contentMarkerRegistry,
   type ContentMarkerSelection,
@@ -1836,7 +1837,8 @@ export default function GraphCanvas({
       onPointerUpCapture={handleCanvasPointerUpCapture}
       ref={containerRef}
     >
-      <ReactFlow<InformationFlowNode, Edge>
+      <TotpSecondClockProvider>
+        <ReactFlow<InformationFlowNode, Edge>
         colorMode="light"
         deleteKeyCode={["Backspace", "Delete"]}
         edges={noFlowEdges}
@@ -1988,7 +1990,8 @@ export default function GraphCanvas({
             <Plus size={18} />
           </button>
         </Panel>
-      </ReactFlow>
+        </ReactFlow>
+      </TotpSecondClockProvider>
 
       {canvasSelection !== null && (
         <div

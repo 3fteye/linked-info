@@ -13,6 +13,12 @@ interface SyntheticReference {
   targetNodeId: string;
 }
 
+interface SyntheticViewport {
+  x: number;
+  y: number;
+  zoom: number;
+}
+
 const workspaceStorageKey = "linked-info.workspace.v1";
 
 function syntheticId(index: number): string {
@@ -32,9 +38,10 @@ async function openSyntheticWorkspace(
   page: Page,
   nodes: SyntheticNode[],
   references: SyntheticReference[] = [],
+  viewport: SyntheticViewport = { x: 0, y: 0, zoom: 1 },
 ) {
   await page.addInitScript(
-    ({ storageKey, syntheticNodes, syntheticReferences }) => {
+    ({ storageKey, syntheticNodes, syntheticReferences, syntheticViewport }) => {
       const seedMarker = `${storageKey}.playwright-seeded`;
       if (sessionStorage.getItem(seedMarker) === "true") {
         return;
@@ -55,7 +62,7 @@ async function openSyntheticWorkspace(
             y: node.y,
           })),
           references: syntheticReferences,
-          viewport: { x: 0, y: 0, zoom: 1 },
+          viewport: syntheticViewport,
           view: { contentProcessorByNodeId: {} },
         }),
       );
@@ -65,6 +72,7 @@ async function openSyntheticWorkspace(
       storageKey: workspaceStorageKey,
       syntheticNodes: nodes,
       syntheticReferences: references,
+      syntheticViewport: viewport,
     },
   );
   await page.goto("/");
@@ -234,6 +242,102 @@ test("TOTP clock updates keep the rendered line geometry stable", async ({ page 
   expect(Math.max(...lineWidths) - Math.min(...lineWidths)).toBeLessThan(0.5);
   expect(Math.max(...nodeHeights) - Math.min(...nodeHeights)).toBeLessThan(0.5);
   expect(new Set(samples.map((sample) => sample.path)).size).toBe(1);
+});
+
+test("low-zoom TOTP updates keep every connected path stable", async ({ page }) => {
+  await page.addInitScript(() => {
+    const secondTimerDelays: number[] = [];
+    const nativeSetTimeout = window.setTimeout.bind(window);
+    window.setTimeout = ((
+      handler: TimerHandler,
+      timeout?: number,
+      ...arguments_: unknown[]
+    ) => {
+      if (
+        timeout !== undefined &&
+        timeout >= 50 &&
+        timeout <= 1_050 &&
+        (new Error().stack ?? "").includes("/totpContent.tsx")
+      ) {
+        secondTimerDelays.push(timeout);
+      }
+      return nativeSetTimeout(handler, timeout, ...arguments_);
+    }) as typeof window.setTimeout;
+    Reflect.set(window, "__linkedInfoSecondTimerDelays", secondTimerDelays);
+    const startedAt = performance.now();
+    Date.now = () => 298_000 + (performance.now() - startedAt);
+  });
+  const nodes = gridNodes(6, 5).map((item, index) => ({
+    ...item,
+    content:
+      index % 2 === 0
+        ? [
+            `Synthetic account ${index + 1} with a deliberately long description`,
+            "[[li:totp]]otpauth://totp/Synthetic?secret=JBSWY3DPEHPK3PXP&period=300[[/li]]",
+            "retained trailing content that wraps inside the canvas node",
+          ].join("\n")
+        : `Synthetic target content ${index + 1}`,
+  }));
+  const references = nodes.slice(1).map((item, index) => ({
+    sourceNodeId: nodes[index].id,
+    targetNodeId: item.id,
+  }));
+  await openSyntheticWorkspace(page, nodes, references, {
+    x: 80,
+    y: 70,
+    zoom: 0.25,
+  });
+  await expect(page.locator(".totp-content-line").first()).toHaveAttribute(
+    "data-status",
+    "ready",
+  );
+  await expect(page.locator(".totp-content-line")).toHaveCount(15);
+  await expect(page.locator(".graph-reference-path").first()).toHaveAttribute("d", /^M/u);
+  const secondTimerCount = await page.evaluate(() =>
+    (Reflect.get(window, "__linkedInfoSecondTimerDelays") as number[]).length,
+  );
+  expect(secondTimerCount).toBeLessThanOrEqual(2);
+
+  const samples = await page.evaluate(async () => {
+    const geometry: Array<{
+      nodeRects: string;
+      pathBounds: string;
+      paths: string;
+      viewportTransform: string;
+    }> = [];
+    const deadline = performance.now() + 2_500;
+    while (performance.now() < deadline) {
+      const nodeRects = Array.from(document.querySelectorAll("[data-node-id]"))
+        .map((element) => {
+          const rect = element.getBoundingClientRect();
+          return `${element.getAttribute("data-node-id")}:${rect.x},${rect.y},${rect.width},${rect.height}`;
+        })
+        .join("|");
+      const paths = Array.from(document.querySelectorAll(".graph-reference-path"))
+        .map((element) => element.getAttribute("d") ?? "")
+        .join("|");
+      const pathBounds = Array.from(document.querySelectorAll(".graph-reference-path"))
+        .map((element) => {
+          const rect = element.getBoundingClientRect();
+          return `${rect.x},${rect.y},${rect.width},${rect.height}`;
+        })
+        .join("|");
+      geometry.push({
+        nodeRects,
+        pathBounds,
+        paths,
+        viewportTransform:
+          document.querySelector<HTMLElement>(".react-flow__viewport")?.style.transform ?? "",
+      });
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    }
+    return geometry;
+  });
+
+  expect(new Set(samples.map((sample) => sample.nodeRects)).size).toBe(1);
+  expect(new Set(samples.map((sample) => sample.paths)).size).toBe(1);
+  expect(new Set(samples.map((sample) => sample.pathBounds)).size).toBe(1);
+  expect(new Set(samples.map((sample) => sample.viewportTransform)).size).toBe(1);
 });
 
 test("existing content markers can be changed or removed without nesting", async ({
