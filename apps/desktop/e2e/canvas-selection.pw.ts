@@ -71,6 +71,7 @@ async function storedWorkspace(page: Page) {
 
 async function selectAllTextarea(page: Page) {
   const textarea = page.locator('[data-node-id][data-editing="true"] textarea');
+  const expectedSelection = await textarea.inputValue();
   await textarea.focus();
   await page.keyboard.press("Control+A");
   await expect
@@ -80,7 +81,7 @@ async function selectAllTextarea(page: Page) {
         return input.value.slice(input.selectionStart, input.selectionEnd);
       }),
     )
-    .toBe(await textarea.inputValue());
+    .toBe(expectedSelection);
 }
 
 async function placeCaretInsideTextareaText(page: Page, text: string) {
@@ -212,8 +213,21 @@ test("existing content markers can be changed or removed without nesting", async
   await expect(totpToolbar).toBeVisible();
   await totpToolbar.getByRole("button", { name: "Remove marker" }).click();
   await expect(textarea).toHaveValue(original);
+});
 
-  await textarea.fill(invalidTotp);
+test("invalid TOTP content is rejected without changing the node", async ({ page }) => {
+  const invalidTotp = "synthetic-invalid-key";
+  const invalidNode = {
+    content: invalidTotp,
+    id: syntheticId(1),
+    name: "Invalid TOTP",
+    x: 100,
+    y: 100,
+  };
+  await openSyntheticWorkspace(page, [invalidNode]);
+  await node(page, invalidNode.id).dblclick({ position: { x: 80, y: 24 } });
+  const textarea = page.locator('[data-node-id][data-editing="true"] textarea');
+  await expect(textarea).toBeVisible();
   await selectAllTextarea(page);
   await page
     .locator(".graph-node-content-marker-toolbar")
