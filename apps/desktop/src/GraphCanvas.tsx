@@ -2,6 +2,7 @@ import {
   Background,
   BackgroundVariant,
   Controls,
+  getViewportForBounds,
   Handle,
   MiniMap,
   Panel,
@@ -18,11 +19,13 @@ import {
   type ReactFlowInstance,
   type Viewport,
   useNodesState,
+  useKeyPress,
 } from "@xyflow/react";
 import {
   Copy,
   Filter,
   GripVertical,
+  Keyboard,
   Link2,
   Pencil,
   Plus,
@@ -204,6 +207,11 @@ interface GraphLabels {
   removeNodeFilter: string;
   sourceHandle: string;
   smartReference: string;
+  shortcuts: {
+    items: ReadonlyArray<{ action: string; keys: string }>;
+    open: string;
+    title: string;
+  };
   targetHandle: string;
   undo: string;
   unnamed: string;
@@ -460,6 +468,18 @@ export function InformationNodeCard({
           processorFocusTransferRef.current = false;
         }
       }}
+      onKeyDownCapture={(event) => {
+        if (
+          data.editing &&
+          event.key === "Escape" &&
+          (event.target instanceof HTMLInputElement ||
+            event.target instanceof HTMLTextAreaElement)
+        ) {
+          event.preventDefault();
+          event.stopPropagation();
+          data.onCommit(id);
+        }
+      }}
       ref={nodeRef}
     >
       <Handle
@@ -693,6 +713,8 @@ export function InformationNodeCard({
 const nodeTypes = { information: InformationNodeCard };
 const noFlowEdges: Edge[] = [];
 const defaultCanvasViewport: Viewport = { x: 0, y: 0, zoom: 1 };
+const minimumCanvasZoom = 0.25;
+const maximumCanvasZoom = 2.2;
 
 export function finalizeNodeDragLayout(
   layout: NodeLayout[],
@@ -718,6 +740,21 @@ function isTextEntryTarget(target: EventTarget | null): boolean {
     target instanceof HTMLInputElement ||
     target instanceof HTMLTextAreaElement ||
     (target instanceof HTMLElement && target.isContentEditable)
+  );
+}
+
+function isCanvasShortcutBlockedTarget(target: EventTarget | null): boolean {
+  if (isTextEntryTarget(target)) {
+    return true;
+  }
+  const element = target instanceof Element ? target : null;
+  if (element === null) {
+    return false;
+  }
+  return (
+    element.closest(
+      "button, select, option, a, [role='dialog'], [role='menu'], [role='listbox']",
+    ) !== null
   );
 }
 
@@ -821,9 +858,53 @@ export default function GraphCanvas({
     useState<CanvasSelectionRectangle | null>(null);
   const [flowNodes, setFlowNodes, applyNodeChanges] =
     useNodesState<InformationFlowNode>([]);
+  const spacePanActive = useKeyPress("Space");
+  const [shortcutHelpOpen, setShortcutHelpOpen] = useState(false);
   const flowNodesRef = useRef(flowNodes);
   flowNodesRef.current = flowNodes;
   const normalizedSearch = searchTerm.trim().toLowerCase();
+
+  const frameCanvasNodes = useCallback(
+    (nodesToFrame: readonly InformationFlowNode[], maximumZoom: number) => {
+      const canvasBounds = containerRef.current?.getBoundingClientRect();
+      if (
+        flowInstance === null ||
+        canvasBounds === undefined ||
+        nodesToFrame.length === 0
+      ) {
+        return;
+      }
+      const left = Math.min(...nodesToFrame.map((node) => node.position.x));
+      const top = Math.min(...nodesToFrame.map((node) => node.position.y));
+      const right = Math.max(
+        ...nodesToFrame.map(
+          (node) =>
+            node.position.x + (node.measured?.width ?? node.width ?? 270),
+        ),
+      );
+      const bottom = Math.max(
+        ...nodesToFrame.map(
+          (node) =>
+            node.position.y + (node.measured?.height ?? node.height ?? 92),
+        ),
+      );
+      const nextViewport = getViewportForBounds(
+        {
+          height: Math.max(1, bottom - top),
+          width: Math.max(1, right - left),
+          x: left,
+          y: top,
+        },
+        canvasBounds.width,
+        canvasBounds.height,
+        minimumCanvasZoom,
+        maximumZoom,
+        0.2,
+      );
+      void flowInstance.setViewport(nextViewport, { duration: 140 });
+    },
+    [flowInstance],
+  );
 
   useEffect(() => {
     return () => {
@@ -1253,12 +1334,99 @@ export default function GraphCanvas({
 
   useEffect(() => {
     const handleCanvasShortcut = (event: KeyboardEvent) => {
-      if (isTextEntryTarget(event.target)) {
+      if (isCanvasShortcutBlockedTarget(event.target)) {
         return;
       }
 
       const key = event.key.toLowerCase();
       const modifierPressed = event.ctrlKey || event.metaKey;
+      if (!modifierPressed && key === "?") {
+        event.preventDefault();
+        setShortcutHelpOpen((current) => !current);
+        return;
+      }
+      if (key === "escape") {
+        event.preventDefault();
+        if (shortcutHelpOpen) {
+          setShortcutHelpOpen(false);
+          return;
+        }
+        if (referenceSearch !== null) {
+          setReferenceSearch(null);
+          return;
+        }
+        if (contextMenu !== null) {
+          setContextMenu(null);
+          return;
+        }
+        if (pendingDeletionNodeIds.length > 0) {
+          setPendingDeletionNodeIds([]);
+          return;
+        }
+        setSelectedReferenceId(null);
+        setFlowNodes((current) =>
+          current.map((node) =>
+            node.selected ? { ...node, selected: false } : node,
+          ),
+        );
+        return;
+      }
+
+      if (key === "home") {
+        const visibleNodes = flowNodesRef.current.filter((node) => !node.hidden);
+        if (visibleNodes.length > 0) {
+          event.preventDefault();
+          frameCanvasNodes(visibleNodes, 1);
+        }
+        return;
+      }
+
+      if (!modifierPressed && key === "f") {
+        const selectedNodes = flowNodesRef.current.filter(
+          (node) => node.selected && !node.hidden,
+        );
+        if (selectedNodes.length > 0) {
+          event.preventDefault();
+          frameCanvasNodes(selectedNodes, 1.4);
+        }
+        return;
+      }
+
+      if (!modifierPressed && (key === "+" || key === "=")) {
+        if (flowInstance !== null) {
+          event.preventDefault();
+          void flowInstance.zoomIn({ duration: 120 });
+        }
+        return;
+      }
+
+      if (!modifierPressed && (key === "-" || key === "_")) {
+        if (flowInstance !== null) {
+          event.preventDefault();
+          void flowInstance.zoomOut({ duration: 120 });
+        }
+        return;
+      }
+
+      if (modifierPressed && key === "0") {
+        if (flowInstance !== null) {
+          event.preventDefault();
+          void flowInstance.zoomTo(1, { duration: 120 });
+        }
+        return;
+      }
+
+      if (!modifierPressed && (key === "enter" || key === "f2")) {
+        const selectedNodes = flowNodesRef.current.filter(
+          (node) => node.selected && !node.hidden,
+        );
+        if (selectedNodes.length === 1) {
+          event.preventDefault();
+          onEditNode(selectedNodes[0].id);
+        }
+        return;
+      }
+
       if (modifierPressed && key === "a") {
         event.preventDefault();
         setSelectedReferenceId(null);
@@ -1321,13 +1489,20 @@ export default function GraphCanvas({
     window.addEventListener("keydown", handleCanvasShortcut, true);
     return () => window.removeEventListener("keydown", handleCanvasShortcut, true);
   }, [
+    contextMenu,
+    frameCanvasNodes,
+    flowInstance,
     historyBlocked,
+    onEditNode,
     onRedo,
     onReferencesChange,
     onUndo,
+    pendingDeletionNodeIds.length,
     references,
+    referenceSearch,
     selectedReferenceId,
     setFlowNodes,
+    shortcutHelpOpen,
   ]);
 
   const handleNodesChange = useCallback(
@@ -1828,6 +2003,8 @@ export default function GraphCanvas({
   return (
     <div
       className="graph-canvas"
+      data-flow-ready={flowInstance !== null}
+      data-space-pan={spacePanActive}
       data-testid="graph-canvas"
       onClickCapture={handleCanvasClickCapture}
       onContextMenu={(event) => event.preventDefault()}
@@ -1843,14 +2020,17 @@ export default function GraphCanvas({
         deleteKeyCode={["Backspace", "Delete"]}
         edges={noFlowEdges}
         edgesReconnectable={false}
+        elementsSelectable={!spacePanActive}
         elevateNodesOnSelect={false}
         defaultViewport={viewport ?? defaultCanvasViewport}
         fitView={viewport === null}
         fitViewOptions={{ maxZoom: 1, padding: 0.25 }}
-        maxZoom={2.2}
-        minZoom={0.25}
+        maxZoom={maximumCanvasZoom}
+        minZoom={minimumCanvasZoom}
         nodeTypes={nodeTypes}
         nodes={flowNodes}
+        nodesConnectable={!spacePanActive}
+        nodesDraggable={!spacePanActive}
         onlyRenderVisibleElements
         onConnect={handleConnect}
         onConnectEnd={handleConnectEnd}
@@ -1885,6 +2065,7 @@ export default function GraphCanvas({
           setSelectedReferenceId(null);
         }}
         onPaneContextMenu={handlePaneContextMenu}
+        panActivationKeyCode="Space"
         panOnDrag={[0, 1]}
         proOptions={{ hideAttribution: true }}
         multiSelectionKeyCode={["Control", "Shift"]}
@@ -1989,6 +2170,40 @@ export default function GraphCanvas({
           >
             <Plus size={18} />
           </button>
+          <button
+            aria-expanded={shortcutHelpOpen}
+            aria-label={labels.shortcuts.open}
+            className="canvas-icon-button"
+            data-testid="canvas-shortcuts-toggle"
+            onClick={() => setShortcutHelpOpen((current) => !current)}
+            onKeyDown={(event) => {
+              if (event.key === "Escape" && shortcutHelpOpen) {
+                event.preventDefault();
+                setShortcutHelpOpen(false);
+              }
+            }}
+            title={labels.shortcuts.open}
+            type="button"
+          >
+            <Keyboard size={18} />
+          </button>
+          {shortcutHelpOpen && (
+            <aside
+              aria-label={labels.shortcuts.title}
+              className="canvas-shortcuts-popover"
+              data-testid="canvas-shortcuts-popover"
+            >
+              <strong>{labels.shortcuts.title}</strong>
+              <dl>
+                {labels.shortcuts.items.map((item) => (
+                  <div key={item.action}>
+                    <dt>{item.action}</dt>
+                    <dd><kbd>{item.keys}</kbd></dd>
+                  </div>
+                ))}
+              </dl>
+            </aside>
+          )}
         </Panel>
         </ReactFlow>
       </TotpSecondClockProvider>

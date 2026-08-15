@@ -1148,6 +1148,16 @@ h1 {
   pointer-events: none;
 }
 
+.graph-canvas[data-space-pan="true"] .react-flow__pane,
+.graph-canvas[data-space-pan="true"] .react-flow__node {
+  cursor: grab;
+}
+
+.graph-canvas[data-space-pan="true"] .react-flow__pane:active,
+.graph-canvas[data-space-pan="true"] .react-flow__node:active {
+  cursor: grabbing;
+}
+
 .graph-reference-layer {
   position: absolute;
   overflow: visible;
@@ -1213,6 +1223,66 @@ h1 {
 .canvas-action-panel {
   display: flex;
   gap: 6px;
+}
+
+.canvas-shortcuts-popover {
+  position: absolute;
+  top: 42px;
+  right: 0;
+  z-index: 24;
+  width: min(410px, calc(100vw - 260px));
+  min-width: 340px;
+  padding: 13px 14px;
+  border: 1px solid #c9d4cc;
+  border-radius: 8px;
+  color: #26322b;
+  background: #ffffff;
+  box-shadow: 0 12px 32px rgb(21 39 27 / 20%);
+}
+
+.canvas-shortcuts-popover > strong {
+  display: block;
+  margin-bottom: 9px;
+  font-size: 14px;
+}
+
+.canvas-shortcuts-popover dl {
+  display: grid;
+  margin: 0;
+  gap: 7px;
+}
+
+.canvas-shortcuts-popover dl > div {
+  display: grid;
+  grid-template-columns: minmax(130px, 1fr) minmax(170px, 1.4fr);
+  align-items: center;
+  gap: 12px;
+}
+
+.canvas-shortcuts-popover dt,
+.canvas-shortcuts-popover dd {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.canvas-shortcuts-popover dd {
+  color: #566159;
+  text-align: right;
+}
+
+.canvas-shortcuts-popover kbd {
+  display: inline-block;
+  min-width: 20px;
+  padding: 1px 5px;
+  border: 1px solid #cad2cc;
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  color: #344239;
+  background: #f6f8f6;
+  text-align: center;
+  font: inherit;
+  font-size: 11px;
 }
 
 .graph-empty {

@@ -356,6 +356,7 @@ function App({
     canRedo: false,
   });
   const [searchTerm, setSearchTerm] = useState("");
+  const searchInputRef = useRef<HTMLInputElement>(null);
   const [unnamedOnly, setUnnamedOnly] = useState(false);
   const [referenceFilterNodeIds, setReferenceFilterNodeIds] = useState<string[]>([]);
   const [pendingWorkspaceReplacement, setPendingWorkspaceReplacement] =
@@ -534,6 +535,27 @@ function App({
         window.clearTimeout(appNoticeTimerRef.current);
       }
     };
+  }, []);
+
+  useEffect(() => {
+    const focusNodeSearch = (event: KeyboardEvent) => {
+      if (
+        !(event.ctrlKey || event.metaKey) ||
+        event.altKey ||
+        event.key.toLowerCase() !== "f"
+      ) {
+        return;
+      }
+      const searchInput = searchInputRef.current;
+      if (searchInput === null) {
+        return;
+      }
+      event.preventDefault();
+      searchInput.focus({ preventScroll: true });
+      searchInput.select();
+    };
+    window.addEventListener("keydown", focusNodeSearch, true);
+    return () => window.removeEventListener("keydown", focusNodeSearch, true);
   }, []);
 
   function showAppNotice(message: string) {
@@ -3411,8 +3433,17 @@ function App({
                 <Search aria-hidden="true" size={16} />
                 <span className="visually-hidden">{t("search.label")}</span>
                 <input
+                  data-testid="node-search"
                   onChange={(event) => setSearchTerm(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Escape") {
+                      event.preventDefault();
+                      setSearchTerm("");
+                      event.currentTarget.blur();
+                    }
+                  }}
                   placeholder={t("search.placeholder")}
+                  ref={searchInputRef}
                   value={searchTerm}
                 />
               </label>
@@ -4841,6 +4872,26 @@ function App({
                 removeNodeFilter: t("filters.removeNodeFilter"),
                 sourceHandle: t("references.sourceHandle"),
                 smartReference: t("smartReference.action"),
+                shortcuts: {
+                  items: [
+                    "pan",
+                    "zoom",
+                    "frame",
+                    "select",
+                    "selectAll",
+                    "edit",
+                    "search",
+                    "history",
+                    "contextMenu",
+                    "cancel",
+                    "help",
+                  ].map((id) => ({
+                    action: t(`canvasShortcuts.items.${id}.action`),
+                    keys: t(`canvasShortcuts.items.${id}.keys`),
+                  })),
+                  open: t("canvasShortcuts.open"),
+                  title: t("canvasShortcuts.title"),
+                },
                 targetHandle: t("references.targetHandle"),
                 undo: t("actions.undo"),
                 unnamed: t("nodes.unnamed"),

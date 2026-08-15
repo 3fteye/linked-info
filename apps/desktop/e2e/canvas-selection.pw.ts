@@ -77,6 +77,10 @@ async function openSyntheticWorkspace(
   );
   await page.goto("/");
   await expect(page.getByTestId("graph-canvas")).toBeVisible();
+  await expect(page.getByTestId("graph-canvas")).toHaveAttribute(
+    "data-flow-ready",
+    "true",
+  );
 }
 
 function node(page: Page, id: string) {
@@ -399,6 +403,192 @@ test("invalid TOTP content is rejected without changing the node", async ({ page
     .click();
   await expect(page.getByRole("alert")).toHaveText("Invalid TOTP secret");
   await expect(textarea).toHaveValue(invalidTotp);
+});
+
+test("Space plus left drag pans from a node without moving it", async ({ page }) => {
+  const nodes = gridNodes(2, 1);
+  await openSyntheticWorkspace(page, nodes);
+  const firstNode = node(page, nodes[0].id);
+  const beforeNode = await firstNode.boundingBox();
+  expect(beforeNode).not.toBeNull();
+
+  await page.keyboard.down("Space");
+  await page.mouse.move(beforeNode!.x + 90, beforeNode!.y + 28);
+  await page.mouse.down({ button: "left" });
+  await page.mouse.move(beforeNode!.x + 230, beforeNode!.y + 108, { steps: 8 });
+  await page.mouse.up({ button: "left" });
+  await page.keyboard.up("Space");
+
+  await expect
+    .poll(async () => (await storedWorkspace(page))?.viewport)
+    .not.toEqual({ x: 0, y: 0, zoom: 1 });
+  expect((await storedWorkspace(page))?.layout).toEqual(
+    nodes.map((item) => ({ nodeId: item.id, x: item.x, y: item.y })),
+  );
+});
+
+test("middle drag pans from a node without moving it", async ({ page }) => {
+  const nodes = gridNodes(2, 1);
+  await openSyntheticWorkspace(page, nodes);
+  const firstNode = node(page, nodes[0].id);
+  const beforeNode = await firstNode.boundingBox();
+  expect(beforeNode).not.toBeNull();
+
+  await page.mouse.move(beforeNode!.x + 90, beforeNode!.y + 28);
+  await page.mouse.down({ button: "middle" });
+  await page.mouse.move(beforeNode!.x + 230, beforeNode!.y + 108, { steps: 8 });
+  await page.mouse.up({ button: "middle" });
+
+  await expect
+    .poll(async () => (await storedWorkspace(page))?.viewport)
+    .not.toEqual({ x: 0, y: 0, zoom: 1 });
+  expect((await storedWorkspace(page))?.layout).toEqual(
+    nodes.map((item) => ({ nodeId: item.id, x: item.x, y: item.y })),
+  );
+});
+
+test("canvas keyboard navigation frames and zooms the current view", async ({ page }) => {
+  const nodes = gridNodes(6, 4);
+  await openSyntheticWorkspace(page, nodes);
+
+  await page.getByTestId("graph-canvas").click({ position: { x: 30, y: 30 } });
+  await page.keyboard.press("Home");
+  await expect
+    .poll(async () => (await storedWorkspace(page))?.viewport?.zoom ?? null)
+    .toBeLessThan(1);
+  const fittedZoom = (await storedWorkspace(page))!.viewport!.zoom;
+
+  await node(page, nodes[0].id).click({ position: { x: 24, y: 24 } });
+  await page.keyboard.press("f");
+  await expect
+    .poll(async () => (await storedWorkspace(page))?.viewport?.zoom ?? null)
+    .toBeGreaterThan(fittedZoom);
+
+  await page.keyboard.press("Control+0");
+  await expect
+    .poll(async () => (await storedWorkspace(page))?.viewport?.zoom ?? null)
+    .toBeCloseTo(1, 3);
+
+  await page.keyboard.press("-");
+  await expect
+    .poll(async () => (await storedWorkspace(page))?.viewport?.zoom ?? null)
+    .toBeLessThan(1);
+  await page.keyboard.press("+");
+  await expect
+    .poll(async () => (await storedWorkspace(page))?.viewport?.zoom ?? null)
+    .toBeCloseTo(1, 2);
+});
+
+test("canvas shortcut help exposes the complete interaction baseline", async ({ page }) => {
+  await openSyntheticWorkspace(page, gridNodes(2, 1));
+  const toggle = page.getByTestId("canvas-shortcuts-toggle");
+  const popover = page.getByTestId("canvas-shortcuts-popover");
+
+  await toggle.click();
+  await expect(toggle).toHaveAttribute("aria-expanded", "true");
+  await expect(popover).toBeVisible();
+  await expect(popover.locator("dt")).toHaveCount(11);
+  const canvasBounds = await page.getByTestId("graph-canvas").boundingBox();
+  const popoverBounds = await popover.boundingBox();
+  expect(canvasBounds).not.toBeNull();
+  expect(popoverBounds).not.toBeNull();
+  expect(popoverBounds!.x).toBeGreaterThan(canvasBounds!.x + canvasBounds!.width / 2);
+  expect(popoverBounds!.x + popoverBounds!.width).toBeLessThanOrEqual(
+    canvasBounds!.x + canvasBounds!.width,
+  );
+  await page.keyboard.press("Escape");
+  await expect(popover).toHaveCount(0);
+
+  await page.getByTestId("graph-canvas").click({ position: { x: 30, y: 30 } });
+  await page.keyboard.press("?");
+  await expect(popover).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(popover).toHaveCount(0);
+});
+
+test("canvas keyboard selection, editing, search and control focus do not conflict", async ({
+  page,
+}) => {
+  const nodes = gridNodes(2, 1);
+  await openSyntheticWorkspace(page, nodes);
+  const firstNode = node(page, nodes[0].id);
+
+  await firstNode.click({ position: { x: 24, y: 24 } });
+  await expect(firstNode).toHaveAttribute("data-selected", "true");
+  await page.keyboard.press("Enter");
+  await expect(firstNode).toHaveAttribute("data-editing", "true");
+  const nameInput = firstNode.locator("input").first();
+  await nameInput.fill("Keyboard edited synthetic node");
+  await page.keyboard.press("Escape");
+  await expect(firstNode).toHaveAttribute("data-editing", "false");
+  await expect
+    .poll(async () =>
+      (await storedWorkspace(page))?.nodes?.find(
+        (item: { id?: string }) => item.id === nodes[0].id,
+      )?.name,
+    )
+    .toBe("Keyboard edited synthetic node");
+
+  await page.keyboard.press("Escape");
+  await expect(firstNode).toHaveAttribute("data-selected", "false");
+
+  const searchInput = page.getByTestId("node-search");
+  await searchInput.fill("Synthetic");
+  await page.getByTestId("graph-canvas").click({ position: { x: 30, y: 30 } });
+  await page.keyboard.press("Control+f");
+  await expect(searchInput).toBeFocused();
+  await expect
+    .poll(() =>
+      searchInput.evaluate((element) => {
+        const input = element as HTMLInputElement;
+        return input.value.slice(input.selectionStart ?? 0, input.selectionEnd ?? 0);
+      }),
+    )
+    .toBe("Synthetic");
+  await page.keyboard.press("Escape");
+  await expect(searchInput).toHaveValue("");
+  await expect(searchInput).not.toBeFocused();
+
+  await firstNode.click({ position: { x: 24, y: 24 } });
+  await page.getByTestId("create-node").focus();
+  await page.keyboard.press("Delete");
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(firstNode).toHaveAttribute("data-selected", "true");
+});
+
+test("canvas select all, delete, undo, redo and context menu share one keyboard model", async ({
+  page,
+}) => {
+  const nodes = gridNodes(3, 1);
+  await openSyntheticWorkspace(page, nodes);
+  const canvas = page.getByTestId("graph-canvas");
+
+  await canvas.click({ position: { x: 30, y: 30 } });
+  await page.keyboard.press("Control+a");
+  await expect(page.locator('[data-node-id][data-selected="true"]')).toHaveCount(3);
+
+  await page.keyboard.press("Delete");
+  await expect(page.getByRole("dialog")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+
+  await page.keyboard.press("Backspace");
+  await expect(page.getByRole("dialog")).toBeVisible();
+  await page.locator(".confirmation-dialog .danger-button").click();
+  await expect(page.locator("[data-node-id]")).toHaveCount(0);
+
+  await canvas.click({ position: { x: 30, y: 30 } });
+  await page.keyboard.press("Control+z");
+  await expect(page.locator("[data-node-id]")).toHaveCount(3);
+  await page.keyboard.press("Control+Shift+z");
+  await expect(page.locator("[data-node-id]")).toHaveCount(0);
+
+  await page.keyboard.press("Control+z");
+  const firstNode = node(page, nodes[0].id);
+  await firstNode.click({ button: "right", position: { x: 30, y: 30 } });
+  await expect(page.locator(".graph-context-menu")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.locator(".graph-context-menu")).toHaveCount(0);
 });
 
 test("node drag and pane pan persist their geometry", async ({ page }) => {

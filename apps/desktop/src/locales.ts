@@ -62,6 +62,23 @@ export const resources = {
         label: "搜索节点",
         placeholder: "按名称搜索",
       },
+      canvasShortcuts: {
+        items: {
+          cancel: { action: "取消操作或清除选择", keys: "Esc" },
+          contextMenu: { action: "上下文菜单", keys: "右键" },
+          edit: { action: "编辑唯一选中的节点", keys: "Enter / F2 / 双击" },
+          frame: { action: "适应全部 / 聚焦所选", keys: "Home / F" },
+          help: { action: "显示或隐藏本帮助", keys: "?" },
+          history: { action: "撤销 / 重做", keys: "Ctrl/⌘+Z / Ctrl+Y / Ctrl/⌘+Shift+Z" },
+          pan: { action: "平移画布", keys: "空白左键拖动 / Space+左键 / 中键" },
+          search: { action: "搜索节点", keys: "Ctrl/⌘+F" },
+          select: { action: "框选 / 追加选择", keys: "Shift+空白拖动 / Ctrl/⌘/Shift+点击" },
+          selectAll: { action: "选择当前可见节点", keys: "Ctrl/⌘+A" },
+          zoom: { action: "缩放 / 恢复 100%", keys: "滚轮 / + / − / Ctrl/⌘+0" },
+        },
+        open: "画布操作与快捷键",
+        title: "画布操作与快捷键",
+      },
       empty: {
         canvas: "画布上还没有节点",
         nodes: "还没有节点",
@@ -682,6 +699,23 @@ export const resources = {
       search: {
         label: "Search nodes",
         placeholder: "Search by name",
+      },
+      canvasShortcuts: {
+        items: {
+          cancel: { action: "Cancel an action or clear selection", keys: "Esc" },
+          contextMenu: { action: "Context menu", keys: "Right click" },
+          edit: { action: "Edit the sole selected node", keys: "Enter / F2 / double click" },
+          frame: { action: "Frame all / focus selection", keys: "Home / F" },
+          help: { action: "Show or hide this help", keys: "?" },
+          history: { action: "Undo / redo", keys: "Ctrl/⌘+Z / Ctrl+Y / Ctrl/⌘+Shift+Z" },
+          pan: { action: "Pan canvas", keys: "Blank left drag / Space+left drag / middle drag" },
+          search: { action: "Search nodes", keys: "Ctrl/⌘+F" },
+          select: { action: "Marquee / additive selection", keys: "Shift+blank drag / Ctrl/⌘/Shift+click" },
+          selectAll: { action: "Select visible nodes", keys: "Ctrl/⌘+A" },
+          zoom: { action: "Zoom / restore 100%", keys: "Wheel / + / − / Ctrl/⌘+0" },
+        },
+        open: "Canvas controls and shortcuts",
+        title: "Canvas controls and shortcuts",
       },
       empty: {
         canvas: "No nodes on this canvas",
