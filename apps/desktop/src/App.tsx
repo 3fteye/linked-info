@@ -12,6 +12,7 @@ import {
   Filter,
   Fingerprint,
   KeyRound,
+  Keyboard,
   Languages,
   Link2,
   LockKeyhole,
@@ -28,6 +29,8 @@ import {
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import GraphCanvas from "./GraphCanvas";
+import CanvasOperationGuide from "./CanvasOperationGuide";
+import { canvasOperationIds } from "./canvasOperations";
 import DocumentImportDialog from "./DocumentImportDialog";
 import {
   buildDocumentImportWorkspace,
@@ -3365,6 +3368,11 @@ function App({
   const progressLlmModelName = t(
     `smartReference.llm.settings.models.${progressLlmModel.translationKey}.name`,
   );
+  const canvasOperationItems = canvasOperationIds.map((id) => ({
+    action: t(`canvasShortcuts.items.${id}.action`),
+    id,
+    keys: t(`canvasShortcuts.items.${id}.keys`),
+  }));
 
   return (
     <div className="app-shell">
@@ -3400,6 +3408,7 @@ function App({
           <button
             className="nav-item"
             data-active={activeView === "settings"}
+            data-testid="settings-navigation"
             disabled={pendingWorkspaceReplacement !== null}
             onClick={() => setActiveView("settings")}
             type="button"
@@ -3612,6 +3621,7 @@ function App({
                   {supportedLanguages.map((language) => (
                     <button
                       data-active={activeLanguage === language}
+                      data-language={language}
                       key={language}
                       onClick={() => changeLanguage(language)}
                       type="button"
@@ -3620,6 +3630,26 @@ function App({
                     </button>
                   ))}
                 </div>
+              </div>
+              <header className="settings-group-heading">
+                <h2 data-testid="operation-guide-heading">
+                  {t("settings.operationGuideTitle")}
+                </h2>
+                <p>{t("settings.operationGuideDescription")}</p>
+              </header>
+              <div className="setting-row operation-guide-setting-row">
+                <div className="setting-label">
+                  <Keyboard size={18} />
+                  <div className="setting-label-copy">
+                    <span>{t("settings.canvasOperations")}</span>
+                    <small>{t("settings.canvasOperationsDescription")}</small>
+                  </div>
+                </div>
+                <CanvasOperationGuide
+                  items={canvasOperationItems}
+                  pickerLabel={t("canvasShortcuts.pickerLabel")}
+                  replayLabel={t("canvasShortcuts.replay")}
+                />
               </div>
               <header className="settings-group-heading">
                 <h2>{t("settings.smartReferenceTitle")}</h2>
@@ -4873,22 +4903,7 @@ function App({
                 sourceHandle: t("references.sourceHandle"),
                 smartReference: t("smartReference.action"),
                 shortcuts: {
-                  items: [
-                    "pan",
-                    "zoom",
-                    "frame",
-                    "select",
-                    "selectAll",
-                    "edit",
-                    "search",
-                    "history",
-                    "contextMenu",
-                    "cancel",
-                    "help",
-                  ].map((id) => ({
-                    action: t(`canvasShortcuts.items.${id}.action`),
-                    keys: t(`canvasShortcuts.items.${id}.keys`),
-                  })),
+                  items: canvasOperationItems,
                   open: t("canvasShortcuts.open"),
                   title: t("canvasShortcuts.title"),
                 },

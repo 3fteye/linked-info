@@ -70,6 +70,7 @@ import {
   type ContentEnhancementLabels,
 } from "./contentProcessor";
 import { TotpSecondClockProvider } from "./totpContent";
+import type { CanvasOperationItem } from "./canvasOperations";
 import {
   contentMarkerRegistry,
   type ContentMarkerSelection,
@@ -208,7 +209,7 @@ interface GraphLabels {
   sourceHandle: string;
   smartReference: string;
   shortcuts: {
-    items: ReadonlyArray<{ action: string; keys: string }>;
+    items: readonly CanvasOperationItem[];
     open: string;
     title: string;
   };
@@ -2196,7 +2197,7 @@ export default function GraphCanvas({
               <strong>{labels.shortcuts.title}</strong>
               <dl>
                 {labels.shortcuts.items.map((item) => (
-                  <div key={item.action}>
+                  <div key={item.id}>
                     <dt>{item.action}</dt>
                     <dd><kbd>{item.keys}</kbd></dd>
                   </div>

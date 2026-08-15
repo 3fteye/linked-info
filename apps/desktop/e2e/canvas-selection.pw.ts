@@ -591,6 +591,93 @@ test("canvas select all, delete, undo, redo and context menu share one keyboard 
   await expect(page.locator(".graph-context-menu")).toHaveCount(0);
 });
 
+test("settings operation guide demonstrates every shared canvas control", async ({ page }) => {
+  await openSyntheticWorkspace(page, gridNodes(2, 1));
+  await page.getByTestId("settings-navigation").click();
+
+  const guide = page.getByTestId("canvas-operation-guide");
+  const stage = page.getByTestId("canvas-operation-stage");
+  await expect(page.getByTestId("operation-guide-heading")).toBeVisible();
+  await expect(guide).toBeVisible();
+  await expect(guide.locator(".canvas-operation-picker-item")).toHaveCount(11);
+
+  const animatedTargets: Record<string, string> = {
+    pan: ".canvas-operation-scene",
+    zoom: ".canvas-operation-scene",
+    frame: ".canvas-operation-scene",
+    select: ".canvas-operation-marquee",
+    selectAll: ".canvas-operation-node-a",
+    edit: ".canvas-operation-editor",
+    search: ".canvas-operation-search",
+    history: ".canvas-operation-node-c",
+    contextMenu: ".canvas-operation-context-menu",
+    cancel: ".canvas-operation-node-b",
+    help: ".canvas-operation-help",
+  };
+  for (const [operation, selector] of Object.entries(animatedTargets)) {
+    await guide.locator(`[data-operation="${operation}"]`).click();
+    await expect(stage).toHaveAttribute("data-demo", operation);
+    await expect
+      .poll(() =>
+        stage.locator(selector).evaluate((element) =>
+          getComputedStyle(element).animationName,
+        ),
+      )
+      .not.toBe("none");
+  }
+
+  const beforeReplay = Number(await stage.getAttribute("data-replay-iteration"));
+  await guide.getByTestId("canvas-operation-replay").click();
+  await expect(stage).toHaveAttribute(
+    "data-replay-iteration",
+    String(beforeReplay + 1),
+  );
+
+  const guideBounds = await guide.boundingBox();
+  const stageBounds = await stage.boundingBox();
+  expect(guideBounds).not.toBeNull();
+  expect(stageBounds).not.toBeNull();
+  expect(stageBounds!.x + stageBounds!.width).toBeLessThanOrEqual(
+    guideBounds!.x + guideBounds!.width,
+  );
+
+  await page.locator('[data-language="en-US"]').click();
+  await expect(page.getByTestId("operation-guide-heading")).toHaveText(
+    "Operation guide",
+  );
+  await expect(guide.locator(".canvas-operation-picker-item")).toHaveCount(11);
+});
+
+test("settings operation guide honors reduced motion", async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await openSyntheticWorkspace(page, gridNodes(1, 1));
+  await page.getByTestId("settings-navigation").click();
+  const guide = page.getByTestId("canvas-operation-guide");
+  await guide.locator('[data-operation="contextMenu"]').click();
+
+  await expect
+    .poll(() =>
+      guide.locator(".canvas-operation-context-menu").evaluate((element) =>
+        getComputedStyle(element).animationName,
+      ),
+    )
+    .toBe("none");
+  await expect
+    .poll(() =>
+      guide.locator(".canvas-operation-context-menu").evaluate((element) =>
+        getComputedStyle(element).opacity,
+      ),
+    )
+    .toBe("1");
+  await expect
+    .poll(() =>
+      guide.locator(".canvas-operation-key-state").evaluate((element) =>
+        getComputedStyle(element).animationName,
+      ),
+    )
+    .toBe("none");
+});
+
 test("node drag and pane pan persist their geometry", async ({ page }) => {
   const nodes = gridNodes(2, 1);
   await openSyntheticWorkspace(page, nodes);
