@@ -722,6 +722,22 @@ test("settings tabs support standard keyboard navigation", async ({ page }) => {
   );
 });
 
+test("offsite backup exposes Cloudflare R2 through the shared S3 form", async ({ page }) => {
+  await openSyntheticWorkspace(page, gridNodes(1, 1));
+  await page.getByTestId("settings-navigation").click();
+  await page.getByTestId("settings-tab-dataSecurity").click();
+
+  const provider = page.getByTestId("offsite-s3-provider");
+  await expect(provider.locator("option")).toHaveCount(5);
+  await expect(provider).toHaveValue("cloudflareR2");
+  await expect(page.getByTestId("offsite-s3-region")).toHaveValue("auto");
+  await expect(page.getByTestId("offsite-s3-endpoint")).toHaveAttribute(
+    "placeholder",
+    "https://<ACCOUNT_ID>.r2.cloudflarestorage.com",
+  );
+  await expect(page.getByText("Cloudflare Worker + R2", { exact: true })).toHaveCount(0);
+});
+
 test("node drag and pane pan persist their geometry", async ({ page }) => {
   const nodes = gridNodes(2, 1);
   await openSyntheticWorkspace(page, nodes);

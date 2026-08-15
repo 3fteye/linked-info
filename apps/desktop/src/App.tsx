@@ -195,6 +195,13 @@ type PendingOffsiteSensitiveAction =
   | { kind: "removeTarget"; targetId: string; targetName: string }
   | { kind: "destroyTarget"; targetId: string; targetName: string }
   | {
+      kind: "migrateLegacy";
+      sourceTargetId: string;
+      sourceTargetName: string;
+      destinationTargetId: string;
+      destinationTargetName: string;
+    }
+  | {
       kind: "retention";
       targetId: string;
       enabled: boolean;
@@ -414,7 +421,7 @@ function App({
   >(null);
   const [pendingBackupTarget, setPendingBackupTarget] = useState<
     | ({ name: string } & TemporaryBackupConnection & {
-        s3Provider?: S3ProviderTemplate;
+        s3Provider: S3ProviderTemplate;
       })
     | null
   >(null);
@@ -450,6 +457,8 @@ function App({
   const [selectedOffsiteTargetId, setSelectedOffsiteTargetId] = useState<
     string | null
   >(null);
+  const [legacyMigrationDestinationId, setLegacyMigrationDestinationId] =
+    useState<string | null>(null);
   const [offsitePage, setOffsitePage] = useState<OffsiteBackupPage | null>(null);
   const [offsiteBusy, setOffsiteBusy] = useState(false);
   const [offsiteMessage, setOffsiteMessage] = useState<string | null>(null);
@@ -458,20 +467,18 @@ function App({
   const automaticOffsiteMarkedRevisionRef = useRef(0);
   const [appNotice, setAppNotice] = useState<string | null>(null);
   const appNoticeTimerRef = useRef<number | null>(null);
-  const [offsiteProvider, setOffsiteProvider] = useState<
-    "cloudflareWorkerR2" | "s3Compatible"
-  >("cloudflareWorkerR2");
   const [offsiteTargetName, setOffsiteTargetName] = useState("Cloudflare R2");
   const [offsiteEndpoint, setOffsiteEndpoint] = useState("");
-  const [offsiteToken, setOffsiteToken] = useState("");
   const [offsiteS3Provider, setOffsiteS3Provider] =
-    useState<S3ProviderTemplate>("backblazeB2");
-  const [offsiteRegion, setOffsiteRegion] = useState("");
+    useState<S3ProviderTemplate>("cloudflareR2");
+  const [offsiteRegion, setOffsiteRegion] = useState("auto");
   const [offsiteBucket, setOffsiteBucket] = useState("");
   const [offsitePrefix, setOffsitePrefix] = useState("linked-info/v1");
   const [offsiteAccessKeyId, setOffsiteAccessKeyId] = useState("");
   const [offsiteSecretAccessKey, setOffsiteSecretAccessKey] = useState("");
   const [offsiteSessionToken, setOffsiteSessionToken] = useState("");
+  const offsiteRecoveryConnectionRef =
+    useRef<TemporaryBackupConnection | null>(null);
   const [offsiteRecoveryPage, setOffsiteRecoveryPage] =
     useState<OffsiteBackupPage | null>(null);
   const [offsiteRestoreDrill, setOffsiteRestoreDrill] = useState<{
@@ -544,6 +551,15 @@ function App({
       offsiteTargets.find((target) => target.id === selectedOffsiteTargetId) ?? null,
     [offsiteTargets, selectedOffsiteTargetId],
   );
+  const s3OffsiteTargets = useMemo(
+    () => offsiteTargets.filter((target) => target.provider === "s3Compatible"),
+    [offsiteTargets],
+  );
+  const effectiveLegacyMigrationDestinationId =
+    legacyMigrationDestinationId !== null &&
+    s3OffsiteTargets.some((target) => target.id === legacyMigrationDestinationId)
+      ? legacyMigrationDestinationId
+      : (s3OffsiteTargets[0]?.id ?? null);
 
   useEffect(() => {
     return () => {
@@ -1037,7 +1053,11 @@ function App({
   }, [offsiteBackup, persistenceReady, workspaceSecurityStatus.encrypted]);
 
   useEffect(() => {
-    if (activeView !== "settings" || selectedOffsiteTargetId === null) {
+    if (
+      activeView !== "settings" ||
+      selectedOffsiteTargetId === null ||
+      selectedOffsiteTarget?.provider !== "s3Compatible"
+    ) {
       setOffsitePage(null);
       return;
     }
@@ -1059,7 +1079,7 @@ function App({
     return () => {
       active = false;
     };
-  }, [activeView, offsiteBackup, selectedOffsiteTargetId, t]);
+  }, [activeView, offsiteBackup, selectedOffsiteTarget, selectedOffsiteTargetId, t]);
 
   useEffect(() => {
     let active = true;
@@ -1329,7 +1349,6 @@ function App({
     setPendingBackupTarget(null);
     setPendingOffsiteSensitiveAction(null);
     setOffsiteConfirmationName("");
-    setOffsiteToken("");
     setOffsiteAccessKeyId("");
     setOffsiteSecretAccessKey("");
     setOffsiteSessionToken("");
@@ -1346,8 +1365,11 @@ function App({
     }
     if (
       securityDialog === "offsiteSensitive" &&
-      pendingOffsiteSensitiveAction?.kind === "destroyTarget" &&
-      offsiteConfirmationName !== pendingOffsiteSensitiveAction.targetName
+      ((pendingOffsiteSensitiveAction?.kind === "destroyTarget" &&
+        offsiteConfirmationName !== pendingOffsiteSensitiveAction.targetName) ||
+        (pendingOffsiteSensitiveAction?.kind === "migrateLegacy" &&
+          offsiteConfirmationName !==
+            pendingOffsiteSensitiveAction.sourceTargetName))
     ) {
       return;
     }
@@ -1401,7 +1423,9 @@ function App({
                     ? "backupSnapshotDelete"
                     : pendingOffsiteSensitiveAction?.kind === "destroyTarget"
                       ? "backupTargetDestroy"
-                      : pendingOffsiteSensitiveAction?.kind === "retention"
+                    : pendingOffsiteSensitiveAction?.kind === "migrateLegacy"
+                      ? "backupTargetDestroy"
+                    : pendingOffsiteSensitiveAction?.kind === "retention"
                         ? "backupRetentionChange"
                         : "backupTargetChange"
                 : "exportWorkspace";
@@ -1434,37 +1458,23 @@ function App({
           if (pendingBackupTarget === null) {
             throw new Error("offsite_backup_missing_pending_target");
           }
-          const configured =
-            pendingBackupTarget.provider === "cloudflareWorkerR2"
-              ? await offsiteBackup.configureCloudflareTarget({
-                  name: pendingBackupTarget.name,
-                  endpoint: pendingBackupTarget.endpoint,
-                  token: pendingBackupTarget.token,
-                  authorization,
-                })
-              : await offsiteBackup.configureS3Target({
-                  name: pendingBackupTarget.name,
-                  endpoint: pendingBackupTarget.endpoint,
-                  s3Provider:
-                    pendingBackupTarget.s3Provider ?? "custom",
-                  region: pendingBackupTarget.region,
-                  bucket: pendingBackupTarget.bucket,
-                  prefix: pendingBackupTarget.prefix,
-                  accessKeyId: pendingBackupTarget.accessKeyId,
-                  secretAccessKey: pendingBackupTarget.secretAccessKey,
-                  sessionToken: pendingBackupTarget.sessionToken,
-                  authorization,
-                });
+          const configured = await offsiteBackup.configureS3Target({
+            name: pendingBackupTarget.name,
+            endpoint: pendingBackupTarget.endpoint,
+            s3Provider: pendingBackupTarget.s3Provider,
+            region: pendingBackupTarget.region,
+            bucket: pendingBackupTarget.bucket,
+            prefix: pendingBackupTarget.prefix,
+            accessKeyId: pendingBackupTarget.accessKeyId,
+            secretAccessKey: pendingBackupTarget.secretAccessKey,
+            sessionToken: pendingBackupTarget.sessionToken,
+            authorization,
+          });
           setOffsiteTargets((targets) => [...targets, configured]);
           setSelectedOffsiteTargetId(configured.id);
           setOffsitePage(null);
           setOffsiteEndpoint("");
-          setOffsiteTargetName(
-            offsiteProvider === "cloudflareWorkerR2"
-              ? "Cloudflare R2"
-              : t(`offsiteBackup.s3Providers.${offsiteS3Provider}`),
-          );
-          setOffsiteToken("");
+          setOffsiteTargetName(t(`offsiteBackup.s3Providers.${offsiteS3Provider}`));
           setOffsiteAccessKeyId("");
           setOffsiteSecretAccessKey("");
           setOffsiteSessionToken("");
@@ -1514,6 +1524,25 @@ function App({
                 }),
               );
             }
+          } else if (action.kind === "migrateLegacy") {
+            const result = await offsiteBackup.migrateLegacyTarget(
+              action.sourceTargetId,
+              action.destinationTargetId,
+              offsiteConfirmationName,
+              authorization,
+            );
+            const targets = await offsiteBackup.inspectTargets();
+            setOffsiteTargets(targets);
+            setSelectedOffsiteTargetId(result.destination.id);
+            setLegacyMigrationDestinationId(null);
+            setOffsitePage(await offsiteBackup.list(result.destination.id));
+            showAppNotice(
+              t("offsiteBackup.migrationSuccess", {
+                copied: result.copiedCount,
+                deleted: result.deletedCount,
+                destination: result.destination.name,
+              }),
+            );
           } else {
             const updated = await offsiteBackup.updateRetentionSettings(
               action.targetId,
@@ -1552,7 +1581,9 @@ function App({
     } catch (error) {
       const reason = errorReason(error);
       setSecurityMessage(
-        reason === "workspace_vault_password_blocked"
+        pendingOffsiteSensitiveAction?.kind === "migrateLegacy"
+          ? t("offsiteBackup.errors.migration", { reason })
+          : reason === "workspace_vault_password_blocked"
           ? t("security.passwordBlocked")
           : reason === "workspace_vault_password_rate_limited"
             ? t("security.passwordRateLimited")
@@ -2554,16 +2585,6 @@ function App({
   }
 
   function currentTemporaryBackupConnection(): TemporaryBackupConnection | null {
-    if (offsiteProvider === "cloudflareWorkerR2") {
-      if (offsiteEndpoint.trim().length === 0 || offsiteToken.length < 32) {
-        return null;
-      }
-      return {
-        provider: "cloudflareWorkerR2",
-        endpoint: offsiteEndpoint.trim(),
-        token: offsiteToken,
-      };
-    }
     const endpoint = resolveS3Endpoint(
       offsiteS3Provider,
       offsiteEndpoint,
@@ -2591,26 +2612,6 @@ function App({
     };
   }
 
-  function changeOffsiteProvider(
-    provider: "cloudflareWorkerR2" | "s3Compatible",
-  ) {
-    setOffsiteProvider(provider);
-    setOffsiteEndpoint("");
-    setOffsiteToken("");
-    setOffsiteRegion("");
-    setOffsiteBucket("");
-    setOffsitePrefix("linked-info/v1");
-    setOffsiteAccessKeyId("");
-    setOffsiteSecretAccessKey("");
-    setOffsiteSessionToken("");
-    setOffsiteRecoveryPage(null);
-    setOffsiteTargetName(
-      provider === "cloudflareWorkerR2"
-        ? "Cloudflare R2"
-        : t("offsiteBackup.s3Providers.backblazeB2"),
-    );
-  }
-
   function changeS3Provider(template: S3ProviderTemplate) {
     const defaults = s3TemplateDefaults(template);
     setOffsiteS3Provider(template);
@@ -2624,178 +2625,134 @@ function App({
   function renderOffsiteConnectionFields() {
     return (
       <>
+        <small>{t("offsiteBackup.s3UnifiedDescription")}</small>
         <label>
-          <span>{t("offsiteBackup.provider")}</span>
+          <span>{t("offsiteBackup.s3Provider")}</span>
           <select
+            data-testid="offsite-s3-provider"
             disabled={offsiteBusy}
             onChange={(event) =>
-              changeOffsiteProvider(
-                event.target.value as
-                  | "cloudflareWorkerR2"
-                  | "s3Compatible",
-              )
+              changeS3Provider(event.target.value as S3ProviderTemplate)
             }
-            value={offsiteProvider}
+            value={offsiteS3Provider}
           >
-            <option value="cloudflareWorkerR2">
-              {t("offsiteBackup.providers.cloudflareWorkerR2")}
+            <option value="cloudflareR2">
+              {t("offsiteBackup.s3Providers.cloudflareR2")}
             </option>
-            <option value="s3Compatible">
-              {t("offsiteBackup.providers.s3Compatible")}
+            <option value="backblazeB2">
+              {t("offsiteBackup.s3Providers.backblazeB2")}
+            </option>
+            <option value="tigris">
+              {t("offsiteBackup.s3Providers.tigris")}
+            </option>
+            <option value="oracleOci">
+              {t("offsiteBackup.s3Providers.oracleOci")}
+            </option>
+            <option value="custom">
+              {t("offsiteBackup.s3Providers.custom")}
             </option>
           </select>
         </label>
-        {offsiteProvider === "cloudflareWorkerR2" ? (
-          <>
-            <label>
-              <span>{t("offsiteBackup.workerEndpoint")}</span>
-              <input
-                disabled={offsiteBusy}
-                onChange={(event) => {
-                  setOffsiteEndpoint(event.target.value);
-                  setOffsiteRecoveryPage(null);
-                }}
-                placeholder="https://linked-info-backup-api.example.workers.dev"
-                type="url"
-                value={offsiteEndpoint}
-              />
-            </label>
-            <label>
-              <span>{t("offsiteBackup.token")}</span>
-              <input
-                autoComplete="off"
-                disabled={offsiteBusy}
-                onChange={(event) => {
-                  setOffsiteToken(event.target.value);
-                  setOffsiteRecoveryPage(null);
-                }}
-                type="password"
-                value={offsiteToken}
-              />
-            </label>
-            <small>{t("offsiteBackup.tokenDescription")}</small>
-          </>
-        ) : (
-          <>
-            <label>
-              <span>{t("offsiteBackup.s3Provider")}</span>
-              <select
-                disabled={offsiteBusy}
-                onChange={(event) =>
-                  changeS3Provider(event.target.value as S3ProviderTemplate)
-                }
-                value={offsiteS3Provider}
-              >
-                <option value="backblazeB2">
-                  {t("offsiteBackup.s3Providers.backblazeB2")}
-                </option>
-                <option value="tigris">
-                  {t("offsiteBackup.s3Providers.tigris")}
-                </option>
-                <option value="oracleOci">
-                  {t("offsiteBackup.s3Providers.oracleOci")}
-                </option>
-                <option value="custom">
-                  {t("offsiteBackup.s3Providers.custom")}
-                </option>
-              </select>
-            </label>
-            <small>{t(`offsiteBackup.s3ProviderDescriptions.${offsiteS3Provider}`)}</small>
-            <label>
-              <span>{t("offsiteBackup.s3Region")}</span>
-              <input
-                autoComplete="off"
-                disabled={offsiteBusy}
-                onChange={(event) => {
-                  setOffsiteRegion(event.target.value);
-                  setOffsiteRecoveryPage(null);
-                }}
-                placeholder={offsiteS3Provider === "tigris" ? "auto" : "us-west-004"}
-                value={offsiteRegion}
-              />
-            </label>
-            <label>
-              <span>{t("offsiteBackup.s3Endpoint")}</span>
-              <input
-                disabled={offsiteBusy}
-                onChange={(event) => {
-                  setOffsiteEndpoint(event.target.value);
-                  setOffsiteRecoveryPage(null);
-                }}
-                placeholder={s3EndpointPlaceholder(
-                  offsiteS3Provider,
-                  offsiteRegion,
-                )}
-                type="url"
-                value={offsiteEndpoint}
-              />
-            </label>
-            <label>
-              <span>{t("offsiteBackup.s3Bucket")}</span>
-              <input
-                autoComplete="off"
-                disabled={offsiteBusy}
-                onChange={(event) => {
-                  setOffsiteBucket(event.target.value);
-                  setOffsiteRecoveryPage(null);
-                }}
-                value={offsiteBucket}
-              />
-            </label>
-            <label>
-              <span>{t("offsiteBackup.s3Prefix")}</span>
-              <input
-                autoComplete="off"
-                disabled={offsiteBusy}
-                onChange={(event) => {
-                  setOffsitePrefix(event.target.value);
-                  setOffsiteRecoveryPage(null);
-                }}
-                value={offsitePrefix}
-              />
-            </label>
-            <label>
-              <span>{t("offsiteBackup.s3AccessKeyId")}</span>
-              <input
-                autoComplete="off"
-                disabled={offsiteBusy}
-                onChange={(event) => {
-                  setOffsiteAccessKeyId(event.target.value);
-                  setOffsiteRecoveryPage(null);
-                }}
-                type="password"
-                value={offsiteAccessKeyId}
-              />
-            </label>
-            <label>
-              <span>{t("offsiteBackup.s3SecretAccessKey")}</span>
-              <input
-                autoComplete="off"
-                disabled={offsiteBusy}
-                onChange={(event) => {
-                  setOffsiteSecretAccessKey(event.target.value);
-                  setOffsiteRecoveryPage(null);
-                }}
-                type="password"
-                value={offsiteSecretAccessKey}
-              />
-            </label>
-            <label>
-              <span>{t("offsiteBackup.s3SessionToken")}</span>
-              <input
-                autoComplete="off"
-                disabled={offsiteBusy}
-                onChange={(event) => {
-                  setOffsiteSessionToken(event.target.value);
-                  setOffsiteRecoveryPage(null);
-                }}
-                type="password"
-                value={offsiteSessionToken}
-              />
-            </label>
-            <small>{t("offsiteBackup.s3CredentialDescription")}</small>
-          </>
-        )}
+        <small>{t(`offsiteBackup.s3ProviderDescriptions.${offsiteS3Provider}`)}</small>
+        <label>
+          <span>{t("offsiteBackup.s3Region")}</span>
+          <input
+            autoComplete="off"
+            data-testid="offsite-s3-region"
+            disabled={offsiteBusy}
+            onChange={(event) => {
+              setOffsiteRegion(event.target.value);
+              setOffsiteRecoveryPage(null);
+            }}
+            placeholder={
+              offsiteS3Provider === "cloudflareR2" || offsiteS3Provider === "tigris"
+                ? "auto"
+                : "us-west-004"
+            }
+            value={offsiteRegion}
+          />
+        </label>
+        <label>
+          <span>{t("offsiteBackup.s3Endpoint")}</span>
+          <input
+            data-testid="offsite-s3-endpoint"
+            disabled={offsiteBusy}
+            onChange={(event) => {
+              setOffsiteEndpoint(event.target.value);
+              setOffsiteRecoveryPage(null);
+            }}
+            placeholder={s3EndpointPlaceholder(
+              offsiteS3Provider,
+              offsiteRegion,
+            )}
+            type="url"
+            value={offsiteEndpoint}
+          />
+        </label>
+        <label>
+          <span>{t("offsiteBackup.s3Bucket")}</span>
+          <input
+            autoComplete="off"
+            disabled={offsiteBusy}
+            onChange={(event) => {
+              setOffsiteBucket(event.target.value);
+              setOffsiteRecoveryPage(null);
+            }}
+            value={offsiteBucket}
+          />
+        </label>
+        <label>
+          <span>{t("offsiteBackup.s3Prefix")}</span>
+          <input
+            autoComplete="off"
+            disabled={offsiteBusy}
+            onChange={(event) => {
+              setOffsitePrefix(event.target.value);
+              setOffsiteRecoveryPage(null);
+            }}
+            value={offsitePrefix}
+          />
+        </label>
+        <label>
+          <span>{t("offsiteBackup.s3AccessKeyId")}</span>
+          <input
+            autoComplete="off"
+            disabled={offsiteBusy}
+            onChange={(event) => {
+              setOffsiteAccessKeyId(event.target.value);
+              setOffsiteRecoveryPage(null);
+            }}
+            type="password"
+            value={offsiteAccessKeyId}
+          />
+        </label>
+        <label>
+          <span>{t("offsiteBackup.s3SecretAccessKey")}</span>
+          <input
+            autoComplete="off"
+            disabled={offsiteBusy}
+            onChange={(event) => {
+              setOffsiteSecretAccessKey(event.target.value);
+              setOffsiteRecoveryPage(null);
+            }}
+            type="password"
+            value={offsiteSecretAccessKey}
+          />
+        </label>
+        <label>
+          <span>{t("offsiteBackup.s3SessionToken")}</span>
+          <input
+            autoComplete="off"
+            disabled={offsiteBusy}
+            onChange={(event) => {
+              setOffsiteSessionToken(event.target.value);
+              setOffsiteRecoveryPage(null);
+            }}
+            type="password"
+            value={offsiteSessionToken}
+          />
+        </label>
+        <small>{t("offsiteBackup.s3CredentialDescription")}</small>
       </>
     );
   }
@@ -2816,9 +2773,7 @@ function App({
     setPendingBackupTarget({
       name: offsiteTargetName.trim(),
       ...connection,
-      ...(connection.provider === "s3Compatible"
-        ? { s3Provider: offsiteS3Provider }
-        : {}),
+      s3Provider: offsiteS3Provider,
     });
     setSecurityDialog("backupTarget");
   }
@@ -2835,6 +2790,30 @@ function App({
     setSecurityDialog("offsiteSensitive");
   }
 
+  function requestLegacyOffsiteMigration() {
+    if (
+      selectedOffsiteTarget?.provider !== "cloudflareWorkerR2" ||
+      effectiveLegacyMigrationDestinationId === null
+    ) {
+      setOffsiteMessage(t("offsiteBackup.errors.migrationDestinationRequired"));
+      return;
+    }
+    const destination = s3OffsiteTargets.find(
+      (target) => target.id === effectiveLegacyMigrationDestinationId,
+    );
+    if (destination === undefined) {
+      setOffsiteMessage(t("offsiteBackup.errors.migrationDestinationRequired"));
+      return;
+    }
+    requestOffsiteSensitiveAction({
+      kind: "migrateLegacy",
+      sourceTargetId: selectedOffsiteTarget.id,
+      sourceTargetName: selectedOffsiteTarget.name,
+      destinationTargetId: destination.id,
+      destinationTargetName: destination.name,
+    });
+  }
+
   async function connectOffsiteRecovery() {
     const connection = currentTemporaryBackupConnection();
     if (offsiteBusy || connection === null) {
@@ -2847,9 +2826,11 @@ function App({
       const page = await offsiteBackup.listRecovery({
         ...connection,
       });
+      offsiteRecoveryConnectionRef.current = connection;
       setOffsiteRecoveryPage(page);
       showAppNotice(t("offsiteBackup.recoveryConnected"));
     } catch (error) {
+      offsiteRecoveryConnectionRef.current = null;
       setOffsiteRecoveryPage(null);
       setOffsiteMessage(
         t("offsiteBackup.errors.list", { reason: errorReason(error) }),
@@ -2860,7 +2841,7 @@ function App({
   }
 
   async function chooseOffsiteBootstrapBackup(snapshotId: string) {
-    const connection = currentTemporaryBackupConnection();
+    const connection = offsiteRecoveryConnectionRef.current;
     if (
       offsiteBusy ||
       offsiteRecoveryPage === null ||
@@ -3155,7 +3136,7 @@ function App({
           ),
         );
         setOffsiteEndpoint("");
-        setOffsiteToken("");
+        offsiteRecoveryConnectionRef.current = null;
         setOffsiteRecoveryPage(null);
       } else {
         await persistence.preserveForRecovery(workspaceRef.current);
@@ -4548,9 +4529,7 @@ function App({
                               <small>
                                 {selectedOffsiteTarget.provider ===
                                 "cloudflareWorkerR2"
-                                  ? t(
-                                      "offsiteBackup.providers.cloudflareWorkerR2",
-                                    )
+                                  ? t("offsiteBackup.legacyWorkerTarget")
                                   : t("offsiteBackup.s3TargetLocation", {
                                       provider: t(
                                         `offsiteBackup.s3Providers.${selectedOffsiteTarget.s3Provider ?? "custom"}`,
@@ -4560,6 +4539,46 @@ function App({
                                       prefix: selectedOffsiteTarget.prefix ?? "",
                                     })}
                               </small>
+                              {selectedOffsiteTarget.provider ===
+                                "cloudflareWorkerR2" && (
+                                <div className="legacy-target-migration">
+                                  <strong>{t("offsiteBackup.migrationTitle")}</strong>
+                                  <small className="offsite-automatic-error" role="note">
+                                    {t("offsiteBackup.legacyWorkerDescription")}
+                                  </small>
+                                  {s3OffsiteTargets.length === 0 ? (
+                                    <small>{t("offsiteBackup.migrationCreateTargetFirst")}</small>
+                                  ) : (
+                                    <>
+                                      <label>
+                                        <span>{t("offsiteBackup.migrationDestination")}</span>
+                                        <select
+                                          disabled={offsiteBusy}
+                                          onChange={(event) =>
+                                            setLegacyMigrationDestinationId(event.target.value)
+                                          }
+                                          value={effectiveLegacyMigrationDestinationId ?? ""}
+                                        >
+                                          {s3OffsiteTargets.map((target) => (
+                                            <option key={target.id} value={target.id}>
+                                              {target.name}
+                                            </option>
+                                          ))}
+                                        </select>
+                                      </label>
+                                      <button
+                                        className="primary-button"
+                                        disabled={offsiteBusy}
+                                        onClick={requestLegacyOffsiteMigration}
+                                        type="button"
+                                      >
+                                        <RefreshCw aria-hidden="true" size={14} />
+                                        {t("offsiteBackup.migrationAction")}
+                                      </button>
+                                    </>
+                                  )}
+                                </div>
+                              )}
                               <small>
                                 {t("offsiteBackup.targetStatus", {
                                   uploaded:
@@ -4594,6 +4613,8 @@ function App({
                                   })}
                                 </small>
                               )}
+                              {selectedOffsiteTarget.provider === "s3Compatible" && (
+                                <>
                               <div className="offsite-automatic-settings">
                                 <label className="switch-setting">
                                   <input
@@ -4762,60 +4783,62 @@ function App({
                                   })}
                                 </small>
                               )}
+                                </>
+                              )}
                             </div>
                           )}
-                          <div className="backup-actions">
-                            <button
-                              className="primary-button"
-                              disabled={offsiteBusy || selectedOffsiteTargetId === null}
-                              onClick={() => void createOffsiteSnapshot()}
-                              type="button"
-                            >
-                              <Upload aria-hidden="true" size={15} />
-                              {t("offsiteBackup.uploadNow")}
-                            </button>
-                            <button
-                              className="secondary-button"
-                              disabled={offsiteBusy || selectedOffsiteTarget === null}
-                              onClick={() =>
-                                selectedOffsiteTarget !== null &&
-                                requestOffsiteSensitiveAction({
-                                  kind: "removeTarget",
-                                  targetId: selectedOffsiteTarget.id,
-                                  targetName: selectedOffsiteTarget.name,
-                                })
-                              }
-                              type="button"
-                            >
-                              <X aria-hidden="true" size={15} />
-                              {t("offsiteBackup.removeTarget")}
-                            </button>
-                            <button
-                              className="danger-button"
-                              disabled={offsiteBusy || selectedOffsiteTarget === null}
-                              onClick={() =>
-                                selectedOffsiteTarget !== null &&
-                                requestOffsiteSensitiveAction({
-                                  kind: "destroyTarget",
-                                  targetId: selectedOffsiteTarget.id,
-                                  targetName: selectedOffsiteTarget.name,
-                                })
-                              }
-                              type="button"
-                            >
-                              <Trash2 aria-hidden="true" size={15} />
-                              {t("offsiteBackup.destroyTarget")}
-                            </button>
-                            <button
-                              className="secondary-button"
-                              disabled={offsiteBusy || selectedOffsiteTargetId === null}
-                              onClick={() => void refreshOffsiteBackups()}
-                              type="button"
-                            >
-                              <RefreshCw aria-hidden="true" size={15} />
-                              {t("offsiteBackup.refresh")}
-                            </button>
-                          </div>
+                          {selectedOffsiteTarget?.provider === "s3Compatible" && (
+                            <div className="backup-actions">
+                              <button
+                                className="primary-button"
+                                disabled={offsiteBusy || selectedOffsiteTargetId === null}
+                                onClick={() => void createOffsiteSnapshot()}
+                                type="button"
+                              >
+                                <Upload aria-hidden="true" size={15} />
+                                {t("offsiteBackup.uploadNow")}
+                              </button>
+                              <button
+                                className="secondary-button"
+                                disabled={offsiteBusy}
+                                onClick={() =>
+                                  requestOffsiteSensitiveAction({
+                                    kind: "removeTarget",
+                                    targetId: selectedOffsiteTarget.id,
+                                    targetName: selectedOffsiteTarget.name,
+                                  })
+                                }
+                                type="button"
+                              >
+                                <X aria-hidden="true" size={15} />
+                                {t("offsiteBackup.removeTarget")}
+                              </button>
+                              <button
+                                className="danger-button"
+                                disabled={offsiteBusy}
+                                onClick={() =>
+                                  requestOffsiteSensitiveAction({
+                                    kind: "destroyTarget",
+                                    targetId: selectedOffsiteTarget.id,
+                                    targetName: selectedOffsiteTarget.name,
+                                  })
+                                }
+                                type="button"
+                              >
+                                <Trash2 aria-hidden="true" size={15} />
+                                {t("offsiteBackup.destroyTarget")}
+                              </button>
+                              <button
+                                className="secondary-button"
+                                disabled={offsiteBusy || selectedOffsiteTargetId === null}
+                                onClick={() => void refreshOffsiteBackups()}
+                                type="button"
+                              >
+                                <RefreshCw aria-hidden="true" size={15} />
+                                {t("offsiteBackup.refresh")}
+                              </button>
+                            </div>
+                          )}
                           {offsitePage !== null && offsitePage.items.length === 0 && (
                             <p className="automatic-backup-history-message">
                               {t("offsiteBackup.empty")}
@@ -5632,8 +5655,10 @@ function App({
                         ? t("offsiteBackup.deleteSnapshotTitle")
                         : pendingOffsiteSensitiveAction?.kind === "removeTarget"
                           ? t("offsiteBackup.removeTargetTitle")
-                          : pendingOffsiteSensitiveAction?.kind === "destroyTarget"
-                            ? t("offsiteBackup.destroyTargetTitle")
+                        : pendingOffsiteSensitiveAction?.kind === "destroyTarget"
+                          ? t("offsiteBackup.destroyTargetTitle")
+                          : pendingOffsiteSensitiveAction?.kind === "migrateLegacy"
+                            ? t("offsiteBackup.migrationConfirmTitle")
                             : t("offsiteBackup.retentionTitle")
                     : t("security.exportTitle")}
             </h2>
@@ -5662,6 +5687,13 @@ function App({
                             ? t("offsiteBackup.destroyTargetDescription", {
                                 name: pendingOffsiteSensitiveAction.targetName,
                               })
+                            : pendingOffsiteSensitiveAction?.kind === "migrateLegacy"
+                              ? t("offsiteBackup.migrationConfirmDescription", {
+                                  source:
+                                    pendingOffsiteSensitiveAction.sourceTargetName,
+                                  destination:
+                                    pendingOffsiteSensitiveAction.destinationTargetName,
+                                })
                             : t("offsiteBackup.retentionDescriptionConfirm", {
                                 count:
                                   pendingOffsiteSensitiveAction?.kind === "retention"
@@ -5733,12 +5765,17 @@ function App({
                 </>
               )}
               {securityDialog === "offsiteSensitive" &&
-                pendingOffsiteSensitiveAction?.kind === "destroyTarget" && (
+                (pendingOffsiteSensitiveAction?.kind === "destroyTarget" ||
+                  pendingOffsiteSensitiveAction?.kind === "migrateLegacy") && (
                   <>
                     <label htmlFor="offsite-target-confirmation-name">
-                      {t("offsiteBackup.destroyTargetConfirmation", {
-                        name: pendingOffsiteSensitiveAction.targetName,
-                      })}
+                      {pendingOffsiteSensitiveAction.kind === "destroyTarget"
+                        ? t("offsiteBackup.destroyTargetConfirmation", {
+                            name: pendingOffsiteSensitiveAction.targetName,
+                          })
+                        : t("offsiteBackup.migrationConfirmation", {
+                            name: pendingOffsiteSensitiveAction.sourceTargetName,
+                          })}
                     </label>
                     <input
                       autoComplete="off"
@@ -5771,9 +5808,12 @@ function App({
                     (securityDialog !== "enable" &&
                       securityCurrentPassword.length === 0) ||
                     (securityDialog === "offsiteSensitive" &&
-                      pendingOffsiteSensitiveAction?.kind === "destroyTarget" &&
-                      offsiteConfirmationName !==
-                        pendingOffsiteSensitiveAction.targetName)
+                      ((pendingOffsiteSensitiveAction?.kind === "destroyTarget" &&
+                        offsiteConfirmationName !==
+                          pendingOffsiteSensitiveAction.targetName) ||
+                        (pendingOffsiteSensitiveAction?.kind === "migrateLegacy" &&
+                          offsiteConfirmationName !==
+                            pendingOffsiteSensitiveAction.sourceTargetName)))
                   }
                   type="submit"
                 >
@@ -5794,6 +5834,8 @@ function App({
                                 ? t("offsiteBackup.removeTarget")
                                 : pendingOffsiteSensitiveAction?.kind === "destroyTarget"
                                   ? t("offsiteBackup.destroyTargetConfirm")
+                                  : pendingOffsiteSensitiveAction?.kind === "migrateLegacy"
+                                    ? t("offsiteBackup.migrationConfirm")
                                   : t("offsiteBackup.retentionConfirm")
                         : t("backup.export")}
                 </button>

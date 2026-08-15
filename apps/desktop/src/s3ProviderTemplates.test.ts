@@ -6,6 +6,17 @@ import {
 } from "./s3ProviderTemplates";
 
 describe("S3 provider templates", () => {
+  it("uses the direct R2 S3 API defaults", () => {
+    expect(s3TemplateDefaults("cloudflareR2")).toEqual({
+      endpoint: "",
+      region: "auto",
+      prefix: "linked-info/v1",
+    });
+    expect(s3EndpointPlaceholder("cloudflareR2", "auto")).toBe(
+      "https://<ACCOUNT_ID>.r2.cloudflarestorage.com",
+    );
+  });
+
   it("supplies the fixed Tigris endpoint and region", () => {
     expect(s3TemplateDefaults("tigris")).toEqual({
       endpoint: "https://fly.storage.tigris.dev",

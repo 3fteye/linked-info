@@ -2528,6 +2528,43 @@ h1 {
   color: #933f35;
 }
 
+.legacy-target-migration {
+  display: grid;
+  margin-top: 7px;
+  padding: 10px;
+  gap: 8px;
+  border: 1px solid #e3c48d;
+  border-radius: 7px;
+  background: #fff9ed;
+}
+
+.legacy-target-migration > strong {
+  color: #754f16;
+  font-size: 12px;
+}
+
+.legacy-target-migration label {
+  display: grid;
+  gap: 4px;
+  color: #5b5140;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.legacy-target-migration select {
+  min-height: 32px;
+  padding: 0 28px 0 9px;
+  border: 1px solid #d8c8a9;
+  border-radius: 6px;
+  color: #303632;
+  background: #ffffff;
+  font: inherit;
+}
+
+.legacy-target-migration .primary-button {
+  justify-self: start;
+}
+
 .offsite-entry-actions {
   display: flex;
   flex: none;

@@ -27,6 +27,7 @@ export interface OffsiteBackupTarget {
 }
 
 export type S3ProviderTemplate =
+  | "cloudflareR2"
   | "backblazeB2"
   | "tigris"
   | "oracleOci"
@@ -43,15 +44,7 @@ export interface S3BackupConnection {
   sessionToken?: string | null;
 }
 
-export interface CloudflareBackupConnection {
-  provider: "cloudflareWorkerR2";
-  endpoint: string;
-  token: string;
-}
-
-export type TemporaryBackupConnection =
-  | CloudflareBackupConnection
-  | S3BackupConnection;
+export type TemporaryBackupConnection = S3BackupConnection;
 
 export interface OffsiteBackupSnapshot {
   id: string;
@@ -87,15 +80,15 @@ export interface DeleteAllOffsiteBackupsOutcome {
   error: string | null;
 }
 
+export interface LegacyBackupMigrationOutcome {
+  copiedCount: number;
+  deletedCount: number;
+  destination: OffsiteBackupTarget;
+}
+
 export interface OffsiteBackupService {
   readonly available: boolean;
   inspectTargets(): Promise<OffsiteBackupTarget[]>;
-  configureCloudflareTarget(input: {
-    name: string;
-    endpoint: string;
-    token: string;
-    authorization: string;
-  }): Promise<OffsiteBackupTarget>;
   configureS3Target(input: Omit<S3BackupConnection, "provider"> & {
     name: string;
     s3Provider: S3ProviderTemplate;
@@ -112,6 +105,12 @@ export interface OffsiteBackupService {
     confirmationName: string,
     authorization: string,
   ): Promise<DeleteAllOffsiteBackupsOutcome>;
+  migrateLegacyTarget(
+    sourceTargetId: string,
+    destinationTargetId: string,
+    confirmationName: string,
+    authorization: string,
+  ): Promise<LegacyBackupMigrationOutcome>;
   updateAutomaticSettings(
     targetId: string,
     enabled: boolean,
@@ -159,9 +158,6 @@ export const tauriOffsiteBackupService: OffsiteBackupService = {
   inspectTargets() {
     return invoke<OffsiteBackupTarget[]>("inspect_offsite_backup_targets");
   },
-  configureCloudflareTarget(input) {
-    return invoke<OffsiteBackupTarget>("configure_cloudflare_backup_target", input);
-  },
   configureS3Target(input) {
     return invoke<OffsiteBackupTarget>("configure_s3_backup_target", input);
   },
@@ -183,6 +179,19 @@ export const tauriOffsiteBackupService: OffsiteBackupService = {
       "delete_all_offsite_backups_and_remove_target",
       { targetId, confirmationName, authorization },
     );
+  },
+  migrateLegacyTarget(
+    sourceTargetId,
+    destinationTargetId,
+    confirmationName,
+    authorization,
+  ) {
+    return invoke<LegacyBackupMigrationOutcome>("migrate_legacy_offsite_backup_target", {
+      sourceTargetId,
+      destinationTargetId,
+      confirmationName,
+      authorization,
+    });
   },
   updateAutomaticSettings(targetId, enabled, intervalHours) {
     return invoke<OffsiteBackupTarget>(
@@ -247,14 +256,6 @@ export const tauriOffsiteBackupService: OffsiteBackupService = {
   },
   listRecovery(input) {
     const { cursor = null, limit = 50 } = input;
-    if (input.provider === "cloudflareWorkerR2") {
-      return invoke<OffsiteBackupPage>("list_cloudflare_recovery_backups", {
-        endpoint: input.endpoint,
-        token: input.token,
-        cursor,
-        limit,
-      });
-    }
     return invoke<OffsiteBackupPage>("list_s3_recovery_backups", {
       endpoint: input.endpoint,
       region: input.region,
@@ -268,16 +269,6 @@ export const tauriOffsiteBackupService: OffsiteBackupService = {
     });
   },
   downloadRecovery(input) {
-    if (input.provider === "cloudflareWorkerR2") {
-      return invoke<DownloadedOffsiteBackup>(
-        "download_cloudflare_recovery_backup",
-        {
-          endpoint: input.endpoint,
-          token: input.token,
-          snapshotId: input.snapshotId,
-        },
-      );
-    }
     return invoke<DownloadedOffsiteBackup>("download_s3_recovery_backup", {
       endpoint: input.endpoint,
       region: input.region,
@@ -300,9 +291,6 @@ export const unavailableOffsiteBackupService: OffsiteBackupService = {
   async inspectTargets() {
     return [];
   },
-  async configureCloudflareTarget() {
-    return unavailable();
-  },
   async configureS3Target() {
     return unavailable();
   },
@@ -313,6 +301,9 @@ export const unavailableOffsiteBackupService: OffsiteBackupService = {
     return unavailable();
   },
   async deleteAllAndRemoveTarget() {
+    return unavailable();
+  },
+  async migrateLegacyTarget() {
     return unavailable();
   },
   async updateAutomaticSettings() {

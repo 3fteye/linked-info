@@ -10,6 +10,12 @@ export function s3TemplateDefaults(
   template: S3ProviderTemplate,
 ): S3TemplateDefaults {
   switch (template) {
+    case "cloudflareR2":
+      return {
+        endpoint: "",
+        region: "auto",
+        prefix: "linked-info/v1",
+      };
     case "tigris":
       return {
         endpoint: "https://fly.storage.tigris.dev",
@@ -49,6 +55,9 @@ export function s3EndpointPlaceholder(
   }
   if (template === "oracleOci") {
     return "https://<namespace>.compat.objectstorage.<region>.oci.customer-oci.com";
+  }
+  if (template === "cloudflareR2") {
+    return "https://<ACCOUNT_ID>.r2.cloudflarestorage.com";
   }
   return "https://s3.example.com";
 }
