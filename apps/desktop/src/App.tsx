@@ -1,4 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+} from "react";
 import {
   AlertTriangle,
   ArchiveRestore,
@@ -166,6 +172,11 @@ import {
 import "./App.css";
 
 type ViewId = "canvas" | "nodes" | "settings";
+type SettingsTabId =
+  | "general"
+  | "operations"
+  | "smartReference"
+  | "dataSecurity";
 
 interface PendingWorkspaceReplacement {
   kind: "history" | "import" | "recovery" | "bootstrapRestore";
@@ -337,6 +348,8 @@ function App({
 }: AppProps) {
   const { t, i18n } = useTranslation();
   const [activeView, setActiveView] = useState<ViewId>("canvas");
+  const [activeSettingsTab, setActiveSettingsTab] =
+    useState<SettingsTabId>("general");
   const [workspace, setWorkspace] = useState(emptyWorkspace);
   const workspaceRef = useRef(workspace);
   const skipUnmountFlushRef = useRef(false);
@@ -3373,6 +3386,52 @@ function App({
     id,
     keys: t(`canvasShortcuts.items.${id}.keys`),
   }));
+  const settingsTabs = [
+    {
+      id: "general" as const,
+      icon: Languages,
+      label: t("settings.tabs.general"),
+    },
+    {
+      id: "operations" as const,
+      icon: Keyboard,
+      label: t("settings.tabs.operations"),
+    },
+    {
+      id: "smartReference" as const,
+      icon: BrainCircuit,
+      label: t("settings.tabs.smartReference"),
+    },
+    {
+      id: "dataSecurity" as const,
+      icon: ShieldCheck,
+      label: t("settings.tabs.dataSecurity"),
+    },
+  ];
+  const handleSettingsTabKeyDown = (
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+    currentIndex: number,
+  ) => {
+    let nextIndex: number | null = null;
+    if (event.key === "ArrowRight") {
+      nextIndex = (currentIndex + 1) % settingsTabs.length;
+    } else if (event.key === "ArrowLeft") {
+      nextIndex = (currentIndex - 1 + settingsTabs.length) % settingsTabs.length;
+    } else if (event.key === "Home") {
+      nextIndex = 0;
+    } else if (event.key === "End") {
+      nextIndex = settingsTabs.length - 1;
+    }
+    if (nextIndex === null) {
+      return;
+    }
+    event.preventDefault();
+    const nextTab = settingsTabs[nextIndex];
+    setActiveSettingsTab(nextTab.id);
+    requestAnimationFrame(() => {
+      document.getElementById(`settings-tab-${nextTab.id}`)?.focus();
+    });
+  };
 
   return (
     <div className="app-shell">
@@ -3608,53 +3667,100 @@ function App({
             />
           ) : activeView === "settings" ? (
             <section className="settings-panel">
-              <header className="settings-group-heading">
-                <h2>{t("settings.generalTitle")}</h2>
-                <p>{t("settings.generalDescription")}</p>
-              </header>
-              <div className="setting-row">
-                <div className="setting-label">
-                  <Languages size={18} />
-                  <span>{t("settings.language")}</span>
-                </div>
-                <div className="segmented-control">
-                  {supportedLanguages.map((language) => (
-                    <button
-                      data-active={activeLanguage === language}
-                      data-language={language}
-                      key={language}
-                      onClick={() => changeLanguage(language)}
-                      type="button"
-                    >
-                      {t(languageLabelKeys[language])}
-                    </button>
-                  ))}
-                </div>
-              </div>
-              <header className="settings-group-heading">
-                <h2 data-testid="operation-guide-heading">
-                  {t("settings.operationGuideTitle")}
-                </h2>
-                <p>{t("settings.operationGuideDescription")}</p>
-              </header>
-              <div className="setting-row operation-guide-setting-row">
-                <div className="setting-label">
-                  <Keyboard size={18} />
-                  <div className="setting-label-copy">
-                    <span>{t("settings.canvasOperations")}</span>
-                    <small>{t("settings.canvasOperationsDescription")}</small>
+              <nav
+                aria-label={t("settings.tabs.label")}
+                className="settings-tab-list"
+                role="tablist"
+              >
+                {settingsTabs.map(({ id, icon: Icon, label }, index) => (
+                  <button
+                    aria-controls={`settings-panel-${id}`}
+                    aria-selected={activeSettingsTab === id}
+                    className="settings-tab"
+                    data-testid={`settings-tab-${id}`}
+                    id={`settings-tab-${id}`}
+                    key={id}
+                    onClick={() => setActiveSettingsTab(id)}
+                    onKeyDown={(event) => handleSettingsTabKeyDown(event, index)}
+                    role="tab"
+                    tabIndex={activeSettingsTab === id ? 0 : -1}
+                    type="button"
+                  >
+                    <Icon aria-hidden="true" size={16} />
+                    <span>{label}</span>
+                  </button>
+                ))}
+              </nav>
+              <section
+                aria-labelledby="settings-tab-general"
+                className="settings-tab-panel"
+                hidden={activeSettingsTab !== "general"}
+                id="settings-panel-general"
+                role="tabpanel"
+              >
+                <header className="settings-group-heading">
+                  <h2>{t("settings.generalTitle")}</h2>
+                  <p>{t("settings.generalDescription")}</p>
+                </header>
+                <div className="setting-row">
+                  <div className="setting-label">
+                    <Languages size={18} />
+                    <span>{t("settings.language")}</span>
+                  </div>
+                  <div className="segmented-control">
+                    {supportedLanguages.map((language) => (
+                      <button
+                        data-active={activeLanguage === language}
+                        data-language={language}
+                        key={language}
+                        onClick={() => changeLanguage(language)}
+                        type="button"
+                      >
+                        {t(languageLabelKeys[language])}
+                      </button>
+                    ))}
                   </div>
                 </div>
-                <CanvasOperationGuide
-                  items={canvasOperationItems}
-                  pickerLabel={t("canvasShortcuts.pickerLabel")}
-                  replayLabel={t("canvasShortcuts.replay")}
-                />
-              </div>
-              <header className="settings-group-heading">
-                <h2>{t("settings.smartReferenceTitle")}</h2>
-                <p>{t("settings.smartReferenceDescription")}</p>
-              </header>
+              </section>
+              <section
+                aria-labelledby="settings-tab-operations"
+                className="settings-tab-panel"
+                hidden={activeSettingsTab !== "operations"}
+                id="settings-panel-operations"
+                role="tabpanel"
+              >
+                <header className="settings-group-heading">
+                  <h2 data-testid="operation-guide-heading">
+                    {t("settings.operationGuideTitle")}
+                  </h2>
+                  <p>{t("settings.operationGuideDescription")}</p>
+                </header>
+                <div className="setting-row operation-guide-setting-row">
+                  <div className="setting-label">
+                    <Keyboard size={18} />
+                    <div className="setting-label-copy">
+                      <span>{t("settings.canvasOperations")}</span>
+                      <small>{t("settings.canvasOperationsDescription")}</small>
+                    </div>
+                  </div>
+                  <CanvasOperationGuide
+                    items={canvasOperationItems}
+                    pickerLabel={t("canvasShortcuts.pickerLabel")}
+                    replayLabel={t("canvasShortcuts.replay")}
+                  />
+                </div>
+              </section>
+              <section
+                aria-labelledby="settings-tab-smartReference"
+                className="settings-tab-panel"
+                hidden={activeSettingsTab !== "smartReference"}
+                id="settings-panel-smartReference"
+                role="tabpanel"
+              >
+                <header className="settings-group-heading">
+                  <h2>{t("settings.smartReferenceTitle")}</h2>
+                  <p>{t("settings.smartReferenceDescription")}</p>
+                </header>
               <div className="setting-row data-setting-row smart-reference-setting-row">
                 <div className="setting-label">
                   <BrainCircuit size={18} />
@@ -4052,10 +4158,18 @@ function App({
                   {vectorCacheMessage !== null && <small>{vectorCacheMessage}</small>}
                 </div>
               </div>
-              <header className="settings-group-heading">
-                <h2>{t("settings.dataSecurityTitle")}</h2>
-                <p>{t("settings.dataSecurityDescription")}</p>
-              </header>
+              </section>
+              <section
+                aria-labelledby="settings-tab-dataSecurity"
+                className="settings-tab-panel"
+                hidden={activeSettingsTab !== "dataSecurity"}
+                id="settings-panel-dataSecurity"
+                role="tabpanel"
+              >
+                <header className="settings-group-heading">
+                  <h2>{t("settings.dataSecurityTitle")}</h2>
+                  <p>{t("settings.dataSecurityDescription")}</p>
+                </header>
               <div className="setting-row data-setting-row">
                 <div className="setting-label">
                   {workspaceSecurityStatus.encrypted ? (
@@ -4827,6 +4941,7 @@ function App({
                   </div>
                 </div>
               )}
+              </section>
             </section>
           ) : activeView === "canvas" ? (
             <GraphCanvas

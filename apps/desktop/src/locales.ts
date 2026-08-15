@@ -167,6 +167,13 @@ export const resources = {
         },
       },
       settings: {
+        tabs: {
+          label: "设置分类",
+          general: "常规",
+          operations: "操作说明",
+          smartReference: "智能引用",
+          dataSecurity: "数据与安全",
+        },
         language: "界面语言",
         generalTitle: "常规",
         generalDescription: "调整只影响当前应用界面的基础选项。",
@@ -811,6 +818,13 @@ export const resources = {
         },
       },
       settings: {
+        tabs: {
+          label: "Settings categories",
+          general: "General",
+          operations: "Operation guide",
+          smartReference: "Smart references",
+          dataSecurity: "Data and security",
+        },
         language: "Interface language",
         generalTitle: "General",
         generalDescription: "Basic options that affect only the current application interface.",

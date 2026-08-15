@@ -1527,6 +1527,65 @@ h1 {
   gap: 12px;
 }
 
+.settings-tab-list {
+  position: sticky;
+  z-index: 8;
+  top: 0;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  width: min(920px, 100%);
+  padding: 4px;
+  gap: 4px;
+  border: 1px solid #dce2dd;
+  border-radius: 10px;
+  background: rgb(247 249 247 / 96%);
+  box-shadow: 0 4px 14px rgb(33 48 38 / 8%);
+  backdrop-filter: blur(8px);
+}
+
+.settings-tab {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  min-height: 38px;
+  padding: 0 12px;
+  gap: 7px;
+  border: 0;
+  border-radius: 7px;
+  color: #5f6962;
+  background: transparent;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.settings-tab:hover {
+  color: #24583d;
+  background: #edf3ef;
+}
+
+.settings-tab[aria-selected="true"] {
+  color: #175538;
+  background: #ffffff;
+  box-shadow: 0 1px 4px rgb(24 57 38 / 14%);
+}
+
+.settings-tab:focus-visible {
+  outline: 2px solid #5a9a75;
+  outline-offset: 1px;
+}
+
+.settings-tab-panel {
+  display: grid;
+  width: min(920px, 100%);
+  gap: 12px;
+}
+
+.settings-tab-panel[hidden] {
+  display: none;
+}
+
 .settings-group-heading {
   width: min(920px, 100%);
   margin-top: 18px;
@@ -3498,6 +3557,16 @@ h1 {
   .node-list-view,
   .settings-panel {
     padding: 16px;
+  }
+
+  .settings-tab-list {
+    display: flex;
+    overflow-x: auto;
+    scrollbar-width: thin;
+  }
+
+  .settings-tab {
+    flex: 0 0 auto;
   }
 
   .node-list-row {

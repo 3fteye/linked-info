@@ -594,6 +594,19 @@ test("canvas select all, delete, undo, redo and context menu share one keyboard 
 test("settings operation guide demonstrates every shared canvas control", async ({ page }) => {
   await openSyntheticWorkspace(page, gridNodes(2, 1));
   await page.getByTestId("settings-navigation").click();
+  await expect(page.getByTestId("settings-tab-general")).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
+  await expect(page.locator('[role="tabpanel"]:not([hidden])')).toHaveAttribute(
+    "id",
+    "settings-panel-general",
+  );
+  await page.getByTestId("settings-tab-operations").click();
+  await expect(page.getByTestId("settings-tab-operations")).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
 
   const guide = page.getByTestId("canvas-operation-guide");
   const stage = page.getByTestId("canvas-operation-stage");
@@ -641,7 +654,9 @@ test("settings operation guide demonstrates every shared canvas control", async 
     guideBounds!.x + guideBounds!.width,
   );
 
+  await page.getByTestId("settings-tab-general").click();
   await page.locator('[data-language="en-US"]').click();
+  await page.getByTestId("settings-tab-operations").click();
   await expect(page.getByTestId("operation-guide-heading")).toHaveText(
     "Operation guide",
   );
@@ -652,6 +667,7 @@ test("settings operation guide honors reduced motion", async ({ page }) => {
   await page.emulateMedia({ reducedMotion: "reduce" });
   await openSyntheticWorkspace(page, gridNodes(1, 1));
   await page.getByTestId("settings-navigation").click();
+  await page.getByTestId("settings-tab-operations").click();
   const guide = page.getByTestId("canvas-operation-guide");
   await guide.locator('[data-operation="contextMenu"]').click();
 
@@ -676,6 +692,34 @@ test("settings operation guide honors reduced motion", async ({ page }) => {
       ),
     )
     .toBe("none");
+});
+
+test("settings tabs support standard keyboard navigation", async ({ page }) => {
+  await openSyntheticWorkspace(page, gridNodes(1, 1));
+  await page.getByTestId("settings-navigation").click();
+
+  const generalTab = page.getByTestId("settings-tab-general");
+  await generalTab.focus();
+  await page.keyboard.press("ArrowRight");
+  await expect(page.getByTestId("settings-tab-operations")).toBeFocused();
+  await expect(page.locator('[role="tabpanel"]:not([hidden])')).toHaveAttribute(
+    "id",
+    "settings-panel-operations",
+  );
+
+  await page.keyboard.press("End");
+  await expect(page.getByTestId("settings-tab-dataSecurity")).toBeFocused();
+  await expect(page.locator('[role="tabpanel"]:not([hidden])')).toHaveAttribute(
+    "id",
+    "settings-panel-dataSecurity",
+  );
+
+  await page.keyboard.press("Home");
+  await expect(generalTab).toBeFocused();
+  await expect(page.locator('[role="tabpanel"]:not([hidden])')).toHaveAttribute(
+    "id",
+    "settings-panel-general",
+  );
 });
 
 test("node drag and pane pan persist their geometry", async ({ page }) => {
