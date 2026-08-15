@@ -4,17 +4,17 @@ import {
   contentEnhancerRegistry,
   type EnhancedContentSegment,
 } from "./contentEnhancer";
+import {
+  contentMarkerPresentationRegistry,
+  missingContentMarkerPresentation,
+} from "./contentMarkerPresentation";
 import { contentMarkerRegistry } from "./contentMarker";
 import {
   maskedTotpLine,
   TotpContentLine,
   type TotpContentLabels,
 } from "./totpContent";
-import {
-  maskedSecretText,
-  SecretContent,
-  type SecretContentLabels,
-} from "./secretContent";
+import type { SecretContentLabels } from "./secretContent";
 
 export type ContentPresentation =
   | { kind: "text"; text: string | null }
@@ -157,9 +157,13 @@ function listContent(
       if (segment.kind === "text") {
         return segment.text;
       }
-      return segment.kind === "totp"
-        ? maskedTotpLine(labels.totp)
-        : maskedSecretText(labels.secret);
+      if (segment.kind === "totp") {
+        return maskedTotpLine(labels.totp);
+      }
+      return (
+        contentMarkerPresentationRegistry.renderList(segment.marker, labels) ??
+        missingContentMarkerPresentation(segment.marker)
+      );
     })
     .join("");
 }
@@ -222,12 +226,11 @@ export function NodeContentHost({
                 labels={enhancementLabels.totp}
                 onCopySecret={onCopySecret}
               />
-            ) : segment.kind === "secret" ? (
-              <SecretContent
-                labels={enhancementLabels.secret}
-                onCopySecret={onCopySecret}
-                value={segment.value}
-              />
+            ) : segment.kind === "marker" ? (
+              contentMarkerPresentationRegistry.renderCanvas(segment.marker, {
+                labels: enhancementLabels,
+                onCopySecret,
+              }) ?? missingContentMarkerPresentation(segment.marker)
             ) : presentation.kind === "markdown" ? (
               <SafeMarkdown source={segment.text} />
             ) : (

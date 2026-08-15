@@ -50,13 +50,18 @@ describe("content enhancement", () => {
 
     expect(segments.map((segment) => segment.kind)).toEqual([
       "text",
-      "totp",
+      "marker",
       "text",
-      "secret",
+      "marker",
       "text",
     ]);
-    expect(segments.filter((segment) => segment.kind === "secret")).toEqual([
-      { kind: "secret", value: "synthetic-api-key" },
+    expect(
+      segments
+        .filter((segment) => segment.kind === "marker")
+        .map((segment) => ({ id: segment.marker.id, payload: segment.marker.payload })),
+    ).toEqual([
+      { id: "totp", payload: syntheticSecret },
+      { id: "secret", payload: "synthetic-api-key" },
     ]);
   });
 
@@ -68,8 +73,11 @@ describe("content enhancement", () => {
     expect(segments).toEqual([
       { kind: "text", text: "Recovery " },
       {
-        kind: "secret",
-        value: "first synthetic line\nsecond synthetic line",
+        kind: "marker",
+        marker: expect.objectContaining({
+          id: "secret",
+          payload: "first synthetic line\nsecond synthetic line",
+        }),
       },
       { kind: "text", text: " retained" },
     ]);

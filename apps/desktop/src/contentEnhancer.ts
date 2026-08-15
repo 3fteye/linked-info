@@ -5,14 +5,13 @@ import {
 } from "./contentMarker";
 import {
   parseTotpDirectiveLine,
-  parseTotpPayload,
   type TotpDirective,
 } from "./totp";
 
 export type EnhancedContentSegment =
   | { kind: "text"; text: string }
   | { directive: TotpDirective; kind: "totp" }
-  | { kind: "secret"; value: string };
+  | { kind: "marker"; marker: ParsedContentMarker };
 
 export interface ContentEnhancer {
   readonly excludeFromSemanticAnalysis: boolean;
@@ -95,11 +94,10 @@ export class ContentEnhancerRegistry {
           appendLegacyText(markerSegment.text);
           continue;
         }
-        const enhanced = enhancedMarker(markerSegment.marker);
-        if (enhanced === null) {
+        if (markerSegment.marker.definition === null) {
           appendText(markerSegment.marker.raw);
         } else {
-          segments.push(enhanced);
+          segments.push({ kind: "marker", marker: markerSegment.marker });
         }
       }
     };
@@ -171,23 +169,6 @@ export class ContentEnhancerRegistry {
     const text = lines.join("\n").trim();
     return text.length === 0 ? null : text;
   }
-}
-
-function enhancedMarker(marker: ParsedContentMarker): EnhancedContentSegment | null {
-  if (marker.id === "secret") {
-    return { kind: "secret", value: marker.payload };
-  }
-  if (marker.id === "totp") {
-    const configuration = parseTotpPayload(marker.payload);
-    return {
-      directive:
-        configuration === null
-          ? { valid: false }
-          : { configuration, valid: true },
-      kind: "totp",
-    };
-  }
-  return null;
 }
 
 export const totpContentEnhancer: ContentEnhancer = {
