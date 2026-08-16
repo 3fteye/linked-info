@@ -624,6 +624,63 @@ test("search scope and unmatched opacity preserve canvas context", async ({ page
     "0.2",
   );
 
+  const secondCard = node(page, nodes[1].id);
+  await expect(secondCard).toHaveAttribute("aria-disabled", "true");
+  await expect(secondCard).toHaveAttribute("data-interactive", "false");
+  await expect(secondFlowNode).toHaveCSS("pointer-events", "none");
+  const secondBounds = await secondCard.boundingBox();
+  expect(secondBounds).not.toBeNull();
+  await page.mouse.click(secondBounds!.x + 70, secondBounds!.y + 28);
+  await expect(secondCard).toHaveAttribute("data-selected", "false");
+
+  await page.mouse.dblclick(secondBounds!.x + 70, secondBounds!.y + 28);
+  await expect(secondCard).toHaveAttribute("data-editing", "false");
+
+  await page.mouse.click(secondBounds!.x + 70, secondBounds!.y + 28, {
+    button: "right",
+  });
+  await expect(page.locator('.graph-context-menu[data-kind="pane"]')).toBeVisible();
+  await page.keyboard.press("Escape");
+
+  const originalSecondLayout = (await storedWorkspace(page))?.layout?.find(
+    (candidate: { nodeId?: string }) => candidate.nodeId === nodes[1].id,
+  );
+  await page.mouse.move(secondBounds!.x + 70, secondBounds!.y + 28);
+  await page.mouse.down();
+  await page.mouse.move(secondBounds!.x + 150, secondBounds!.y + 85, { steps: 8 });
+  await page.mouse.up();
+  await page.waitForTimeout(450);
+  expect(
+    (await storedWorkspace(page))?.layout?.find(
+      (candidate: { nodeId?: string }) => candidate.nodeId === nodes[1].id,
+    ),
+  ).toEqual(originalSecondLayout);
+
+  const dimmedPathPoint = await page
+    .locator(".graph-reference-path-dimmed")
+    .evaluate((element) => {
+      const path = element as SVGPathElement;
+      const point = path.getPointAtLength(path.getTotalLength() / 2);
+      const matrix = path.getScreenCTM();
+      if (matrix === null) {
+        throw new Error("missing path screen transform");
+      }
+      const screenPoint = new DOMPoint(point.x, point.y).matrixTransform(matrix);
+      return { x: screenPoint.x, y: screenPoint.y };
+    });
+  await page.mouse.click(dimmedPathPoint.x, dimmedPathPoint.y);
+  await page.keyboard.press("Delete");
+  await page.waitForTimeout(350);
+  expect((await storedWorkspace(page))?.references).toHaveLength(1);
+
+  await page.getByTestId("graph-canvas").click({ position: { x: 30, y: 30 } });
+  await page.keyboard.press("Control+a");
+  await expect(page.locator('[data-node-id][data-selected="true"]')).toHaveCount(1);
+  await expect(firstFlowNode.locator("[data-node-id]")).toHaveAttribute(
+    "data-selected",
+    "true",
+  );
+
   await opacity.fill("0");
   await expect(secondFlowNode).toBeHidden();
   await expect(page.locator(".graph-reference-path-dimmed")).toHaveCount(0);

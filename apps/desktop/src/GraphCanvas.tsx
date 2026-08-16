@@ -117,6 +117,7 @@ interface InformationNodeData extends Record<string, unknown> {
   contentPlaceholder: string;
   enhancementLabels: ContentEnhancementLabels;
   editing: boolean;
+  interactive: boolean;
   nameConflict: boolean;
   nameConflictLabel: string;
   nameLabel: string;
@@ -461,10 +462,13 @@ export function InformationNodeCard({
 
   return (
     <article
+      aria-disabled={!data.interactive}
       className="graph-node"
       data-editing={data.editing}
+      data-interactive={data.interactive}
       data-node-id={id}
       data-selected={selected}
+      inert={!data.interactive}
       onBlur={commitWhenLeavingNode}
       onFocus={(event) => {
         if (event.target !== processorSelectRef.current) {
@@ -487,6 +491,7 @@ export function InformationNodeCard({
     >
       <Handle
         className="graph-handle graph-handle-target"
+        isConnectable={data.interactive ? undefined : false}
         position={Position.Left}
         title={data.targetLabel}
         type="target"
@@ -705,6 +710,7 @@ export function InformationNodeCard({
       )}
       <Handle
         className="graph-handle graph-handle-source"
+        isConnectable={data.interactive ? undefined : false}
         position={Position.Right}
         title={data.sourceLabel}
         type="source"
@@ -1147,6 +1153,27 @@ export default function GraphCanvas({
     () => [...stationaryReferenceCurves, ...movingReferenceCurves],
     [movingReferenceCurves, stationaryReferenceCurves],
   );
+  const interactiveReferenceCurves = useMemo(
+    () =>
+      referenceCurves.filter(
+        (curve) =>
+          !filteredOutNodeIdSet.has(curve.sourceNodeId) &&
+          !filteredOutNodeIdSet.has(curve.targetNodeId),
+      ),
+    [filteredOutNodeIdSet, referenceCurves],
+  );
+  const interactiveReferenceIdSet = useMemo(
+    () => new Set(interactiveReferenceCurves.map((curve) => curve.id)),
+    [interactiveReferenceCurves],
+  );
+  useEffect(() => {
+    if (
+      selectedReferenceId !== null &&
+      !interactiveReferenceIdSet.has(selectedReferenceId)
+    ) {
+      setSelectedReferenceId(null);
+    }
+  }, [interactiveReferenceIdSet, selectedReferenceId]);
   const partitionCurvesByFilteredState = useCallback(
     (curves: readonly ReferenceCurve[]) => {
       const regular: ReferenceCurve[] = [];
@@ -1201,7 +1228,7 @@ export default function GraphCanvas({
       selectedCanvasNodeBoundary(
         flowNodes.map((node) => ({
           height: node.measured?.height ?? node.height ?? 92,
-          hidden: node.hidden === true,
+          hidden: node.hidden === true || filteredOutNodeIdSet.has(node.id),
           id: node.id,
           selected: node.selected === true,
           width: node.measured?.width ?? node.width ?? 270,
@@ -1209,7 +1236,7 @@ export default function GraphCanvas({
           y: node.position.y,
         })),
       ),
-    [flowNodes],
+    [filteredOutNodeIdSet, flowNodes],
   );
 
   const referenceSearchCandidates = useMemo(() => {
@@ -1217,7 +1244,7 @@ export default function GraphCanvas({
       return [];
     }
     return availableReferenceTargets(
-      nodes,
+      nodes.filter((node) => !filteredOutNodeIdSet.has(node.id)),
       references,
       referenceSearch.sourceNodeId,
       referenceSearch.selectedTargetNodeIds,
@@ -1227,7 +1254,14 @@ export default function GraphCanvas({
         referencedNodeLabel(right, labels.unnamed, labels.noContent),
       ),
     );
-  }, [labels.noContent, labels.unnamed, nodes, referenceSearch, references]);
+  }, [
+    filteredOutNodeIdSet,
+    labels.noContent,
+    labels.unnamed,
+    nodes,
+    referenceSearch,
+    references,
+  ]);
 
   const referenceSearchCreationName = useMemo(() => {
     if (referenceSearch === null || referenceSearchCandidates.length > 0) {
@@ -1237,22 +1271,39 @@ export default function GraphCanvas({
   }, [nodes, referenceSearch, referenceSearchCandidates.length]);
 
   useEffect(() => {
+    if (
+      referenceSearch !== null &&
+      filteredOutNodeIdSet.has(referenceSearch.sourceNodeId)
+    ) {
+      setReferenceSearch(null);
+    }
+  }, [filteredOutNodeIdSet, referenceSearch]);
+
+  useEffect(() => {
     setFlowNodes((current) => {
       const currentById = new Map(current.map((node) => [node.id, node]));
       return nodes.map((node, index) => {
         const savedLayout = layoutByNode.get(node.id);
         const currentNode = currentById.get(node.id);
         const referencedNodes = referencedNodesBySource.get(node.id) ?? [];
+        const interactive = !filteredOutNodeIdSet.has(node.id);
         return {
+          connectable: interactive ? undefined : false,
+          draggable: interactive ? undefined : false,
           id: node.id,
           type: "information",
           deletable: false,
+          focusable: interactive ? undefined : false,
           position: savedLayout
             ? { x: savedLayout.x, y: savedLayout.y }
             : { x: 80 + (index % 4) * 300, y: 80 + Math.floor(index / 4) * 210 },
-          selected: currentNode?.selected ?? false,
-          style: dimmedNodeIdSet.has(node.id)
-            ? { opacity: clampedUnmatchedNodeOpacity / 100 }
+          selectable: interactive ? undefined : false,
+          selected: interactive && (currentNode?.selected ?? false),
+          style: !interactive
+            ? {
+                opacity: clampedUnmatchedNodeOpacity / 100,
+                pointerEvents: "none" as const,
+              }
             : undefined,
           zIndex: stackOrderByNode.get(node.id) ?? index,
           hidden: hiddenNodeIdSet.has(node.id),
@@ -1291,6 +1342,7 @@ export default function GraphCanvas({
               },
             },
             editing: editingNodeId === node.id,
+            interactive,
             nameConflict: nameConflictNodeIds.has(node.id),
             nameConflictLabel: labels.nameConflict,
             nameLabel: labels.name,
@@ -1333,7 +1385,7 @@ export default function GraphCanvas({
     canvasReferencePresentation,
     editingNodeId,
     clampedUnmatchedNodeOpacity,
-    dimmedNodeIdSet,
+    filteredOutNodeIdSet,
     hiddenNodeIdSet,
     labels,
     layoutByNode,
@@ -1350,6 +1402,18 @@ export default function GraphCanvas({
     setFlowNodes,
     stackOrderByNode,
   ]);
+
+  useEffect(() => {
+    setPendingDeletionNodeIds((current) => {
+      const next = current.filter((nodeId) => !filteredOutNodeIdSet.has(nodeId));
+      return next.length === current.length ? current : next;
+    });
+    setContextMenu((current) =>
+      current?.kind === "node" && filteredOutNodeIdSet.has(current.nodeId)
+        ? null
+        : current,
+    );
+  }, [filteredOutNodeIdSet]);
 
   useEffect(() => {
     if (contextMenu === null) {
@@ -1435,7 +1499,7 @@ export default function GraphCanvas({
 
       if (!modifierPressed && key === "f") {
         const selectedNodes = flowNodesRef.current.filter(
-          (node) => node.selected && !node.hidden,
+          (node) => node.selected && !node.hidden && node.selectable !== false,
         );
         if (selectedNodes.length > 0) {
           event.preventDefault();
@@ -1470,7 +1534,7 @@ export default function GraphCanvas({
 
       if (!modifierPressed && (key === "enter" || key === "f2")) {
         const selectedNodes = flowNodesRef.current.filter(
-          (node) => node.selected && !node.hidden,
+          (node) => node.selected && !node.hidden && node.selectable !== false,
         );
         if (selectedNodes.length === 1) {
           event.preventDefault();
@@ -1485,7 +1549,7 @@ export default function GraphCanvas({
         setFlowNodes((current) =>
           current.map((node) => ({
             ...node,
-            selected: !node.hidden,
+            selected: !node.hidden && node.selectable !== false,
           })),
         );
         return;
@@ -1515,7 +1579,9 @@ export default function GraphCanvas({
 
       if (key === "delete" || key === "backspace") {
         const selectedNodeIds = flowNodesRef.current
-          .filter((node) => node.selected && !node.hidden)
+          .filter(
+            (node) => node.selected && !node.hidden && node.selectable !== false,
+          )
           .map((node) => node.id);
         if (selectedNodeIds.length > 0) {
           event.preventDefault();
@@ -1523,7 +1589,10 @@ export default function GraphCanvas({
           setPendingDeletionNodeIds(selectedNodeIds);
           return;
         }
-        if (selectedReferenceId !== null) {
+        if (
+          selectedReferenceId !== null &&
+          interactiveReferenceIdSet.has(selectedReferenceId)
+        ) {
           event.preventDefault();
           event.stopPropagation();
           const nextReferences = references.filter(
@@ -1545,6 +1614,7 @@ export default function GraphCanvas({
     frameCanvasNodes,
     flowInstance,
     historyBlocked,
+    interactiveReferenceIdSet,
     onEditNode,
     onRedo,
     onReferencesChange,
@@ -1559,13 +1629,25 @@ export default function GraphCanvas({
 
   const handleNodesChange = useCallback(
     (changes: NodeChange<InformationFlowNode>[]) => {
-      applyNodeChanges(changes);
+      applyNodeChanges(
+        changes.filter(
+          (change) =>
+            change.type === "add" ||
+            !filteredOutNodeIdSet.has(change.id) ||
+            (change.type !== "position" &&
+              change.type !== "select" &&
+              change.type !== "remove"),
+        ),
+      );
     },
-    [applyNodeChanges],
+    [applyNodeChanges, filteredOutNodeIdSet],
   );
 
   const bringFlowNodeToFront = useCallback(
     (nodeId: string) => {
+      if (filteredOutNodeIdSet.has(nodeId)) {
+        return;
+      }
       setFlowNodes((current) => {
         const target = current.find((node) => node.id === nodeId);
         if (target === undefined) {
@@ -1583,12 +1665,18 @@ export default function GraphCanvas({
         );
       });
     },
-    [setFlowNodes],
+    [filteredOutNodeIdSet, setFlowNodes],
   );
 
   const handleConnect = useCallback(
     (connection: Connection) => {
       if (connection.source === null || connection.target === null) {
+        return;
+      }
+      if (
+        filteredOutNodeIdSet.has(connection.source) ||
+        filteredOutNodeIdSet.has(connection.target)
+      ) {
         return;
       }
 
@@ -1604,11 +1692,17 @@ export default function GraphCanvas({
         onReferencesChange(nextReferences);
       }
     },
-    [nodes, onReferencesChange],
+    [filteredOutNodeIdSet, nodes, onReferencesChange],
   );
 
   const appendReference = useCallback(
     (sourceNodeId: string, targetNodeId: string) => {
+      if (
+        filteredOutNodeIdSet.has(sourceNodeId) ||
+        filteredOutNodeIdSet.has(targetNodeId)
+      ) {
+        return;
+      }
       const currentReferences = referencesRef.current;
       const nextReferences = appendExistingNodeReference(
         nodes,
@@ -1621,12 +1715,18 @@ export default function GraphCanvas({
         onReferencesChange(nextReferences);
       }
     },
-    [nodes, onReferencesChange],
+    [filteredOutNodeIdSet, nodes, onReferencesChange],
   );
 
   const chooseReferenceSearchTarget = useCallback(
     (targetNodeId: string, closeAfterSelection: boolean) => {
       if (referenceSearch === null) {
+        return;
+      }
+      if (
+        filteredOutNodeIdSet.has(referenceSearch.sourceNodeId) ||
+        filteredOutNodeIdSet.has(targetNodeId)
+      ) {
         return;
       }
       appendReference(referenceSearch.sourceNodeId, targetNodeId);
@@ -1644,12 +1744,16 @@ export default function GraphCanvas({
         ],
       });
     },
-    [appendReference, referenceSearch],
+    [appendReference, filteredOutNodeIdSet, referenceSearch],
   );
 
   const createReferenceSearchTarget = useCallback(
     () => {
-      if (referenceSearch === null || referenceSearchCreationName === null) {
+      if (
+        referenceSearch === null ||
+        referenceSearchCreationName === null ||
+        filteredOutNodeIdSet.has(referenceSearch.sourceNodeId)
+      ) {
         return;
       }
       const nodeId = onCreateReferencedNode(
@@ -1667,7 +1771,12 @@ export default function GraphCanvas({
       );
       setReferenceSearch(null);
     },
-    [onCreateReferencedNode, referenceSearch, referenceSearchCreationName],
+    [
+      filteredOutNodeIdSet,
+      onCreateReferencedNode,
+      referenceSearch,
+      referenceSearchCreationName,
+    ],
   );
 
   const handleConnectEnd = useCallback(
@@ -1684,6 +1793,7 @@ export default function GraphCanvas({
           targetElement.closest(".react-flow__background") !== null);
       if (
         sourceNodeId === null ||
+        filteredOutNodeIdSet.has(sourceNodeId) ||
         connectionState.isValid === true ||
         connectionState.toNode !== null ||
         !droppedOnEmptyCanvas ||
@@ -1717,7 +1827,7 @@ export default function GraphCanvas({
         ),
       });
     },
-    [flowInstance],
+    [filteredOutNodeIdSet, flowInstance],
   );
 
   const handleNodeDragStop = useCallback(
@@ -1727,7 +1837,12 @@ export default function GraphCanvas({
       draggedNodes: InformationFlowNode[],
     ) => {
       setDraggingNodeIds([]);
-      const movedNodes = draggedNodes.length > 0 ? draggedNodes : [node];
+      if (filteredOutNodeIdSet.has(node.id)) {
+        return;
+      }
+      const movedNodes = (draggedNodes.length > 0 ? draggedNodes : [node]).filter(
+        (movedNode) => !filteredOutNodeIdSet.has(movedNode.id),
+      );
       const nextLayout = finalizeNodeDragLayout(
         layout,
         movedNodes,
@@ -1737,7 +1852,7 @@ export default function GraphCanvas({
         onLayoutChange(nextLayout);
       }
     },
-    [layout, onLayoutChange],
+    [filteredOutNodeIdSet, layout, onLayoutChange],
   );
 
   const positionContextMenu = useCallback((clientX: number, clientY: number) => {
@@ -1776,6 +1891,9 @@ export default function GraphCanvas({
     (event, node) => {
       event.preventDefault();
       event.stopPropagation();
+      if (filteredOutNodeIdSet.has(node.id)) {
+        return;
+      }
       setSelectedReferenceId(null);
       onNodeBringToFront(node.id);
       setContextMenu({
@@ -1784,7 +1902,7 @@ export default function GraphCanvas({
         nodeId: node.id,
       });
     },
-    [onNodeBringToFront, positionContextMenu],
+    [filteredOutNodeIdSet, onNodeBringToFront, positionContextMenu],
   );
 
   const createAtCenter = useCallback(() => {
@@ -1818,7 +1936,7 @@ export default function GraphCanvas({
       const selectedNodeIds = nodesFullyInsideCanvasSelection(
         flowNodesRef.current.map((node) => ({
           height: node.measured?.height ?? node.height ?? 92,
-          hidden: node.hidden === true,
+          hidden: node.hidden === true || filteredOutNodeIdSet.has(node.id),
           id: node.id,
           width: node.measured?.width ?? node.width ?? 270,
           x: node.position.x,
@@ -1849,7 +1967,7 @@ export default function GraphCanvas({
       };
       setCanvasSelection(canvasSelectionRectangle(startScreen, currentScreen));
     },
-    [flowInstance, setFlowNodes],
+    [filteredOutNodeIdSet, flowInstance, setFlowNodes],
   );
 
   const startCanvasSelectionAutoPan = useCallback(
@@ -2032,7 +2150,11 @@ export default function GraphCanvas({
         y: event.clientY,
       });
       const zoom = flowInstance.getViewport().zoom;
-      const selected = findReferenceCurveAtPoint(referenceCurves, point, 9 / zoom);
+      const selected = findReferenceCurveAtPoint(
+        interactiveReferenceCurves,
+        point,
+        9 / zoom,
+      );
       if (selected === null) {
         setSelectedReferenceId(null);
         return;
@@ -2044,7 +2166,7 @@ export default function GraphCanvas({
         current.map((node) => (node.selected ? { ...node, selected: false } : node)),
       );
     },
-    [flowInstance, referenceCurves, setFlowNodes],
+    [flowInstance, interactiveReferenceCurves, setFlowNodes],
   );
 
   const emptyStateLabel =
@@ -2093,16 +2215,31 @@ export default function GraphCanvas({
         onConnectEnd={handleConnectEnd}
         onConnectStart={(_event, params) => {
           connectionSourceRef.current =
-            params.handleType === "source" ? params.nodeId : null;
+            params.handleType === "source" &&
+            params.nodeId !== null &&
+            !filteredOutNodeIdSet.has(params.nodeId)
+              ? params.nodeId
+              : null;
         }}
         onInit={setFlowInstance}
         onNodeContextMenu={handleNodeContextMenu}
         onNodeClick={(_event, node) => {
+          if (filteredOutNodeIdSet.has(node.id)) {
+            return;
+          }
           setSelectedReferenceId(null);
           onNodeBringToFront(node.id);
         }}
-        onNodeDoubleClick={(_event, node) => onEditNode(node.id)}
+        onNodeDoubleClick={(_event, node) => {
+          if (!filteredOutNodeIdSet.has(node.id)) {
+            onEditNode(node.id);
+          }
+        }}
         onNodeDragStart={(_event, node, draggedNodes) => {
+          if (filteredOutNodeIdSet.has(node.id)) {
+            setDraggingNodeIds([]);
+            return;
+          }
           setDraggingNodeIds(
             Array.from(
               new Set(
@@ -2455,6 +2592,7 @@ export default function GraphCanvas({
       {contextMenu !== null && (
         <div
           className="graph-context-menu"
+          data-kind={contextMenu.kind}
           onPointerDown={(event) => event.stopPropagation()}
           style={{ left: contextMenu.left, top: contextMenu.top }}
         >

@@ -63,6 +63,7 @@ function cardProps(overrides: Record<string, unknown> = {}): NodeProps<any> {
         },
       },
       editing: true,
+      interactive: true,
       nameConflict: false,
       nameConflictLabel: "Conflict",
       nameLabel: "Name",
