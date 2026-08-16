@@ -82,6 +82,7 @@ import {
   findReferenceCurveAtPoint,
   partitionReferencesByMovingNodes,
   referenceCurveId,
+  type ReferenceCurve,
 } from "./batchedReferenceLayer";
 import {
   canvasSelectionAutoPanDelta,
@@ -191,6 +192,7 @@ interface GraphLabels {
   totpRemaining: (seconds: number) => string;
   editNode: string;
   empty: string;
+  noMatches: string;
   filterByNode: string;
   name: string;
   nameConflict: string;
@@ -233,8 +235,8 @@ interface GraphCanvasProps {
   historyBlocked: boolean;
   nameConflictNodeIds: Set<string>;
   referenceFilterNodeIds: string[];
-  searchTerm: string;
-  unnamedOnly: boolean;
+  filteredNodeIds: ReadonlySet<string>;
+  unmatchedNodeOpacity: number;
   labels: GraphLabels;
   onAnalyzeNode: (nodeId: string) => void;
   onCreateNode: (position: { x: number; y: number }) => void;
@@ -808,8 +810,8 @@ export default function GraphCanvas({
   historyBlocked,
   nameConflictNodeIds,
   referenceFilterNodeIds,
-  searchTerm,
-  unnamedOnly,
+  filteredNodeIds,
+  unmatchedNodeOpacity,
   labels,
   onAnalyzeNode,
   onCreateNode,
@@ -863,7 +865,6 @@ export default function GraphCanvas({
   const [shortcutHelpOpen, setShortcutHelpOpen] = useState(false);
   const flowNodesRef = useRef(flowNodes);
   flowNodesRef.current = flowNodes;
-  const normalizedSearch = searchTerm.trim().toLowerCase();
 
   const frameCanvasNodes = useCallback(
     (nodesToFrame: readonly InformationFlowNode[], maximumZoom: number) => {
@@ -1056,36 +1057,41 @@ export default function GraphCanvas({
     [references],
   );
 
-  const hiddenNodeIdSet = useMemo(() => {
+  const filteredOutNodeIdSet = useMemo(() => {
     const result = new Set<string>();
     for (const node of nodes) {
       if (editingNodeId === node.id || referenceFilterNodeIdSet.has(node.id)) {
         continue;
       }
-      const referencedTargetIds = new Set(
-        (referencedNodesBySource.get(node.id) ?? []).map((target) => target.id),
-      );
-      if (
-        (unnamedOnly && node.name !== null) ||
-        (normalizedSearch.length > 0 &&
-          !(node.name ?? "").toLowerCase().includes(normalizedSearch)) ||
-        referenceFilterNodeIds.some(
-          (targetNodeId) => !referencedTargetIds.has(targetNodeId),
-        )
-      ) {
+      if (!filteredNodeIds.has(node.id)) {
         result.add(node.id);
       }
     }
     return result;
   }, [
     editingNodeId,
+    filteredNodeIds,
     nodes,
-    normalizedSearch,
-    referenceFilterNodeIds,
     referenceFilterNodeIdSet,
-    referencedNodesBySource,
-    unnamedOnly,
   ]);
+  const clampedUnmatchedNodeOpacity = Math.max(
+    0,
+    Math.min(100, unmatchedNodeOpacity),
+  );
+  const hiddenNodeIdSet = useMemo(
+    () =>
+      clampedUnmatchedNodeOpacity === 0
+        ? filteredOutNodeIdSet
+        : new Set<string>(),
+    [clampedUnmatchedNodeOpacity, filteredOutNodeIdSet],
+  );
+  const dimmedNodeIdSet = useMemo(
+    () =>
+      clampedUnmatchedNodeOpacity > 0 && clampedUnmatchedNodeOpacity < 100
+        ? filteredOutNodeIdSet
+        : new Set<string>(),
+    [clampedUnmatchedNodeOpacity, filteredOutNodeIdSet],
+  );
 
   const liveReferenceNodeGeometry = useMemo(
     () =>
@@ -1141,14 +1147,54 @@ export default function GraphCanvas({
     () => [...stationaryReferenceCurves, ...movingReferenceCurves],
     [movingReferenceCurves, stationaryReferenceCurves],
   );
+  const partitionCurvesByFilteredState = useCallback(
+    (curves: readonly ReferenceCurve[]) => {
+      const regular: ReferenceCurve[] = [];
+      const dimmed: ReferenceCurve[] = [];
+      for (const curve of curves) {
+        (dimmedNodeIdSet.has(curve.sourceNodeId) ||
+        dimmedNodeIdSet.has(curve.targetNodeId)
+          ? dimmed
+          : regular
+        ).push(curve);
+      }
+      return { dimmed, regular };
+    },
+    [dimmedNodeIdSet],
+  );
+  const stationaryCurvesByFilteredState = useMemo(
+    () => partitionCurvesByFilteredState(stationaryReferenceCurves),
+    [partitionCurvesByFilteredState, stationaryReferenceCurves],
+  );
+  const movingCurvesByFilteredState = useMemo(
+    () => partitionCurvesByFilteredState(movingReferenceCurves),
+    [movingReferenceCurves, partitionCurvesByFilteredState],
+  );
   const stationaryReferencePaths = useMemo(
-    () =>
-      buildBatchedReferencePaths(stationaryReferenceCurves, selectedReferenceId),
-    [selectedReferenceId, stationaryReferenceCurves],
+    () => ({
+      dimmed: buildBatchedReferencePaths(
+        stationaryCurvesByFilteredState.dimmed,
+        selectedReferenceId,
+      ),
+      regular: buildBatchedReferencePaths(
+        stationaryCurvesByFilteredState.regular,
+        selectedReferenceId,
+      ),
+    }),
+    [selectedReferenceId, stationaryCurvesByFilteredState],
   );
   const movingReferencePaths = useMemo(
-    () => buildBatchedReferencePaths(movingReferenceCurves, selectedReferenceId),
-    [movingReferenceCurves, selectedReferenceId],
+    () => ({
+      dimmed: buildBatchedReferencePaths(
+        movingCurvesByFilteredState.dimmed,
+        selectedReferenceId,
+      ),
+      regular: buildBatchedReferencePaths(
+        movingCurvesByFilteredState.regular,
+        selectedReferenceId,
+      ),
+    }),
+    [movingCurvesByFilteredState, selectedReferenceId],
   );
   const selectedNodeBoundary = useMemo(
     () =>
@@ -1205,6 +1251,9 @@ export default function GraphCanvas({
             ? { x: savedLayout.x, y: savedLayout.y }
             : { x: 80 + (index % 4) * 300, y: 80 + Math.floor(index / 4) * 210 },
           selected: currentNode?.selected ?? false,
+          style: dimmedNodeIdSet.has(node.id)
+            ? { opacity: clampedUnmatchedNodeOpacity / 100 }
+            : undefined,
           zIndex: stackOrderByNode.get(node.id) ?? index,
           hidden: hiddenNodeIdSet.has(node.id),
           data: {
@@ -1283,6 +1332,8 @@ export default function GraphCanvas({
     copyTextAsSecret,
     canvasReferencePresentation,
     editingNodeId,
+    clampedUnmatchedNodeOpacity,
+    dimmedNodeIdSet,
     hiddenNodeIdSet,
     labels,
     layoutByNode,
@@ -1996,7 +2047,12 @@ export default function GraphCanvas({
     [flowInstance, referenceCurves, setFlowNodes],
   );
 
-  const visibleNodeCount = flowNodes.filter((node) => !node.hidden).length;
+  const emptyStateLabel =
+    nodes.length === 0
+      ? labels.empty
+      : filteredNodeIds.size === 0
+        ? labels.noMatches
+        : null;
   const pendingDeletionNodes = pendingDeletionNodeIds
     .map((nodeId) => nodes.find((node) => node.id === nodeId))
     .filter((node): node is InformationNode => node !== undefined);
@@ -2081,26 +2137,54 @@ export default function GraphCanvas({
             height="1"
             width="1"
           >
+            {stationaryReferencePaths.dimmed.normal.length > 0 && (
+              <path
+                className="graph-reference-path graph-reference-path-dimmed"
+                d={stationaryReferencePaths.dimmed.normal}
+                style={{ opacity: clampedUnmatchedNodeOpacity / 100 }}
+              />
+            )}
+            {stationaryReferencePaths.dimmed.selected.length > 0 && (
+              <path
+                className="graph-reference-path graph-reference-path-selected graph-reference-path-dimmed"
+                d={stationaryReferencePaths.dimmed.selected}
+                style={{ opacity: clampedUnmatchedNodeOpacity / 100 }}
+              />
+            )}
             <path
               className="graph-reference-path"
-              d={stationaryReferencePaths.normal}
+              d={stationaryReferencePaths.regular.normal}
             />
-            {stationaryReferencePaths.selected.length > 0 && (
+            {stationaryReferencePaths.regular.selected.length > 0 && (
               <path
                 className="graph-reference-path graph-reference-path-selected"
-                d={stationaryReferencePaths.selected}
+                d={stationaryReferencePaths.regular.selected}
               />
             )}
-            {movingReferencePaths.normal.length > 0 && (
+            {movingReferencePaths.dimmed.normal.length > 0 && (
+              <path
+                className="graph-reference-path graph-reference-path-dimmed"
+                d={movingReferencePaths.dimmed.normal}
+                style={{ opacity: clampedUnmatchedNodeOpacity / 100 }}
+              />
+            )}
+            {movingReferencePaths.dimmed.selected.length > 0 && (
+              <path
+                className="graph-reference-path graph-reference-path-selected graph-reference-path-dimmed"
+                d={movingReferencePaths.dimmed.selected}
+                style={{ opacity: clampedUnmatchedNodeOpacity / 100 }}
+              />
+            )}
+            {movingReferencePaths.regular.normal.length > 0 && (
               <path
                 className="graph-reference-path"
-                d={movingReferencePaths.normal}
+                d={movingReferencePaths.regular.normal}
               />
             )}
-            {movingReferencePaths.selected.length > 0 && (
+            {movingReferencePaths.regular.selected.length > 0 && (
               <path
                 className="graph-reference-path graph-reference-path-selected"
-                d={movingReferencePaths.selected}
+                d={movingReferencePaths.regular.selected}
               />
             )}
           </svg>
@@ -2362,9 +2446,9 @@ export default function GraphCanvas({
         </div>
       )}
 
-      {visibleNodeCount === 0 && (
+      {emptyStateLabel !== null && (
         <div className="graph-empty" aria-live="polite">
-          <span>{labels.empty}</span>
+          <span>{emptyStateLabel}</span>
         </div>
       )}
 

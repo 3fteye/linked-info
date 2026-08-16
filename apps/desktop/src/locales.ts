@@ -12,6 +12,7 @@ export const resources = {
       workspace: {
         label: "工作区",
         itemCount: "{{count}} 条",
+        filteredItemCount: "{{count}} / {{total}} 条",
       },
       actions: {
         cancel: "取消",
@@ -60,7 +61,21 @@ export const resources = {
       },
       search: {
         label: "搜索节点",
-        placeholder: "按名称搜索",
+        hidden: "隐藏",
+        opacityValue: "{{value}}%",
+        placeholders: {
+          both: "搜索名称或内容",
+          content: "搜索内容",
+          name: "搜索名称",
+        },
+        scopeLabel: "搜索范围",
+        scopes: {
+          both: "两者",
+          content: "内容",
+          name: "名称",
+        },
+        unmatchedOpacity: "未匹配",
+        unmatchedOpacityHint: "调整未匹配节点与引用线的透明度；0% 表示隐藏。",
       },
       canvasShortcuts: {
         items: {
@@ -84,6 +99,7 @@ export const resources = {
       empty: {
         canvas: "画布上还没有节点",
         nodes: "还没有节点",
+        search: "没有匹配的节点",
       },
       nodes: {
         noContent: "无内容",
@@ -675,6 +691,7 @@ export const resources = {
       workspace: {
         label: "Workspace",
         itemCount: "{{count}} items",
+        filteredItemCount: "{{count}} / {{total}} items",
       },
       actions: {
         cancel: "Cancel",
@@ -724,7 +741,22 @@ export const resources = {
       },
       search: {
         label: "Search nodes",
-        placeholder: "Search by name",
+        hidden: "Hidden",
+        opacityValue: "{{value}}%",
+        placeholders: {
+          both: "Search names or content",
+          content: "Search content",
+          name: "Search names",
+        },
+        scopeLabel: "Search scope",
+        scopes: {
+          both: "Both",
+          content: "Content",
+          name: "Name",
+        },
+        unmatchedOpacity: "Unmatched",
+        unmatchedOpacityHint:
+          "Adjust the opacity of unmatched nodes and references; 0% hides them.",
       },
       canvasShortcuts: {
         items: {
@@ -748,6 +780,7 @@ export const resources = {
       empty: {
         canvas: "No nodes on this canvas",
         nodes: "No nodes yet",
+        search: "No matching nodes",
       },
       nodes: {
         noContent: "No content",

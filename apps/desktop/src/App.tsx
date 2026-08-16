@@ -1,4 +1,5 @@
 import {
+  useDeferredValue,
   useEffect,
   useMemo,
   useRef,
@@ -56,6 +57,7 @@ import {
   contentProcessorRegistry,
 } from "./contentProcessor";
 import { contentMarkerRegistry } from "./contentMarker";
+import { NodeSearchIndex, type NodeSearchScope } from "./nodeSearch";
 import { supportedLanguages, type SupportedLanguage } from "./locales";
 import {
   emptyWorkspace,
@@ -387,6 +389,8 @@ function App({
     canRedo: false,
   });
   const [searchTerm, setSearchTerm] = useState("");
+  const [searchScope, setSearchScope] = useState<NodeSearchScope>("name");
+  const [unmatchedNodeOpacity, setUnmatchedNodeOpacity] = useState(20);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [unnamedOnly, setUnnamedOnly] = useState(false);
   const [referenceFilterNodeIds, setReferenceFilterNodeIds] = useState<string[]>([]);
@@ -556,7 +560,8 @@ function App({
   const [vectorCacheMessage, setVectorCacheMessage] = useState<string | null>(null);
   const currentView = views.find((view) => view.id === activeView) ?? views[0];
   const activeLanguage = i18n.resolvedLanguage ?? i18n.language;
-  const normalizedSearch = normalizeNodeName(searchTerm);
+  const deferredSearchTerm = useDeferredValue(searchTerm);
+  const nodeSearchIndex = useMemo(() => new NodeSearchIndex(), []);
   const remoteEmbeddingScope = useMemo(
     () => embeddingTransmissionEstimate(workspace.nodes),
     [workspace.nodes],
@@ -1151,23 +1156,41 @@ function App({
     return targetIdsBySource;
   }, [workspace.references]);
 
+  const searchMatchedNodeIds = useMemo(
+    () =>
+      nodeSearchIndex.matchingNodeIds(
+        workspace.nodes,
+        deferredSearchTerm,
+        searchScope,
+      ),
+    [deferredSearchTerm, nodeSearchIndex, searchScope, workspace.nodes],
+  );
+
   const filteredNodes = useMemo(() => {
     return workspace.nodes.filter(
       (node) =>
         (!unnamedOnly || isUnnamedNode(node)) &&
-          (normalizedSearch.length === 0 ||
-            normalizeNodeName(node.name ?? "").includes(normalizedSearch)) &&
+          searchMatchedNodeIds.has(node.id) &&
           referenceFilterNodeIds.every((targetNodeId) =>
             referencedTargetIdsBySource.get(node.id)?.has(targetNodeId),
           ),
     );
   }, [
-    normalizedSearch,
     referenceFilterNodeIds,
     referencedTargetIdsBySource,
+    searchMatchedNodeIds,
     unnamedOnly,
     workspace.nodes,
   ]);
+
+  const filteredNodeIds = useMemo(
+    () => new Set(filteredNodes.map((node) => node.id)),
+    [filteredNodes],
+  );
+  const hasActiveNodeFilter =
+    normalizeNodeName(deferredSearchTerm).length > 0 ||
+    unnamedOnly ||
+    referenceFilterNodeIds.length > 0;
 
   const selectedReferenceFilterNodes = useMemo(() => {
     const nodesById = new Map(workspace.nodes.map((node) => [node.id, node]));
@@ -3628,24 +3651,66 @@ function App({
             pendingWorkspaceReplacement === null &&
             documentImportPreview === null && (
             <div className="workspace-actions">
-              <label className="search-field">
-                <Search aria-hidden="true" size={16} />
-                <span className="visually-hidden">{t("search.label")}</span>
-                <input
-                  data-testid="node-search"
-                  onChange={(event) => setSearchTerm(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Escape") {
-                      event.preventDefault();
-                      setSearchTerm("");
-                      event.currentTarget.blur();
+              <div className="node-search-control">
+                <label className="search-scope-picker">
+                  <span className="visually-hidden">{t("search.scopeLabel")}</span>
+                  <select
+                    aria-label={t("search.scopeLabel")}
+                    data-testid="node-search-scope"
+                    onChange={(event) =>
+                      setSearchScope(event.target.value as NodeSearchScope)
                     }
-                  }}
-                  placeholder={t("search.placeholder")}
-                  ref={searchInputRef}
-                  value={searchTerm}
-                />
-              </label>
+                    value={searchScope}
+                  >
+                    <option value="name">{t("search.scopes.name")}</option>
+                    <option value="content">{t("search.scopes.content")}</option>
+                    <option value="both">{t("search.scopes.both")}</option>
+                  </select>
+                </label>
+                <label className="search-field">
+                  <Search aria-hidden="true" size={16} />
+                  <span className="visually-hidden">{t("search.label")}</span>
+                  <input
+                    data-testid="node-search"
+                    onChange={(event) => setSearchTerm(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Escape") {
+                        event.preventDefault();
+                        setSearchTerm("");
+                        event.currentTarget.blur();
+                      }
+                    }}
+                    placeholder={t(`search.placeholders.${searchScope}`)}
+                    ref={searchInputRef}
+                    value={searchTerm}
+                  />
+                </label>
+              </div>
+              {activeView === "canvas" && (
+                <label
+                  className="unmatched-opacity-control"
+                  title={t("search.unmatchedOpacityHint")}
+                >
+                  <span>{t("search.unmatchedOpacity")}</span>
+                  <input
+                    aria-label={t("search.unmatchedOpacity")}
+                    data-testid="unmatched-node-opacity"
+                    max="100"
+                    min="0"
+                    onChange={(event) =>
+                      setUnmatchedNodeOpacity(Number(event.target.value))
+                    }
+                    step="5"
+                    type="range"
+                    value={unmatchedNodeOpacity}
+                  />
+                  <output>
+                    {unmatchedNodeOpacity === 0
+                      ? t("search.hidden")
+                      : t("search.opacityValue", { value: unmatchedNodeOpacity })}
+                  </output>
+                </label>
+              )}
               <div className="reference-filter-area">
                 <label className="reference-filter-picker">
                   <Filter aria-hidden="true" size={15} />
@@ -3715,7 +3780,12 @@ function App({
                 <span>{t("filters.unnamedOnly")}</span>
               </label>
               <span className="item-count">
-                {t("workspace.itemCount", { count: filteredNodes.length })}
+                {hasActiveNodeFilter
+                  ? t("workspace.filteredItemCount", {
+                      count: filteredNodes.length,
+                      total: workspace.nodes.length,
+                    })
+                  : t("workspace.itemCount", { count: filteredNodes.length })}
               </span>
               <button
                 className="secondary-button"
@@ -5166,6 +5236,7 @@ function App({
                     ? t("deleteNode.title")
                     : t("deleteNode.titleMultiple", { count }),
                 empty: t("empty.canvas"),
+                noMatches: t("empty.search"),
                 filterByNode: t("filters.filterByNode"),
                 name: t("editor.name"),
                 nameConflict: t("validation.nameUnique"),
@@ -5225,8 +5296,8 @@ function App({
               onViewportChange={updateViewport}
               referenceFilterNodeIds={referenceFilterNodeIds}
               references={workspace.references}
-              searchTerm={searchTerm}
-              unnamedOnly={unnamedOnly}
+              filteredNodeIds={filteredNodeIds}
+              unmatchedNodeOpacity={unmatchedNodeOpacity}
               viewport={workspace.viewport}
             />
           ) : (

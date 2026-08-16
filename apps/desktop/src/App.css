@@ -531,6 +531,42 @@ h1 {
   accent-color: #246b4a;
 }
 
+.node-search-control {
+  display: flex;
+  align-items: stretch;
+  min-width: 0;
+}
+
+.search-scope-picker {
+  display: flex;
+  align-items: center;
+  height: 36px;
+  padding: 0 5px 0 8px;
+  border: 1px solid #d9dfd9;
+  border-right: 0;
+  border-radius: 6px 0 0 6px;
+  color: #59615b;
+  background: #f2f6f3;
+}
+
+.search-scope-picker:focus-within {
+  position: relative;
+  z-index: 1;
+  border-color: #4c8a6a;
+  box-shadow: 0 0 0 2px rgb(44 125 88 / 12%);
+}
+
+.search-scope-picker select {
+  height: 100%;
+  padding: 0 18px 0 0;
+  border: 0;
+  outline: 0;
+  color: #425048;
+  background: transparent;
+  font-size: 12px;
+  font-weight: 600;
+}
+
 .search-field {
   display: flex;
   align-items: center;
@@ -542,6 +578,11 @@ h1 {
   border-radius: 6px;
   color: #737b75;
   background: #f8faf8;
+}
+
+.node-search-control .search-field {
+  margin-left: -1px;
+  border-radius: 0 6px 6px 0;
 }
 
 .search-field:focus-within {
@@ -558,6 +599,33 @@ h1 {
   color: #232824;
   background: transparent;
   font-size: 13px;
+}
+
+.unmatched-opacity-control {
+  display: grid;
+  grid-template-columns: auto minmax(58px, 88px) 38px;
+  align-items: center;
+  min-height: 36px;
+  padding: 0 9px;
+  gap: 7px;
+  border: 1px solid #d9dfd9;
+  border-radius: 6px;
+  color: #59615b;
+  background: #ffffff;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.unmatched-opacity-control input {
+  min-width: 0;
+  accent-color: #2d7d58;
+}
+
+.unmatched-opacity-control output {
+  color: #246b4a;
+  font-variant-numeric: tabular-nums;
+  font-weight: 650;
+  text-align: right;
 }
 
 .item-count {
@@ -659,6 +727,10 @@ h1 {
 
 .graph-canvas .react-flow__pane.dragging {
   cursor: grabbing;
+}
+
+.graph-canvas .react-flow__node {
+  transition: opacity 120ms ease-out;
 }
 
 .graph-canvas-selection {
@@ -1190,6 +1262,10 @@ h1 {
 .graph-reference-path-selected {
   stroke: #c36d2d;
   stroke-width: 2.6;
+}
+
+.graph-reference-path-dimmed {
+  transition: opacity 120ms ease-out;
 }
 
 .graph-selected-nodes-boundary {

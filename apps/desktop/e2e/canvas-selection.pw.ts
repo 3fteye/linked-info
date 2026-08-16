@@ -594,6 +594,55 @@ test("canvas keyboard selection, editing, search and control focus do not confli
   await expect(firstNode).toHaveAttribute("data-selected", "true");
 });
 
+test("search scope and unmatched opacity preserve canvas context", async ({ page }) => {
+  const nodes = gridNodes(3, 1).map((item, index) => ({
+    ...item,
+    content:
+      index === 1
+        ? "content-only match"
+        : index === 2
+          ? "[[li:secret]]synthetic-hidden-value[[/li]]"
+          : "ordinary content",
+  }));
+  await openSyntheticWorkspace(page, nodes, [
+    { sourceNodeId: nodes[0].id, targetNodeId: nodes[1].id },
+  ]);
+
+  const searchInput = page.getByTestId("node-search");
+  const searchScope = page.getByTestId("node-search-scope");
+  const opacity = page.getByTestId("unmatched-node-opacity");
+  const firstFlowNode = page.locator(`.react-flow__node[data-id="${nodes[0].id}"]`);
+  const secondFlowNode = page.locator(`.react-flow__node[data-id="${nodes[1].id}"]`);
+
+  await searchInput.fill(nodes[0].name);
+  await expect(firstFlowNode).toHaveCSS("opacity", "1");
+  await expect(secondFlowNode).toHaveCSS("opacity", "0.2");
+  await expect(page.locator(".item-count")).toContainText("1 / 3");
+  await expect(page.locator(".graph-reference-path-dimmed")).toHaveCount(1);
+  await expect(page.locator(".graph-reference-path-dimmed")).toHaveCSS(
+    "opacity",
+    "0.2",
+  );
+
+  await opacity.fill("0");
+  await expect(secondFlowNode).toBeHidden();
+  await expect(page.locator(".graph-reference-path-dimmed")).toHaveCount(0);
+
+  await opacity.fill("35");
+  await expect(secondFlowNode).toBeVisible();
+  await expect(secondFlowNode).toHaveCSS("opacity", "0.35");
+
+  await searchInput.fill("content-only match");
+  await expect(page.locator(".item-count")).toContainText("0 / 3");
+  await searchScope.selectOption("content");
+  await expect(secondFlowNode).toHaveCSS("opacity", "1");
+  await expect(firstFlowNode).toHaveCSS("opacity", "0.35");
+  await expect(page.locator(".item-count")).toContainText("1 / 3");
+
+  await searchInput.fill("synthetic-hidden-value");
+  await expect(page.locator(".item-count")).toContainText("0 / 3");
+});
+
 test("canvas select all, delete, undo, redo and context menu share one keyboard model", async ({
   page,
 }) => {
