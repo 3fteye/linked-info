@@ -131,9 +131,7 @@ import {
   EmbeddingAnalysisFailure,
   EmbeddingAnalyzer,
   embeddingTransmissionEstimate,
-  type EmbeddingCandidate,
   type EmbeddingGateway,
-  type EmbeddingRelatedNode,
 } from "./embeddingService";
 import type {
   EmbeddingVectorCache,
@@ -172,6 +170,13 @@ import {
   type LocalLlmProgress,
   type LocalLlmRuntime,
 } from "./localLlmModels";
+import {
+  smartReferenceResultCacheKey,
+  smartReferenceResultSettingsFingerprint,
+  type CachedSmartReferenceResult,
+  type SmartReferenceResultCache,
+  type SmartReferenceResultCacheStatus,
+} from "./smartReferenceCache";
 import "./App.css";
 
 type ViewId = "canvas" | "nodes" | "settings";
@@ -228,24 +233,31 @@ interface AppProps {
   offsiteBackup: OffsiteBackupService;
   persistence: WorkspacePersistence;
   secretClipboard: SecretClipboard;
+  smartReferenceResultCache: SmartReferenceResultCache;
   updateWorkspaceSecurityStatus: (status: WorkspaceSecurityStatus) => void;
   workspaceBackupHistory: WorkspaceBackupHistory;
   workspaceSecurity: WorkspaceSecurity;
   workspaceSecurityStatus: WorkspaceSecurityStatus;
 }
 
-interface SmartReferenceResult {
+interface SmartReferenceResult extends CachedSmartReferenceResult {
+  analysisKey: string;
   acceptedNodeIds: string[];
   automaticallyAddedNodeIds: string[];
-  candidates: EmbeddingCandidate[];
-  llmEnabled: boolean;
-  llmNoMatch: boolean;
-  llmSelectedNodeIds: string[];
-  llmUncertainNodeIds: string[];
-  relatedNodes: EmbeddingRelatedNode[];
-  sourceNodeId: string;
-  truncatedNodeCount: number;
 }
+
+type SmartReferenceTaskStatus = "queued" | "running" | "completed" | "failed";
+
+interface SmartReferenceTask {
+  cacheHit: boolean;
+  error: string | null;
+  nodeId: string;
+  result: SmartReferenceResult | null;
+  status: SmartReferenceTaskStatus;
+}
+
+const maximumSmartReferenceBatchSize = 256;
+const maximumSmartReferenceMemoryResults = 128;
 
 interface WorkspaceUpdateOptions {
   flushImmediately?: boolean;
@@ -354,6 +366,7 @@ function App({
   offsiteBackup,
   persistence,
   secretClipboard,
+  smartReferenceResultCache,
   updateWorkspaceSecurityStatus,
   workspaceBackupHistory,
   workspaceSecurity,
@@ -532,8 +545,21 @@ function App({
   const [llmSettings, setLlmSettings] = useState<LlmSettings>(() =>
     llmSettingsStore.load(),
   );
+  const embeddingSettingsRef = useRef(embeddingSettings);
+  const llmSettingsRef = useRef(llmSettings);
+  embeddingSettingsRef.current = embeddingSettings;
+  llmSettingsRef.current = llmSettings;
   const [remoteEmbeddingToken, setRemoteEmbeddingToken] = useState("");
   const [analyzingNodeId, setAnalyzingNodeId] = useState<string | null>(null);
+  const [smartReferenceTasks, setSmartReferenceTasks] = useState<
+    SmartReferenceTask[]
+  >([]);
+  const smartReferenceWorkerRunningRef = useRef(false);
+  const [smartReferenceWorkerRevision, setSmartReferenceWorkerRevision] = useState(0);
+  const smartReferenceQueueGenerationRef = useRef(0);
+  const smartReferenceMemoryCacheRef = useRef(
+    new Map<string, CachedSmartReferenceResult>(),
+  );
   const [smartReferenceResult, setSmartReferenceResult] =
     useState<SmartReferenceResult | null>(null);
   const [smartReferenceStatus, setSmartReferenceStatus] = useState<string | null>(null);
@@ -558,6 +584,12 @@ function App({
     useState<EmbeddingVectorCacheStatus | null>(null);
   const [vectorCacheBusy, setVectorCacheBusy] = useState(false);
   const [vectorCacheMessage, setVectorCacheMessage] = useState<string | null>(null);
+  const [smartReferenceCacheStatus, setSmartReferenceCacheStatus] =
+    useState<SmartReferenceResultCacheStatus | null>(null);
+  const [smartReferenceCacheBusy, setSmartReferenceCacheBusy] = useState(false);
+  const [smartReferenceCacheMessage, setSmartReferenceCacheMessage] = useState<
+    string | null
+  >(null);
   const currentView = views.find((view) => view.id === activeView) ?? views[0];
   const activeLanguage = i18n.resolvedLanguage ?? i18n.language;
   const deferredSearchTerm = useDeferredValue(searchTerm);
@@ -991,6 +1023,33 @@ function App({
       active = false;
     };
   }, [activeView, embeddingVectorCache, t]);
+
+  useEffect(() => {
+    if (activeView !== "settings") {
+      return;
+    }
+    let active = true;
+    void smartReferenceResultCache
+      .inspect()
+      .then((status) => {
+        if (active) {
+          setSmartReferenceCacheStatus(status);
+          setSmartReferenceCacheMessage(null);
+        }
+      })
+      .catch((error) => {
+        if (active) {
+          setSmartReferenceCacheMessage(
+            t("smartReference.settings.resultCache.inspectFailed", {
+              reason: errorReason(error),
+            }),
+          );
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [activeView, smartReferenceResultCache, t]);
 
   useEffect(() => {
     if (!persistenceReady || !workspaceBackupHistory.available) {
@@ -1792,12 +1851,19 @@ function App({
 
   function changeEmbeddingConfiguration(patch: Partial<EmbeddingSettings>) {
     const next = updateEmbeddingSettings(embeddingSettings, patch);
-    const fingerprintChanged =
+    const modelFingerprintChanged =
       embeddingSettingsFingerprint(next) !==
       embeddingSettingsFingerprint(embeddingSettings);
-    if (fingerprintChanged) {
+    const resultSettingsChanged =
+      smartReferenceResultSettingsFingerprint(next, llmSettings) !==
+      smartReferenceResultSettingsFingerprint(embeddingSettings, llmSettings);
+    if (modelFingerprintChanged) {
       setRemoteEmbeddingToken("");
+    }
+    if (resultSettingsChanged) {
       setSmartReferenceResult(null);
+      smartReferenceQueueGenerationRef.current += 1;
+      setSmartReferenceTasks([]);
       setLocalEmbeddingProgress(null);
     }
     setEmbeddingSettings(next);
@@ -1813,6 +1879,8 @@ function App({
     const next = updateLlmSettings(llmSettings, patch);
     setLlmSettings(next);
     setSmartReferenceResult(null);
+    smartReferenceQueueGenerationRef.current += 1;
+    setSmartReferenceTasks([]);
     setLocalLlmProgress(null);
     if (!next.enabled) {
       void localLlmRuntime.stop();
@@ -1846,149 +1914,383 @@ function App({
     }
   }
 
-  async function analyzeNodeReferences(nodeId: string) {
+  async function clearSmartReferenceResultCache() {
+    if (smartReferenceCacheBusy) {
+      return;
+    }
+    setSmartReferenceCacheBusy(true);
+    setSmartReferenceCacheMessage(null);
+    try {
+      const status = await smartReferenceResultCache.clear();
+      smartReferenceMemoryCacheRef.current.clear();
+      setSmartReferenceCacheStatus(status);
+      setSmartReferenceTasks((current) =>
+        current.filter((task) => task.status === "queued" || task.status === "running"),
+      );
+      setSmartReferenceResult(null);
+      showAppNotice(t("smartReference.settings.resultCache.clearSuccess"));
+    } catch (error) {
+      setSmartReferenceCacheMessage(
+        t("smartReference.settings.resultCache.clearFailed", {
+          reason: errorReason(error),
+        }),
+      );
+    } finally {
+      setSmartReferenceCacheBusy(false);
+    }
+  }
+
+  function rememberSmartReferenceResult(
+    key: string,
+    result: CachedSmartReferenceResult,
+  ) {
+    const cache = smartReferenceMemoryCacheRef.current;
+    cache.delete(key);
+    cache.set(key, result);
+    while (cache.size > maximumSmartReferenceMemoryResults) {
+      const oldest = cache.keys().next().value as string | undefined;
+      if (oldest === undefined) {
+        break;
+      }
+      cache.delete(oldest);
+    }
+  }
+
+  function hydrateSmartReferenceResult(
+    analysisKey: string,
+    cached: CachedSmartReferenceResult,
+    automaticallyAddedNodeIds: string[] = [],
+  ): SmartReferenceResult {
+    const acceptedNodeIds = workspaceRef.current.references
+      .filter((reference) => reference.sourceNodeId === cached.sourceNodeId)
+      .map((reference) => reference.targetNodeId);
+    return {
+      ...cached,
+      analysisKey,
+      acceptedNodeIds: Array.from(
+        new Set([...acceptedNodeIds, ...automaticallyAddedNodeIds]),
+      ),
+      automaticallyAddedNodeIds,
+    };
+  }
+
+  function smartReferenceFailureMessage(error: unknown): string {
+    if (error instanceof EmbeddingAnalysisFailure) {
+      return t(`smartReference.errors.${error.reason}`);
+    }
+    const reason = errorReason(error);
+    if (reason === "smart_reference_analysis_outdated") {
+      return t("smartReference.errors.analysisOutdated");
+    }
+    return reason.includes("local embedding download cancelled")
+      ? t("smartReference.download.cancelled")
+      : reason.includes("local LLM download cancelled")
+        ? t("smartReference.llm.download.cancelled")
+        : t("smartReference.errors.failed", { reason });
+  }
+
+  async function runSmartReferenceAnalysis(
+    nodeId: string,
+    queueGeneration: number,
+  ): Promise<{ cacheHit: boolean; result: SmartReferenceResult }> {
+    const currentEmbeddingSettings = embeddingSettingsRef.current;
+    const currentLlmSettings = llmSettingsRef.current;
     if (
-      analyzingNodeId !== null ||
+      workspaceSecurityStatus.encrypted &&
+      currentEmbeddingSettings.provider === "remote"
+    ) {
+      throw new Error(t("smartReference.errors.remoteBlockedByEncryption"));
+    }
+    setLocalEmbeddingProgress(null);
+    setCancellingLocalDownload(false);
+    setSmartReferenceStatus(null);
+    const currentWorkspace = workspaceRef.current;
+    const replacementGeneration = workspaceReplacementGenerationRef.current;
+    const analysisKey = await smartReferenceResultCacheKey(
+      nodeId,
+      currentWorkspace,
+      currentEmbeddingSettings,
+      currentLlmSettings,
+    );
+    const memoryResult = smartReferenceMemoryCacheRef.current.get(analysisKey);
+    if (memoryResult !== undefined) {
+      rememberSmartReferenceResult(analysisKey, memoryResult);
+      return {
+        cacheHit: true,
+        result: hydrateSmartReferenceResult(analysisKey, memoryResult),
+      };
+    }
+    const persistentResult = await smartReferenceResultCache.read(analysisKey);
+    if (persistentResult !== null) {
+      rememberSmartReferenceResult(analysisKey, persistentResult);
+      return {
+        cacheHit: true,
+        result: hydrateSmartReferenceResult(analysisKey, persistentResult),
+      };
+    }
+    const analysis = await embeddingAnalyzer.analyze(
+      nodeId,
+      currentWorkspace.nodes,
+      currentWorkspace.references,
+      currentEmbeddingSettings,
+      remoteEmbeddingToken,
+    );
+    let llmSelectedNodeIds: string[] = [];
+    let llmUncertainNodeIds: string[] = [];
+    let llmNoMatch = false;
+    if (currentLlmSettings.enabled) {
+      const prepared = prepareLlmReview(
+        nodeId,
+        currentWorkspace.nodes,
+        currentWorkspace.references,
+        analysis,
+      );
+      if (prepared === null) {
+        llmNoMatch = true;
+      } else {
+        const response = await llmGateway.review(
+          { kind: "local", modelId: currentLlmSettings.localModel },
+          prepared.request,
+        );
+        const decision = validateLlmReviewResponse(prepared, response);
+        llmSelectedNodeIds = decision.selectedNodeIds;
+        llmUncertainNodeIds = decision.uncertainNodeIds;
+        llmNoMatch = decision.noMatch;
+      }
+    }
+    if (
+      queueGeneration !== smartReferenceQueueGenerationRef.current ||
+      replacementGeneration !== workspaceReplacementGenerationRef.current
+    ) {
+      throw new Error("smart_reference_analysis_outdated");
+    }
+    const latestKey = await smartReferenceResultCacheKey(
+      nodeId,
+      workspaceRef.current,
+      embeddingSettingsRef.current,
+      llmSettingsRef.current,
+    );
+    if (latestKey !== analysisKey) {
+      throw new Error("smart_reference_analysis_outdated");
+    }
+    const automaticCandidateIds =
+      !currentLlmSettings.enabled &&
+      currentEmbeddingSettings.autoReferenceEnabled &&
+      currentEmbeddingSettings.thresholdFingerprint ===
+        smartReferenceScoringFingerprint(currentEmbeddingSettings)
+        ? analysis.candidates
+            .filter(
+              (candidate) =>
+                candidate.score >= currentEmbeddingSettings.autoReferenceThreshold,
+            )
+            .map((candidate) => candidate.nodeId)
+        : [];
+    const automaticallyAddedNodeIds: string[] = [];
+    if (automaticCandidateIds.length > 0) {
+      updateWorkspace(
+        (current) => {
+          let nextReferences = current.references;
+          for (const targetNodeId of automaticCandidateIds) {
+            const appended = appendExistingNodeReference(
+              current.nodes,
+              nextReferences,
+              nodeId,
+              targetNodeId,
+            );
+            if (appended !== nextReferences) {
+              automaticallyAddedNodeIds.push(targetNodeId);
+              nextReferences = appended;
+            }
+          }
+          return nextReferences === current.references
+            ? current
+            : { ...current, references: nextReferences };
+        },
+        { flushImmediately: true, recordHistory: true },
+      );
+    }
+    const currentNodeIds = new Set(
+      workspaceRef.current.nodes.map((node) => node.id),
+    );
+    if (!currentNodeIds.has(nodeId)) {
+      throw new Error("smart_reference_analysis_outdated");
+    }
+    const currentLlmSelectedNodeIds = llmSelectedNodeIds.filter((candidateId) =>
+      currentNodeIds.has(candidateId),
+    );
+    const currentLlmUncertainNodeIds = llmUncertainNodeIds.filter((candidateId) =>
+      currentNodeIds.has(candidateId),
+    );
+    const cached: CachedSmartReferenceResult = {
+      candidates: analysis.candidates.filter((candidate) =>
+        currentNodeIds.has(candidate.nodeId),
+      ),
+      generatedAtMs: Date.now(),
+      llmEnabled: currentLlmSettings.enabled,
+      llmNoMatch:
+        llmNoMatch ||
+        (currentLlmSelectedNodeIds.length === 0 &&
+          currentLlmUncertainNodeIds.length === 0),
+      llmSelectedNodeIds: currentLlmSelectedNodeIds,
+      llmUncertainNodeIds: currentLlmUncertainNodeIds,
+      relatedNodes: analysis.relatedNodes.filter((related) =>
+        currentNodeIds.has(related.nodeId),
+      ),
+      sourceNodeId: nodeId,
+      truncatedNodeCount: analysis.truncatedNodeCount,
+    };
+    let resultKey = analysisKey;
+    if (automaticallyAddedNodeIds.length === 0) {
+      rememberSmartReferenceResult(analysisKey, cached);
+      try {
+        await smartReferenceResultCache.write(analysisKey, cached);
+      } catch (error) {
+        setSmartReferenceCacheMessage(
+          t("smartReference.settings.resultCache.writeFailed", {
+            reason: errorReason(error),
+          }),
+        );
+      }
+    } else {
+      resultKey = await smartReferenceResultCacheKey(
+        nodeId,
+        workspaceRef.current,
+        embeddingSettingsRef.current,
+        llmSettingsRef.current,
+      );
+    }
+    return {
+      cacheHit: false,
+      result: hydrateSmartReferenceResult(
+        resultKey,
+        cached,
+        automaticallyAddedNodeIds,
+      ),
+    };
+  }
+
+  function enqueueSmartReferenceNodes(nodeIds: string[]) {
+    const currentNodeIds = new Set(workspaceRef.current.nodes.map((node) => node.id));
+    const unique = Array.from(new Set(nodeIds))
+      .filter((nodeId) => currentNodeIds.has(nodeId))
+      .slice(0, maximumSmartReferenceBatchSize);
+    if (unique.length === 0) {
+      return;
+    }
+    setSmartReferenceTasks((current) => {
+      const queued = new Set(unique);
+      const retained = current.filter(
+        (task) => task.status === "running" || !queued.has(task.nodeId),
+      );
+      const runningNodeIds = new Set(
+        retained.filter((task) => task.status === "running").map((task) => task.nodeId),
+      );
+      return [
+        ...retained,
+        ...unique
+          .filter((nodeId) => !runningNodeIds.has(nodeId))
+          .map((nodeId) => ({
+            cacheHit: false,
+            error: null,
+            nodeId,
+            result: null,
+            status: "queued" as const,
+          })),
+      ];
+    });
+    setSmartReferenceStatus(null);
+  }
+
+  async function openSmartReferenceTask(task: SmartReferenceTask) {
+    if (task.result === null) {
+      return;
+    }
+    const currentKey = await smartReferenceResultCacheKey(
+      task.nodeId,
+      workspaceRef.current,
+      embeddingSettingsRef.current,
+      llmSettingsRef.current,
+    );
+    if (currentKey !== task.result.analysisKey) {
+      const message = t("smartReference.errors.analysisOutdated");
+      setSmartReferenceTasks((current) =>
+        current.map((candidate) =>
+          candidate.nodeId === task.nodeId
+            ? { ...candidate, error: message, result: null, status: "failed" }
+            : candidate,
+        ),
+      );
+      setSmartReferenceStatus(message);
+      return;
+    }
+    setSmartReferenceResult(
+      hydrateSmartReferenceResult(
+        currentKey,
+        task.result,
+        task.result.automaticallyAddedNodeIds,
+      ),
+    );
+  }
+
+  useEffect(() => {
+    if (
+      smartReferenceWorkerRunningRef.current ||
       preparingLocalModelId !== null ||
       preparingLocalLlmModelId !== null
     ) {
       return;
     }
-    if (
-      workspaceSecurityStatus.encrypted &&
-      embeddingSettings.provider === "remote"
-    ) {
-      setSmartReferenceStatus(t("smartReference.errors.remoteBlockedByEncryption"));
+    const nextTask = smartReferenceTasks.find((task) => task.status === "queued");
+    if (nextTask === undefined) {
       return;
     }
-    setAnalyzingNodeId(nodeId);
-    setLocalEmbeddingProgress(null);
-    setCancellingLocalDownload(false);
-    setSmartReferenceStatus(null);
-    try {
-      const currentWorkspace = workspaceRef.current;
-      const replacementGeneration = workspaceReplacementGenerationRef.current;
-      const analysis = await embeddingAnalyzer.analyze(
-        nodeId,
-        currentWorkspace.nodes,
-        currentWorkspace.references,
-        embeddingSettings,
-        remoteEmbeddingToken,
-      );
-      let llmSelectedNodeIds: string[] = [];
-      let llmUncertainNodeIds: string[] = [];
-      let llmNoMatch = false;
-      if (llmSettings.enabled) {
-        const prepared = prepareLlmReview(
-          nodeId,
-          currentWorkspace.nodes,
-          currentWorkspace.references,
-          analysis,
-        );
-        if (prepared === null) {
-          llmNoMatch = true;
-        } else {
-          const response = await llmGateway.review(
-            { kind: "local", modelId: llmSettings.localModel },
-            prepared.request,
-          );
-          const decision = validateLlmReviewResponse(prepared, response);
-          llmSelectedNodeIds = decision.selectedNodeIds;
-          llmUncertainNodeIds = decision.uncertainNodeIds;
-          llmNoMatch = decision.noMatch;
+    const queueGeneration = smartReferenceQueueGenerationRef.current;
+    smartReferenceWorkerRunningRef.current = true;
+    setAnalyzingNodeId(nextTask.nodeId);
+    setSmartReferenceTasks((current) =>
+      current.map((task) =>
+        task.nodeId === nextTask.nodeId
+          ? { ...task, error: null, status: "running" }
+          : task,
+      ),
+    );
+    void runSmartReferenceAnalysis(nextTask.nodeId, queueGeneration)
+      .then(({ cacheHit, result }) => {
+        if (queueGeneration !== smartReferenceQueueGenerationRef.current) {
+          return;
         }
-      }
-      const automaticCandidateIds =
-        !llmSettings.enabled &&
-        embeddingSettings.autoReferenceEnabled &&
-        embeddingSettings.thresholdFingerprint ===
-          smartReferenceScoringFingerprint(embeddingSettings)
-          ? analysis.candidates
-              .filter(
-                (candidate) =>
-                  candidate.score >= embeddingSettings.autoReferenceThreshold,
-              )
-              .map((candidate) => candidate.nodeId)
-          : [];
-      const automaticallyAddedNodeIds: string[] = [];
-      if (replacementGeneration !== workspaceReplacementGenerationRef.current) {
-        setSmartReferenceStatus(t("smartReference.errors.analysisOutdated"));
-        return;
-      }
-      if (automaticCandidateIds.length > 0) {
-        updateWorkspace(
-          (current) => {
-            let nextReferences = current.references;
-            for (const targetNodeId of automaticCandidateIds) {
-              const appended = appendExistingNodeReference(
-                current.nodes,
-                nextReferences,
-                nodeId,
-                targetNodeId,
-              );
-              if (appended !== nextReferences) {
-                automaticallyAddedNodeIds.push(targetNodeId);
-                nextReferences = appended;
-              }
-            }
-            return nextReferences === current.references
-              ? current
-              : { ...current, references: nextReferences };
-          },
-          { flushImmediately: true, recordHistory: true },
+        setSmartReferenceTasks((current) =>
+          current.map((task) =>
+            task.nodeId === nextTask.nodeId
+              ? { ...task, cacheHit, error: null, result, status: "completed" }
+              : task,
+          ),
         );
-      }
-      const currentNodeIds = new Set(
-        workspaceRef.current.nodes.map((node) => node.id),
-      );
-      if (!currentNodeIds.has(nodeId)) {
-        setSmartReferenceStatus(t("smartReference.errors.analysisOutdated"));
-        return;
-      }
-      const currentCandidates = analysis.candidates.filter((candidate) =>
-        currentNodeIds.has(candidate.nodeId),
-      );
-      const currentRelatedNodes = analysis.relatedNodes.filter((related) =>
-        currentNodeIds.has(related.nodeId),
-      );
-      const currentLlmSelectedNodeIds = llmSelectedNodeIds.filter((candidateId) =>
-        currentNodeIds.has(candidateId),
-      );
-      const currentLlmUncertainNodeIds = llmUncertainNodeIds.filter(
-        (candidateId) => currentNodeIds.has(candidateId),
-      );
-      setSmartReferenceResult({
-        acceptedNodeIds: [...automaticallyAddedNodeIds],
-        automaticallyAddedNodeIds,
-        candidates: currentCandidates,
-        llmEnabled: llmSettings.enabled,
-        llmNoMatch:
-          llmNoMatch ||
-          (currentLlmSelectedNodeIds.length === 0 &&
-            currentLlmUncertainNodeIds.length === 0),
-        llmSelectedNodeIds: currentLlmSelectedNodeIds,
-        llmUncertainNodeIds: currentLlmUncertainNodeIds,
-        relatedNodes: currentRelatedNodes,
-        sourceNodeId: nodeId,
-        truncatedNodeCount: analysis.truncatedNodeCount,
+      })
+      .catch((error) => {
+        if (queueGeneration !== smartReferenceQueueGenerationRef.current) {
+          return;
+        }
+        const message = smartReferenceFailureMessage(error);
+        setSmartReferenceTasks((current) =>
+          current.map((task) =>
+            task.nodeId === nextTask.nodeId
+              ? { ...task, error: message, result: null, status: "failed" }
+              : task,
+          ),
+        );
+      })
+      .finally(() => {
+        smartReferenceWorkerRunningRef.current = false;
+        setAnalyzingNodeId(null);
+        setSmartReferenceWorkerRevision((current) => current + 1);
       });
-    } catch (error) {
-      if (error instanceof EmbeddingAnalysisFailure) {
-        setSmartReferenceStatus(t(`smartReference.errors.${error.reason}`));
-      } else {
-        const reason = error instanceof Error ? error.message : String(error);
-        setSmartReferenceStatus(
-          reason.includes("local embedding download cancelled")
-            ? t("smartReference.download.cancelled")
-            : reason.includes("local LLM download cancelled")
-              ? t("smartReference.llm.download.cancelled")
-              : t("smartReference.errors.failed", { reason }),
-        );
-      }
-    } finally {
-      setAnalyzingNodeId(null);
-    }
-  }
+  }, [
+    preparingLocalLlmModelId,
+    preparingLocalModelId,
+    smartReferenceTasks,
+    smartReferenceWorkerRevision,
+  ]);
 
   async function prepareLocalEmbeddingModel(modelId: LocalEmbeddingModelId) {
     if (
@@ -2074,7 +2376,7 @@ function App({
     }
   }
 
-  function acceptSmartReference(targetNodeId: string) {
+  async function acceptSmartReference(targetNodeId: string) {
     const result = smartReferenceResult;
     if (result === null) {
       return;
@@ -2082,9 +2384,16 @@ function App({
     const currentNodeIds = new Set(
       workspaceRef.current.nodes.map((node) => node.id),
     );
+    const currentAnalysisKey = await smartReferenceResultCacheKey(
+      result.sourceNodeId,
+      workspaceRef.current,
+      embeddingSettingsRef.current,
+      llmSettingsRef.current,
+    );
     if (
       !currentNodeIds.has(result.sourceNodeId) ||
-      !currentNodeIds.has(targetNodeId)
+      !currentNodeIds.has(targetNodeId) ||
+      currentAnalysisKey !== result.analysisKey
     ) {
       setSmartReferenceStatus(t("smartReference.errors.analysisOutdated"));
       setSmartReferenceResult(null);
@@ -2104,13 +2413,36 @@ function App({
       },
       { flushImmediately: true, recordHistory: true },
     );
+    const nextAnalysisKey = await smartReferenceResultCacheKey(
+      result.sourceNodeId,
+      workspaceRef.current,
+      embeddingSettingsRef.current,
+      llmSettingsRef.current,
+    );
     setSmartReferenceResult((current) =>
       current === null || current.acceptedNodeIds.includes(targetNodeId)
         ? current
         : {
             ...current,
+            analysisKey: nextAnalysisKey,
             acceptedNodeIds: [...current.acceptedNodeIds, targetNodeId],
           },
+    );
+    setSmartReferenceTasks((current) =>
+      current.map((task) =>
+        task.nodeId !== result.sourceNodeId || task.result === null
+          ? task
+          : {
+              ...task,
+              result: {
+                ...task.result,
+                analysisKey: nextAnalysisKey,
+                acceptedNodeIds: task.result.acceptedNodeIds.includes(targetNodeId)
+                  ? task.result.acceptedNodeIds
+                  : [...task.result.acceptedNodeIds, targetNodeId],
+              },
+            },
+      ),
     );
   }
 
@@ -2336,6 +2668,9 @@ function App({
     }
     setReferenceFilterNodeIds((current) =>
       current.filter((currentNodeId) => !deletedNodeIds.has(currentNodeId)),
+    );
+    setSmartReferenceTasks((current) =>
+      current.filter((task) => !deletedNodeIds.has(task.nodeId)),
     );
     setSmartReferenceResult((current) => {
       if (current === null || deletedNodeIds.has(current.sourceNodeId)) {
@@ -3271,6 +3606,9 @@ function App({
       setSearchTerm("");
       setUnnamedOnly(false);
       setReferenceFilterNodeIds([]);
+      smartReferenceQueueGenerationRef.current += 1;
+      smartReferenceMemoryCacheRef.current.clear();
+      setSmartReferenceTasks([]);
       setSmartReferenceResult(null);
       setRecoveryAvailable(true);
       setRecoveryStorageProblem(null);
@@ -3317,6 +3655,9 @@ function App({
       setSearchTerm("");
       setUnnamedOnly(false);
       setReferenceFilterNodeIds([]);
+      smartReferenceQueueGenerationRef.current += 1;
+      smartReferenceMemoryCacheRef.current.clear();
+      setSmartReferenceTasks([]);
       setSmartReferenceResult(null);
       setRecoveryAvailable(true);
       setRecoveryStorageProblem(null);
@@ -3407,8 +3748,12 @@ function App({
       await persistence.save(initialWorkspace);
       workspaceChangedInSessionRef.current = true;
       workspaceReplacementGenerationRef.current += 1;
+      smartReferenceQueueGenerationRef.current += 1;
+      smartReferenceMemoryCacheRef.current.clear();
       workspaceRef.current = initialWorkspace;
       setWorkspace(initialWorkspace);
+      setSmartReferenceTasks([]);
+      setSmartReferenceResult(null);
       clearHistory();
       setPrimaryStorageProblem(null);
       setConfirmClearUnreadable(false);
@@ -4359,6 +4704,48 @@ function App({
                   {vectorCacheMessage !== null && <small>{vectorCacheMessage}</small>}
                 </div>
               </div>
+              <div className="setting-row data-setting-row smart-reference-setting-row">
+                <div className="setting-label">
+                  <ArchiveRestore size={18} />
+                  <div className="setting-label-copy">
+                    <span>{t("smartReference.settings.resultCache.title")}</span>
+                    <small>{t("smartReference.settings.resultCache.description")}</small>
+                  </div>
+                </div>
+                <div className="vector-cache-settings">
+                  {smartReferenceCacheStatus === null ? (
+                    <span>{t("smartReference.settings.resultCache.loading")}</span>
+                  ) : smartReferenceCacheStatus.persistent ? (
+                    <span>
+                      {t("smartReference.settings.resultCache.usage", {
+                        used: formatByteCount(smartReferenceCacheStatus.diskBytes),
+                        limit: formatByteCount(smartReferenceCacheStatus.maxBytes),
+                        count: smartReferenceCacheStatus.entryCount,
+                      })}
+                    </span>
+                  ) : (
+                    <span>{t("smartReference.settings.resultCache.memoryOnly")}</span>
+                  )}
+                  <small>{t("smartReference.settings.resultCache.lifecycle")}</small>
+                  <button
+                    className="secondary-button"
+                    disabled={
+                      smartReferenceCacheBusy ||
+                      smartReferenceCacheStatus?.persistent !== true
+                    }
+                    onClick={() => void clearSmartReferenceResultCache()}
+                    type="button"
+                  >
+                    <Trash2 aria-hidden="true" size={15} />
+                    {smartReferenceCacheBusy
+                      ? t("smartReference.settings.resultCache.clearing")
+                      : t("smartReference.settings.resultCache.clear")}
+                  </button>
+                  {smartReferenceCacheMessage !== null && (
+                    <small>{smartReferenceCacheMessage}</small>
+                  )}
+                </div>
+              </div>
               </section>
               <section
                 aria-labelledby="settings-tab-dataSecurity"
@@ -5256,6 +5643,8 @@ function App({
                 removeNodeFilter: t("filters.removeNodeFilter"),
                 sourceHandle: t("references.sourceHandle"),
                 smartReference: t("smartReference.action"),
+                smartReferenceMultiple: (count) =>
+                  t("smartReference.batchAction", { count }),
                 shortcuts: {
                   items: canvasOperationItems,
                   open: t("canvasShortcuts.open"),
@@ -5271,7 +5660,7 @@ function App({
               contentMarkerOptions={contentMarkerOptions}
               nameConflictNodeIds={nameConflictNodeIds}
               nodes={workspace.nodes}
-              onAnalyzeNode={(nodeId) => void analyzeNodeReferences(nodeId)}
+              onAnalyzeNodes={enqueueSmartReferenceNodes}
               onCreateNode={createNode}
               onCreateReferencedNode={createReferencedNode}
               onCopySecret={
@@ -5507,6 +5896,97 @@ function App({
         </div>
       )}
 
+      {smartReferenceTasks.length > 0 && (
+        <aside className="smart-reference-queue" data-testid="smart-reference-queue">
+          <header>
+            <div>
+              <strong>{t("smartReference.queue.title")}</strong>
+              <span>
+                {t("smartReference.queue.summary", {
+                  completed: smartReferenceTasks.filter(
+                    (task) => task.status === "completed",
+                  ).length,
+                  queued: smartReferenceTasks.filter((task) => task.status === "queued")
+                    .length,
+                  total: smartReferenceTasks.length,
+                })}
+              </span>
+            </div>
+            <button
+              disabled={smartReferenceTasks.every(
+                (task) => task.status === "queued" || task.status === "running",
+              )}
+              onClick={() =>
+                setSmartReferenceTasks((current) =>
+                  current.filter(
+                    (task) => task.status === "queued" || task.status === "running",
+                  ),
+                )
+              }
+              type="button"
+            >
+              {t("smartReference.queue.clearFinished")}
+            </button>
+          </header>
+          <div className="smart-reference-queue-list">
+            {smartReferenceTasks.map((task) => {
+              const node = workspace.nodes.find((candidate) => candidate.id === task.nodeId);
+              const label =
+                node === undefined
+                  ? t("smartReference.queue.missingNode")
+                  : nodeFilterLabel(
+                      node,
+                      t("nodes.unnamed"),
+                      t("nodes.noContent"),
+                    );
+              return (
+                <div
+                  className="smart-reference-queue-item"
+                  data-status={task.status}
+                  key={task.nodeId}
+                >
+                  <div>
+                    <strong>{label}</strong>
+                    <span>
+                      {task.status === "completed" && task.cacheHit
+                        ? t("smartReference.queue.cached")
+                        : t(`smartReference.queue.${task.status}`)}
+                    </span>
+                    {task.error !== null && <small>{task.error}</small>}
+                  </div>
+                  {task.status === "completed" ? (
+                    <button
+                      onClick={() => void openSmartReferenceTask(task)}
+                      type="button"
+                    >
+                      {t("smartReference.queue.open")}
+                    </button>
+                  ) : task.status === "failed" ? (
+                    <button
+                      onClick={() => enqueueSmartReferenceNodes([task.nodeId])}
+                      type="button"
+                    >
+                      {t("smartReference.queue.retry")}
+                    </button>
+                  ) : task.status === "queued" ? (
+                    <button
+                      onClick={() =>
+                        setSmartReferenceTasks((current) =>
+                          current.filter((candidate) => candidate.nodeId !== task.nodeId),
+                        )
+                      }
+                      type="button"
+                    >
+                      {t("smartReference.queue.remove")}
+                    </button>
+                  ) : null}
+                </div>
+              );
+            })}
+          </div>
+        </aside>
+      )}
+
       {smartReferenceStatus !== null && (
         <div className="smart-reference-status" role="alert">
           <span>{smartReferenceStatus}</span>
@@ -5611,7 +6091,7 @@ function App({
                             <button
                               className="secondary-button"
                               disabled={accepted}
-                              onClick={() => acceptSmartReference(nodeId)}
+                              onClick={() => void acceptSmartReference(nodeId)}
                               type="button"
                             >
                               {accepted
@@ -5655,7 +6135,7 @@ function App({
                             <button
                               className="secondary-button"
                               disabled={accepted}
-                              onClick={() => acceptSmartReference(nodeId)}
+                              onClick={() => void acceptSmartReference(nodeId)}
                               type="button"
                             >
                               {accepted
@@ -5719,7 +6199,7 @@ function App({
                           <button
                             className="secondary-button"
                             disabled={accepted}
-                            onClick={() => acceptSmartReference(candidate.nodeId)}
+                            onClick={() => void acceptSmartReference(candidate.nodeId)}
                             type="button"
                           >
                             {accepted

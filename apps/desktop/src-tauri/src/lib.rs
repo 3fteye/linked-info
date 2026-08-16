@@ -4,6 +4,7 @@ mod llm;
 mod offsite_backup;
 mod s3_backup_target;
 mod secret_clipboard;
+mod smart_reference_cache;
 mod system_unlock;
 mod vector_cache;
 #[cfg(windows)]
@@ -46,6 +47,7 @@ pub fn run() {
         .manage(llm::LlmState::default())
         .manage(offsite_backup::OffsiteBackupState::default())
         .manage(secret_clipboard::SecretClipboardState::default())
+        .manage(smart_reference_cache::SmartReferenceCacheState::default())
         .manage(system_unlock::SystemUnlockState::default())
         .manage(vector_cache::VectorCacheState::default())
         .manage(workspace_file::WorkspaceVaultState::default())
@@ -102,6 +104,10 @@ pub fn run() {
             offsite_backup::verify_offsite_backup,
             secret_clipboard::copy_secret_to_clipboard,
             secret_clipboard::inspect_secret_clipboard,
+            smart_reference_cache::clear_smart_reference_result_cache,
+            smart_reference_cache::inspect_smart_reference_result_cache,
+            smart_reference_cache::read_smart_reference_result_cache,
+            smart_reference_cache::write_smart_reference_result_cache,
             vector_cache::clear_embedding_vector_cache,
             vector_cache::inspect_embedding_vector_cache,
             vector_cache::read_embedding_vector_cache,

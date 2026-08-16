@@ -3421,6 +3421,89 @@ h1 {
   background: rgb(60 75 66 / 8%);
 }
 
+.smart-reference-queue {
+  position: fixed;
+  z-index: 118;
+  top: 112px;
+  right: 20px;
+  display: grid;
+  width: min(390px, calc(100vw - 40px));
+  max-height: min(560px, calc(100vh - 152px));
+  overflow: hidden;
+  border: 1px solid #cdd8d1;
+  border-radius: 9px;
+  color: #29342e;
+  background: rgb(250 253 251 / 96%);
+  box-shadow: 0 12px 36px rgb(35 55 44 / 18%);
+}
+
+.smart-reference-queue > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 11px 12px;
+  gap: 10px;
+  border-bottom: 1px solid #e1e8e3;
+}
+
+.smart-reference-queue > header > div,
+.smart-reference-queue-item > div {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.smart-reference-queue span,
+.smart-reference-queue small {
+  color: #68746d;
+  font-size: 11px;
+}
+
+.smart-reference-queue button {
+  min-height: 28px;
+  flex: none;
+  padding: 0 9px;
+  border: 1px solid #ccd7d0;
+  border-radius: 6px;
+  color: #335a46;
+  background: #fff;
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.smart-reference-queue button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.smart-reference-queue-list {
+  display: grid;
+  overflow: auto;
+}
+
+.smart-reference-queue-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 9px 12px;
+  gap: 10px;
+  border-bottom: 1px solid #edf1ee;
+}
+
+.smart-reference-queue-item:last-child {
+  border-bottom: 0;
+}
+
+.smart-reference-queue-item[data-status="running"] {
+  background: #f0f8f3;
+}
+
+.smart-reference-queue-item[data-status="failed"] small,
+.smart-reference-queue-item[data-status="failed"] span {
+  color: #9a4339;
+}
+
 .smart-reference-dialog {
   width: min(620px, 100%);
   max-height: min(760px, calc(100vh - 48px));

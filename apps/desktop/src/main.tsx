@@ -45,6 +45,10 @@ import {
   tauriOffsiteBackupService,
   unavailableOffsiteBackupService,
 } from "./offsiteBackup";
+import {
+  memoryOnlySmartReferenceResultCache,
+  tauriSmartReferenceResultCache,
+} from "./smartReferenceCache";
 
 document.addEventListener(
   "contextmenu",
@@ -94,6 +98,9 @@ const secretClipboard = runningInTauri
 const offsiteBackup = runningInTauri
   ? tauriOffsiteBackupService
   : unavailableOffsiteBackupService;
+const smartReferenceResultCache = runningInTauri
+  ? tauriSmartReferenceResultCache
+  : memoryOnlySmartReferenceResultCache;
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
@@ -112,6 +119,7 @@ ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
           offsiteBackup={offsiteBackup}
           persistence={persistence}
           secretClipboard={secretClipboard}
+          smartReferenceResultCache={smartReferenceResultCache}
           updateWorkspaceSecurityStatus={updateWorkspaceSecurityStatus}
           workspaceBackupHistory={workspaceBackupHistory}
           workspaceSecurity={workspaceSecurity}

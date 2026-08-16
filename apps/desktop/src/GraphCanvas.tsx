@@ -211,6 +211,7 @@ interface GraphLabels {
   removeNodeFilter: string;
   sourceHandle: string;
   smartReference: string;
+  smartReferenceMultiple: (count: number) => string;
   shortcuts: {
     items: readonly CanvasOperationItem[];
     open: string;
@@ -239,7 +240,7 @@ interface GraphCanvasProps {
   filteredNodeIds: ReadonlySet<string>;
   unmatchedNodeOpacity: number;
   labels: GraphLabels;
-  onAnalyzeNode: (nodeId: string) => void;
+  onAnalyzeNodes: (nodeIds: string[]) => void;
   onCreateNode: (position: { x: number; y: number }) => void;
   onCreateReferencedNode: (
     sourceNodeId: string,
@@ -274,6 +275,7 @@ type ContextMenuState =
       left: number;
       top: number;
       nodeId: string;
+      nodeIds: string[];
     };
 
 interface ReferenceSearchState {
@@ -819,7 +821,7 @@ export default function GraphCanvas({
   filteredNodeIds,
   unmatchedNodeOpacity,
   labels,
-  onAnalyzeNode,
+  onAnalyzeNodes,
   onCreateNode,
   onCreateReferencedNode,
   onCopySecret,
@@ -848,6 +850,7 @@ export default function GraphCanvas({
     startY: number;
   } | null>(null);
   const canvasSelectionGestureRef = useRef<CanvasSelectionGesture | null>(null);
+  const contextMenuSelectionRef = useRef<string[]>([]);
   const referencesRef = useRef(references);
   const [flowInstance, setFlowInstance] =
     useState<ReactFlowInstance<InformationFlowNode, Edge> | null>(null);
@@ -1896,10 +1899,24 @@ export default function GraphCanvas({
       }
       setSelectedReferenceId(null);
       onNodeBringToFront(node.id);
+      const currentSelectedNodeIds = flowNodesRef.current
+        .filter(
+          (candidate) =>
+            candidate.selected &&
+            !candidate.hidden &&
+            candidate.selectable !== false,
+        )
+        .map((candidate) => candidate.id);
+      const selectedNodeIds = contextMenuSelectionRef.current.includes(node.id)
+        ? contextMenuSelectionRef.current
+        : currentSelectedNodeIds;
+      contextMenuSelectionRef.current = [];
       setContextMenu({
         kind: "node",
         ...positionContextMenu(event.clientX, event.clientY),
         nodeId: node.id,
+        nodeIds:
+          selectedNodeIds.length > 1 ? selectedNodeIds : [node.id],
       });
     },
     [filteredOutNodeIdSet, onNodeBringToFront, positionContextMenu],
@@ -2034,6 +2051,15 @@ export default function GraphCanvas({
   const handleCanvasPointerDownCapture = useCallback(
     (event: ReactPointerEvent<HTMLDivElement>) => {
       const target = event.target instanceof Element ? event.target : null;
+      contextMenuSelectionRef.current =
+        event.button === 2
+          ? flowNodesRef.current
+              .filter(
+                (node) =>
+                  node.selected && !node.hidden && node.selectable !== false,
+              )
+              .map((node) => node.id)
+          : [];
       const selectionSurface =
         target !== null &&
         (target.classList.contains("react-flow__pane") ||
@@ -2631,18 +2657,21 @@ export default function GraphCanvas({
                   </button>
                 )}
               <button
-                disabled={analyzingNodeId !== null}
+                data-node-count={contextMenu.nodeIds.length}
+                data-testid="smart-reference-context-action"
                 onClick={() => {
-                  onAnalyzeNode(contextMenu.nodeId);
+                  onAnalyzeNodes(contextMenu.nodeIds);
                   setContextMenu(null);
                 }}
                 type="button"
               >
                 <Sparkles size={16} />
                 <span>
-                  {analyzingNodeId === contextMenu.nodeId
+                  {analyzingNodeId === contextMenu.nodeId && contextMenu.nodeIds.length === 1
                     ? labels.analyzingNode
-                    : labels.smartReference}
+                    : contextMenu.nodeIds.length > 1
+                      ? labels.smartReferenceMultiple(contextMenu.nodeIds.length)
+                      : labels.smartReference}
                 </span>
               </button>
               <button

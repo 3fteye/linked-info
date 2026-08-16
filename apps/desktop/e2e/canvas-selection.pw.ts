@@ -969,6 +969,33 @@ test("Shift-click keeps an explicit boundary around multiple selected nodes", as
   await expect(page.getByTestId("selected-node-boundary")).toBeVisible();
 });
 
+test("multi-selected nodes enter the smart-reference queue as one batch", async ({
+  page,
+}) => {
+  const nodes = gridNodes(3, 1);
+  await openSyntheticWorkspace(page, nodes);
+
+  await node(page, nodes[0].id).click({ position: { x: 24, y: 24 } });
+  await node(page, nodes[1].id).click({
+    modifiers: ["Shift"],
+    position: { x: 24, y: 24 },
+  });
+  await node(page, nodes[1].id).click({
+    button: "right",
+    position: { x: 24, y: 24 },
+  });
+  const batchAction = page.getByTestId("smart-reference-context-action");
+  await expect(batchAction).toBeVisible();
+  await expect(batchAction).toHaveAttribute("data-node-count", "2");
+  await batchAction.click();
+
+  const queue = page.getByTestId("smart-reference-queue");
+  await expect(queue).toBeVisible();
+  await expect(queue.locator(".smart-reference-queue-item")).toHaveCount(2);
+  await expect(queue.locator('[data-status="failed"]')).toHaveCount(2);
+  await expect(page.getByTestId("graph-canvas")).toBeVisible();
+});
+
 test("Shift marquee remains narrow while auto-panning and never selects the full graph", async ({
   page,
 }) => {

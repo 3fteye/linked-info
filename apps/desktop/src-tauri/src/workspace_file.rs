@@ -408,6 +408,32 @@ impl WorkspaceVaultState {
         Arc::clone(&self.access_generation)
     }
 
+    pub(crate) fn encrypt_derived_cache_payload(
+        &self,
+        plaintext: &[u8],
+        aad: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        let permit = self.access_permit()?;
+        let data_key = self.data_key()?;
+        let envelope = encrypt_bytes(plaintext, &data_key, aad)?;
+        self.ensure_access_permit(permit)?;
+        serde_json::to_vec(&envelope).map_err(|_| "workspace_vault_encryption_failed".to_owned())
+    }
+
+    pub(crate) fn decrypt_derived_cache_payload(
+        &self,
+        encrypted: &[u8],
+        aad: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        let permit = self.access_permit()?;
+        let data_key = self.data_key()?;
+        let envelope: CipherEnvelope = serde_json::from_slice(encrypted)
+            .map_err(|_| "workspace_vault_invalid_cipher".to_owned())?;
+        let plaintext = decrypt_bytes(&envelope, &data_key, aad)?;
+        self.ensure_access_permit(permit)?;
+        Ok(plaintext)
+    }
+
     pub fn ensure_access_permit(&self, permit: WorkspaceAccessPermit) -> Result<(), String> {
         if self.access_generation.load(Ordering::Acquire) != permit.generation
             || !self.is_unlocked()?
@@ -1040,6 +1066,10 @@ pub async fn change_workspace_password(
 pub async fn rotate_workspace_data_key(
     app: AppHandle,
     state: tauri::State<'_, WorkspaceVaultState>,
+    smart_reference_cache_state: tauri::State<
+        '_,
+        crate::smart_reference_cache::SmartReferenceCacheState,
+    >,
     system_unlock_state: tauri::State<'_, SystemUnlockState>,
     password: String,
     authorization: String,
@@ -1053,6 +1083,7 @@ pub async fn rotate_workspace_data_key(
     let provider = system_unlock_state.provider();
     let password = Zeroizing::new(password);
 
+    crate::smart_reference_cache::purge(&app, &smart_reference_cache_state).await?;
     state.revoke_access()?;
     cleanup_locked_workspace(&app);
     crate::secret_clipboard::clear_active(&app);
@@ -1330,11 +1361,16 @@ pub async fn clear_workspace_recovery_data(
 pub async fn destroy_workspace(
     app: AppHandle,
     state: tauri::State<'_, WorkspaceVaultState>,
+    smart_reference_cache_state: tauri::State<
+        '_,
+        crate::smart_reference_cache::SmartReferenceCacheState,
+    >,
     system_unlock_state: tauri::State<'_, SystemUnlockState>,
     authorization: String,
 ) -> Result<(), String> {
     let _permit = state
         .consume_sensitive_authorization(SensitiveOperation::DestroyWorkspace, &authorization)?;
+    crate::smart_reference_cache::purge(&app, &smart_reference_cache_state).await?;
     lock_workspace_runtime(&app, "workspace_destroy");
 
     let store = workspace_store(&app).map_err(|error| error.to_string())?;
@@ -1698,12 +1734,17 @@ pub async fn commit_workspace_restore(
     app: AppHandle,
     state: tauri::State<'_, WorkspaceVaultState>,
     vector_cache_state: tauri::State<'_, crate::vector_cache::VectorCacheState>,
+    smart_reference_cache_state: tauri::State<
+        '_,
+        crate::smart_reference_cache::SmartReferenceCacheState,
+    >,
     embedding_state: tauri::State<'_, crate::embedding::EmbeddingState>,
     llm_state: tauri::State<'_, crate::llm::LlmState>,
     system_unlock_state: tauri::State<'_, SystemUnlockState>,
     restore_id: uuid::Uuid,
 ) -> Result<WorkspaceSecurityStatus, String> {
     crate::vector_cache::purge_for_encryption(&app, &vector_cache_state).await?;
+    crate::smart_reference_cache::purge(&app, &smart_reference_cache_state).await?;
     let prepared = {
         let mut pending = state
             .prepared_restore
@@ -3500,6 +3541,36 @@ mod tests {
             "workspace_vault_session_expired"
         );
         assert!(!state.shutdown());
+    }
+
+    #[test]
+    fn derived_cache_payloads_are_bound_to_the_unlocked_workspace_and_cache_key() {
+        let state = WorkspaceVaultState::default();
+        state.replace_data_key([8; DATA_KEY_BYTES]).unwrap();
+        let plaintext = b"candidate ids only";
+        let encrypted = state
+            .encrypt_derived_cache_payload(plaintext, b"cache-key-a")
+            .unwrap();
+
+        assert_ne!(encrypted, plaintext);
+        assert_eq!(
+            state
+                .decrypt_derived_cache_payload(&encrypted, b"cache-key-a")
+                .unwrap(),
+            plaintext
+        );
+        assert!(
+            state
+                .decrypt_derived_cache_payload(&encrypted, b"cache-key-b")
+                .is_err()
+        );
+        assert!(state.shutdown());
+        assert_eq!(
+            state
+                .decrypt_derived_cache_payload(&encrypted, b"cache-key-a")
+                .unwrap_err(),
+            "workspace_vault_locked"
+        );
     }
 
     #[test]
