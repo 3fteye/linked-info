@@ -153,13 +153,7 @@ describe("localWorkspacePersistence", () => {
 
     await localWorkspacePersistence.preserveForRecovery(first);
     await localWorkspacePersistence.save(second);
-    const recovery = await localWorkspacePersistence.loadRecovery();
-    expect(recovery).toEqual({ status: "ready", workspace: first });
-
-    await localWorkspacePersistence.preserveForRecovery(second);
-    if (recovery.status === "ready") {
-      await localWorkspacePersistence.save(recovery.workspace);
-    }
+    expect(await localWorkspacePersistence.swapWithRecovery()).toEqual(first);
 
     expect(await localWorkspacePersistence.load()).toEqual({
       status: "ready",
@@ -168,6 +162,25 @@ describe("localWorkspacePersistence", () => {
     expect(await localWorkspacePersistence.loadRecovery()).toEqual({
       status: "ready",
       workspace: second,
+    });
+
+    expect(await localWorkspacePersistence.swapWithRecovery()).toEqual(second);
+    expect(await localWorkspacePersistence.loadRecovery()).toEqual({
+      status: "ready",
+      workspace: first,
+    });
+  });
+
+  it("does not change the primary workspace when no recovery copy exists", async () => {
+    const workspace = validWorkspace();
+    await localWorkspacePersistence.save(workspace);
+
+    await expect(localWorkspacePersistence.swapWithRecovery()).rejects.toThrow(
+      "workspace_recovery_unavailable",
+    );
+    expect(await localWorkspacePersistence.load()).toEqual({
+      status: "ready",
+      workspace,
     });
   });
 });

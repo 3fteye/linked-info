@@ -426,7 +426,11 @@ export default function WorkspaceRestorePreview({
   );
 
   return (
-    <section className="restore-preview-canvas" aria-label={labels.title}>
+    <section
+      className="restore-preview-canvas"
+      aria-label={labels.title}
+      data-testid="workspace-restore-preview"
+    >
       <ReactFlow<RestoreFlowNode, Edge>
         colorMode="light"
         deleteKeyCode={null}
@@ -518,6 +522,7 @@ export default function WorkspaceRestorePreview({
             </button>
             <button
               className="primary-button"
+              data-testid="workspace-restore-confirm"
               disabled={identical}
               onClick={onConfirm}
               type="button"

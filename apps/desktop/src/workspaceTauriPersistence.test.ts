@@ -169,4 +169,63 @@ describe("createTauriWorkspacePersistence", () => {
       "Second",
     );
   });
+
+  it("swaps the primary workspace and recovery copy through the write queue", async () => {
+    const bridge = new MemoryFileBridge();
+    const persistence = createTauriWorkspacePersistence(
+      bridge,
+      new MemoryLegacySource(),
+    );
+    const first = validWorkspace("First");
+    const second = validWorkspace("Second");
+    await persistence.preserveForRecovery(first);
+    await persistence.save(second);
+
+    expect(await persistence.swapWithRecovery()).toEqual(first);
+    expect(await persistence.load()).toEqual({ status: "ready", workspace: first });
+    expect(await persistence.loadRecovery()).toEqual({
+      status: "ready",
+      workspace: second,
+    });
+
+    expect(await persistence.swapWithRecovery()).toEqual(second);
+    expect(await persistence.loadRecovery()).toEqual({
+      status: "ready",
+      workspace: first,
+    });
+  });
+
+  it("restores the old recovery copy if replacing primary fails", async () => {
+    const files = new Map<WorkspaceStorageSlot, string>();
+    let writeCount = 0;
+    const bridge: WorkspaceFileBridge = {
+      async read(slot) {
+        return files.get(slot) ?? null;
+      },
+      async write(slot, contents) {
+        writeCount += 1;
+        if (writeCount === 4) {
+          throw new Error("primary write failed");
+        }
+        files.set(slot, contents);
+      },
+    };
+    const persistence = createTauriWorkspacePersistence(
+      bridge,
+      new MemoryLegacySource(),
+    );
+    const first = validWorkspace("First");
+    const second = validWorkspace("Second");
+    await persistence.preserveForRecovery(first);
+    await persistence.save(second);
+
+    await expect(persistence.swapWithRecovery()).rejects.toThrow(
+      "primary write failed",
+    );
+    expect(await persistence.load()).toEqual({ status: "ready", workspace: second });
+    expect(await persistence.loadRecovery()).toEqual({
+      status: "ready",
+      workspace: first,
+    });
+  });
 });

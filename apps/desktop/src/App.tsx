@@ -191,6 +191,16 @@ interface PendingEncryptedWorkspaceImport extends ImportedWorkspaceFile {
   bootstrapRestore: boolean;
 }
 
+type WorkspaceReplacementHistoryBoundary = "undo" | "redo" | null;
+
+interface AppNotice {
+  message: string;
+  action?: {
+    label: string;
+    run: () => void;
+  };
+}
+
 type PendingOffsiteSensitiveAction =
   | { kind: "deleteSnapshot"; targetId: string; snapshotId: string; createdAtMs: number }
   | { kind: "removeTarget"; targetId: string; targetName: string }
@@ -363,11 +373,15 @@ function App({
   const [confirmClearUnreadable, setConfirmClearUnreadable] = useState(false);
   const [storageProblemStatus, setStorageProblemStatus] = useState<string | null>(null);
   const [editingNodeId, setEditingNodeId] = useState<string | null>(null);
+  const editingNodeIdRef = useRef<string | null>(null);
   const editBaselineRef = useRef<{
     nodeId: string;
     state: WorkspaceHistoryState;
   } | null>(null);
   const historyTimelineRef = useRef(emptyWorkspaceHistoryTimeline());
+  const workspaceReplacementHistoryBoundaryRef =
+    useRef<WorkspaceReplacementHistoryBoundary>(null);
+  const workspaceReplacementHistoryBusyRef = useRef(false);
   const [historyAvailability, setHistoryAvailability] = useState({
     canUndo: false,
     canRedo: false,
@@ -461,7 +475,7 @@ function App({
   const automaticOffsiteRunningRef = useRef(false);
   const automaticOffsiteRevisionRef = useRef(0);
   const automaticOffsiteMarkedRevisionRef = useRef(0);
-  const [appNotice, setAppNotice] = useState<string | null>(null);
+  const [appNotice, setAppNotice] = useState<AppNotice | null>(null);
   const appNoticeTimerRef = useRef<number | null>(null);
   const [offsiteTargetName, setOffsiteTargetName] = useState("Cloudflare R2");
   const [offsiteEndpoint, setOffsiteEndpoint] = useState("");
@@ -553,6 +567,10 @@ function App({
     [offsiteTargets, selectedOffsiteTargetId],
   );
   useEffect(() => {
+    editingNodeIdRef.current = editingNodeId;
+  }, [editingNodeId]);
+
+  useEffect(() => {
     return () => {
       if (appNoticeTimerRef.current !== null) {
         window.clearTimeout(appNoticeTimerRef.current);
@@ -581,15 +599,23 @@ function App({
     return () => window.removeEventListener("keydown", focusNodeSearch, true);
   }, []);
 
-  function showAppNotice(message: string) {
+  function dismissAppNotice() {
+    if (appNoticeTimerRef.current !== null) {
+      window.clearTimeout(appNoticeTimerRef.current);
+      appNoticeTimerRef.current = null;
+    }
+    setAppNotice(null);
+  }
+
+  function showAppNotice(message: string, action?: AppNotice["action"]) {
     if (appNoticeTimerRef.current !== null) {
       window.clearTimeout(appNoticeTimerRef.current);
     }
-    setAppNotice(message);
+    setAppNotice({ message, action });
     appNoticeTimerRef.current = window.setTimeout(() => {
       setAppNotice(null);
       appNoticeTimerRef.current = null;
-    }, 6_000);
+    }, action === undefined ? 6_000 : 10_000);
   }
 
   function openDocumentImport() {
@@ -1695,6 +1721,8 @@ function App({
       setAutomaticBackupHistory(await workspaceBackupHistory.inspect());
       setRecoveryAvailable(false);
       setRecoveryStorageProblem(null);
+      setWorkspaceReplacementHistoryBoundary(null);
+      dismissAppNotice();
       setRecoveryClearDialog(false);
       setRecoveryClearPassword("");
       showAppNotice(t("security.clearRecoverySuccess"));
@@ -2091,18 +2119,36 @@ function App({
 
   function syncHistoryAvailability() {
     setHistoryAvailability({
-      canUndo: historyTimelineRef.current.undo.length > 0,
-      canRedo: historyTimelineRef.current.redo.length > 0,
+      canUndo:
+        historyTimelineRef.current.undo.length > 0 ||
+        workspaceReplacementHistoryBoundaryRef.current === "undo",
+      canRedo:
+        historyTimelineRef.current.redo.length > 0 ||
+        workspaceReplacementHistoryBoundaryRef.current === "redo",
     });
   }
 
   function clearHistory() {
     historyTimelineRef.current = emptyWorkspaceHistoryTimeline();
+    workspaceReplacementHistoryBoundaryRef.current = null;
     editBaselineRef.current = null;
     syncHistoryAvailability();
   }
 
+  function setWorkspaceReplacementHistoryBoundary(
+    boundary: WorkspaceReplacementHistoryBoundary,
+  ) {
+    workspaceReplacementHistoryBoundaryRef.current = boundary;
+    syncHistoryAvailability();
+  }
+
   function recordHistory(before: WorkspaceHistoryState, after: WorkspaceHistoryState) {
+    if (workspaceReplacementHistoryBoundaryRef.current !== null) {
+      dismissAppNotice();
+    }
+    if (workspaceReplacementHistoryBoundaryRef.current === "redo") {
+      workspaceReplacementHistoryBoundaryRef.current = null;
+    }
     historyTimelineRef.current = appendWorkspaceHistory(
       historyTimelineRef.current,
       before,
@@ -2135,6 +2181,9 @@ function App({
     }
     const step = stepWorkspaceHistoryBackward(historyTimelineRef.current);
     if (step === null) {
+      if (workspaceReplacementHistoryBoundaryRef.current === "undo") {
+        void swapWorkspaceWithRecovery("undo");
+      }
       return;
     }
     historyTimelineRef.current = step.timeline;
@@ -2148,6 +2197,9 @@ function App({
     }
     const step = stepWorkspaceHistoryForward(historyTimelineRef.current);
     if (step === null) {
+      if (workspaceReplacementHistoryBoundaryRef.current === "redo") {
+        void swapWorkspaceWithRecovery("redo");
+      }
       return;
     }
     historyTimelineRef.current = step.timeline;
@@ -2519,11 +2571,13 @@ function App({
     }
     if (recovery.status === "missing") {
       setRecoveryAvailable(false);
+      setWorkspaceReplacementHistoryBoundary(null);
       setBackupStatus(t("backup.recoveryUnavailable"));
       return;
     }
     if (recovery.status === "invalid") {
       setRecoveryAvailable(false);
+      setWorkspaceReplacementHistoryBoundary(null);
       setRecoveryStorageProblem(recovery.raw);
       setBackupStatus(t("backup.recoveryInvalid"));
       return;
@@ -3189,6 +3243,7 @@ function App({
       workspaceRef.current = pendingWorkspaceReplacement.workspace;
       setWorkspace(pendingWorkspaceReplacement.workspace);
       clearHistory();
+      setWorkspaceReplacementHistoryBoundary("undo");
       setEditingNodeId(null);
       setSearchTerm("");
       setUnnamedOnly(false);
@@ -3197,18 +3252,72 @@ function App({
       setRecoveryAvailable(true);
       setRecoveryStorageProblem(null);
       setActiveView("canvas");
-      showAppNotice(
+      const successMessage =
         pendingWorkspaceReplacement.kind === "recovery"
           ? t("backup.recoverySuccess")
           : pendingWorkspaceReplacement.kind === "history"
             ? t("backup.historyRestoreSuccess")
             : pendingWorkspaceReplacement.kind === "bootstrapRestore"
               ? t("offsiteBackup.bootstrapSuccess")
-              : t("backup.importSuccess"),
-      );
+              : t("backup.importSuccess");
+      showAppNotice(successMessage, {
+        label: t("backup.undoReplacement"),
+        run: () => void swapWorkspaceWithRecovery("undo"),
+      });
       setPendingWorkspaceReplacement(null);
     } catch {
       setBackupStatus(t("backup.importFailed"));
+    }
+  }
+
+  async function swapWorkspaceWithRecovery(direction: "undo" | "redo") {
+    if (
+      editingNodeIdRef.current !== null ||
+      workspaceReplacementHistoryBusyRef.current ||
+      workspaceReplacementHistoryBoundaryRef.current !== direction
+    ) {
+      return;
+    }
+    workspaceReplacementHistoryBusyRef.current = true;
+    workspaceReplacementHistoryBoundaryRef.current = null;
+    syncHistoryAvailability();
+    try {
+      const next = await persistence.swapWithRecovery();
+      workspaceChangedInSessionRef.current = true;
+      automaticOffsiteRevisionRef.current += 1;
+      workspaceReplacementGenerationRef.current += 1;
+      workspaceRef.current = next;
+      setWorkspace(next);
+      historyTimelineRef.current = emptyWorkspaceHistoryTimeline();
+      editBaselineRef.current = null;
+      setEditingNodeId(null);
+      setSearchTerm("");
+      setUnnamedOnly(false);
+      setReferenceFilterNodeIds([]);
+      setSmartReferenceResult(null);
+      setRecoveryAvailable(true);
+      setRecoveryStorageProblem(null);
+      setActiveView("canvas");
+      setWorkspaceReplacementHistoryBoundary(direction === "undo" ? "redo" : "undo");
+      showAppNotice(
+        direction === "undo"
+          ? t("backup.replacementUndoSuccess")
+          : t("backup.replacementRedoSuccess"),
+        {
+          label:
+            direction === "undo"
+              ? t("backup.redoReplacement")
+              : t("backup.undoReplacement"),
+          run: () =>
+            void swapWorkspaceWithRecovery(direction === "undo" ? "redo" : "undo"),
+        },
+      );
+    } catch {
+      workspaceReplacementHistoryBoundaryRef.current = direction;
+      setBackupStatus(t("backup.replacementUndoFailed"));
+    } finally {
+      workspaceReplacementHistoryBusyRef.current = false;
+      syncHistoryAvailability();
     }
   }
 
@@ -4354,6 +4463,7 @@ function App({
                   {recoveryAvailable && (
                     <button
                       className="secondary-button"
+                      data-testid="restore-recovery-workspace"
                       onClick={() => void chooseRecoveryWorkspace()}
                       type="button"
                     >
@@ -6203,16 +6313,25 @@ function App({
 
       {appNotice !== null && (
         <div className="app-status-toast" role="status">
-          <span>{appNotice}</span>
+          <span>{appNotice.message}</span>
+          {appNotice.action !== undefined && (
+            <button
+              className="app-status-action"
+              data-testid="app-notice-action"
+              onClick={() => {
+                const action = appNotice.action;
+                dismissAppNotice();
+                action?.run();
+              }}
+              type="button"
+            >
+              {appNotice.action.label}
+            </button>
+          )}
           <button
             aria-label={t("actions.close")}
-            onClick={() => {
-              if (appNoticeTimerRef.current !== null) {
-                window.clearTimeout(appNoticeTimerRef.current);
-                appNoticeTimerRef.current = null;
-              }
-              setAppNotice(null);
-            }}
+            className="app-status-close"
+            onClick={dismissAppNotice}
             type="button"
           >
             <X aria-hidden="true" size={15} />

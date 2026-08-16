@@ -72,6 +72,31 @@ export function createTauriWorkspacePersistence(
     legacy.remove(slot);
   }
 
+  async function swapWithRecovery() {
+    await writeTail.catch(() => undefined);
+    const primary = await loadSlot("primary");
+    const recovery = await loadSlot("recovery");
+    if (primary.status !== "ready" || recovery.status === "missing") {
+      throw new Error("workspace_recovery_unavailable");
+    }
+    if (recovery.status !== "ready") {
+      throw new Error("workspace_recovery_invalid");
+    }
+
+    await saveSlot("recovery", primary.workspace);
+    try {
+      await saveSlot("primary", recovery.workspace);
+    } catch (error) {
+      try {
+        await saveSlot("recovery", recovery.workspace);
+      } catch {
+        throw new Error("workspace_recovery_swap_rollback_failed");
+      }
+      throw error;
+    }
+    return recovery.workspace;
+  }
+
   return {
     load() {
       return loadSlot("primary");
@@ -85,6 +110,7 @@ export function createTauriWorkspacePersistence(
     save(workspace) {
       return saveSlot("primary", workspace);
     },
+    swapWithRecovery,
   };
 }
 

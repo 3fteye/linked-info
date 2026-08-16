@@ -20,6 +20,7 @@ interface SyntheticViewport {
 }
 
 const workspaceStorageKey = "linked-info.workspace.v1";
+const workspaceRecoveryStorageKey = "linked-info.workspace.recovery.v1";
 
 function syntheticId(index: number): string {
   return `00000000-0000-4000-8000-${index.toString().padStart(12, "0")}`;
@@ -77,6 +78,43 @@ async function openSyntheticWorkspace(
   );
   await page.goto("/");
   await expect(page.getByTestId("graph-canvas")).toBeVisible();
+  await expect(page.getByTestId("graph-canvas")).toHaveAttribute(
+    "data-flow-ready",
+    "true",
+  );
+}
+
+async function openSyntheticWorkspaceWithRecovery(
+  page: Page,
+  current: SyntheticNode[],
+  recovery: SyntheticNode[],
+) {
+  await page.addInitScript(
+    ({ primaryKey, recoveryKey, currentNodes, recoveryNodes }) => {
+      const snapshot = (nodes: SyntheticNode[]) => ({
+        version: 2,
+        nodes: nodes.map((node) => ({
+          id: node.id,
+          name: node.name,
+          content: node.content ?? `Generated test content for ${node.name}`,
+        })),
+        layout: nodes.map((node) => ({ nodeId: node.id, x: node.x, y: node.y })),
+        references: [],
+        viewport: { x: 0, y: 0, zoom: 1 },
+        view: { contentProcessorByNodeId: {} },
+      });
+      localStorage.clear();
+      localStorage.setItem(primaryKey, JSON.stringify(snapshot(currentNodes)));
+      localStorage.setItem(recoveryKey, JSON.stringify(snapshot(recoveryNodes)));
+    },
+    {
+      primaryKey: workspaceStorageKey,
+      recoveryKey: workspaceRecoveryStorageKey,
+      currentNodes: current,
+      recoveryNodes: recovery,
+    },
+  );
+  await page.goto("/");
   await expect(page.getByTestId("graph-canvas")).toHaveAttribute(
     "data-flow-ready",
     "true",
@@ -720,6 +758,40 @@ test("settings tabs support standard keyboard navigation", async ({ page }) => {
     "id",
     "settings-panel-general",
   );
+});
+
+test("confirmed workspace replacement can be undone and redone from disk", async ({
+  page,
+}) => {
+  const current = {
+    id: syntheticId(901),
+    name: "Current workspace",
+    x: 120,
+    y: 100,
+  };
+  const recovery = {
+    id: syntheticId(902),
+    name: "Recovery workspace",
+    x: 520,
+    y: 320,
+  };
+  await openSyntheticWorkspaceWithRecovery(page, [current], [recovery]);
+
+  await page.getByTestId("settings-navigation").click();
+  await page.getByTestId("settings-tab-dataSecurity").click();
+  await page.getByTestId("restore-recovery-workspace").click();
+  await expect(page.getByTestId("workspace-restore-preview")).toBeVisible();
+  await page.getByTestId("workspace-restore-confirm").click();
+
+  await expect(node(page, recovery.id)).toBeVisible();
+  await expect(node(page, current.id)).toHaveCount(0);
+  await expect(page.getByTestId("app-notice-action")).toBeVisible();
+  await page.keyboard.press("Control+z");
+  await expect(node(page, current.id)).toBeVisible();
+  await expect(node(page, recovery.id)).toHaveCount(0);
+  await page.keyboard.press("Control+y");
+  await expect(node(page, recovery.id)).toBeVisible();
+  await expect(node(page, current.id)).toHaveCount(0);
 });
 
 test("offsite backup exposes Cloudflare R2 through the shared S3 form", async ({ page }) => {

@@ -217,6 +217,23 @@ button:disabled {
   background: transparent;
 }
 
+.app-status-toast > .app-status-action {
+  width: auto;
+  min-height: 28px;
+  padding: 4px 9px;
+  border: 1px solid #9fc2aa;
+  font-weight: 650;
+  white-space: nowrap;
+  background: #e8f4ec;
+}
+
+.app-status-toast > .app-status-close {
+  width: 26px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
 .app-status-toast > button:hover {
   background: rgb(39 94 67 / 9%);
 }

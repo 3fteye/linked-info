@@ -31,6 +31,7 @@ export interface WorkspacePersistence {
   loadRecovery(): Promise<WorkspaceLoadResult>;
   preserveForRecovery(workspace: WorkspaceSnapshot): Promise<void>;
   save(workspace: WorkspaceSnapshot): Promise<void>;
+  swapWithRecovery(): Promise<WorkspaceSnapshot>;
 }
 
 export type WorkspaceStorageSlot = "primary" | "recovery";
@@ -107,5 +108,30 @@ export const localWorkspacePersistence: WorkspacePersistence = {
   },
   async save(workspace) {
     saveLegacyBrowserWorkspace("primary", workspace);
+  },
+  async swapWithRecovery() {
+    const primaryRaw = localStorage.getItem(storageKey("primary"));
+    const recoveryRaw = localStorage.getItem(storageKey("recovery"));
+    if (primaryRaw === null || recoveryRaw === null) {
+      throw new Error("workspace_recovery_unavailable");
+    }
+    const primary = parseStoredWorkspaceText(primaryRaw);
+    const recovery = parseStoredWorkspaceText(recoveryRaw);
+    if (primary.status !== "ready" || recovery.status !== "ready") {
+      throw new Error("workspace_recovery_invalid");
+    }
+
+    localStorage.setItem(storageKey("recovery"), primaryRaw);
+    try {
+      localStorage.setItem(storageKey("primary"), recoveryRaw);
+    } catch (error) {
+      try {
+        localStorage.setItem(storageKey("recovery"), recoveryRaw);
+      } catch {
+        throw new Error("workspace_recovery_swap_rollback_failed");
+      }
+      throw error;
+    }
+    return recovery.workspace;
   },
 };
