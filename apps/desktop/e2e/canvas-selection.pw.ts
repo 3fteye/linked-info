@@ -700,6 +700,44 @@ test("search scope and unmatched opacity preserve canvas context", async ({ page
   await expect(page.locator(".item-count")).toContainText("0 / 3");
 });
 
+test("reference search can target nodes outside the current canvas filter", async ({
+  page,
+}) => {
+  const nodes = gridNodes(3, 1);
+  await openSyntheticWorkspace(page, nodes);
+  await page.getByTestId("node-search").fill(nodes[0].name);
+  await page.getByTestId("unmatched-node-opacity").fill("0");
+
+  const sourceHandle = node(page, nodes[0].id).locator(".graph-handle-source");
+  const sourceBounds = await sourceHandle.boundingBox();
+  const canvasBounds = await page.getByTestId("graph-canvas").boundingBox();
+  expect(sourceBounds).not.toBeNull();
+  expect(canvasBounds).not.toBeNull();
+
+  await page.mouse.move(
+    sourceBounds!.x + sourceBounds!.width / 2,
+    sourceBounds!.y + sourceBounds!.height / 2,
+  );
+  await page.mouse.down();
+  await page.mouse.move(
+    canvasBounds!.x + canvasBounds!.width / 2,
+    canvasBounds!.y + canvasBounds!.height - 80,
+    { steps: 8 },
+  );
+  await page.mouse.up();
+
+  const referenceSearch = page.locator(".reference-search-popover");
+  await expect(referenceSearch).toBeVisible();
+  await expect(referenceSearch.locator(".reference-search-option")).toHaveCount(2);
+  await referenceSearch
+    .locator(".reference-search-option")
+    .filter({ hasText: nodes[1].name })
+    .click();
+  await expect
+    .poll(async () => (await storedWorkspace(page))?.references)
+    .toContainEqual({ sourceNodeId: nodes[0].id, targetNodeId: nodes[1].id });
+});
+
 test("double-clicking an inline reference filter leaves every node visible", async ({
   page,
 }) => {

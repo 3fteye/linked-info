@@ -1254,7 +1254,7 @@ export default function GraphCanvas({
       return [];
     }
     return availableReferenceTargets(
-      nodes.filter((node) => !filteredOutNodeIdSet.has(node.id)),
+      nodes,
       references,
       referenceSearch.sourceNodeId,
       referenceSearch.selectedTargetNodeIds,
@@ -1265,7 +1265,6 @@ export default function GraphCanvas({
       ),
     );
   }, [
-    filteredOutNodeIdSet,
     labels.noContent,
     labels.unnamed,
     nodes,
@@ -1724,10 +1723,7 @@ export default function GraphCanvas({
 
   const appendReference = useCallback(
     (sourceNodeId: string, targetNodeId: string) => {
-      if (
-        filteredOutNodeIdSet.has(sourceNodeId) ||
-        filteredOutNodeIdSet.has(targetNodeId)
-      ) {
+      if (filteredOutNodeIdSet.has(sourceNodeId)) {
         return;
       }
       const currentReferences = referencesRef.current;
@@ -1750,10 +1746,7 @@ export default function GraphCanvas({
       if (referenceSearch === null) {
         return;
       }
-      if (
-        filteredOutNodeIdSet.has(referenceSearch.sourceNodeId) ||
-        filteredOutNodeIdSet.has(targetNodeId)
-      ) {
+      if (filteredOutNodeIdSet.has(referenceSearch.sourceNodeId)) {
         return;
       }
       appendReference(referenceSearch.sourceNodeId, targetNodeId);
