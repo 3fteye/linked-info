@@ -79,7 +79,7 @@ export const resources = {
       },
       canvasShortcuts: {
         items: {
-          cancel: { action: "取消操作或清除选择", keys: "Esc" },
+          cancel: { action: "取消操作、清除选择或筛选", keys: "Esc" },
           contextMenu: { action: "上下文菜单", keys: "右键" },
           edit: { action: "编辑唯一选中的节点", keys: "Enter / F2 / 双击" },
           frame: { action: "适应全部 / 聚焦所选", keys: "Home / F" },
@@ -109,7 +109,7 @@ export const resources = {
         activeReferences: "当前引用筛选",
         addReference: "添加引用筛选",
         clearReferences: "清除全部",
-        filterByNode: "以此节点筛选",
+        filterByNode: "只以此节点筛选",
         referencePicker: "选择引用筛选条件",
         removeNodeFilter: "移除此筛选条件",
         removeReference: "移除筛选条件：{{name}}",
@@ -791,7 +791,7 @@ export const resources = {
       },
       canvasShortcuts: {
         items: {
-          cancel: { action: "Cancel an action or clear selection", keys: "Esc" },
+          cancel: { action: "Cancel an action, selection, or filters", keys: "Esc" },
           contextMenu: { action: "Context menu", keys: "Right click" },
           edit: { action: "Edit the sole selected node", keys: "Enter / F2 / double click" },
           frame: { action: "Frame all / focus selection", keys: "Home / F" },
@@ -821,7 +821,7 @@ export const resources = {
         activeReferences: "Active reference filters",
         addReference: "Add reference filter",
         clearReferences: "Clear all",
-        filterByNode: "Filter by this node",
+        filterByNode: "Filter only by this node",
         referencePicker: "Choose a reference filter",
         removeNodeFilter: "Remove this filter",
         removeReference: "Remove filter: {{name}}",

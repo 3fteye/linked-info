@@ -237,6 +237,7 @@ interface GraphCanvasProps {
   canRedo: boolean;
   canUndo: boolean;
   historyBlocked: boolean;
+  nodeFiltersActive: boolean;
   nameConflictNodeIds: Set<string>;
   referenceFilterNodeIds: string[];
   filteredNodeIds: ReadonlySet<string>;
@@ -250,6 +251,7 @@ interface GraphCanvasProps {
     position: { x: number; y: number },
   ) => string | null;
   onCopySecret: ((text: string) => Promise<void>) | null;
+  onClearNodeFilters: () => void;
   onDeleteNodes: (nodeIds: string[]) => void;
   onEditNode: (nodeId: string) => void;
   onLayoutChange: (layout: NodeLayout[]) => void;
@@ -819,6 +821,7 @@ export default function GraphCanvas({
   canRedo,
   canUndo,
   historyBlocked,
+  nodeFiltersActive,
   nameConflictNodeIds,
   referenceFilterNodeIds,
   filteredNodeIds,
@@ -828,6 +831,7 @@ export default function GraphCanvas({
   onCreateNode,
   onCreateReferencedNode,
   onCopySecret,
+  onClearNodeFilters,
   onDeleteNodes,
   onEditNode,
   onLayoutChange,
@@ -1456,11 +1460,20 @@ export default function GraphCanvas({
 
   useEffect(() => {
     const handleCanvasShortcut = (event: KeyboardEvent) => {
-      if (isCanvasShortcutBlockedTarget(event.target)) {
+      const key = event.key.toLowerCase();
+      const canvasFilterButtonFocused =
+        key === "escape" &&
+        event.target instanceof Element &&
+        event.target.closest(
+          ".graph-node-filter-button, .graph-node-reference-chip",
+        ) !== null;
+      if (
+        isCanvasShortcutBlockedTarget(event.target) &&
+        !canvasFilterButtonFocused
+      ) {
         return;
       }
 
-      const key = event.key.toLowerCase();
       const modifierPressed = event.ctrlKey || event.metaKey;
       if (!modifierPressed && key === "?") {
         event.preventDefault();
@@ -1485,12 +1498,18 @@ export default function GraphCanvas({
           setPendingDeletionNodeIds([]);
           return;
         }
+        const hadSelection =
+          selectedReferenceId !== null ||
+          flowNodesRef.current.some((node) => node.selected);
         setSelectedReferenceId(null);
         setFlowNodes((current) =>
           current.map((node) =>
             node.selected ? { ...node, selected: false } : node,
           ),
         );
+        if (!hadSelection && nodeFiltersActive) {
+          onClearNodeFilters();
+        }
         return;
       }
 
@@ -1621,6 +1640,8 @@ export default function GraphCanvas({
     flowInstance,
     historyBlocked,
     interactiveReferenceIdSet,
+    nodeFiltersActive,
+    onClearNodeFilters,
     onEditNode,
     onRedo,
     onReferencesChange,

@@ -2834,6 +2834,22 @@ function App({
     );
   }
 
+  function activateCanvasReferenceFilter(nodeId: string) {
+    if (!workspaceRef.current.nodes.some((node) => node.id === nodeId)) {
+      return;
+    }
+
+    setReferenceFilterNodeIds((current) =>
+      current.length === 1 && current[0] === nodeId ? [] : [nodeId],
+    );
+  }
+
+  function clearNodeFilters() {
+    setSearchTerm("");
+    setUnnamedOnly(false);
+    setReferenceFilterNodeIds([]);
+  }
+
   async function exportWorkspace(authorization?: string) {
     setBackupStatus(null);
     if (workspaceSecurityStatus.encrypted && authorization === undefined) {
@@ -5697,6 +5713,8 @@ function App({
                     }
                   : null
               }
+              nodeFiltersActive={hasActiveNodeFilter}
+              onClearNodeFilters={clearNodeFilters}
               onDeleteNodes={deleteNodes}
               onEditNode={editNode}
               onLayoutChange={updateLayout}
@@ -5707,7 +5725,7 @@ function App({
               onNodeNameChange={updateNodeName}
               onReferencesChange={updateReferences}
               onRedo={redoWorkspace}
-              onToggleReferenceFilter={toggleReferenceFilter}
+              onToggleReferenceFilter={activateCanvasReferenceFilter}
               onUndo={undoWorkspace}
               onViewportChange={updateViewport}
               referenceFilterNodeIds={referenceFilterNodeIds}

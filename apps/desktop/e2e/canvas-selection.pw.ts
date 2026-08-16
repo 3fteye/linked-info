@@ -700,6 +700,64 @@ test("search scope and unmatched opacity preserve canvas context", async ({ page
   await expect(page.locator(".item-count")).toContainText("0 / 3");
 });
 
+test("double-clicking an inline reference filter leaves every node visible", async ({
+  page,
+}) => {
+  const nodes = gridNodes(3, 1);
+  await openSyntheticWorkspace(page, nodes, [
+    { sourceNodeId: nodes[0].id, targetNodeId: nodes[1].id },
+  ]);
+  await page.getByTestId("unmatched-node-opacity").fill("0");
+
+  const referenceChip = node(page, nodes[0].id).locator(
+    ".graph-node-reference-chip",
+  );
+  await expect(referenceChip).toHaveCount(1);
+  await referenceChip.dblclick();
+
+  await expect(page.locator(".active-reference-filter")).toHaveCount(0);
+  for (const syntheticNode of nodes) {
+    await expect(
+      page.locator(`.react-flow__node[data-id="${syntheticNode.id}"]`),
+    ).toBeVisible();
+  }
+});
+
+test("following inline references replaces the browsing filter instead of accumulating AND filters", async ({
+  page,
+}) => {
+  const nodes = gridNodes(3, 1);
+  await openSyntheticWorkspace(page, nodes, [
+    { sourceNodeId: nodes[0].id, targetNodeId: nodes[1].id },
+    { sourceNodeId: nodes[1].id, targetNodeId: nodes[2].id },
+  ]);
+  await page.getByTestId("unmatched-node-opacity").fill("0");
+
+  await node(page, nodes[0].id).locator(".graph-node-reference-chip").click();
+  await node(page, nodes[1].id).locator(".graph-node-reference-chip").click();
+
+  await expect(page.locator(".active-reference-filter")).toHaveCount(1);
+  await expect(page.locator(".item-count")).toContainText("1 / 3");
+  await expect(
+    page.locator(`.react-flow__node[data-id="${nodes[0].id}"]`),
+  ).toBeHidden();
+  await expect(
+    page.locator(`.react-flow__node[data-id="${nodes[1].id}"]`),
+  ).toBeVisible();
+  await expect(
+    page.locator(`.react-flow__node[data-id="${nodes[2].id}"]`),
+  ).toBeVisible();
+
+  await page.keyboard.press("Escape");
+  await expect(page.locator(".active-reference-filter")).toHaveCount(0);
+  await expect(page.locator(".item-count")).toContainText("3");
+  for (const syntheticNode of nodes) {
+    await expect(
+      page.locator(`.react-flow__node[data-id="${syntheticNode.id}"]`),
+    ).toBeVisible();
+  }
+});
+
 test("canvas select all, delete, undo, redo and context menu share one keyboard model", async ({
   page,
 }) => {
