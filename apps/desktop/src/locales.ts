@@ -478,7 +478,9 @@ export const resources = {
           },
         },
         errors: {
-          analysisOutdated: "分析期间工作区已替换或相关节点已删除，旧结果已丢弃。请重新分析。",
+          sourceChanged: "分析期间该节点的文字发生变化或节点已被删除，旧结果已丢弃。请重新分析。",
+          automaticWorkspaceChanged: "分析期间节点或引用发生变化。为避免按旧结果自动建立引用，本次结果已丢弃。请重新分析。",
+          candidateMissing: "该候选节点已被删除，无法建立引用。",
           sourceEmpty: "这个节点的名称和内容都为空，无法计算语义相似度。",
           remoteConfigurationMissing: "请先在设置中填写远端嵌入接口地址和模型名。",
           invalidEmbeddingResponse: "模型返回的向量数量、维度或数值无效，没有建立引用。",
@@ -1188,7 +1190,9 @@ export const resources = {
           },
         },
         errors: {
-          analysisOutdated: "The workspace was replaced or a related node was deleted during analysis. The stale result was discarded; run the analysis again.",
+          sourceChanged: "This node was deleted or its model-visible text changed during analysis. The stale result was discarded; run the analysis again.",
+          automaticWorkspaceChanged: "Nodes or references changed during analysis. To avoid creating automatic references from stale results, this result was discarded; run the analysis again.",
+          candidateMissing: "This candidate node was deleted and can no longer be referenced.",
           sourceEmpty: "This node has no name or content, so semantic similarity cannot be calculated.",
           remoteConfigurationMissing: "Enter a remote embedding endpoint and model name in Settings first.",
           invalidEmbeddingResponse: "The model returned invalid vector counts, dimensions, or values. No references were added.",

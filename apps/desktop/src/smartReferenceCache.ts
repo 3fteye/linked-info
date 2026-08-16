@@ -5,7 +5,7 @@ import type { EmbeddingCandidate, EmbeddingRelatedNode } from "./embeddingServic
 import type { LlmSettings } from "./llmSettings";
 import type { WorkspaceSnapshot } from "./workspaceData";
 
-const resultAlgorithmVersion = "smart-reference-result-v1";
+const resultAlgorithmVersion = "smart-reference-result-v2";
 const maximumCandidates = 256;
 const maximumRelatedNodes = 256;
 const maximumSupportingNodes = 32;
@@ -18,6 +18,7 @@ export interface CachedSmartReferenceResult {
   llmSelectedNodeIds: string[];
   llmUncertainNodeIds: string[];
   relatedNodes: EmbeddingRelatedNode[];
+  sourceFingerprint: string;
   sourceNodeId: string;
   truncatedNodeCount: number;
 }
@@ -38,6 +39,10 @@ export interface SmartReferenceResultCache {
 
 function validNodeId(value: unknown): value is string {
   return typeof value === "string" && /^[0-9a-f-]{36}$/i.test(value);
+}
+
+function validFingerprint(value: unknown): value is string {
+  return typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
 }
 
 function validNodeIdList(value: unknown): value is string[] {
@@ -90,6 +95,7 @@ export function parseCachedSmartReferenceResult(
   const result = value as Partial<CachedSmartReferenceResult>;
   if (
     !validNodeId(result.sourceNodeId) ||
+    !validFingerprint(result.sourceFingerprint) ||
     typeof result.generatedAtMs !== "number" ||
     !Number.isSafeInteger(result.generatedAtMs) ||
     result.generatedAtMs < 0 ||
@@ -140,6 +146,57 @@ export function smartReferenceResultSettingsFingerprint(
           embeddingSettings.thresholdFingerprint,
         ],
   ]);
+}
+
+export async function smartReferenceSourceFingerprint(
+  sourceNodeId: string,
+  workspace: WorkspaceSnapshot,
+): Promise<string | null> {
+  const source = workspace.nodes.find((node) => node.id === sourceNodeId);
+  return source === undefined
+    ? null
+    : sha256(
+        JSON.stringify([
+          resultAlgorithmVersion,
+          sourceNodeId,
+          nodeEmbeddingText(source),
+        ]),
+      );
+}
+
+export function filterSmartReferenceResultForWorkspace(
+  result: CachedSmartReferenceResult,
+  workspace: WorkspaceSnapshot,
+): CachedSmartReferenceResult {
+  const nodeIds = new Set(workspace.nodes.map((node) => node.id));
+  const candidates = result.candidates
+    .filter((candidate) => nodeIds.has(candidate.nodeId))
+    .map((candidate) => ({
+      ...candidate,
+      supportingNodeIds: candidate.supportingNodeIds.filter((nodeId) =>
+        nodeIds.has(nodeId),
+      ),
+    }));
+  const llmSelectedNodeIds = result.llmSelectedNodeIds.filter((nodeId) =>
+    nodeIds.has(nodeId),
+  );
+  const llmUncertainNodeIds = result.llmUncertainNodeIds.filter((nodeId) =>
+    nodeIds.has(nodeId),
+  );
+  return {
+    ...result,
+    candidates,
+    llmNoMatch:
+      result.llmNoMatch ||
+      (result.llmEnabled &&
+        llmSelectedNodeIds.length === 0 &&
+        llmUncertainNodeIds.length === 0),
+    llmSelectedNodeIds,
+    llmUncertainNodeIds,
+    relatedNodes: result.relatedNodes.filter((related) =>
+      nodeIds.has(related.nodeId),
+    ),
+  };
 }
 
 export async function smartReferenceResultCacheKey(

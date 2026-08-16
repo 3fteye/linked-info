@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 import { defaultEmbeddingSettings } from "./embeddingSettings";
 import { defaultLlmSettings } from "./llmSettings";
 import {
+  filterSmartReferenceResultForWorkspace,
   parseCachedSmartReferenceResult,
   smartReferenceResultCacheKey,
+  smartReferenceSourceFingerprint,
   type CachedSmartReferenceResult,
 } from "./smartReferenceCache";
 import type { WorkspaceSnapshot } from "./workspaceData";
@@ -38,6 +40,7 @@ function result(): CachedSmartReferenceResult {
     llmSelectedNodeIds: [candidateId],
     llmUncertainNodeIds: [],
     relatedNodes: [{ nodeId: candidateId, similarity: 0.75 }],
+    sourceFingerprint: "a".repeat(64),
     sourceNodeId: sourceId,
     truncatedNodeCount: 0,
   };
@@ -106,6 +109,81 @@ describe("smart-reference result cache", () => {
     );
   });
 
+  it("tracks source text independently from unrelated node and reference changes", async () => {
+    const original = workspace();
+    const originalCacheKey = await smartReferenceResultCacheKey(
+      sourceId,
+      original,
+      defaultEmbeddingSettings,
+      defaultLlmSettings,
+    );
+    const originalFingerprint = await smartReferenceSourceFingerprint(
+      sourceId,
+      original,
+    );
+    const unrelatedChange = workspace();
+    unrelatedChange.nodes[1] = {
+      ...unrelatedChange.nodes[1],
+      content: "已经修改的候选说明",
+    };
+    unrelatedChange.references = [
+      { sourceNodeId: candidateId, targetNodeId: sourceId },
+    ];
+    await expect(
+      smartReferenceSourceFingerprint(sourceId, unrelatedChange),
+    ).resolves.toBe(originalFingerprint);
+    await expect(
+      smartReferenceResultCacheKey(
+        sourceId,
+        unrelatedChange,
+        defaultEmbeddingSettings,
+        defaultLlmSettings,
+      ),
+    ).resolves.not.toBe(originalCacheKey);
+
+    const sourceChange = workspace();
+    sourceChange.nodes[0] = {
+      ...sourceChange.nodes[0],
+      content: "另一个账号服务",
+    };
+    await expect(
+      smartReferenceSourceFingerprint(sourceId, sourceChange),
+    ).resolves.not.toBe(originalFingerprint);
+
+    const deletedSource = workspace();
+    deletedSource.nodes = deletedSource.nodes.filter((node) => node.id !== sourceId);
+    await expect(
+      smartReferenceSourceFingerprint(sourceId, deletedSource),
+    ).resolves.toBeNull();
+  });
+
+  it("keeps a completed snapshot while filtering deleted candidates and supports", () => {
+    const missingId = "00000000-0000-4000-8000-000000000003";
+    const cached = result();
+    cached.candidates[0] = {
+      ...cached.candidates[0],
+      supportingNodeIds: [sourceId, missingId],
+    };
+    cached.relatedNodes.push({ nodeId: missingId, similarity: 0.6 });
+
+    const filtered = filterSmartReferenceResultForWorkspace(cached, workspace());
+    expect(filtered.candidates).toEqual([
+      { nodeId: candidateId, score: 0.8, supportingNodeIds: [sourceId] },
+    ]);
+    expect(filtered.relatedNodes).toEqual([
+      { nodeId: candidateId, similarity: 0.75 },
+    ]);
+
+    const withoutCandidate = workspace();
+    withoutCandidate.nodes = withoutCandidate.nodes.filter(
+      (node) => node.id !== candidateId,
+    );
+    const emptied = filterSmartReferenceResultForWorkspace(cached, withoutCandidate);
+    expect(emptied.candidates).toEqual([]);
+    expect(emptied.llmSelectedNodeIds).toEqual([]);
+    expect(emptied.llmNoMatch).toBe(true);
+  });
+
   it("invalidates when threshold automation behavior changes", async () => {
     const original = workspace();
     const originalKey = await smartReferenceResultCacheKey(
@@ -130,6 +208,12 @@ describe("smart-reference result cache", () => {
       parseCachedSmartReferenceResult({
         ...result(),
         llmUncertainNodeIds: [candidateId],
+      }),
+    ).toBeNull();
+    expect(
+      parseCachedSmartReferenceResult({
+        ...result(),
+        sourceFingerprint: undefined,
       }),
     ).toBeNull();
     expect(

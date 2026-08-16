@@ -171,8 +171,10 @@ import {
   type LocalLlmRuntime,
 } from "./localLlmModels";
 import {
+  filterSmartReferenceResultForWorkspace,
   smartReferenceResultCacheKey,
   smartReferenceResultSettingsFingerprint,
+  smartReferenceSourceFingerprint,
   type CachedSmartReferenceResult,
   type SmartReferenceResultCache,
   type SmartReferenceResultCacheStatus,
@@ -1961,16 +1963,26 @@ function App({
     cached: CachedSmartReferenceResult,
     automaticallyAddedNodeIds: string[] = [],
   ): SmartReferenceResult {
-    const acceptedNodeIds = workspaceRef.current.references
+    const currentWorkspace = workspaceRef.current;
+    const filtered = filterSmartReferenceResultForWorkspace(
+      cached,
+      currentWorkspace,
+    );
+    const currentNodeIds = new Set(currentWorkspace.nodes.map((node) => node.id));
+    const currentAutomaticallyAddedNodeIds = automaticallyAddedNodeIds.filter(
+      (nodeId) => currentNodeIds.has(nodeId),
+    );
+    const acceptedNodeIds = currentWorkspace.references
       .filter((reference) => reference.sourceNodeId === cached.sourceNodeId)
-      .map((reference) => reference.targetNodeId);
+      .map((reference) => reference.targetNodeId)
+      .filter((nodeId) => currentNodeIds.has(nodeId));
     return {
-      ...cached,
+      ...filtered,
       analysisKey,
       acceptedNodeIds: Array.from(
-        new Set([...acceptedNodeIds, ...automaticallyAddedNodeIds]),
+        new Set([...acceptedNodeIds, ...currentAutomaticallyAddedNodeIds]),
       ),
-      automaticallyAddedNodeIds,
+      automaticallyAddedNodeIds: currentAutomaticallyAddedNodeIds,
     };
   }
 
@@ -1979,8 +1991,11 @@ function App({
       return t(`smartReference.errors.${error.reason}`);
     }
     const reason = errorReason(error);
-    if (reason === "smart_reference_analysis_outdated") {
-      return t("smartReference.errors.analysisOutdated");
+    if (reason === "smart_reference_source_changed") {
+      return t("smartReference.errors.sourceChanged");
+    }
+    if (reason === "smart_reference_workspace_changed_before_auto_reference") {
+      return t("smartReference.errors.automaticWorkspaceChanged");
     }
     return reason.includes("local embedding download cancelled")
       ? t("smartReference.download.cancelled")
@@ -2006,6 +2021,13 @@ function App({
     setSmartReferenceStatus(null);
     const currentWorkspace = workspaceRef.current;
     const replacementGeneration = workspaceReplacementGenerationRef.current;
+    const sourceFingerprint = await smartReferenceSourceFingerprint(
+      nodeId,
+      currentWorkspace,
+    );
+    if (sourceFingerprint === null) {
+      throw new Error("smart_reference_source_changed");
+    }
     const analysisKey = await smartReferenceResultCacheKey(
       nodeId,
       currentWorkspace,
@@ -2062,16 +2084,14 @@ function App({
       queueGeneration !== smartReferenceQueueGenerationRef.current ||
       replacementGeneration !== workspaceReplacementGenerationRef.current
     ) {
-      throw new Error("smart_reference_analysis_outdated");
+      throw new Error("smart_reference_source_changed");
     }
-    const latestKey = await smartReferenceResultCacheKey(
+    const currentSourceFingerprint = await smartReferenceSourceFingerprint(
       nodeId,
       workspaceRef.current,
-      embeddingSettingsRef.current,
-      llmSettingsRef.current,
     );
-    if (latestKey !== analysisKey) {
-      throw new Error("smart_reference_analysis_outdated");
+    if (currentSourceFingerprint !== sourceFingerprint) {
+      throw new Error("smart_reference_source_changed");
     }
     const automaticCandidateIds =
       !currentLlmSettings.enabled &&
@@ -2087,6 +2107,15 @@ function App({
         : [];
     const automaticallyAddedNodeIds: string[] = [];
     if (automaticCandidateIds.length > 0) {
+      const latestKey = await smartReferenceResultCacheKey(
+        nodeId,
+        workspaceRef.current,
+        embeddingSettingsRef.current,
+        llmSettingsRef.current,
+      );
+      if (latestKey !== analysisKey) {
+        throw new Error("smart_reference_workspace_changed_before_auto_reference");
+      }
       updateWorkspace(
         (current) => {
           let nextReferences = current.references;
@@ -2113,7 +2142,7 @@ function App({
       workspaceRef.current.nodes.map((node) => node.id),
     );
     if (!currentNodeIds.has(nodeId)) {
-      throw new Error("smart_reference_analysis_outdated");
+      throw new Error("smart_reference_source_changed");
     }
     const currentLlmSelectedNodeIds = llmSelectedNodeIds.filter((candidateId) =>
       currentNodeIds.has(candidateId),
@@ -2136,6 +2165,7 @@ function App({
       relatedNodes: analysis.relatedNodes.filter((related) =>
         currentNodeIds.has(related.nodeId),
       ),
+      sourceFingerprint,
       sourceNodeId: nodeId,
       truncatedNodeCount: analysis.truncatedNodeCount,
     };
@@ -2205,14 +2235,12 @@ function App({
     if (task.result === null) {
       return;
     }
-    const currentKey = await smartReferenceResultCacheKey(
+    const currentSourceFingerprint = await smartReferenceSourceFingerprint(
       task.nodeId,
       workspaceRef.current,
-      embeddingSettingsRef.current,
-      llmSettingsRef.current,
     );
-    if (currentKey !== task.result.analysisKey) {
-      const message = t("smartReference.errors.analysisOutdated");
+    if (currentSourceFingerprint !== task.result.sourceFingerprint) {
+      const message = t("smartReference.errors.sourceChanged");
       setSmartReferenceTasks((current) =>
         current.map((candidate) =>
           candidate.nodeId === task.nodeId
@@ -2225,7 +2253,7 @@ function App({
     }
     setSmartReferenceResult(
       hydrateSmartReferenceResult(
-        currentKey,
+        task.result.analysisKey,
         task.result,
         task.result.automaticallyAddedNodeIds,
       ),
@@ -2384,19 +2412,26 @@ function App({
     const currentNodeIds = new Set(
       workspaceRef.current.nodes.map((node) => node.id),
     );
-    const currentAnalysisKey = await smartReferenceResultCacheKey(
+    const currentSourceFingerprint = await smartReferenceSourceFingerprint(
       result.sourceNodeId,
       workspaceRef.current,
-      embeddingSettingsRef.current,
-      llmSettingsRef.current,
     );
-    if (
-      !currentNodeIds.has(result.sourceNodeId) ||
-      !currentNodeIds.has(targetNodeId) ||
-      currentAnalysisKey !== result.analysisKey
-    ) {
-      setSmartReferenceStatus(t("smartReference.errors.analysisOutdated"));
+    if (currentSourceFingerprint !== result.sourceFingerprint) {
+      setSmartReferenceStatus(t("smartReference.errors.sourceChanged"));
       setSmartReferenceResult(null);
+      return;
+    }
+    if (!currentNodeIds.has(targetNodeId)) {
+      setSmartReferenceStatus(t("smartReference.errors.candidateMissing"));
+      setSmartReferenceResult((current) =>
+        current === null
+          ? null
+          : hydrateSmartReferenceResult(
+              current.analysisKey,
+              current,
+              current.automaticallyAddedNodeIds,
+            ),
+      );
       return;
     }
     updateWorkspace(
@@ -2413,18 +2448,11 @@ function App({
       },
       { flushImmediately: true, recordHistory: true },
     );
-    const nextAnalysisKey = await smartReferenceResultCacheKey(
-      result.sourceNodeId,
-      workspaceRef.current,
-      embeddingSettingsRef.current,
-      llmSettingsRef.current,
-    );
     setSmartReferenceResult((current) =>
       current === null || current.acceptedNodeIds.includes(targetNodeId)
         ? current
         : {
             ...current,
-            analysisKey: nextAnalysisKey,
             acceptedNodeIds: [...current.acceptedNodeIds, targetNodeId],
           },
     );
@@ -2436,7 +2464,6 @@ function App({
               ...task,
               result: {
                 ...task.result,
-                analysisKey: nextAnalysisKey,
                 acceptedNodeIds: task.result.acceptedNodeIds.includes(targetNodeId)
                   ? task.result.acceptedNodeIds
                   : [...task.result.acceptedNodeIds, targetNodeId],
