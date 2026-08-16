@@ -738,6 +738,47 @@ test("reference search can target nodes outside the current canvas filter", asyn
     .toContainEqual({ sourceNodeId: nodes[0].id, targetNodeId: nodes[1].id });
 });
 
+test("incoming reference browser finds and focuses hidden source nodes", async ({
+  page,
+}) => {
+  const nodes = gridNodes(3, 1);
+  await openSyntheticWorkspace(page, nodes, [
+    { sourceNodeId: nodes[0].id, targetNodeId: nodes[2].id },
+    { sourceNodeId: nodes[1].id, targetNodeId: nodes[2].id },
+  ]);
+  const searchInput = page.getByTestId("node-search");
+  await searchInput.fill(nodes[2].name);
+  await page.getByTestId("unmatched-node-opacity").fill("0");
+
+  const firstSource = page.locator(
+    `.react-flow__node[data-id="${nodes[0].id}"]`,
+  );
+  await expect(firstSource).toBeHidden();
+  await node(page, nodes[2].id).locator(".graph-node-incoming-button").click();
+
+  const browser = page.getByTestId("incoming-reference-browser");
+  await expect(browser).toBeVisible();
+  await expect(browser.locator(".incoming-reference-browser-list button")).toHaveCount(
+    2,
+  );
+  await browser.locator(".incoming-reference-browser-search input").fill(
+    nodes[0].name,
+  );
+  await expect(browser.locator(".incoming-reference-browser-list button")).toHaveCount(
+    1,
+  );
+  await browser
+    .locator(".incoming-reference-browser-list button")
+    .filter({ hasText: nodes[0].name })
+    .click();
+
+  await expect(browser).toBeHidden();
+  await expect(firstSource).toBeVisible();
+  await expect(node(page, nodes[0].id)).toHaveAttribute("data-selected", "true");
+  await expect(searchInput).toHaveValue(nodes[2].name);
+  await expect(page.locator(".item-count")).toContainText("1 / 3");
+});
+
 test("double-clicking an inline reference filter leaves every node visible", async ({
   page,
 }) => {

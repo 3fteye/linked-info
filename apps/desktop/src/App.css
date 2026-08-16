@@ -1166,14 +1166,32 @@ h1 {
   border-top: 1px solid #edf0ed;
 }
 
-.graph-node-collapsed-references {
-  margin: 0;
-  padding: 7px 10px 9px;
+.graph-node-incoming-button {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-height: 31px;
+  padding: 6px 10px;
+  gap: 6px;
+  border: 0;
   border-top: 1px solid #edf0ed;
+  border-radius: 0 0 6px 6px;
   color: #6c756e;
   background: #fafcfb;
   font-size: 10px;
-  line-height: 1.4;
+  text-align: left;
+}
+
+.graph-node-incoming-button:hover,
+.graph-node-incoming-button:focus-visible {
+  color: #18583a;
+  background: #eaf3ed;
+}
+
+.graph-node-incoming-button span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .graph-node-references-label {
@@ -1463,6 +1481,171 @@ h1 {
   border-radius: 7px;
   background: #ffffff;
   box-shadow: 0 12px 32px rgb(21 39 27 / 22%);
+}
+
+.incoming-reference-browser {
+  position: absolute;
+  z-index: 26;
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr) auto auto;
+  width: 320px;
+  max-width: calc(100% - 16px);
+  max-height: 380px;
+  padding: 8px;
+  gap: 7px;
+  border: 1px solid #ccd8cf;
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 12px 32px rgb(21 39 27 / 22%);
+}
+
+.incoming-reference-browser-header,
+.incoming-reference-browser-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-width: 0;
+  gap: 8px;
+}
+
+.incoming-reference-browser-header > div {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.incoming-reference-browser-header strong {
+  color: #244f37;
+  font-size: 12px;
+}
+
+.incoming-reference-browser-header span,
+.incoming-reference-browser-footer > span {
+  overflow: hidden;
+  color: #707a73;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.incoming-reference-browser-header > button,
+.incoming-reference-browser-footer button,
+.incoming-reference-browser-list button {
+  border: 0;
+  color: #435148;
+  background: transparent;
+}
+
+.incoming-reference-browser-header > button {
+  display: inline-grid;
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border-radius: 5px;
+}
+
+.incoming-reference-browser-search {
+  display: flex;
+  align-items: center;
+  min-height: 34px;
+  padding: 0 8px;
+  gap: 6px;
+  border: 1px solid #cbd6ce;
+  border-radius: 5px;
+  color: #3c7153;
+  background: #fbfdfb;
+}
+
+.incoming-reference-browser-search:focus-within {
+  border-color: #4a8765;
+  box-shadow: 0 0 0 2px rgb(45 125 88 / 10%);
+}
+
+.incoming-reference-browser-search input {
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  color: #263129;
+  background: transparent;
+  font-size: 12px;
+}
+
+.incoming-reference-browser-list {
+  display: grid;
+  min-height: 40px;
+  overflow-y: auto;
+  align-content: start;
+  gap: 2px;
+}
+
+.incoming-reference-browser-list > p,
+.incoming-reference-browser-note {
+  margin: 0;
+  color: #707a73;
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.incoming-reference-browser-list > p {
+  padding: 14px 8px;
+  text-align: center;
+}
+
+.incoming-reference-browser-list button {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-height: 32px;
+  padding: 5px 8px;
+  gap: 7px;
+  border-radius: 5px;
+  text-align: left;
+}
+
+.incoming-reference-browser-list button:hover,
+.incoming-reference-browser-list button:focus-visible,
+.incoming-reference-browser-header > button:hover,
+.incoming-reference-browser-header > button:focus-visible {
+  color: #184d35;
+  background: #eaf2ed;
+}
+
+.incoming-reference-browser-list button span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.incoming-reference-browser-note {
+  padding: 6px 8px;
+  border-radius: 5px;
+  background: #f6f8f6;
+}
+
+.incoming-reference-browser-footer {
+  padding-top: 7px;
+  border-top: 1px solid #edf0ed;
+}
+
+.incoming-reference-browser-footer button {
+  display: inline-flex;
+  align-items: center;
+  min-height: 29px;
+  padding: 0 8px;
+  gap: 5px;
+  border: 1px solid #c8d5cc;
+  border-radius: 5px;
+  color: #245d40;
+  background: #f8fbf9;
+  font-size: 10px;
+}
+
+.incoming-reference-browser-footer button:hover,
+.incoming-reference-browser-footer button:focus-visible {
+  border-color: #6f9c81;
+  background: #eaf3ed;
 }
 
 .reference-search-input-shell {

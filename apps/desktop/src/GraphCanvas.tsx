@@ -34,6 +34,7 @@ import {
   Sparkles,
   Trash2,
   Undo2,
+  X,
 } from "lucide-react";
 import {
   useCallback,
@@ -54,6 +55,7 @@ import type {
 } from "./workspaceStore";
 import {
   moveNodeLayoutToFront,
+  normalizeNodeName,
   updateNodeLayoutPositions,
 } from "./workspaceStore";
 import {
@@ -122,6 +124,8 @@ interface InformationNodeData extends Record<string, unknown> {
   nameConflictLabel: string;
   nameLabel: string;
   namePlaceholder: string;
+  incomingReferenceCount: number;
+  incomingReferencesLabel: string;
   referencedTargets: Array<{ filterActive: boolean; id: string; label: string }>;
   collapsedIncomingReferenceLabel: string | null;
   referencesLabel: string;
@@ -132,6 +136,10 @@ interface InformationNodeData extends Record<string, unknown> {
   sourceLabel: string;
   targetLabel: string;
   onCommit: (nodeId: string) => void;
+  onBrowseIncomingReferences: (
+    nodeId: string,
+    anchor: { bottom: number; left: number; top: number },
+  ) => void;
   onContentChange: (nodeId: string, content: string) => void;
   onContentProcessorChange: (nodeId: string, processorId: string) => void;
   onCopyDerivedSecret: ((value: string) => Promise<void>) | null;
@@ -197,6 +205,13 @@ interface GraphLabels {
   empty: string;
   noMatches: string;
   filterByNode: string;
+  incomingReferenceBrowserFilter: string;
+  incomingReferenceBrowserNoMatches: string;
+  incomingReferenceBrowserSearch: string;
+  incomingReferenceBrowserShowing: (count: number, total: number) => string;
+  incomingReferenceBrowserTitle: string;
+  incomingReferenceFocus: (name: string) => string;
+  incomingReferences: (count: number) => string;
   name: string;
   nameConflict: string;
   namePlaceholder: string;
@@ -281,6 +296,13 @@ type ContextMenuState =
       nodeId: string;
       nodeIds: string[];
     };
+
+interface IncomingReferenceBrowserState {
+  left: number;
+  query: string;
+  targetNodeId: string;
+  top: number;
+}
 
 interface ReferenceSearchState {
   activeIndex: number;
@@ -709,10 +731,28 @@ export function InformationNodeCard({
           </div>
         </section>
       )}
-      {data.collapsedIncomingReferenceLabel !== null && (
-        <p className="graph-node-collapsed-references">
-          {data.collapsedIncomingReferenceLabel}
-        </p>
+      {data.incomingReferenceCount > 0 && (
+        <button
+          aria-haspopup="dialog"
+          className="nodrag nowheel graph-node-incoming-button"
+          onClick={(event) => {
+            event.stopPropagation();
+            const bounds = event.currentTarget.getBoundingClientRect();
+            data.onBrowseIncomingReferences(id, {
+              bottom: bounds.bottom,
+              left: bounds.left,
+              top: bounds.top,
+            });
+          }}
+          onPointerDown={(event) => event.stopPropagation()}
+          title={
+            data.collapsedIncomingReferenceLabel ?? data.incomingReferencesLabel
+          }
+          type="button"
+        >
+          <Link2 aria-hidden="true" size={12} />
+          <span>{data.incomingReferencesLabel}</span>
+        </button>
       )}
       <Handle
         className="graph-handle graph-handle-source"
@@ -731,6 +771,7 @@ const defaultCanvasViewport: Viewport = { x: 0, y: 0, zoom: 1 };
 const minimumCanvasZoom = 0.25;
 const maximumCanvasZoom = 2.2;
 const canvasSelectionAutoPanDelayMs = 160;
+const incomingReferenceBrowserRenderLimit = 100;
 
 export function finalizeNodeDragLayout(
   layout: NodeLayout[],
@@ -847,6 +888,7 @@ export default function GraphCanvas({
   onViewportChange,
 }: GraphCanvasProps) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const incomingReferenceBrowserRef = useRef<HTMLDivElement>(null);
   const referenceSearchInputRef = useRef<HTMLInputElement>(null);
   const referenceSearchPopoverRef = useRef<HTMLDivElement>(null);
   const connectionSourceRef = useRef<string | null>(null);
@@ -863,6 +905,10 @@ export default function GraphCanvas({
     useState<ReactFlowInstance<InformationFlowNode, Edge> | null>(null);
   const lastWorkspaceViewportRef = useRef<CanvasViewport | null>(viewport);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+  const [incomingReferenceBrowser, setIncomingReferenceBrowser] =
+    useState<IncomingReferenceBrowserState | null>(null);
+  const [navigationFocusNodeId, setNavigationFocusNodeId] =
+    useState<string | null>(null);
   const [pendingDeletionNodeIds, setPendingDeletionNodeIds] = useState<string[]>([]);
   const [secretClipboardNotice, setSecretClipboardNotice] = useState<{
     error: boolean;
@@ -881,6 +927,7 @@ export default function GraphCanvas({
   const [shortcutHelpOpen, setShortcutHelpOpen] = useState(false);
   const flowNodesRef = useRef(flowNodes);
   flowNodesRef.current = flowNodes;
+  const lastFilteredNodeIdsRef = useRef(filteredNodeIds);
 
   const frameCanvasNodes = useCallback(
     (nodesToFrame: readonly InformationFlowNode[], maximumZoom: number) => {
@@ -922,6 +969,37 @@ export default function GraphCanvas({
       void flowInstance.setViewport(nextViewport, { duration: 140 });
     },
     [flowInstance],
+  );
+
+  const openIncomingReferenceBrowser = useCallback(
+    (
+      targetNodeId: string,
+      anchor: { bottom: number; left: number; top: number },
+    ) => {
+      const canvasBounds = containerRef.current?.getBoundingClientRect();
+      if (canvasBounds === undefined) {
+        return;
+      }
+      const popoverWidth = 320;
+      const popoverHeight = 380;
+      const preferredTop = anchor.bottom - canvasBounds.top + 6;
+      const top =
+        preferredTop + popoverHeight <= canvasBounds.height - 8
+          ? preferredTop
+          : Math.max(8, anchor.top - canvasBounds.top - popoverHeight - 6);
+      setContextMenu(null);
+      setReferenceSearch(null);
+      setIncomingReferenceBrowser({
+        left: Math.min(
+          Math.max(8, anchor.left - canvasBounds.left),
+          Math.max(8, canvasBounds.width - popoverWidth - 8),
+        ),
+        query: "",
+        targetNodeId,
+        top,
+      });
+    },
+    [],
   );
 
   useEffect(() => {
@@ -1053,8 +1131,12 @@ export default function GraphCanvas({
     [referenceFilterNodeIds],
   );
 
+  const nodesById = useMemo(
+    () => new Map(nodes.map((node) => [node.id, node])),
+    [nodes],
+  );
+
   const referencedNodesBySource = useMemo(() => {
-    const nodesById = new Map(nodes.map((node) => [node.id, node]));
     const result = new Map<string, InformationNode[]>();
     for (const reference of references) {
       const targetNode = nodesById.get(reference.targetNodeId);
@@ -1066,7 +1148,52 @@ export default function GraphCanvas({
       result.set(reference.sourceNodeId, referencedNodes);
     }
     return result;
-  }, [nodes, references]);
+  }, [nodesById, references]);
+
+  const incomingNodesByTarget = useMemo(() => {
+    const result = new Map<string, InformationNode[]>();
+    for (const reference of references) {
+      const sourceNode = nodesById.get(reference.sourceNodeId);
+      if (sourceNode === undefined) {
+        continue;
+      }
+      const incomingNodes = result.get(reference.targetNodeId) ?? [];
+      incomingNodes.push(sourceNode);
+      result.set(reference.targetNodeId, incomingNodes);
+    }
+    return result;
+  }, [nodesById, references]);
+
+  const incomingReferenceBrowserTarget =
+    incomingReferenceBrowser === null
+      ? undefined
+      : nodesById.get(incomingReferenceBrowser.targetNodeId);
+  const incomingReferenceBrowserMatches = useMemo(() => {
+    if (incomingReferenceBrowser === null) {
+      return [];
+    }
+    const query = normalizeNodeName(incomingReferenceBrowser.query);
+    return [...(incomingNodesByTarget.get(incomingReferenceBrowser.targetNodeId) ?? [])]
+      .filter(
+        (node) =>
+          query.length === 0 ||
+          normalizeNodeName(
+            referencedNodeLabel(node, labels.unnamed, labels.noContent),
+          ).includes(query),
+      )
+      .sort((left, right) =>
+        referencedNodeLabel(left, labels.unnamed, labels.noContent).localeCompare(
+          referencedNodeLabel(right, labels.unnamed, labels.noContent),
+        ),
+      );
+  }, [
+    incomingNodesByTarget,
+    incomingReferenceBrowser,
+    labels.noContent,
+    labels.unnamed,
+  ]);
+  const visibleIncomingReferenceBrowserSources =
+    incomingReferenceBrowserMatches.slice(0, incomingReferenceBrowserRenderLimit);
 
   const canvasReferencePresentation = useMemo(
     () => buildCanvasReferencePresentation(references),
@@ -1076,7 +1203,11 @@ export default function GraphCanvas({
   const filteredOutNodeIdSet = useMemo(() => {
     const result = new Set<string>();
     for (const node of nodes) {
-      if (editingNodeId === node.id || referenceFilterNodeIdSet.has(node.id)) {
+      if (
+        editingNodeId === node.id ||
+        navigationFocusNodeId === node.id ||
+        referenceFilterNodeIdSet.has(node.id)
+      ) {
         continue;
       }
       if (!filteredNodeIds.has(node.id)) {
@@ -1087,6 +1218,7 @@ export default function GraphCanvas({
   }, [
     editingNodeId,
     filteredNodeIds,
+    navigationFocusNodeId,
     nodes,
     referenceFilterNodeIdSet,
   ]);
@@ -1108,6 +1240,74 @@ export default function GraphCanvas({
         : new Set<string>(),
     [clampedUnmatchedNodeOpacity, filteredOutNodeIdSet],
   );
+
+  const focusIncomingReferenceSource = useCallback(
+    (nodeId: string) => {
+      if (!nodesById.has(nodeId)) {
+        return;
+      }
+      setIncomingReferenceBrowser(null);
+      setNavigationFocusNodeId(nodeId);
+      onNodeBringToFront(nodeId);
+    },
+    [nodesById, onNodeBringToFront],
+  );
+
+  useEffect(() => {
+    if (lastFilteredNodeIdsRef.current !== filteredNodeIds) {
+      lastFilteredNodeIdsRef.current = filteredNodeIds;
+      setNavigationFocusNodeId(null);
+    }
+  }, [filteredNodeIds]);
+
+  useEffect(() => {
+    if (navigationFocusNodeId === null) {
+      return;
+    }
+    if (!nodesById.has(navigationFocusNodeId)) {
+      setNavigationFocusNodeId(null);
+      return;
+    }
+    const focusTimer = window.setTimeout(() => {
+      const target = flowNodesRef.current.find(
+        (node) => node.id === navigationFocusNodeId,
+      );
+      if (target === undefined) {
+        return;
+      }
+      setSelectedReferenceId(null);
+      setFlowNodes((current) =>
+        current.map((node) => ({
+          ...node,
+          selected: node.id === navigationFocusNodeId,
+        })),
+      );
+      frameCanvasNodes([target], 1.4);
+    }, 0);
+    return () => window.clearTimeout(focusTimer);
+  }, [
+    frameCanvasNodes,
+    navigationFocusNodeId,
+    nodesById,
+    setFlowNodes,
+  ]);
+
+  useEffect(() => {
+    if (incomingReferenceBrowser === null) {
+      return;
+    }
+    if (
+      incomingReferenceBrowserTarget === undefined ||
+      (incomingNodesByTarget.get(incomingReferenceBrowser.targetNodeId)?.length ??
+        0) === 0
+    ) {
+      setIncomingReferenceBrowser(null);
+    }
+  }, [
+    incomingNodesByTarget,
+    incomingReferenceBrowser,
+    incomingReferenceBrowserTarget,
+  ]);
 
   const liveReferenceNodeGeometry = useMemo(
     () =>
@@ -1295,6 +1495,7 @@ export default function GraphCanvas({
         const savedLayout = layoutByNode.get(node.id);
         const currentNode = currentById.get(node.id);
         const referencedNodes = referencedNodesBySource.get(node.id) ?? [];
+        const incomingNodes = incomingNodesByTarget.get(node.id) ?? [];
         const interactive = !filteredOutNodeIdSet.has(node.id);
         return {
           connectable: interactive ? undefined : false,
@@ -1356,6 +1557,10 @@ export default function GraphCanvas({
             nameConflictLabel: labels.nameConflict,
             nameLabel: labels.name,
             namePlaceholder: labels.namePlaceholder,
+            incomingReferenceCount: incomingNodes.length,
+            incomingReferencesLabel: labels.incomingReferences(
+              incomingNodes.length,
+            ),
             referencedTargets: referencedNodes
               .map((target) => ({
                 filterActive: referenceFilterNodeIdSet.has(target.id),
@@ -1376,6 +1581,7 @@ export default function GraphCanvas({
             sourceLabel: labels.sourceHandle,
             targetLabel: labels.targetHandle,
             onCommit: onNodeCommit,
+            onBrowseIncomingReferences: openIncomingReferenceBrowser,
             onContentChange: onNodeContentChange,
             onContentProcessorChange: onNodeContentProcessorChange,
             onCopyDerivedSecret:
@@ -1396,6 +1602,7 @@ export default function GraphCanvas({
     clampedUnmatchedNodeOpacity,
     filteredOutNodeIdSet,
     hiddenNodeIdSet,
+    incomingNodesByTarget,
     labels,
     layoutByNode,
     nameConflictNodeIds,
@@ -1405,6 +1612,7 @@ export default function GraphCanvas({
     onNodeContentProcessorChange,
     onCopySecret,
     onNodeNameChange,
+    openIncomingReferenceBrowser,
     onToggleReferenceFilter,
     referenceFilterNodeIdSet,
     referencedNodesBySource,
@@ -1423,6 +1631,22 @@ export default function GraphCanvas({
         : current,
     );
   }, [filteredOutNodeIdSet]);
+
+  useEffect(() => {
+    if (incomingReferenceBrowser === null) {
+      return;
+    }
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      if (
+        event.target instanceof globalThis.Node &&
+        !incomingReferenceBrowserRef.current?.contains(event.target)
+      ) {
+        setIncomingReferenceBrowser(null);
+      }
+    };
+    window.addEventListener("pointerdown", closeOnOutsidePointer);
+    return () => window.removeEventListener("pointerdown", closeOnOutsidePointer);
+  }, [incomingReferenceBrowser]);
 
   useEffect(() => {
     if (contextMenu === null) {
@@ -1460,15 +1684,15 @@ export default function GraphCanvas({
   useEffect(() => {
     const handleCanvasShortcut = (event: KeyboardEvent) => {
       const key = event.key.toLowerCase();
-      const canvasFilterButtonFocused =
+      const canvasTransientControlFocused =
         key === "escape" &&
         event.target instanceof Element &&
         event.target.closest(
-          ".graph-node-filter-button, .graph-node-reference-chip",
+          ".graph-node-filter-button, .graph-node-reference-chip, .graph-node-incoming-button, .incoming-reference-browser",
         ) !== null;
       if (
         isCanvasShortcutBlockedTarget(event.target) &&
-        !canvasFilterButtonFocused
+        !canvasTransientControlFocused
       ) {
         return;
       }
@@ -1483,6 +1707,10 @@ export default function GraphCanvas({
         event.preventDefault();
         if (shortcutHelpOpen) {
           setShortcutHelpOpen(false);
+          return;
+        }
+        if (incomingReferenceBrowser !== null) {
+          setIncomingReferenceBrowser(null);
           return;
         }
         if (referenceSearch !== null) {
@@ -1638,6 +1866,7 @@ export default function GraphCanvas({
     frameCanvasNodes,
     flowInstance,
     historyBlocked,
+    incomingReferenceBrowser,
     interactiveReferenceIdSet,
     nodeFiltersActive,
     onClearNodeFilters,
@@ -2498,6 +2727,122 @@ export default function GraphCanvas({
           }}
         />
       )}
+
+      {incomingReferenceBrowser !== null &&
+        incomingReferenceBrowserTarget !== undefined && (
+          <div
+            aria-label={labels.incomingReferenceBrowserTitle}
+            className="incoming-reference-browser"
+            data-testid="incoming-reference-browser"
+            onPointerDown={(event) => event.stopPropagation()}
+            ref={incomingReferenceBrowserRef}
+            role="dialog"
+            style={{
+              left: incomingReferenceBrowser.left,
+              top: incomingReferenceBrowser.top,
+            }}
+          >
+            <header className="incoming-reference-browser-header">
+              <div>
+                <strong>{labels.incomingReferenceBrowserTitle}</strong>
+                <span>
+                  {referencedNodeLabel(
+                    incomingReferenceBrowserTarget,
+                    labels.unnamed,
+                    labels.noContent,
+                  )}
+                </span>
+              </div>
+              <button
+                aria-label={labels.cancel}
+                onClick={() => setIncomingReferenceBrowser(null)}
+                title={labels.cancel}
+                type="button"
+              >
+                <X aria-hidden="true" size={15} />
+              </button>
+            </header>
+            <label className="incoming-reference-browser-search">
+              <Search aria-hidden="true" size={14} />
+              <input
+                aria-label={labels.incomingReferenceBrowserSearch}
+                autoFocus
+                onChange={(event) =>
+                  setIncomingReferenceBrowser((current) =>
+                    current === null
+                      ? null
+                      : { ...current, query: event.target.value },
+                  )
+                }
+                placeholder={labels.incomingReferenceBrowserSearch}
+                value={incomingReferenceBrowser.query}
+              />
+            </label>
+            <div className="incoming-reference-browser-list">
+              {visibleIncomingReferenceBrowserSources.length === 0 ? (
+                <p>{labels.incomingReferenceBrowserNoMatches}</p>
+              ) : (
+                visibleIncomingReferenceBrowserSources.map((sourceNode) => {
+                  const sourceLabel = referencedNodeLabel(
+                    sourceNode,
+                    labels.unnamed,
+                    labels.noContent,
+                  );
+                  return (
+                    <button
+                      aria-label={labels.incomingReferenceFocus(sourceLabel)}
+                      key={sourceNode.id}
+                      onClick={() =>
+                        focusIncomingReferenceSource(sourceNode.id)
+                      }
+                      type="button"
+                    >
+                      <Link2 aria-hidden="true" size={13} />
+                      <span>{sourceLabel}</span>
+                    </button>
+                  );
+                })
+              )}
+            </div>
+            {(canvasReferencePresentation.collapsedIncomingByTarget.get(
+              incomingReferenceBrowser.targetNodeId,
+            ) ?? 0) > 0 && (
+              <p className="incoming-reference-browser-note">
+                {labels.collapsedIncomingReferences(
+                  canvasReferencePresentation.collapsedIncomingByTarget.get(
+                    incomingReferenceBrowser.targetNodeId,
+                  ) ?? 0,
+                )}
+              </p>
+            )}
+            <footer className="incoming-reference-browser-footer">
+              <span>
+                {labels.incomingReferenceBrowserShowing(
+                  visibleIncomingReferenceBrowserSources.length,
+                  incomingReferenceBrowserMatches.length,
+                )}
+              </span>
+              <button
+                onClick={() => {
+                  onToggleReferenceFilter(
+                    incomingReferenceBrowser.targetNodeId,
+                  );
+                  setIncomingReferenceBrowser(null);
+                }}
+                type="button"
+              >
+                <Filter aria-hidden="true" size={13} />
+                <span>
+                  {referenceFilterNodeIdSet.has(
+                    incomingReferenceBrowser.targetNodeId,
+                  )
+                    ? labels.removeNodeFilter
+                    : labels.incomingReferenceBrowserFilter}
+                </span>
+              </button>
+            </footer>
+          </div>
+        )}
 
       {referenceSearch !== null && (
         <div

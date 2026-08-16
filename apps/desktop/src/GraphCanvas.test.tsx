@@ -68,6 +68,8 @@ function cardProps(overrides: Record<string, unknown> = {}): NodeProps<any> {
       nameConflictLabel: "Conflict",
       nameLabel: "Name",
       namePlaceholder: "Name",
+      incomingReferenceCount: 0,
+      incomingReferencesLabel: "Referenced by 0 nodes",
       referencedTargets: [],
       collapsedIncomingReferenceLabel: null,
       referencesLabel: "References",
@@ -77,6 +79,7 @@ function cardProps(overrides: Record<string, unknown> = {}): NodeProps<any> {
       removeNodeFilterLabel: "Remove filter",
       sourceLabel: "Source",
       targetLabel: "Target",
+      onBrowseIncomingReferences: vi.fn(),
       onCommit: vi.fn(),
       onContentChange: vi.fn(),
       onContentProcessorChange: vi.fn(),
@@ -392,16 +395,25 @@ describe("InformationNodeCard", () => {
     expect(props.data.onContentChange).not.toHaveBeenCalled();
   });
 
-  it("shows when dense incoming edges are folded by the canvas view", () => {
-    renderCard(
-      root,
-      cardProps({
-        collapsedIncomingReferenceLabel: "182 incoming references folded",
-        editing: false,
-      }),
-    );
+  it("opens incoming reference browsing while preserving the folded-edge hint", () => {
+    const props = cardProps({
+      collapsedIncomingReferenceLabel: "182 incoming references folded",
+      editing: false,
+      incomingReferenceCount: 182,
+      incomingReferencesLabel: "Referenced by 182 nodes",
+    });
+    renderCard(root, props);
 
-    expect(container.textContent).toContain("182 incoming references folded");
+    const button = container.querySelector<HTMLButtonElement>(
+      ".graph-node-incoming-button",
+    )!;
+    expect(button.textContent).toContain("Referenced by 182 nodes");
+    expect(button.title).toBe("182 incoming references folded");
+    act(() => button.click());
+    expect(props.data.onBrowseIncomingReferences).toHaveBeenCalledWith(
+      nodeId,
+      expect.objectContaining({ bottom: 0, left: 0, top: 0 }),
+    );
   });
 
   it("loads full content only when a preview node enters editing", () => {

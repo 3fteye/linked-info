@@ -5675,6 +5675,24 @@ function App({
                 references: t("references.list"),
                 collapsedIncomingReferences: (count) =>
                   t("references.collapsedIncoming", { count }),
+                incomingReferenceBrowserFilter: t(
+                  "references.incomingBrowserFilter",
+                ),
+                incomingReferenceBrowserNoMatches: t(
+                  "references.incomingBrowserNoMatches",
+                ),
+                incomingReferenceBrowserSearch: t(
+                  "references.incomingBrowserSearch",
+                ),
+                incomingReferenceBrowserShowing: (count, total) =>
+                  t("references.incomingBrowserShowing", { count, total }),
+                incomingReferenceBrowserTitle: t(
+                  "references.incomingBrowserTitle",
+                ),
+                incomingReferenceFocus: (name) =>
+                  t("references.incomingFocus", { name }),
+                incomingReferences: (count) =>
+                  t("references.incomingReferences", { count }),
                 referenceSearchCreate: (name) =>
                   t("references.searchCreate", { name }),
                 referenceSearchCreateHint: t("references.searchCreateHint"),
