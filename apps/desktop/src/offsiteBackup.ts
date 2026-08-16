@@ -87,6 +87,13 @@ export interface OffsiteBackupService {
     s3Provider: S3ProviderTemplate;
     authorization: string;
   }): Promise<OffsiteBackupTarget>;
+  updateS3Target(input: Omit<S3BackupConnection, "provider"> & {
+    targetId: string;
+    name: string;
+    s3Provider: S3ProviderTemplate;
+    replaceCredentials: boolean;
+    authorization: string;
+  }): Promise<OffsiteBackupTarget>;
   removeTarget(targetId: string, authorization: string): Promise<void>;
   deleteSnapshot(
     targetId: string,
@@ -147,6 +154,9 @@ export const tauriOffsiteBackupService: OffsiteBackupService = {
   },
   configureS3Target(input) {
     return invoke<OffsiteBackupTarget>("configure_s3_backup_target", input);
+  },
+  updateS3Target(input) {
+    return invoke<OffsiteBackupTarget>("update_s3_backup_target", input);
   },
   removeTarget(targetId, authorization) {
     return invoke<void>("remove_offsite_backup_target", {
@@ -266,6 +276,9 @@ export const unavailableOffsiteBackupService: OffsiteBackupService = {
     return [];
   },
   async configureS3Target() {
+    return unavailable();
+  },
+  async updateS3Target() {
     return unavailable();
   },
   async removeTarget() {

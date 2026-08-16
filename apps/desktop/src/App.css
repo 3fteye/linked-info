@@ -2555,6 +2555,18 @@ h1 {
   gap: 10px;
 }
 
+.remote-embedding-fields .offsite-replace-credentials {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.remote-embedding-fields .offsite-replace-credentials input {
+  width: auto;
+  min-height: 0;
+  padding: 0;
+}
+
 .offsite-target-create-form .secondary-button {
   justify-self: start;
 }

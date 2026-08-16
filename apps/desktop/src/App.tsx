@@ -23,6 +23,7 @@ import {
   Link2,
   LockKeyhole,
   Network,
+  Pencil,
   Plus,
   RefreshCw,
   Search,
@@ -413,7 +414,11 @@ function App({
     | null
   >(null);
   const [pendingBackupTarget, setPendingBackupTarget] = useState<
-    | ({ name: string } & TemporaryBackupConnection & {
+    | ({
+        targetId: string | null;
+        name: string;
+        replaceCredentials: boolean;
+      } & TemporaryBackupConnection & {
         s3Provider: S3ProviderTemplate;
       })
     | null
@@ -468,6 +473,11 @@ function App({
   const [offsiteAccessKeyId, setOffsiteAccessKeyId] = useState("");
   const [offsiteSecretAccessKey, setOffsiteSecretAccessKey] = useState("");
   const [offsiteSessionToken, setOffsiteSessionToken] = useState("");
+  const [editingOffsiteTargetId, setEditingOffsiteTargetId] = useState<
+    string | null
+  >(null);
+  const [replaceOffsiteCredentials, setReplaceOffsiteCredentials] =
+    useState(false);
   const offsiteRecoveryConnectionRef =
     useRef<TemporaryBackupConnection | null>(null);
   const [offsiteRecoveryPage, setOffsiteRecoveryPage] =
@@ -1433,7 +1443,7 @@ function App({
           if (pendingBackupTarget === null) {
             throw new Error("offsite_backup_missing_pending_target");
           }
-          const configured = await offsiteBackup.configureS3Target({
+          const targetInput = {
             name: pendingBackupTarget.name,
             endpoint: pendingBackupTarget.endpoint,
             s3Provider: pendingBackupTarget.s3Provider,
@@ -1444,16 +1454,30 @@ function App({
             secretAccessKey: pendingBackupTarget.secretAccessKey,
             sessionToken: pendingBackupTarget.sessionToken,
             authorization,
-          });
-          setOffsiteTargets((targets) => [...targets, configured]);
+          };
+          const configured =
+            pendingBackupTarget.targetId === null
+              ? await offsiteBackup.configureS3Target(targetInput)
+              : await offsiteBackup.updateS3Target({
+                  ...targetInput,
+                  targetId: pendingBackupTarget.targetId,
+                  replaceCredentials: pendingBackupTarget.replaceCredentials,
+                });
+          setOffsiteTargets((targets) =>
+            pendingBackupTarget.targetId === null
+              ? [...targets, configured]
+              : targets.map((target) =>
+                  target.id === configured.id ? configured : target,
+                ),
+          );
           setSelectedOffsiteTargetId(configured.id);
           setOffsitePage(null);
-          setOffsiteEndpoint("");
-          setOffsiteTargetName(t(`offsiteBackup.s3Providers.${offsiteS3Provider}`));
-          setOffsiteAccessKeyId("");
-          setOffsiteSecretAccessKey("");
-          setOffsiteSessionToken("");
-          showAppNotice(t("offsiteBackup.targetConnected"));
+          resetOffsiteTargetForm();
+          showAppNotice(
+            pendingBackupTarget.targetId === null
+              ? t("offsiteBackup.targetConnected")
+              : t("offsiteBackup.targetUpdated"),
+          );
         } else if (
           securityDialog === "offsiteSensitive" &&
           pendingOffsiteSensitiveAction !== null
@@ -1474,6 +1498,9 @@ function App({
             setOffsiteTargets(targets);
             setSelectedOffsiteTargetId(targets[0]?.id ?? null);
             setOffsitePage(null);
+            if (editingOffsiteTargetId === action.targetId) {
+              cancelOffsiteTargetEdit();
+            }
             showAppNotice(t("offsiteBackup.targetRemoved"));
           } else if (action.kind === "destroyTarget") {
             const result = await offsiteBackup.deleteAllAndRemoveTarget(
@@ -1493,6 +1520,9 @@ function App({
               setOffsiteTargets(targets);
               setSelectedOffsiteTargetId(targets[0]?.id ?? null);
               setOffsitePage(null);
+              if (editingOffsiteTargetId === action.targetId) {
+                cancelOffsiteTargetEdit();
+              }
               showAppNotice(
                 t("offsiteBackup.targetDestroyed", {
                   count: result.deletedCount,
@@ -2538,7 +2568,9 @@ function App({
     }
   }
 
-  function currentTemporaryBackupConnection(): TemporaryBackupConnection | null {
+  function currentTemporaryBackupConnection(
+    credentialsRequired = true,
+  ): TemporaryBackupConnection | null {
     const endpoint = resolveS3Endpoint(
       offsiteS3Provider,
       offsiteEndpoint,
@@ -2548,8 +2580,8 @@ function App({
       endpoint.length === 0 ||
       offsiteRegion.trim().length === 0 ||
       offsiteBucket.trim().length === 0 ||
-      offsiteAccessKeyId.length < 3 ||
-      offsiteSecretAccessKey.length < 8
+      (credentialsRequired &&
+        (offsiteAccessKeyId.length < 3 || offsiteSecretAccessKey.length < 8))
     ) {
       return null;
     }
@@ -2573,7 +2605,50 @@ function App({
     setOffsiteRegion(defaults.region);
     setOffsitePrefix(defaults.prefix);
     setOffsiteRecoveryPage(null);
-    setOffsiteTargetName(t(`offsiteBackup.s3Providers.${template}`));
+    if (editingOffsiteTargetId === null) {
+      setOffsiteTargetName(t(`offsiteBackup.s3Providers.${template}`));
+    }
+  }
+
+  function beginOffsiteTargetEdit(target: OffsiteBackupTarget) {
+    const template = target.s3Provider ?? "custom";
+    setEditingOffsiteTargetId(target.id);
+    setReplaceOffsiteCredentials(false);
+    setOffsiteTargetName(target.name);
+    setOffsiteS3Provider(template);
+    setOffsiteEndpoint(target.endpoint);
+    setOffsiteRegion(target.region ?? "");
+    setOffsiteBucket(target.bucket ?? "");
+    setOffsitePrefix(target.prefix ?? "");
+    setOffsiteAccessKeyId("");
+    setOffsiteSecretAccessKey("");
+    setOffsiteSessionToken("");
+    setOffsiteMessage(null);
+    window.requestAnimationFrame(() => {
+      document
+        .getElementById("offsite-target-form")
+        ?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    });
+  }
+
+  function resetOffsiteTargetForm() {
+    const defaults = s3TemplateDefaults("cloudflareR2");
+    setEditingOffsiteTargetId(null);
+    setReplaceOffsiteCredentials(false);
+    setOffsiteTargetName(t("offsiteBackup.s3Providers.cloudflareR2"));
+    setOffsiteS3Provider("cloudflareR2");
+    setOffsiteEndpoint(defaults.endpoint);
+    setOffsiteRegion(defaults.region);
+    setOffsiteBucket("");
+    setOffsitePrefix(defaults.prefix);
+    setOffsiteAccessKeyId("");
+    setOffsiteSecretAccessKey("");
+    setOffsiteSessionToken("");
+  }
+
+  function cancelOffsiteTargetEdit() {
+    resetOffsiteTargetForm();
+    setOffsiteMessage(null);
   }
 
   function renderOffsiteConnectionFields() {
@@ -2667,52 +2742,78 @@ function App({
             value={offsitePrefix}
           />
         </label>
-        <label>
-          <span>{t("offsiteBackup.s3AccessKeyId")}</span>
-          <input
-            autoComplete="off"
-            disabled={offsiteBusy}
-            onChange={(event) => {
-              setOffsiteAccessKeyId(event.target.value);
-              setOffsiteRecoveryPage(null);
-            }}
-            type="password"
-            value={offsiteAccessKeyId}
-          />
-        </label>
-        <label>
-          <span>{t("offsiteBackup.s3SecretAccessKey")}</span>
-          <input
-            autoComplete="off"
-            disabled={offsiteBusy}
-            onChange={(event) => {
-              setOffsiteSecretAccessKey(event.target.value);
-              setOffsiteRecoveryPage(null);
-            }}
-            type="password"
-            value={offsiteSecretAccessKey}
-          />
-        </label>
-        <label>
-          <span>{t("offsiteBackup.s3SessionToken")}</span>
-          <input
-            autoComplete="off"
-            disabled={offsiteBusy}
-            onChange={(event) => {
-              setOffsiteSessionToken(event.target.value);
-              setOffsiteRecoveryPage(null);
-            }}
-            type="password"
-            value={offsiteSessionToken}
-          />
-        </label>
+        {editingOffsiteTargetId !== null && (
+          <label className="switch-setting offsite-replace-credentials">
+            <input
+              checked={replaceOffsiteCredentials}
+              data-testid="offsite-replace-credentials"
+              disabled={offsiteBusy}
+              onChange={(event) => {
+                setReplaceOffsiteCredentials(event.target.checked);
+                setOffsiteAccessKeyId("");
+                setOffsiteSecretAccessKey("");
+                setOffsiteSessionToken("");
+              }}
+              type="checkbox"
+            />
+            {t("offsiteBackup.replaceCredentials")}
+          </label>
+        )}
+        {(editingOffsiteTargetId === null || replaceOffsiteCredentials) && (
+          <>
+            <label>
+              <span>{t("offsiteBackup.s3AccessKeyId")}</span>
+              <input
+                autoComplete="off"
+                disabled={offsiteBusy}
+                onChange={(event) => {
+                  setOffsiteAccessKeyId(event.target.value);
+                  setOffsiteRecoveryPage(null);
+                }}
+                type="password"
+                value={offsiteAccessKeyId}
+              />
+            </label>
+            <label>
+              <span>{t("offsiteBackup.s3SecretAccessKey")}</span>
+              <input
+                autoComplete="off"
+                disabled={offsiteBusy}
+                onChange={(event) => {
+                  setOffsiteSecretAccessKey(event.target.value);
+                  setOffsiteRecoveryPage(null);
+                }}
+                type="password"
+                value={offsiteSecretAccessKey}
+              />
+            </label>
+            <label>
+              <span>{t("offsiteBackup.s3SessionToken")}</span>
+              <input
+                autoComplete="off"
+                disabled={offsiteBusy}
+                onChange={(event) => {
+                  setOffsiteSessionToken(event.target.value);
+                  setOffsiteRecoveryPage(null);
+                }}
+                type="password"
+                value={offsiteSessionToken}
+              />
+            </label>
+          </>
+        )}
+        {editingOffsiteTargetId !== null && !replaceOffsiteCredentials && (
+          <small>{t("offsiteBackup.keepCredentialsDescription")}</small>
+        )}
         <small>{t("offsiteBackup.s3CredentialDescription")}</small>
       </>
     );
   }
 
   function requestOffsiteTargetConfiguration() {
-    const connection = currentTemporaryBackupConnection();
+    const replacingCredentials =
+      editingOffsiteTargetId === null || replaceOffsiteCredentials;
+    const connection = currentTemporaryBackupConnection(replacingCredentials);
     if (
       offsiteBusy ||
       offsiteTargetName.trim().length === 0 ||
@@ -2725,7 +2826,9 @@ function App({
     setSecurityMessage(null);
     setSecurityCurrentPassword("");
     setPendingBackupTarget({
+      targetId: editingOffsiteTargetId,
       name: offsiteTargetName.trim(),
+      replaceCredentials: replacingCredentials,
       ...connection,
       s3Provider: offsiteS3Provider,
     });
@@ -4673,6 +4776,17 @@ function App({
                           {selectedOffsiteTarget !== null && (
                             <div className="backup-actions">
                               <button
+                                className="secondary-button"
+                                disabled={offsiteBusy}
+                                onClick={() =>
+                                  beginOffsiteTargetEdit(selectedOffsiteTarget)
+                                }
+                                type="button"
+                              >
+                                <Pencil aria-hidden="true" size={15} />
+                                {t("offsiteBackup.editTarget")}
+                              </button>
+                              <button
                                 className="primary-button"
                                 disabled={offsiteBusy || selectedOffsiteTargetId === null}
                                 onClick={() => void createOffsiteSnapshot()}
@@ -4813,12 +4927,27 @@ function App({
                 </div>
               </div>
               {workspaceSecurityStatus.encrypted && (
-                <div className="setting-row data-setting-row">
+                <div
+                  className="setting-row data-setting-row"
+                  id="offsite-target-form"
+                >
                   <div className="setting-label">
-                    <Plus size={18} />
+                    {editingOffsiteTargetId === null ? (
+                      <Plus size={18} />
+                    ) : (
+                      <Pencil size={18} />
+                    )}
                     <div className="setting-label-copy">
-                      <span>{t("offsiteBackup.addTarget")}</span>
-                      <small>{t("offsiteBackup.addTargetDescription")}</small>
+                      <span>
+                        {editingOffsiteTargetId === null
+                          ? t("offsiteBackup.addTarget")
+                          : t("offsiteBackup.editTargetTitle")}
+                      </span>
+                      <small>
+                        {editingOffsiteTargetId === null
+                          ? t("offsiteBackup.addTargetDescription")
+                          : t("offsiteBackup.editTargetDescription")}
+                      </small>
                     </div>
                   </div>
                   <div className="offsite-backup-settings">
@@ -4833,15 +4962,30 @@ function App({
                         />
                       </label>
                       {renderOffsiteConnectionFields()}
-                      <button
-                        className="secondary-button"
-                        disabled={offsiteBusy || !offsiteBackup.available}
-                        onClick={requestOffsiteTargetConfiguration}
-                        type="button"
-                      >
-                        <Cloud aria-hidden="true" size={15} />
-                        {t("offsiteBackup.connect")}
-                      </button>
+                      <div className="backup-actions">
+                        {editingOffsiteTargetId !== null && (
+                          <button
+                            className="secondary-button"
+                            disabled={offsiteBusy}
+                            onClick={cancelOffsiteTargetEdit}
+                            type="button"
+                          >
+                            <X aria-hidden="true" size={15} />
+                            {t("actions.cancel")}
+                          </button>
+                        )}
+                        <button
+                          className="secondary-button"
+                          disabled={offsiteBusy || !offsiteBackup.available}
+                          onClick={requestOffsiteTargetConfiguration}
+                          type="button"
+                        >
+                          <Cloud aria-hidden="true" size={15} />
+                          {editingOffsiteTargetId === null
+                            ? t("offsiteBackup.connect")
+                            : t("offsiteBackup.saveTargetChanges")}
+                        </button>
+                      </div>
                     </div>
                     <small>{t("offsiteBackup.passwordHistoryWarning")}</small>
                   </div>
@@ -5532,7 +5676,9 @@ function App({
                   : securityDialog === "rotate"
                     ? t("security.rotateTitle")
                     : securityDialog === "backupTarget"
-                      ? t("offsiteBackup.reauthenticateTitle")
+                      ? pendingBackupTarget?.targetId === null
+                        ? t("offsiteBackup.reauthenticateTitle")
+                        : t("offsiteBackup.reauthenticateEditTitle")
                     : securityDialog === "offsiteSensitive"
                       ? pendingOffsiteSensitiveAction?.kind === "deleteSnapshot"
                         ? t("offsiteBackup.deleteSnapshotTitle")
@@ -5551,7 +5697,9 @@ function App({
                   : securityDialog === "rotate"
                     ? t("security.rotateDescription")
                     : securityDialog === "backupTarget"
-                      ? t("offsiteBackup.reauthenticateDescription")
+                      ? pendingBackupTarget?.targetId === null
+                        ? t("offsiteBackup.reauthenticateDescription")
+                        : t("offsiteBackup.reauthenticateEditDescription")
                     : securityDialog === "offsiteSensitive"
                       ? pendingOffsiteSensitiveAction?.kind === "deleteSnapshot"
                         ? t("offsiteBackup.deleteSnapshotDescription", {
@@ -5692,7 +5840,9 @@ function App({
                         : securityDialog === "rotate"
                           ? t("security.rotateConfirm")
                           : securityDialog === "backupTarget"
-                            ? t("offsiteBackup.connect")
+                            ? pendingBackupTarget?.targetId === null
+                              ? t("offsiteBackup.connect")
+                              : t("offsiteBackup.saveTargetChanges")
                           : securityDialog === "offsiteSensitive"
                             ? pendingOffsiteSensitiveAction?.kind === "deleteSnapshot"
                               ? t("offsiteBackup.deleteSnapshot")

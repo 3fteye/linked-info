@@ -98,6 +98,7 @@ pub fn run() {
             offsite_backup::test_offsite_backup_restore,
             offsite_backup::update_offsite_backup_automatic_settings,
             offsite_backup::update_offsite_backup_retention_settings,
+            offsite_backup::update_s3_backup_target,
             offsite_backup::verify_offsite_backup,
             secret_clipboard::copy_secret_to_clipboard,
             secret_clipboard::inspect_secret_clipboard,

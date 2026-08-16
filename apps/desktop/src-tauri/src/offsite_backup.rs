@@ -631,6 +631,164 @@ pub async fn configure_s3_backup_target(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn update_s3_backup_target(
+    app: tauri::AppHandle,
+    backup_state: tauri::State<'_, OffsiteBackupState>,
+    vault_state: tauri::State<'_, WorkspaceVaultState>,
+    target_id: Uuid,
+    name: String,
+    endpoint: String,
+    s3_provider: S3ProviderTemplate,
+    region: String,
+    bucket: String,
+    prefix: String,
+    replace_credentials: bool,
+    access_key_id: String,
+    secret_access_key: String,
+    session_token: Option<String>,
+    authorization: String,
+) -> Result<BackupTargetSummary, String> {
+    let _claim = TargetOperationClaim::acquire(&backup_state, target_id)?;
+    let permit = vault_state
+        .consume_sensitive_authorization(SensitiveOperation::BackupTargetChange, &authorization)?;
+    let name = validate_target_name(&name)?;
+    let endpoint = S3BackupTarget::normalize_endpoint(&endpoint).map_err(target_error)?;
+    let region = S3BackupTarget::normalize_region(&region).map_err(target_error)?;
+    let bucket = S3BackupTarget::normalize_bucket(&bucket).map_err(target_error)?;
+    let prefix = S3BackupTarget::normalize_prefix(&prefix).map_err(target_error)?;
+    let previous = find_target(&app, &backup_state, target_id).await?;
+
+    let mut replacement_credential = None;
+    let (credentials, next_credential_id) = if replace_credentials {
+        let mut record = S3CredentialRecord {
+            format: S3_CREDENTIAL_FORMAT.to_owned(),
+            version: S3_CREDENTIAL_VERSION,
+            access_key_id,
+            secret_access_key,
+            session_token: session_token.filter(|value| !value.is_empty()),
+        };
+        let stored = Zeroizing::new(
+            serde_json::to_string(&record)
+                .map_err(|_| "offsite_backup_invalid_credential".to_owned())?,
+        );
+        let credential_id = Uuid::new_v4().to_string();
+        let credentials = S3Credentials {
+            access_key_id: std::mem::take(&mut record.access_key_id),
+            secret_access_key: std::mem::take(&mut record.secret_access_key),
+            session_token: record.session_token.take(),
+        };
+        replacement_credential = Some((credential_id.clone(), stored));
+        (credentials, credential_id)
+    } else {
+        if !access_key_id.is_empty()
+            || !secret_access_key.is_empty()
+            || session_token
+                .as_ref()
+                .is_some_and(|value| !value.is_empty())
+        {
+            return Err("offsite_backup_unexpected_credential_input".to_owned());
+        }
+        let stored = load_credential_async(previous.credential_id.clone()).await?;
+        (
+            parse_s3_credentials(stored.as_str())?,
+            previous.credential_id.clone(),
+        )
+    };
+
+    let target = S3BackupTarget::new(&endpoint, &region, &bucket, &prefix, credentials)
+        .map_err(target_error)?;
+    target.list(None, 1).await.map_err(target_error)?;
+    ensure_workspace_access(&app, &vault_state, Some(permit))?;
+
+    if let Some((credential_id, stored)) = replacement_credential.as_ref() {
+        let credential_id = credential_id.clone();
+        let stored = Zeroizing::new(stored.to_string());
+        tauri::async_runtime::spawn_blocking(move || {
+            store_credential(&credential_id, stored.as_str())
+        })
+        .await
+        .map_err(|error| error.to_string())??;
+    }
+    if let Err(error) = ensure_workspace_access(&app, &vault_state, Some(permit)) {
+        if replacement_credential.is_some() {
+            let _ = delete_credential(&next_credential_id);
+        }
+        return Err(error);
+    }
+
+    let app_for_write = app.clone();
+    let config_lock = Arc::clone(&backup_state.config_lock);
+    let endpoint_for_write = endpoint.clone();
+    let region_for_write = region.clone();
+    let bucket_for_write = bucket.clone();
+    let prefix_for_write = prefix.clone();
+    let next_credential_id_for_write = next_credential_id.clone();
+    let write_result = tauri::async_runtime::spawn_blocking(move || {
+        let _guard = config_lock
+            .lock()
+            .map_err(|_| "offsite_backup_config_unavailable".to_owned())?;
+        let path = config_path(&app_for_write)?;
+        let mut config = read_config(&path)?;
+        let index = config
+            .targets
+            .iter()
+            .position(|target| target.id == target_id)
+            .ok_or_else(|| "offsite_backup_target_not_found".to_owned())?;
+        let mut updated = config.targets[index].clone();
+        let remote_location_changed = remote_target_location_changed(
+            &updated,
+            &endpoint_for_write,
+            &region_for_write,
+            &bucket_for_write,
+            &prefix_for_write,
+        );
+        updated.name = name;
+        updated.endpoint = endpoint_for_write;
+        updated.s3_provider = Some(s3_provider);
+        updated.region = Some(region_for_write);
+        updated.bucket = Some(bucket_for_write);
+        updated.prefix = Some(prefix_for_write);
+        updated.credential_id = next_credential_id_for_write;
+        if remote_location_changed {
+            reset_remote_target_status(&mut updated);
+        }
+        if config
+            .targets
+            .iter()
+            .enumerate()
+            .any(|(item_index, item)| item_index != index && targets_conflict(item, &updated))
+        {
+            return Err("offsite_backup_target_conflict".to_owned());
+        }
+        let summary = target_summary(&updated)?;
+        config.targets[index] = updated;
+        write_config(&path, &config)?;
+        Ok(summary)
+    })
+    .await
+    .map_err(|error| error.to_string())?;
+    let summary = match write_result {
+        Ok(summary) => summary,
+        Err(error) => {
+            if replacement_credential.is_some() {
+                let _ = delete_credential(&next_credential_id);
+            }
+            return Err(error);
+        }
+    };
+    let old_credential_cleanup = if replacement_credential.is_some() {
+        delete_credential_async(previous.credential_id).await
+    } else {
+        Ok(())
+    };
+    let access_result = ensure_workspace_access(&app, &vault_state, Some(permit));
+    old_credential_cleanup?;
+    access_result?;
+    Ok(summary)
+}
+
+#[tauri::command]
 pub async fn remove_offsite_backup_target(
     app: tauri::AppHandle,
     backup_state: tauri::State<'_, OffsiteBackupState>,
@@ -1046,6 +1204,33 @@ fn automatic_backup_due(target: &BackupTargetConfig, now: u64) -> bool {
         .last_automatic_attempt_at_ms
         .is_none_or(|last| now.saturating_sub(last) >= AUTOMATIC_RETRY_DELAY_MS);
     upload_due && retry_due
+}
+
+fn reset_remote_target_status(target: &mut BackupTargetConfig) {
+    target.last_upload_at_ms = None;
+    target.last_verified_at_ms = None;
+    target.last_restore_test_at_ms = None;
+    target.last_restore_test_snapshot_id = None;
+    target.automatic_revision = target.automatic_revision.max(1);
+    target.automatic_uploaded_revision = 0;
+    target.last_automatic_attempt_at_ms = None;
+    target.last_automatic_error = None;
+    target.retention_enabled = false;
+    target.last_retention_cleanup_at_ms = None;
+    target.last_retention_error = None;
+}
+
+fn remote_target_location_changed(
+    target: &BackupTargetConfig,
+    endpoint: &str,
+    region: &str,
+    bucket: &str,
+    prefix: &str,
+) -> bool {
+    target.endpoint != endpoint
+        || target.region.as_deref() != Some(region)
+        || target.bucket.as_deref() != Some(bucket)
+        || target.prefix.as_deref() != Some(prefix)
 }
 
 fn claim_automatic_upload(state: &OffsiteBackupState, target_id: Uuid) -> bool {
@@ -1741,6 +1926,57 @@ mod tests {
             })
             .is_ok()
         );
+    }
+
+    #[test]
+    fn credential_rotation_does_not_invalidate_remote_status() {
+        let target = s3_target("linked-info/v1");
+
+        assert!(!remote_target_location_changed(
+            &target,
+            "https://s3.us-west-004.backblazeb2.com/",
+            "us-west-004",
+            "linked-info-backup",
+            "linked-info/v1",
+        ));
+    }
+
+    #[test]
+    fn changing_remote_location_requires_a_new_backup_and_restore_drill() {
+        let mut target = s3_target("linked-info/v1");
+        target.last_upload_at_ms = Some(10);
+        target.last_verified_at_ms = Some(11);
+        target.last_restore_test_at_ms = Some(12);
+        target.last_restore_test_snapshot_id = Some(Uuid::new_v4());
+        target.automatic_enabled = true;
+        target.automatic_revision = 4;
+        target.automatic_uploaded_revision = 4;
+        target.last_automatic_attempt_at_ms = Some(13);
+        target.last_automatic_error = Some("failure".to_owned());
+        target.retention_enabled = true;
+        target.last_retention_cleanup_at_ms = Some(14);
+        target.last_retention_error = Some("failure".to_owned());
+
+        assert!(remote_target_location_changed(
+            &target,
+            "https://s3.us-west-004.backblazeb2.com/",
+            "us-west-004",
+            "linked-info-backup",
+            "linked-info/v2",
+        ));
+        reset_remote_target_status(&mut target);
+
+        assert_eq!(target.last_upload_at_ms, None);
+        assert_eq!(target.last_verified_at_ms, None);
+        assert_eq!(target.last_restore_test_at_ms, None);
+        assert_eq!(target.last_restore_test_snapshot_id, None);
+        assert_eq!(target.automatic_revision, 4);
+        assert_eq!(target.automatic_uploaded_revision, 0);
+        assert_eq!(target.last_automatic_attempt_at_ms, None);
+        assert_eq!(target.last_automatic_error, None);
+        assert!(!target.retention_enabled);
+        assert_eq!(target.last_retention_cleanup_at_ms, None);
+        assert_eq!(target.last_retention_error, None);
     }
 
     #[test]
