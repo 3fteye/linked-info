@@ -23,7 +23,7 @@ use crate::{
     workspace_file::{
         SensitiveOperation, WorkspaceAccessPermit, WorkspaceVaultState, begin_workspace_access,
         encrypt_offsite_workspace_snapshot, ensure_workspace_access,
-        test_offsite_workspace_restore, workspace_encryption_configured, write_atomically,
+        test_current_offsite_workspace_restore, workspace_encryption_configured, write_atomically,
     },
 };
 
@@ -1019,23 +1019,9 @@ pub async fn test_offsite_backup_restore(
         .map_err(target_error)?
         .ok_or_else(|| "offsite_backup_snapshot_not_found".to_owned())?;
     ensure_workspace_access(&app, &vault_state, Some(permit))?;
-    let encrypted = Zeroizing::new(
-        String::from_utf8(snapshot.payload)
-            .map_err(|_| "offsite_backup_invalid_snapshot".to_owned())?,
-    );
-    let password = Zeroizing::new(password);
-    let access_generation = vault_state.access_generation();
-    let restore_result = tauri::async_runtime::spawn_blocking(move || {
-        test_offsite_workspace_restore(
-            encrypted.as_str(),
-            password.as_str(),
-            Some(&access_generation),
-            Some(permit),
-        )
-    })
-    .await
-    .map_err(|error| error.to_string())?;
-    restore_result?;
+    let encrypted = String::from_utf8(snapshot.payload)
+        .map_err(|_| "offsite_backup_invalid_snapshot".to_owned())?;
+    test_current_offsite_workspace_restore(&app, &vault_state, encrypted, password, permit).await?;
     ensure_workspace_access(&app, &vault_state, Some(permit))?;
     let completed_at_ms = current_time_milliseconds()?;
     update_target_status(&app, &backup_state, target_id, move |config| {

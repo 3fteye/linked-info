@@ -136,7 +136,7 @@ impl WorkspaceFileSlot {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct KdfEnvelope {
     algorithm: String,
@@ -146,7 +146,7 @@ struct KdfEnvelope {
     salt: String,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CipherEnvelope {
     algorithm: String,
@@ -1446,8 +1446,68 @@ pub(crate) fn test_offsite_workspace_restore(
     access_generation: Option<&AtomicU64>,
     permit: Option<WorkspaceAccessPermit>,
 ) -> Result<(), String> {
+    test_offsite_workspace_restore_with_context(contents, password, access_generation, permit, None)
+}
+
+struct CurrentWorkspaceRestoreContext<'a> {
+    metadata: &'a VaultMetadata,
+    data_key: &'a [u8; DATA_KEY_BYTES],
+}
+
+pub(crate) async fn test_current_offsite_workspace_restore(
+    app: &AppHandle,
+    state: &WorkspaceVaultState,
+    contents: String,
+    password: String,
+    permit: WorkspaceAccessPermit,
+) -> Result<(), String> {
+    let store = workspace_store(app).map_err(|error| error.to_string())?;
+    let current_metadata = store
+        .read_vault_metadata()
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "workspace_vault_not_configured".to_owned())?;
+    let current_data_key = state.data_key()?;
+    let access_generation = state.access_generation();
+    let contents = Zeroizing::new(contents);
+    let password = Zeroizing::new(password);
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        test_offsite_workspace_restore_with_context(
+            contents.as_str(),
+            password.as_str(),
+            Some(&access_generation),
+            Some(permit),
+            Some(CurrentWorkspaceRestoreContext {
+                metadata: &current_metadata,
+                data_key: &*current_data_key,
+            }),
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?;
+    ensure_workspace_access(app, state, Some(permit))?;
+    result
+}
+
+fn test_offsite_workspace_restore_with_context(
+    contents: &str,
+    password: &str,
+    access_generation: Option<&AtomicU64>,
+    permit: Option<WorkspaceAccessPermit>,
+    current: Option<CurrentWorkspaceRestoreContext<'_>>,
+) -> Result<(), String> {
     ensure_restore_drill_access(access_generation, permit)?;
-    let (envelope, data_key, plaintext) = open_encrypted_export(contents, password)?;
+    let (envelope, data_key, plaintext) = match open_encrypted_export(contents, password) {
+        Ok(opened) => opened,
+        Err(error) if error == "workspace_vault_invalid_password" && current.is_some() => {
+            let envelope = parse_encrypted_export(contents)?;
+            return Err(classify_restore_password_failure(
+                &envelope,
+                password,
+                current.expect("restore context was checked"),
+            ));
+        }
+        Err(error) => return Err(error),
+    };
     let plaintext = Zeroizing::new(plaintext);
     let expected_workspace = workspace_storage_from_export(plaintext.as_str())
         .map_err(|_| "workspace_restore_invalid_data".to_owned())?;
@@ -1503,6 +1563,32 @@ pub(crate) fn test_offsite_workspace_restore(
         (Err(error), Ok(())) => Err(error),
         (Ok(()), Err(_)) => Err("workspace_restore_drill_cleanup_failed".to_owned()),
         (Err(error), Err(_)) => Err(format!("{error}:workspace_restore_drill_cleanup_failed")),
+    }
+}
+
+fn classify_restore_password_failure(
+    envelope: &EncryptedExportEnvelope,
+    password: &str,
+    current: CurrentWorkspaceRestoreContext<'_>,
+) -> String {
+    let current_password_key = match unwrap_data_key(current.metadata, password) {
+        Ok(data_key) => data_key,
+        Err(_) => return "workspace_restore_password_rejected_by_current_workspace".to_owned(),
+    };
+    if current_password_key != *current.data_key {
+        return "workspace_restore_current_workspace_key_mismatch".to_owned();
+    }
+    if envelope.kdf == current.metadata.kdf
+        && envelope.wrapped_data_key == current.metadata.wrapped_data_key
+    {
+        return "workspace_restore_snapshot_wrap_inconsistent".to_owned();
+    }
+    match decrypt_bytes(&envelope.payload, current.data_key, EXPORT_PAYLOAD_AAD) {
+        Ok(plaintext) => {
+            let _plaintext = Zeroizing::new(plaintext);
+            "workspace_restore_snapshot_wrap_mismatch".to_owned()
+        }
+        Err(_) => "workspace_restore_snapshot_key_mismatch_or_corrupt".to_owned(),
     }
 }
 
@@ -2856,11 +2942,7 @@ fn open_encrypted_export(
     contents: &str,
     password: &str,
 ) -> Result<(EncryptedExportEnvelope, [u8; DATA_KEY_BYTES], String), String> {
-    let envelope: EncryptedExportEnvelope = serde_json::from_str(contents)
-        .map_err(|_| "workspace_export_invalid_encrypted_envelope".to_owned())?;
-    if envelope.format != ENCRYPTED_EXPORT_FORMAT || envelope.version != CRYPTO_VERSION {
-        return Err("workspace_export_invalid_encrypted_envelope".to_owned());
-    }
+    let envelope = parse_encrypted_export(contents)?;
     let metadata = VaultMetadata {
         format: VAULT_FORMAT.to_owned(),
         version: CRYPTO_VERSION,
@@ -2873,6 +2955,15 @@ fn open_encrypted_export(
     let data_key = unwrap_data_key(&metadata, password)?;
     let plaintext = decrypt_export_payload(&envelope, &data_key)?;
     Ok((envelope, data_key, plaintext))
+}
+
+fn parse_encrypted_export(contents: &str) -> Result<EncryptedExportEnvelope, String> {
+    let envelope: EncryptedExportEnvelope = serde_json::from_str(contents)
+        .map_err(|_| "workspace_export_invalid_encrypted_envelope".to_owned())?;
+    if envelope.format != ENCRYPTED_EXPORT_FORMAT || envelope.version != CRYPTO_VERSION {
+        return Err("workspace_export_invalid_encrypted_envelope".to_owned());
+    }
+    Ok(envelope)
 }
 
 fn decrypt_export_payload(
@@ -4309,6 +4400,99 @@ mod tests {
         assert_eq!(
             test_offsite_workspace_restore(&encrypted, "incorrect password", None, None),
             Err("workspace_vault_invalid_password".to_owned())
+        );
+    }
+
+    #[test]
+    fn recovery_drill_distinguishes_current_password_from_snapshot_lineage() {
+        let current_key = random_array::<DATA_KEY_BYTES>().unwrap();
+        let current_metadata =
+            create_vault_metadata("current master password", &current_key, Vec::new()).unwrap();
+        let previous_metadata =
+            create_vault_metadata("previous master password", &current_key, Vec::new()).unwrap();
+        let previous_envelope = parse_encrypted_export(
+            &encrypt_export(
+                &workspace_export("previous-wrapper"),
+                &previous_metadata,
+                &current_key,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            classify_restore_password_failure(
+                &previous_envelope,
+                "not the current password",
+                CurrentWorkspaceRestoreContext {
+                    metadata: &current_metadata,
+                    data_key: &current_key,
+                },
+            ),
+            "workspace_restore_password_rejected_by_current_workspace"
+        );
+        assert_eq!(
+            classify_restore_password_failure(
+                &previous_envelope,
+                "current master password",
+                CurrentWorkspaceRestoreContext {
+                    metadata: &current_metadata,
+                    data_key: &current_key,
+                },
+            ),
+            "workspace_restore_snapshot_wrap_mismatch"
+        );
+
+        let other_key = random_array::<DATA_KEY_BYTES>().unwrap();
+        let other_metadata =
+            create_vault_metadata("other workspace password", &other_key, Vec::new()).unwrap();
+        let other_envelope = parse_encrypted_export(
+            &encrypt_export(
+                &workspace_export("other-lineage"),
+                &other_metadata,
+                &other_key,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            classify_restore_password_failure(
+                &other_envelope,
+                "current master password",
+                CurrentWorkspaceRestoreContext {
+                    metadata: &current_metadata,
+                    data_key: &current_key,
+                },
+            ),
+            "workspace_restore_snapshot_key_mismatch_or_corrupt"
+        );
+    }
+
+    #[test]
+    fn recovery_drill_reports_an_impossible_current_wrapper_failure_separately() {
+        let current_key = random_array::<DATA_KEY_BYTES>().unwrap();
+        let current_metadata =
+            create_vault_metadata("current master password", &current_key, Vec::new()).unwrap();
+        let envelope = parse_encrypted_export(
+            &encrypt_export(
+                &workspace_export("current-lineage"),
+                &current_metadata,
+                &current_key,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            classify_restore_password_failure(
+                &envelope,
+                "current master password",
+                CurrentWorkspaceRestoreContext {
+                    metadata: &current_metadata,
+                    data_key: &current_key,
+                },
+            ),
+            "workspace_restore_snapshot_wrap_inconsistent"
         );
     }
 

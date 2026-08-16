@@ -3116,6 +3116,14 @@ function App({
       setOffsiteRestoreDrillError(
         reason === "workspace_vault_invalid_password"
           ? t("security.invalidPassword")
+          : reason === "workspace_restore_password_rejected_by_current_workspace"
+            ? t("offsiteBackup.errors.currentPasswordRejected")
+            : reason === "workspace_restore_snapshot_wrap_mismatch"
+              ? t("offsiteBackup.errors.snapshotWrapMismatch")
+              : reason === "workspace_restore_snapshot_key_mismatch_or_corrupt"
+                ? t("offsiteBackup.errors.snapshotKeyMismatch")
+                : reason === "workspace_restore_snapshot_wrap_inconsistent"
+                  ? t("offsiteBackup.errors.snapshotWrapInconsistent")
           : t("offsiteBackup.errors.restoreDrill", { reason }),
       );
     } finally {
