@@ -792,19 +792,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cloudflare-backup-worker"
-version = "0.1.0"
-dependencies = [
- "linked-info-backup-port",
- "serde",
- "serde_json",
- "subtle",
- "uuid",
- "worker",
- "worker-macros",
-]
-
-[[package]]
 name = "cloudflare-worker"
 version = "0.1.0"
 dependencies = [

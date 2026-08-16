@@ -3230,8 +3230,6 @@ fn sync_parent_directory(_parent: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cloudflare_backup_target::CloudflareBackupTarget;
-    use linked_info_backup_port::{BackupSnapshot, BackupTarget};
     use std::collections::HashMap;
 
     #[derive(Default)]
@@ -4486,118 +4484,6 @@ mod tests {
         assert_eq!(
             decrypt_export(&encrypted, "correct horse battery").unwrap(),
             "exported contents"
-        );
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    #[ignore = "requires an isolated deployed Cloudflare drill target"]
-    async fn live_cloudflare_backup_restores_in_a_fresh_configuration() {
-        let endpoint = std::env::var("LINKED_INFO_BACKUP_DRILL_ENDPOINT")
-            .expect("LINKED_INFO_BACKUP_DRILL_ENDPOINT must be set");
-        let token = Zeroizing::new(
-            std::env::var("LINKED_INFO_BACKUP_DRILL_TOKEN")
-                .expect("LINKED_INFO_BACKUP_DRILL_TOKEN must be set"),
-        );
-        let target = CloudflareBackupTarget::new(&endpoint, token.to_string())
-            .expect("drill target configuration must be valid");
-        let password = "linked info recovery drill password";
-        let restored_workspace = serde_json::json!({
-            "nodes": [
-                {
-                    "id": "11111111-1111-4111-8111-111111111111",
-                    "name": "recovery-drill-account",
-                    "content": "synthetic secret value"
-                },
-                {
-                    "id": "22222222-2222-4222-8222-222222222222",
-                    "name": "recovery-drill-service",
-                    "content": null
-                }
-            ],
-            "layout": [
-                {
-                    "nodeId": "11111111-1111-4111-8111-111111111111",
-                    "x": 10,
-                    "y": 20
-                },
-                {
-                    "nodeId": "22222222-2222-4222-8222-222222222222",
-                    "x": 310,
-                    "y": 120
-                }
-            ],
-            "references": [{
-                "sourceNodeId": "11111111-1111-4111-8111-111111111111",
-                "targetNodeId": "22222222-2222-4222-8222-222222222222"
-            }],
-            "viewport": { "x": 25, "y": 35, "zoom": 1.25 },
-            "view": { "contentProcessorByNodeId": {} }
-        });
-        validate_workspace_snapshot(&restored_workspace, false)
-            .expect("drill workspace must be valid");
-        let restored = serde_json::json!({
-            "format": WORKSPACE_EXPORT_FORMAT,
-            "version": 2,
-            "exportedAt": "2026-08-13T00:00:00.000Z",
-            "workspace": restored_workspace
-        })
-        .to_string();
-
-        let source_key = random_array::<DATA_KEY_BYTES>().expect("test key generation failed");
-        let source_metadata = create_vault_metadata(password, &source_key, Vec::new())
-            .expect("test vault creation failed");
-        let encrypted = encrypt_export(&restored, &source_metadata, &source_key)
-            .expect("test export encryption failed");
-        let snapshot = BackupSnapshot::new(
-            uuid::Uuid::new_v4(),
-            current_time_milliseconds().expect("system time unavailable"),
-            encrypted.into_bytes(),
-        )
-        .expect("test snapshot creation failed");
-        let snapshot_id = snapshot.metadata.id;
-        let outcome: Result<(), String> = async {
-            let uploaded = target
-                .upload(snapshot)
-                .await
-                .map_err(|error| error.to_string())?;
-            let verified = target
-                .verify(snapshot_id)
-                .await
-                .map_err(|error| error.to_string())?;
-            if verified.metadata != uploaded || verified.downloaded_bytes != uploaded.size_bytes {
-                return Err("drill verification did not match the uploaded snapshot".to_owned());
-            }
-
-            let downloaded = target
-                .download(snapshot_id)
-                .await
-                .map_err(|error| error.to_string())?
-                .ok_or_else(|| "drill snapshot disappeared after upload".to_owned())?;
-            let encrypted = String::from_utf8(downloaded.payload)
-                .map_err(|_| "drill snapshot was not UTF-8 JSON".to_owned())?;
-            if decrypt_export(&encrypted, password)? != restored {
-                return Err("drill downloaded workspace differs from the source".to_owned());
-            }
-            test_offsite_workspace_restore(&encrypted, password, None, None)
-        }
-        .await;
-
-        let deletion = target.delete(snapshot_id).await;
-        if let Err(error) = outcome {
-            panic!("live recovery drill failed before cleanup: {error}");
-        }
-        assert_eq!(
-            deletion,
-            Ok(true),
-            "live recovery drill did not remove its synthetic snapshot"
-        );
-        assert!(
-            target
-                .download(snapshot_id)
-                .await
-                .expect("post-cleanup lookup failed")
-                .is_none(),
-            "synthetic snapshot still exists after the recovery drill"
         );
     }
 }

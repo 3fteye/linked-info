@@ -567,10 +567,6 @@ export const resources = {
         addTargetDescription: "配置一个新的独立远端保存位置。连接信息和凭据只属于这个目标，保存前需要重新验证身份。",
         targetName: "目标名称",
         s3UnifiedDescription: "所有新目标统一使用 S3 兼容接口；服务商模板只负责预填连接参数，不会建立专用适配器。",
-        legacyWorkerTarget: "旧版 Cloudflare Worker 目标",
-        legacyWorkerDescription: "这个目标不能再上传、恢复或管理单个快照。确认当前工作区或其他备份可用后，直接删除它的全部旧远端快照、旧目标配置和旧令牌；随后使用 Cloudflare R2（S3）重新上传。",
-        legacyCleanupTitle: "停用并删除旧备份",
-        legacyCleanupAction: "删除旧快照和目标",
         s3Provider: "服务商模板",
         s3Providers: {
           cloudflareR2: "Cloudflare R2",
@@ -1217,10 +1213,6 @@ export const resources = {
         addTargetDescription: "Configure a new independent remote storage location. Its connection details and credentials belong only to this target, and saving requires reauthentication.",
         targetName: "Target name",
         s3UnifiedDescription: "Every new target uses the same S3-compatible interface. Provider templates only prefill connection parameters; they do not create provider-specific adapters.",
-        legacyWorkerTarget: "Legacy Cloudflare Worker target",
-        legacyWorkerDescription: "This target can no longer upload, restore, or manage individual snapshots. After confirming that the current workspace or another backup is usable, delete every legacy remote snapshot, its local target, and its legacy token, then upload a new backup through Cloudflare R2 (S3).",
-        legacyCleanupTitle: "Retire and delete the legacy backup",
-        legacyCleanupAction: "Delete legacy snapshots and target",
         s3Provider: "Provider template",
         s3Providers: {
           cloudflareR2: "Cloudflare R2",

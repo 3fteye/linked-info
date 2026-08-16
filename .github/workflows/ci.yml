@@ -60,11 +60,10 @@ jobs:
           -p linked-info-storage-memory
           -p linked-info-application
 
-      - name: Check Cloudflare Worker
+      - name: Check Cloudflare node API Worker
         run: >-
           cargo clippy
           -p cloudflare-worker
-          -p cloudflare-backup-worker
           --target wasm32-unknown-unknown -- -D warnings
 
       - name: Install pnpm

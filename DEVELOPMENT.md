@@ -20,7 +20,6 @@
 | `apps/desktop` | React、TypeScript、React Flow 和 Tauri 2 桌面应用 |
 | `apps/desktop/src-tauri` | Rust 桌面壳、本地文件持久化和单实例生命周期 |
 | `apps/cloudflare-worker` | 可选的 Cloudflare Worker HTTP 入口与 D1 绑定 |
-| `apps/cloudflare-backup-worker` | 独立的密文备份 Worker 与 R2 绑定，不复用节点 API 权限 |
 | `crates/domain` | 节点、引用和领域不变量 |
 | `crates/application` | 与存储实现无关的应用用例 |
 | `crates/contracts` | 供应商无关的 API DTO、错误码和 OpenAPI 契约 |
@@ -29,7 +28,7 @@
 | `crates/storage-memory` | 测试和本地用的内存适配器 |
 | `crates/storage-d1` | Cloudflare D1 存储适配器 |
 
-当前桌面应用的正常功能不调用 Worker；只有清除已保存旧目标时会调用旧备份 Worker 的列举和删除接口。节点 API 与桌面本地路径分别演进：
+当前桌面应用不调用 Worker。可选节点 API 与桌面本地路径分别演进；异机备份由桌面 Rust 直接调用标准 S3 兼容接口：
 
 ```mermaid
 flowchart LR
@@ -234,7 +233,6 @@ Worker 的 wasm 检查：
 ```powershell
 rustup target add wasm32-unknown-unknown
 cargo clippy -p cloudflare-worker --target wasm32-unknown-unknown -- -D warnings
-cargo clippy -p cloudflare-backup-worker --target wasm32-unknown-unknown -- -D warnings
 ```
 
 ## 打包
@@ -252,19 +250,11 @@ pnpm tauri build
 
 Cloudflare 不是桌面端的固定依赖。`apps/cloudflare-worker` 通过供应商无关的应用层和存储端口接入 D1；Cloudflare 类型不得进入领域 crate 或桌面 React 组件。
 
-当前 Worker/D1 实现是未被桌面端调用的明文节点 API，不能直接用作秘密工作区备份。异机备份通过独立 `BackupTarget` 端口接入，所有对象存储目标统一由 S3 兼容适配器实现，不能让 R2、D1 或 S3 类型进入加密核心。早期独立 Cloudflare Worker + R2 备份路径已经停用；源码中的旧适配器仅供已配置目标一次性删除旧远端对象和凭据，清理完成后删除，不构成受支持的兼容路径。
-
-旧备份 Worker 与节点 API Worker 是两个部署单元。前者曾接受带应用级授权的不透明加密导出并写入独立 R2 bucket；现在不得新建、上传或用于恢复，只允许列举并删除旧对象。后者继续只承担现有图节点 API。
-
-旧备份 Worker 不再部署或扩展。待现有旧快照实际删除完成后，删除它的源码、构建工作流和桌面旧适配器。
-
-旧 Worker 的隔离恢复演练只记录历史验收结果，不再作为当前发布门禁。当前恢复演练必须通过统一 S3 适配器执行。
+当前 Worker/D1 实现是未被桌面端调用的明文节点 API，不能直接用作秘密工作区备份。异机备份通过独立 `BackupTarget` 端口接入，所有对象存储目标统一由 S3 兼容适配器实现，不能让 R2、D1 或 S3 类型进入加密核心。仓库不包含备份 Worker、对应桌面适配器、构建工作流或旧目标管理入口；旧部署和对象只能由所有者在服务商管理台删除。
 
 设置页还提供针对实际已配置目标的恢复演练。它与“恢复预览”不同：恢复预览用于有意替换当前工作区；恢复演练只在 Rust 临时目录中证明选定快照可建立全新配置，并在成功清理临时数据后写入该目标的 `lastRestoreTestAtMs`。成功结果必须继续留在当前对话框中，直到用户确认关闭；不能用对话框直接消失或设置页视野外的一行状态文字暗示成功。不能用对象列表成功、HTTP 200 或仅比较服务端元数据代替这项验证。
 
 当前远端实现是桌面 Rust 侧唯一的新建路径：通用 S3 兼容适配器。Cloudflare R2、Backblaze B2、Tigris、Oracle OCI 和自定义 S3 只提供配置模板，必须复用同一套 `BackupTarget` 行为与测试。对象固定写入用户选择前缀下的版本化键；列表忽略未知对象，下载后再校验完整密文。S3 endpoint、region、bucket 和 prefix 可以写入非秘密目标配置；访问密钥和可选临时会话令牌只能作为版本化 JSON 凭据写入系统安全存储。
-
-旧 Worker 目标只允许执行“删除全部远端快照并移除目标”：用户重新认证并输入旧目标名称后，逐份删除旧对象；中途失败时保留本机目标和凭据以便继续清理，全部删除成功后再移除旧本机配置和系统凭据。普通上传、列举、下载、恢复、保留、单快照删除和仅移除本机目标均拒绝旧目标，避免遗留不可管理的远端密文。
 
 仓库没有包含远程数据库 ID、API 令牌或已部署地址。`wrangler.jsonc` 中的 D1 `database_id` 保持为 `local`，只有实际创建远程资源时才由部署者在自己的环境中配置。不要提交 `.env`、Wrangler 登录状态、令牌或数据库导出。
 

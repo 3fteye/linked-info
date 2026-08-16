@@ -1,7 +1,6 @@
 [workspace]
 resolver = "2"
 members = [
-    "apps/cloudflare-backup-worker",
     "apps/cloudflare-worker",
     "apps/desktop/src-tauri",
     "crates/application",

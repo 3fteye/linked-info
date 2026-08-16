@@ -735,7 +735,6 @@ test("offsite backup exposes Cloudflare R2 through the shared S3 form", async ({
     "placeholder",
     "https://<ACCOUNT_ID>.r2.cloudflarestorage.com",
   );
-  await expect(page.getByText("Cloudflare Worker + R2", { exact: true })).toHaveCount(0);
 });
 
 test("node drag and pane pan persist their geometry", async ({ page }) => {

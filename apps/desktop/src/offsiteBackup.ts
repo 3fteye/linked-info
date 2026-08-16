@@ -3,7 +3,6 @@ import { invoke } from "@tauri-apps/api/core";
 export interface OffsiteBackupTarget {
   id: string;
   name: string;
-  provider: "cloudflareWorkerR2" | "s3Compatible";
   endpoint: string;
   s3Provider: S3ProviderTemplate | null;
   region: string | null;

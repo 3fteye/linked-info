@@ -19,7 +19,6 @@ use uuid::Uuid;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::{
-    cloudflare_backup_target::CloudflareBackupTarget,
     s3_backup_target::{S3BackupTarget, S3Credentials},
     workspace_file::{
         SensitiveOperation, WorkspaceAccessPermit, WorkspaceVaultState, begin_workspace_access,
@@ -118,7 +117,6 @@ struct AuthenticatedOffsiteBackupConfig {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 enum BackupProviderKind {
-    CloudflareWorkerR2,
     S3Compatible,
 }
 
@@ -183,7 +181,6 @@ struct BackupTargetConfig {
 pub struct BackupTargetSummary {
     id: Uuid,
     name: String,
-    provider: BackupProviderKind,
     endpoint: String,
     s3_provider: Option<S3ProviderTemplate>,
     region: Option<String>,
@@ -292,9 +289,6 @@ pub async fn update_offsite_backup_automatic_settings(
             .iter_mut()
             .find(|target| target.id == target_id)
             .ok_or_else(|| "offsite_backup_target_not_found".to_owned())?;
-        if target.provider == BackupProviderKind::CloudflareWorkerR2 {
-            return Err("offsite_backup_legacy_target_read_only".to_owned());
-        }
         if enabled && !target.automatic_enabled {
             target.automatic_revision = target
                 .automatic_revision
@@ -342,9 +336,6 @@ pub async fn update_offsite_backup_retention_settings(
             .iter_mut()
             .find(|target| target.id == target_id)
             .ok_or_else(|| "offsite_backup_target_not_found".to_owned())?;
-        if target.provider == BackupProviderKind::CloudflareWorkerR2 {
-            return Err("offsite_backup_legacy_target_read_only".to_owned());
-        }
         ensure_retention_enable_allowed(target, enabled)?;
         target.retention_enabled = enabled;
         target.retention_max_snapshots = max_snapshots;
@@ -377,7 +368,7 @@ pub async fn mark_automatic_offsite_backup_pending(
         let mut config = read_config(&path)?;
         let mut changed = false;
         for target in &mut config.targets {
-            if target.provider == BackupProviderKind::S3Compatible && target.automatic_enabled {
+            if target.automatic_enabled {
                 target.automatic_revision = target
                     .automatic_revision
                     .checked_add(1)
@@ -651,7 +642,6 @@ pub async fn remove_offsite_backup_target(
     let permit = vault_state
         .consume_sensitive_authorization(SensitiveOperation::BackupTargetChange, &authorization)?;
     let target = find_target(&app, &backup_state, target_id).await?;
-    ensure_s3_target(&target)?;
     ensure_workspace_access(&app, &vault_state, Some(permit))?;
     remove_target_config_and_credential(&app, &backup_state, &target, target_id).await?;
     ensure_workspace_access(&app, &vault_state, Some(permit))
@@ -672,7 +662,6 @@ pub async fn delete_offsite_backup(
         &authorization,
     )?;
     let config = find_target(&app, &backup_state, target_id).await?;
-    ensure_s3_target(&config)?;
     let target = open_target(&config).await?;
     ensure_workspace_access(&app, &vault_state, Some(permit))?;
     if !target.delete(snapshot_id).await.map_err(target_error)? {
@@ -754,9 +743,6 @@ pub async fn create_offsite_backup(
     let _claim = TargetOperationClaim::acquire(&backup_state, target_id)?;
     let permit = begin_workspace_access(&app, &vault_state)?;
     let target_config = find_target(&app, &backup_state, target_id).await?;
-    if target_config.provider == BackupProviderKind::CloudflareWorkerR2 {
-        return Err("offsite_backup_legacy_target_read_only".to_owned());
-    }
     let uploaded_revision = target_config.automatic_revision;
     let target = open_target(&target_config).await?;
     let encrypted = encrypt_offsite_workspace_snapshot(&app, &vault_state, contents).await?;
@@ -796,7 +782,6 @@ pub async fn list_offsite_backups(
 ) -> Result<BackupListPage, String> {
     let permit = begin_workspace_access(&app, &vault_state)?;
     let config = find_target(&app, &backup_state, target_id).await?;
-    ensure_s3_target(&config)?;
     let page = open_target(&config)
         .await?
         .list(cursor, limit)
@@ -816,7 +801,6 @@ pub async fn download_offsite_backup(
 ) -> Result<DownloadedOffsiteBackup, String> {
     let permit = begin_workspace_access(&app, &vault_state)?;
     let config = find_target(&app, &backup_state, target_id).await?;
-    ensure_s3_target(&config)?;
     let snapshot = open_target(&config)
         .await?
         .download(snapshot_id)
@@ -843,7 +827,6 @@ pub async fn verify_offsite_backup(
 ) -> Result<BackupVerification, String> {
     let permit = begin_workspace_access(&app, &vault_state)?;
     let config = find_target(&app, &backup_state, target_id).await?;
-    ensure_s3_target(&config)?;
     let verification = open_target(&config)
         .await?
         .verify(snapshot_id)
@@ -871,7 +854,6 @@ pub async fn test_offsite_backup_restore(
     let permit = begin_workspace_access(&app, &vault_state)?
         .ok_or_else(|| "workspace_vault_not_configured".to_owned())?;
     let config = find_target(&app, &backup_state, target_id).await?;
-    ensure_s3_target(&config)?;
     let snapshot = open_target(&config)
         .await?
         .download(snapshot_id)
@@ -912,34 +894,25 @@ pub async fn test_offsite_backup_restore(
 
 async fn open_target(config: &BackupTargetConfig) -> Result<Box<dyn BackupTarget>, String> {
     let credential = load_credential_async(config.credential_id.clone()).await?;
-    match config.provider {
-        BackupProviderKind::CloudflareWorkerR2 => {
-            CloudflareBackupTarget::new(&config.endpoint, credential.to_string())
-                .map(|target| Box::new(target) as Box<dyn BackupTarget>)
-                .map_err(target_error)
-        }
-        BackupProviderKind::S3Compatible => {
-            let credentials = parse_s3_credentials(credential.as_str())?;
-            S3BackupTarget::new(
-                &config.endpoint,
-                config
-                    .region
-                    .as_deref()
-                    .ok_or_else(|| "offsite_backup_invalid_config".to_owned())?,
-                config
-                    .bucket
-                    .as_deref()
-                    .ok_or_else(|| "offsite_backup_invalid_config".to_owned())?,
-                config
-                    .prefix
-                    .as_deref()
-                    .ok_or_else(|| "offsite_backup_invalid_config".to_owned())?,
-                credentials,
-            )
-            .map(|target| Box::new(target) as Box<dyn BackupTarget>)
-            .map_err(target_error)
-        }
-    }
+    let credentials = parse_s3_credentials(credential.as_str())?;
+    S3BackupTarget::new(
+        &config.endpoint,
+        config
+            .region
+            .as_deref()
+            .ok_or_else(|| "offsite_backup_invalid_config".to_owned())?,
+        config
+            .bucket
+            .as_deref()
+            .ok_or_else(|| "offsite_backup_invalid_config".to_owned())?,
+        config
+            .prefix
+            .as_deref()
+            .ok_or_else(|| "offsite_backup_invalid_config".to_owned())?,
+        credentials,
+    )
+    .map(|target| Box::new(target) as Box<dyn BackupTarget>)
+    .map_err(target_error)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -998,14 +971,6 @@ async fn find_target(
         .into_iter()
         .find(|target| target.id == target_id)
         .ok_or_else(|| "offsite_backup_target_not_found".to_owned())
-}
-
-fn ensure_s3_target(target: &BackupTargetConfig) -> Result<(), String> {
-    if target.provider == BackupProviderKind::S3Compatible {
-        Ok(())
-    } else {
-        Err("offsite_backup_legacy_target_cleanup_required".to_owned())
-    }
 }
 
 async fn remove_target_config_and_credential(
@@ -1069,9 +1034,7 @@ async fn list_all_snapshots(
 }
 
 fn automatic_backup_due(target: &BackupTargetConfig, now: u64) -> bool {
-    if target.provider != BackupProviderKind::S3Compatible
-        || !target.automatic_enabled
-        || target.automatic_revision <= target.automatic_uploaded_revision
+    if !target.automatic_enabled || target.automatic_revision <= target.automatic_uploaded_revision
     {
         return false;
     }
@@ -1296,15 +1259,9 @@ async fn update_target_status(
 }
 
 fn target_summary(config: &BackupTargetConfig) -> Result<BackupTargetSummary, String> {
-    let maximum_upload_bytes = match config.provider {
-        BackupProviderKind::CloudflareWorkerR2 | BackupProviderKind::S3Compatible => {
-            Some(100 * 1024 * 1024)
-        }
-    };
     Ok(BackupTargetSummary {
         id: config.id,
         name: config.name.clone(),
-        provider: config.provider,
         endpoint: config.endpoint.clone(),
         s3_provider: config.s3_provider,
         region: config.region.clone(),
@@ -1314,7 +1271,7 @@ fn target_summary(config: &BackupTargetConfig) -> Result<BackupTargetSummary, St
         last_upload_at_ms: config.last_upload_at_ms,
         last_verified_at_ms: config.last_verified_at_ms,
         last_restore_test_at_ms: config.last_restore_test_at_ms,
-        maximum_upload_bytes,
+        maximum_upload_bytes: Some(100 * 1024 * 1024),
         automatic_enabled: config.automatic_enabled,
         automatic_interval_hours: config.automatic_interval_hours,
         automatic_pending: config.automatic_revision > config.automatic_uploaded_revision,
@@ -1429,39 +1386,24 @@ fn validate_config(config: &OffsiteBackupConfig) -> Result<(), String> {
     let mut ids = HashSet::new();
     for target in &config.targets {
         validate_target_name(&target.name)?;
-        let provider_config_valid = match target.provider {
-            BackupProviderKind::CloudflareWorkerR2 => {
-                CloudflareBackupTarget::normalize_endpoint(&target.endpoint)
-                    .map(|endpoint| {
-                        endpoint == target.endpoint
-                            && target.s3_provider.is_none()
-                            && target.region.is_none()
-                            && target.bucket.is_none()
-                            && target.prefix.is_none()
-                    })
-                    .unwrap_or(false)
-            }
-            BackupProviderKind::S3Compatible => {
-                let Some(region) = target.region.as_deref() else {
-                    return Err("offsite_backup_invalid_config".to_owned());
-                };
-                let Some(bucket) = target.bucket.as_deref() else {
-                    return Err("offsite_backup_invalid_config".to_owned());
-                };
-                let Some(prefix) = target.prefix.as_deref() else {
-                    return Err("offsite_backup_invalid_config".to_owned());
-                };
-                target.s3_provider.is_some()
-                    && S3BackupTarget::normalize_endpoint(&target.endpoint)
-                        .is_ok_and(|endpoint| endpoint == target.endpoint)
-                    && S3BackupTarget::normalize_region(region)
-                        .is_ok_and(|normalized| normalized == region)
-                    && S3BackupTarget::normalize_bucket(bucket)
-                        .is_ok_and(|normalized| normalized == bucket)
-                    && S3BackupTarget::normalize_prefix(prefix)
-                        .is_ok_and(|normalized| normalized == prefix)
-            }
+        let Some(region) = target.region.as_deref() else {
+            return Err("offsite_backup_invalid_config".to_owned());
         };
+        let Some(bucket) = target.bucket.as_deref() else {
+            return Err("offsite_backup_invalid_config".to_owned());
+        };
+        let Some(prefix) = target.prefix.as_deref() else {
+            return Err("offsite_backup_invalid_config".to_owned());
+        };
+        let provider_config_valid = target.s3_provider.is_some()
+            && S3BackupTarget::normalize_endpoint(&target.endpoint)
+                .is_ok_and(|endpoint| endpoint == target.endpoint)
+            && S3BackupTarget::normalize_region(region)
+                .is_ok_and(|normalized| normalized == region)
+            && S3BackupTarget::normalize_bucket(bucket)
+                .is_ok_and(|normalized| normalized == bucket)
+            && S3BackupTarget::normalize_prefix(prefix)
+                .is_ok_and(|normalized| normalized == prefix);
         if !ids.insert(target.id)
             || !provider_config_valid
             || Uuid::parse_str(&target.credential_id).is_err()
@@ -1510,18 +1452,10 @@ fn validate_config(config: &OffsiteBackupConfig) -> Result<(), String> {
 }
 
 fn targets_conflict(left: &BackupTargetConfig, right: &BackupTargetConfig) -> bool {
-    match (left.provider, right.provider) {
-        (BackupProviderKind::CloudflareWorkerR2, BackupProviderKind::CloudflareWorkerR2) => {
-            left.endpoint == right.endpoint
-        }
-        (BackupProviderKind::S3Compatible, BackupProviderKind::S3Compatible) => {
-            left.endpoint == right.endpoint
-                && left.region == right.region
-                && left.bucket == right.bucket
-                && left.prefix == right.prefix
-        }
-        _ => false,
-    }
+    left.endpoint == right.endpoint
+        && left.region == right.region
+        && left.bucket == right.bucket
+        && left.prefix == right.prefix
 }
 
 fn validate_target_name(name: &str) -> Result<String, String> {
@@ -1668,33 +1602,7 @@ mod tests {
 
     #[test]
     fn config_rejects_duplicate_targets() {
-        let target = BackupTargetConfig {
-            id: Uuid::new_v4(),
-            name: "Cloudflare".to_owned(),
-            provider: BackupProviderKind::CloudflareWorkerR2,
-            endpoint: "https://backup.example.test".to_owned(),
-            s3_provider: None,
-            region: None,
-            bucket: None,
-            prefix: None,
-            credential_id: Uuid::new_v4().to_string(),
-            created_at_ms: 42,
-            last_upload_at_ms: None,
-            last_verified_at_ms: None,
-            last_restore_test_at_ms: None,
-            last_restore_test_snapshot_id: None,
-            automatic_enabled: false,
-            automatic_interval_hours: DEFAULT_AUTOMATIC_INTERVAL_HOURS,
-            automatic_revision: 0,
-            automatic_uploaded_revision: 0,
-            last_automatic_attempt_at_ms: None,
-            last_automatic_error: None,
-            retention_enabled: false,
-            retention_max_snapshots: DEFAULT_RETENTION_MAX_SNAPSHOTS,
-            retention_max_age_days: DEFAULT_RETENTION_MAX_AGE_DAYS,
-            last_retention_cleanup_at_ms: None,
-            last_retention_error: None,
-        };
+        let target = s3_target("linked-info/v1");
         let mut duplicate = target.clone();
         duplicate.id = Uuid::new_v4();
         duplicate.credential_id = Uuid::new_v4().to_string();
@@ -1711,33 +1619,7 @@ mod tests {
 
     #[test]
     fn config_never_serializes_the_backup_token() {
-        let target = BackupTargetConfig {
-            id: Uuid::new_v4(),
-            name: "Cloudflare".to_owned(),
-            provider: BackupProviderKind::CloudflareWorkerR2,
-            endpoint: "https://backup.example.test".to_owned(),
-            s3_provider: None,
-            region: None,
-            bucket: None,
-            prefix: None,
-            credential_id: Uuid::new_v4().to_string(),
-            created_at_ms: 42,
-            last_upload_at_ms: None,
-            last_verified_at_ms: None,
-            last_restore_test_at_ms: None,
-            last_restore_test_snapshot_id: None,
-            automatic_enabled: false,
-            automatic_interval_hours: DEFAULT_AUTOMATIC_INTERVAL_HOURS,
-            automatic_revision: 0,
-            automatic_uploaded_revision: 0,
-            last_automatic_attempt_at_ms: None,
-            last_automatic_error: None,
-            retention_enabled: false,
-            retention_max_snapshots: DEFAULT_RETENTION_MAX_SNAPSHOTS,
-            retention_max_age_days: DEFAULT_RETENTION_MAX_AGE_DAYS,
-            last_retention_cleanup_at_ms: None,
-            last_retention_error: None,
-        };
+        let target = s3_target("linked-info/v1");
         let serialized = serde_json::to_string(&OffsiteBackupConfig {
             targets: vec![target],
             ..OffsiteBackupConfig::default()
@@ -1806,7 +1688,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_restore_drill_requires_revalidation_before_retention_is_enabled() {
+    fn restore_drill_without_snapshot_id_requires_revalidation_before_retention_is_enabled() {
         let mut target = s3_target("linked-info/v1");
         target.last_restore_test_at_ms = Some(42);
 
@@ -1843,7 +1725,6 @@ mod tests {
         target.region = Some("auto".to_owned());
 
         let summary = target_summary(&target).unwrap();
-        assert_eq!(summary.provider, BackupProviderKind::S3Compatible);
         assert_eq!(summary.s3_provider, Some(S3ProviderTemplate::CloudflareR2));
     }
 
@@ -1863,38 +1744,6 @@ mod tests {
     }
 
     #[test]
-    fn existing_cloudflare_config_without_s3_fields_stays_valid() {
-        let json = format!(
-            r#"{{
-              "format": "{CONFIG_FORMAT}",
-              "version": {CONFIG_VERSION},
-              "targets": [{{
-                "id": "{}",
-                "name": "Cloudflare",
-                "provider": "cloudflareWorkerR2",
-                "endpoint": "https://backup.example.test/",
-                "credentialId": "{}",
-                "createdAtMs": 42,
-                "lastUploadAtMs": null,
-                "lastVerifiedAtMs": null,
-                "lastRestoreTestAtMs": null
-              }}]
-            }}"#,
-            Uuid::new_v4(),
-            Uuid::new_v4(),
-        );
-        let config: OffsiteBackupConfig = serde_json::from_str(&json).unwrap();
-
-        assert!(validate_config(&config).is_ok());
-        assert!(config.targets[0].region.is_none());
-        assert!(!config.targets[0].automatic_enabled);
-        assert_eq!(
-            config.targets[0].automatic_interval_hours,
-            DEFAULT_AUTOMATIC_INTERVAL_HOURS
-        );
-    }
-
-    #[test]
     fn automatic_backup_waits_for_changes_and_the_interval() {
         let mut target = s3_target("linked-info/v1");
         target.automatic_enabled = true;
@@ -1906,36 +1755,6 @@ mod tests {
         assert!(automatic_backup_due(&target, 1_000 + 24 * 60 * 60 * 1_000));
         target.automatic_uploaded_revision = 2;
         assert!(!automatic_backup_due(&target, 1_000 + 48 * 60 * 60 * 1_000));
-    }
-
-    #[test]
-    fn legacy_worker_targets_never_schedule_new_uploads() {
-        let mut target = s3_target("linked-info/v1");
-        target.provider = BackupProviderKind::CloudflareWorkerR2;
-        target.s3_provider = None;
-        target.region = None;
-        target.bucket = None;
-        target.prefix = None;
-        target.automatic_enabled = true;
-        target.automatic_revision = 2;
-        target.automatic_uploaded_revision = 1;
-
-        assert!(!automatic_backup_due(&target, u64::MAX));
-    }
-
-    #[test]
-    fn legacy_worker_targets_reject_regular_s3_operations() {
-        let mut target = s3_target("linked-info/v1");
-        target.provider = BackupProviderKind::CloudflareWorkerR2;
-        target.s3_provider = None;
-        target.region = None;
-        target.bucket = None;
-        target.prefix = None;
-
-        assert_eq!(
-            ensure_s3_target(&target),
-            Err("offsite_backup_legacy_target_cleanup_required".to_owned())
-        );
     }
 
     #[test]

@@ -1036,8 +1036,7 @@ function App({
   useEffect(() => {
     if (
       activeView !== "settings" ||
-      selectedOffsiteTargetId === null ||
-      selectedOffsiteTarget?.provider !== "s3Compatible"
+      selectedOffsiteTargetId === null
     ) {
       setOffsitePage(null);
       return;
@@ -4458,42 +4457,15 @@ function App({
                             <div className="offsite-target-summary">
                               <strong>{selectedOffsiteTarget.endpoint}</strong>
                               <small>
-                                {selectedOffsiteTarget.provider ===
-                                "cloudflareWorkerR2"
-                                  ? t("offsiteBackup.legacyWorkerTarget")
-                                  : t("offsiteBackup.s3TargetLocation", {
-                                      provider: t(
-                                        `offsiteBackup.s3Providers.${selectedOffsiteTarget.s3Provider ?? "custom"}`,
-                                      ),
-                                      region: selectedOffsiteTarget.region ?? "",
-                                      bucket: selectedOffsiteTarget.bucket ?? "",
-                                      prefix: selectedOffsiteTarget.prefix ?? "",
-                                    })}
+                                {t("offsiteBackup.s3TargetLocation", {
+                                  provider: t(
+                                    `offsiteBackup.s3Providers.${selectedOffsiteTarget.s3Provider ?? "custom"}`,
+                                  ),
+                                  region: selectedOffsiteTarget.region ?? "",
+                                  bucket: selectedOffsiteTarget.bucket ?? "",
+                                  prefix: selectedOffsiteTarget.prefix ?? "",
+                                })}
                               </small>
-                              {selectedOffsiteTarget.provider ===
-                                "cloudflareWorkerR2" && (
-                                <div className="legacy-target-cleanup">
-                                  <strong>{t("offsiteBackup.legacyCleanupTitle")}</strong>
-                                  <small className="offsite-automatic-error" role="note">
-                                    {t("offsiteBackup.legacyWorkerDescription")}
-                                  </small>
-                                  <button
-                                    className="danger-button"
-                                    disabled={offsiteBusy}
-                                    onClick={() =>
-                                      requestOffsiteSensitiveAction({
-                                        kind: "destroyTarget",
-                                        targetId: selectedOffsiteTarget.id,
-                                        targetName: selectedOffsiteTarget.name,
-                                      })
-                                    }
-                                    type="button"
-                                  >
-                                    <Trash2 aria-hidden="true" size={14} />
-                                    {t("offsiteBackup.legacyCleanupAction")}
-                                  </button>
-                                </div>
-                              )}
                               <small>
                                 {t("offsiteBackup.targetStatus", {
                                   uploaded:
@@ -4528,8 +4500,6 @@ function App({
                                   })}
                                 </small>
                               )}
-                              {selectedOffsiteTarget.provider === "s3Compatible" && (
-                                <>
                               <div className="offsite-automatic-settings">
                                 <label className="switch-setting">
                                   <input
@@ -4698,11 +4668,9 @@ function App({
                                   })}
                                 </small>
                               )}
-                                </>
-                              )}
                             </div>
                           )}
-                          {selectedOffsiteTarget?.provider === "s3Compatible" && (
+                          {selectedOffsiteTarget !== null && (
                             <div className="backup-actions">
                               <button
                                 className="primary-button"

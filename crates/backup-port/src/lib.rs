@@ -5,22 +5,9 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
 
-pub const BACKUP_API_VERSION: u16 = 1;
 pub const BACKUP_CONTENT_TYPE: &str = "application/vnd.linked-info.encrypted-workspace-export+json";
 pub const DEFAULT_BACKUP_PAGE_LIMIT: u16 = 50;
 pub const MAX_BACKUP_PAGE_LIMIT: u16 = 200;
-
-pub mod headers {
-    pub const CREATED_AT_MS: &str = "x-linked-info-created-at-ms";
-    pub const SHA256: &str = "x-linked-info-sha256";
-    pub const SNAPSHOT_ID: &str = "x-linked-info-snapshot-id";
-}
-
-pub mod routes {
-    pub const HEALTH: &str = "/v1/health";
-    pub const BACKUPS: &str = "/v1/backups";
-    pub const BACKUP: &str = "/v1/backups/:snapshot_id";
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -109,22 +96,6 @@ pub struct BackupTargetCapabilities {
 pub struct BackupVerification {
     pub metadata: BackupSnapshotMetadata,
     pub downloaded_bytes: u64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum BackupApiErrorCode {
-    Unauthorized,
-    InvalidRequest,
-    SnapshotNotFound,
-    SnapshotConflict,
-    PayloadTooLarge,
-    StorageFailure,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BackupApiErrorResponse {
-    pub code: BackupApiErrorCode,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]

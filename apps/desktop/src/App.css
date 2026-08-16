@@ -2528,25 +2528,6 @@ h1 {
   color: #933f35;
 }
 
-.legacy-target-cleanup {
-  display: grid;
-  margin-top: 7px;
-  padding: 10px;
-  gap: 8px;
-  border: 1px solid #e3c48d;
-  border-radius: 7px;
-  background: #fff9ed;
-}
-
-.legacy-target-cleanup > strong {
-  color: #754f16;
-  font-size: 12px;
-}
-
-.legacy-target-cleanup .danger-button {
-  justify-self: start;
-}
-
 .offsite-entry-actions {
   display: flex;
   flex: none;
