@@ -87,7 +87,7 @@ import {
 import {
   canvasSelectionAutoPanDelta,
   canvasSelectionRectangle,
-  nodesFullyInsideCanvasSelection,
+  nodesIntersectingCanvasSelection,
   selectedCanvasNodeBoundary,
   type CanvasSelectionPoint,
   type CanvasSelectionRectangle,
@@ -154,6 +154,8 @@ type InformationFlowNode = Node<InformationNodeData, "information">;
 
 interface CanvasSelectionGesture {
   animationFrameId: number | null;
+  autoPanDirection: string | null;
+  autoPanStartedAt: number | null;
   currentClient: CanvasSelectionPoint;
   moved: boolean;
   pointerId: number;
@@ -726,6 +728,7 @@ const noFlowEdges: Edge[] = [];
 const defaultCanvasViewport: Viewport = { x: 0, y: 0, zoom: 1 };
 const minimumCanvasZoom = 0.25;
 const maximumCanvasZoom = 2.2;
+const canvasSelectionAutoPanDelayMs = 160;
 
 export function finalizeNodeDragLayout(
   layout: NodeLayout[],
@@ -1950,7 +1953,7 @@ export default function GraphCanvas({
           viewportForSelection.zoom,
       };
       const flowRectangle = canvasSelectionRectangle(gesture.startFlow, endFlow);
-      const selectedNodeIds = nodesFullyInsideCanvasSelection(
+      const selectedNodeIds = nodesIntersectingCanvasSelection(
         flowNodesRef.current.map((node) => ({
           height: node.measured?.height ?? node.height ?? 92,
           hidden: node.hidden === true || filteredOutNodeIdSet.has(node.id),
@@ -2003,7 +2006,18 @@ export default function GraphCanvas({
             },
             { height: bounds.height, width: bounds.width },
           );
-          if (delta.x !== 0 || delta.y !== 0) {
+          const direction = `${Math.sign(delta.x)},${Math.sign(delta.y)}`;
+          if (delta.x === 0 && delta.y === 0) {
+            gesture.autoPanDirection = null;
+            gesture.autoPanStartedAt = null;
+          } else if (gesture.autoPanDirection !== direction) {
+            gesture.autoPanDirection = direction;
+            gesture.autoPanStartedAt = performance.now();
+          } else if (
+            gesture.autoPanStartedAt !== null &&
+            performance.now() - gesture.autoPanStartedAt >=
+              canvasSelectionAutoPanDelayMs
+          ) {
             const currentViewport = flowInstance.getViewport();
             const nextViewport = {
               x: currentViewport.x + delta.x,
@@ -2074,6 +2088,8 @@ export default function GraphCanvas({
         canvasPointerGestureRef.current = null;
         canvasSelectionGestureRef.current = {
           animationFrameId: null,
+          autoPanDirection: null,
+          autoPanStartedAt: null,
           currentClient: startClient,
           moved: false,
           pointerId: event.pointerId,

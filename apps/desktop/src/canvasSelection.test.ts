@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   canvasSelectionAutoPanDelta,
   canvasSelectionRectangle,
-  nodesFullyInsideCanvasSelection,
+  nodesIntersectingCanvasSelection,
   selectedCanvasNodeBoundary,
 } from "./canvasSelection";
 
@@ -16,22 +16,23 @@ describe("canvas selection", () => {
     });
   });
 
-  it("selects only fully enclosed visible nodes", () => {
+  it("selects visible nodes with a positive-area intersection", () => {
     const rectangle = canvasSelectionRectangle({ x: 0, y: 0 }, { x: 200, y: 200 });
     expect(
-      nodesFullyInsideCanvasSelection(
+      nodesIntersectingCanvasSelection(
         [
           { id: "inside", x: 10, y: 10, width: 50, height: 50, hidden: false },
           { id: "partial", x: 180, y: 20, width: 50, height: 50, hidden: false },
+          { id: "touching", x: 200, y: 20, width: 50, height: 50, hidden: false },
           { id: "hidden", x: 20, y: 20, width: 50, height: 50, hidden: true },
           { id: "outside", x: 300, y: 300, width: 50, height: 50, hidden: false },
         ],
         rectangle,
       ),
-    ).toEqual(new Set(["inside"]));
+    ).toEqual(new Set(["inside", "partial"]));
   });
 
-  it("does not select unrendered nodes outside a narrow auto-panned column", () => {
+  it("keeps an auto-panned selection inside its narrow column", () => {
     const nodes = Array.from({ length: 500 }, (_, index) => {
       const column = index % 10;
       const row = Math.floor(index / 10);
@@ -44,14 +45,14 @@ describe("canvas selection", () => {
         hidden: false,
       };
     });
-    const selected = nodesFullyInsideCanvasSelection(nodes, {
+    const selected = nodesIntersectingCanvasSelection(nodes, {
       x: 30,
       y: 30,
       width: 360,
       height: 800,
     });
     expect(selected).toEqual(
-      new Set(["node-0", "node-10", "node-20", "node-30"]),
+      new Set(["node-0", "node-10", "node-20", "node-30", "node-40"]),
     );
   });
 

@@ -1018,6 +1018,9 @@ test("Shift marquee remains narrow while auto-panning and never selects the full
   await page.keyboard.up("Shift");
 
   await expect(page.getByTestId("canvas-selection-marquee")).toHaveCount(0);
+  await expect
+    .poll(async () => (await storedWorkspace(page))?.viewport?.y)
+    .toBeLessThan(0);
   const boundary = page.getByTestId("selected-node-boundary");
   await expect(boundary).toBeVisible();
   const boundaryBox = await boundary.boundingBox();
@@ -1032,4 +1035,41 @@ test("Shift marquee remains narrow while auto-panning and never selects the full
     const source = nodes.find((candidate) => candidate.id === id);
     expect(source?.x).toBe(100);
   }
+});
+
+test("low-zoom Shift marquee follows the pointer and selects a partially intersected node", async ({
+  page,
+}) => {
+  const nodes = gridNodes(3, 1);
+  await openSyntheticWorkspace(page, nodes, [], { x: 40, y: 30, zoom: 0.11 });
+  const target = node(page, nodes[0].id);
+  const targetBox = await target.boundingBox();
+  expect(targetBox).not.toBeNull();
+  if (targetBox === null) {
+    return;
+  }
+  const start = { x: targetBox.x - 24, y: targetBox.y - 24 };
+  const end = {
+    x: targetBox.x + targetBox.width * 0.7,
+    y: targetBox.y + targetBox.height + 24,
+  };
+
+  await page.keyboard.down("Shift");
+  await page.mouse.move(start.x, start.y);
+  await page.mouse.down();
+  await page.mouse.move(end.x, end.y, { steps: 8 });
+
+  const marqueeBox = await page
+    .getByTestId("canvas-selection-marquee")
+    .boundingBox();
+  expect(marqueeBox).not.toBeNull();
+  expect(marqueeBox!.x).toBeCloseTo(start.x, 0);
+  expect(marqueeBox!.y).toBeCloseTo(start.y, 0);
+  expect(marqueeBox!.width).toBeCloseTo(end.x - start.x, 0);
+  expect(marqueeBox!.height).toBeCloseTo(end.y - start.y, 0);
+
+  await page.mouse.up();
+  await page.keyboard.up("Shift");
+  await expect(target).toHaveAttribute("data-selected", "true");
+  await expect(node(page, nodes[1].id)).toHaveAttribute("data-selected", "false");
 });

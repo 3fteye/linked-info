@@ -31,7 +31,7 @@ export function canvasSelectionRectangle(
   };
 }
 
-export function nodesFullyInsideCanvasSelection(
+export function nodesIntersectingCanvasSelection(
   nodes: readonly CanvasSelectionNode[],
   rectangle: CanvasSelectionRectangle,
 ): Set<string> {
@@ -41,10 +41,10 @@ export function nodesFullyInsideCanvasSelection(
   for (const node of nodes) {
     if (
       !node.hidden &&
-      node.x >= rectangle.x &&
-      node.y >= rectangle.y &&
-      node.x + node.width <= right &&
-      node.y + node.height <= bottom
+      node.x < right &&
+      node.y < bottom &&
+      node.x + node.width > rectangle.x &&
+      node.y + node.height > rectangle.y
     ) {
       selected.add(node.id);
     }
