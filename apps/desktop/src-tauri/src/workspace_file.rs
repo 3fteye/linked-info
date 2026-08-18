@@ -3153,8 +3153,7 @@ fn validate_workspace_snapshot(
                 let height = finite_json_number(Some(height)).ok_or_else(|| {
                     invalid_workspace_data("workspace layout height must be finite")
                 })?;
-                if !(MINIMUM_MANUAL_NODE_WIDTH..=MAXIMUM_MANUAL_NODE_DIMENSION)
-                    .contains(&width)
+                if !(MINIMUM_MANUAL_NODE_WIDTH..=MAXIMUM_MANUAL_NODE_DIMENSION).contains(&width)
                     || !(MINIMUM_MANUAL_NODE_HEIGHT..=MAXIMUM_MANUAL_NODE_DIMENSION)
                         .contains(&height)
                 {
