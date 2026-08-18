@@ -74,6 +74,7 @@ import {
 import { TotpSecondClockProvider } from "./totpContent";
 import type { CanvasOperationItem } from "./canvasOperations";
 import {
+  CONTENT_MARKER_NOTE_MAX_LENGTH,
   contentMarkerRegistry,
   type ContentMarkerSelection,
 } from "./contentMarker";
@@ -111,9 +112,12 @@ interface InformationNodeData extends Record<string, unknown> {
   contentMarkerOptions: readonly ContentMarkerOption[];
   editMarkerLabel: (markerLabel: string) => string;
   markSelectionLabel: string;
+  markerNoteLabel: string;
+  markerNotePlaceholder: string;
   markerPayloadInvalidLabel: (markerLabel: string) => string;
   markerSelectionConflictLabel: string;
   removeMarkerLabel: string;
+  saveMarkerNoteLabel: string;
   unsupportedContentProcessorLabel: (processorId: string) => string;
   contentLabel: string;
   contentPlaceholder: string;
@@ -158,6 +162,20 @@ interface ContentMarkerOption {
   label: string;
 }
 
+function contentMarkerAttributesWithNote(
+  attributes: Readonly<Record<string, string>>,
+  rawNote: string,
+): Record<string, string> {
+  const next = { ...attributes };
+  const note = rawNote.trim();
+  if (note.length === 0) {
+    delete next.note;
+  } else {
+    next.note = note;
+  }
+  return next;
+}
+
 type InformationFlowNode = Node<InformationNodeData, "information">;
 
 interface CanvasSelectionGesture {
@@ -188,9 +206,12 @@ interface GraphLabels {
   copySecretSuccess: string;
   editMarker: (markerLabel: string) => string;
   markSelection: string;
+  markerNote: string;
+  markerNotePlaceholder: string;
   markerPayloadInvalid: (markerLabel: string) => string;
   markerSelectionConflict: string;
   removeMarker: string;
+  saveMarkerNote: string;
   secretCopy: string;
   secretHide: string;
   secretLabel: string;
@@ -322,12 +343,14 @@ export function InformationNodeCard({
   const nodeRef = useRef<HTMLElement>(null);
   const nameInputRef = useRef<HTMLInputElement>(null);
   const contentInputRef = useRef<HTMLTextAreaElement>(null);
+  const contentMarkerNoteInputRef = useRef<HTMLInputElement>(null);
   const contentKeyboardSelectionRef = useRef(false);
   const processorSelectRef = useRef<HTMLSelectElement>(null);
   const processorFocusTransferRef = useRef(false);
   const [draft, setDraft] = useState(() => nodeEditorDraft(data.name, data.content));
   const [contentSelection, setContentSelection] =
     useState<ContentMarkerSelection | null>(null);
+  const [contentMarkerNote, setContentMarkerNote] = useState("");
   const [contentMarkerError, setContentMarkerError] = useState<string | null>(null);
   const wasEditingRef = useRef(data.editing);
 
@@ -338,6 +361,7 @@ export function InformationNodeCard({
 
     setDraft(nodeEditorDraft(data.name, data.content));
     setContentSelection(null);
+    setContentMarkerNote("");
     setContentMarkerError(null);
   }, [data.content, data.editing, data.name]);
 
@@ -432,6 +456,12 @@ export function InformationNodeCard({
       selectionStart,
       selectionEnd,
       markerId,
+      contentSelection.kind === "marker"
+        ? contentMarkerAttributesWithNote(
+            contentSelection.located.marker.attributes,
+            contentMarkerNote,
+          )
+        : undefined,
     );
     if (!result.ok) {
       setContentMarkerError(
@@ -443,12 +473,63 @@ export function InformationNodeCard({
       return;
     }
     setDraft((current) => updateNodeEditorContent(current, result.content));
-    setContentSelection(null);
+    const markerSelection = contentMarkerRegistry.inspectSelection(
+      result.content,
+      Math.max(0, result.caret - 1),
+      Math.max(0, result.caret - 1),
+    );
+    setContentSelection(markerSelection);
+    setContentMarkerNote(
+      markerSelection?.kind === "marker"
+        ? markerSelection.located.marker.attributes.note ?? ""
+        : "",
+    );
     setContentMarkerError(null);
     data.onContentChange(id, result.content);
     window.setTimeout(() => {
-      contentInputRef.current?.focus({ preventScroll: true });
-      contentInputRef.current?.setSelectionRange(result.caret, result.caret);
+      if (markerSelection?.kind === "marker") {
+        contentMarkerNoteInputRef.current?.focus({ preventScroll: true });
+        contentMarkerNoteInputRef.current?.select();
+      } else {
+        contentInputRef.current?.focus({ preventScroll: true });
+        contentInputRef.current?.setSelectionRange(result.caret, result.caret);
+      }
+    }, 0);
+  };
+
+  const saveSelectedMarkerNote = () => {
+    if (contentSelection?.kind !== "marker") {
+      return;
+    }
+    const note = contentMarkerNote.trim();
+    const attributes = contentMarkerAttributesWithNote(
+      contentSelection.located.marker.attributes,
+      note,
+    );
+    const result = contentMarkerRegistry.applyMarker(
+      draft.content,
+      contentSelection.located.start,
+      contentSelection.located.end,
+      contentSelection.located.marker.id,
+      attributes,
+    );
+    if (!result.ok) {
+      setContentMarkerError(data.markerSelectionConflictLabel);
+      return;
+    }
+    const markerSelection = contentMarkerRegistry.inspectSelection(
+      result.content,
+      Math.max(0, result.caret - 1),
+      Math.max(0, result.caret - 1),
+    );
+    setDraft((current) => updateNodeEditorContent(current, result.content));
+    setContentSelection(markerSelection);
+    setContentMarkerNote(note);
+    setContentMarkerError(null);
+    data.onContentChange(id, result.content);
+    window.setTimeout(() => {
+      contentMarkerNoteInputRef.current?.focus({ preventScroll: true });
+      contentMarkerNoteInputRef.current?.setSelectionRange(note.length, note.length);
     }, 0);
   };
 
@@ -483,6 +564,11 @@ export function InformationNodeCard({
       selectionEnd,
     );
     setContentSelection(selection);
+    setContentMarkerNote(
+      selection?.kind === "marker"
+        ? selection.located.marker.attributes.note ?? ""
+        : "",
+    );
     setContentMarkerError(
       selection?.kind === "conflict" ? data.markerSelectionConflictLabel : null,
     );
@@ -504,6 +590,9 @@ export function InformationNodeCard({
         }
       }}
       onKeyDownCapture={(event) => {
+        if (event.target === contentMarkerNoteInputRef.current) {
+          return;
+        }
         if (
           data.editing &&
           event.key === "Escape" &&
@@ -604,6 +693,7 @@ export function InformationNodeCard({
               const content = event.target.value;
               setDraft((current) => updateNodeEditorContent(current, content));
               setContentSelection(null);
+              setContentMarkerNote("");
               setContentMarkerError(null);
               data.onContentChange(id, content);
             }}
@@ -673,14 +763,57 @@ export function InformationNodeCard({
                 </button>
               ))}
               {contentSelection.kind === "marker" && (
-                <button
-                  className="nodrag nowheel graph-node-content-marker-button graph-node-content-marker-remove"
-                  onClick={removeSelectedMarker}
-                  onPointerDown={(event) => event.preventDefault()}
-                  type="button"
-                >
-                  {data.removeMarkerLabel}
-                </button>
+                <>
+                  <label className="graph-node-content-marker-note-field">
+                    <span>{data.markerNoteLabel}</span>
+                    <input
+                      aria-label={data.markerNoteLabel}
+                      className="nodrag nowheel graph-node-content-marker-note-input"
+                      maxLength={CONTENT_MARKER_NOTE_MAX_LENGTH}
+                      onChange={(event) => setContentMarkerNote(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          saveSelectedMarkerNote();
+                        } else if (event.key === "Escape") {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          const marker = contentSelection.located;
+                          setContentMarkerNote(marker.marker.attributes.note ?? "");
+                          contentInputRef.current?.focus({ preventScroll: true });
+                          contentInputRef.current?.setSelectionRange(
+                            marker.payloadStart,
+                            marker.payloadEnd,
+                          );
+                        }
+                      }}
+                      placeholder={data.markerNotePlaceholder}
+                      ref={contentMarkerNoteInputRef}
+                      value={contentMarkerNote}
+                    />
+                  </label>
+                  <button
+                    className="nodrag nowheel graph-node-content-marker-button"
+                    disabled={
+                      contentMarkerNote.trim() ===
+                      (contentSelection.located.marker.attributes.note ?? "")
+                    }
+                    onClick={saveSelectedMarkerNote}
+                    onPointerDown={(event) => event.preventDefault()}
+                    type="button"
+                  >
+                    {data.saveMarkerNoteLabel}
+                  </button>
+                  <button
+                    className="nodrag nowheel graph-node-content-marker-button graph-node-content-marker-remove"
+                    onClick={removeSelectedMarker}
+                    onPointerDown={(event) => event.preventDefault()}
+                    type="button"
+                  >
+                    {data.removeMarkerLabel}
+                  </button>
+                </>
               )}
             </div>
           )}
@@ -1529,9 +1662,12 @@ export default function GraphCanvas({
             contentMarkerOptions,
             editMarkerLabel: labels.editMarker,
             markSelectionLabel: labels.markSelection,
+            markerNoteLabel: labels.markerNote,
+            markerNotePlaceholder: labels.markerNotePlaceholder,
             markerPayloadInvalidLabel: labels.markerPayloadInvalid,
             markerSelectionConflictLabel: labels.markerSelectionConflict,
             removeMarkerLabel: labels.removeMarker,
+            saveMarkerNoteLabel: labels.saveMarkerNote,
             unsupportedContentProcessorLabel: labels.unsupportedContentProcessor,
             contentLabel: labels.content,
             contentPlaceholder: labels.contentPlaceholder,

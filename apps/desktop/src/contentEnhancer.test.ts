@@ -114,14 +114,14 @@ describe("content enhancement", () => {
   it("removes only known sensitive marker payloads from semantic analysis", () => {
     const sanitized = contentForSemanticAnalysis(
       [
-        `2FA [[li:totp]]${syntheticSecret}[[/li]], note`,
-        "API [[li:secret]]synthetic-api-key[[/li]] retained",
+        `2FA [[li:totp note="OpenAI 2FA"]]${syntheticSecret}[[/li]], note`,
+        'API [[li:secret note="GitHub API Key"]]synthetic-api-key[[/li]] retained',
         "Unknown [[li:plugin-x]]payload[[/li]] retained",
       ].join("\n"),
     );
 
     expect(sanitized).toBe(
-      "2FA , note\nAPI  retained\nUnknown [[li:plugin-x]]payload[[/li]] retained",
+      "2FA OpenAI 2FA, note\nAPI GitHub API Key retained\nUnknown [[li:plugin-x]]payload[[/li]] retained",
     );
     expect(sanitized).not.toContain("synthetic-api-key");
     expect(sanitized).not.toContain("jbsw");

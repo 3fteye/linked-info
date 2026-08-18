@@ -17,11 +17,13 @@ describe("content markers", () => {
       {
         kind: "marker",
         marker: {
+          attributes: {},
           definition: expect.objectContaining({
             excludeFromSemanticAnalysis: true,
             id: "totp",
           }),
           id: "totp",
+          malformed: false,
           payload: "jbsw y3dp ehpk 3pxp",
           raw: "[[li:totp]]jbsw y3dp ehpk 3pxp[[/li]]",
         },
@@ -39,6 +41,39 @@ describe("content markers", () => {
     if (segment.kind === "marker") {
       expect(segment.marker.payload).toBe(payload);
     }
+  });
+
+  it("round-trips an escaped single-line description as marker metadata", () => {
+    const note = 'OpenAI｜登录密码 "主用" \\ workstation';
+    const serialized = contentMarkerRegistry.serialize(
+      "secret",
+      "synthetic-value",
+      { note },
+    );
+    const segment = contentMarkerRegistry.segment(serialized)[0];
+
+    expect(serialized).toContain(`note=${JSON.stringify(note)}`);
+    expect(segment).toMatchObject({
+      kind: "marker",
+      marker: {
+        attributes: { note },
+        malformed: false,
+        payload: "synthetic-value",
+      },
+    });
+  });
+
+  it("fails closed for malformed attributes on a known sensitive marker", () => {
+    const source = "before [[li:secret note=broken]]synthetic-value[[/li]] after";
+    expect(contentMarkerRegistry.segment(source)[1]).toMatchObject({
+      kind: "marker",
+      marker: {
+        attributes: {},
+        id: "secret",
+        malformed: true,
+        payload: "synthetic-value",
+      },
+    });
   });
 
   it("preserves unknown and malformed markers as recoverable source", () => {
@@ -124,6 +159,36 @@ describe("content markers", () => {
     });
   });
 
+  it("preserves a description across type changes and restores it as plain text", () => {
+    const source =
+      '[[li:secret note="OpenAI｜2FA"]]JBSWY3DPEHPK3PXP[[/li]]';
+    const caret = source.indexOf("JBSW");
+    const changed = contentMarkerRegistry.applyMarker(
+      source,
+      caret,
+      caret,
+      "totp",
+    );
+    expect(changed).toMatchObject({
+      content: '[[li:totp note="OpenAI｜2FA"]]JBSWY3DPEHPK3PXP[[/li]]',
+      ok: true,
+    });
+    if (!changed.ok) {
+      throw new Error("expected marker type change to succeed");
+    }
+    expect(
+      contentMarkerRegistry.removeMarker(
+        changed.content,
+        changed.content.indexOf("JBSW"),
+        changed.content.indexOf("JBSW"),
+      ),
+    ).toEqual({
+      caret: "OpenAI｜2FA: JBSWY3DPEHPK3PXP".length,
+      content: "OpenAI｜2FA: JBSWY3DPEHPK3PXP",
+      ok: true,
+    });
+  });
+
   it("rejects invalid TOTP payloads and selections that would nest markers", () => {
     expect(
       contentMarkerRegistry.applyMarker("not-a-key", 0, 9, "totp"),
@@ -175,6 +240,9 @@ describe("content markers", () => {
     expect(() => contentMarkerRegistry.serialize("missing", "value")).toThrow(
       "unknown",
     );
+    expect(() =>
+      contentMarkerRegistry.serialize("secret", "value", { note: "line 1\nline 2" }),
+    ).toThrow("one line");
     expect(() => contentMarkerRegistry.wrapSelection("value", 2, 2, "secret")).toThrow(
       "selection",
     );

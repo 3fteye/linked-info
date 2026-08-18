@@ -387,7 +387,7 @@ test("existing content markers can be changed or removed without nesting", async
 }) => {
   const syntheticTotp = "JBSW Y3DP EHPK 3PXP";
   const invalidTotp = "synthetic-invalid-key";
-  const original = `valid ${syntheticTotp}; invalid ${invalidTotp}`;
+  const restored = `valid OpenAI | 2FA: ${syntheticTotp}; invalid ${invalidTotp}`;
   const markedNode = {
     content: `valid [[li:secret]]${syntheticTotp}[[/li]]; invalid ${invalidTotp}`,
     id: syntheticId(1),
@@ -407,6 +407,14 @@ test("existing content markers can be changed or removed without nesting", async
   await expect(textarea).toHaveValue(
     `valid [[li:totp]]${syntheticTotp}[[/li]]; invalid ${invalidTotp}`,
   );
+  const annotatedToolbar = page.getByLabel("Current marker: TOTP");
+  await annotatedToolbar.getByRole("textbox", { name: "Description" }).fill(
+    "OpenAI | 2FA",
+  );
+  await annotatedToolbar.getByRole("button", { name: "Save description" }).click();
+  await expect(textarea).toHaveValue(
+    `valid [[li:totp note="OpenAI | 2FA"]]${syntheticTotp}[[/li]]; invalid ${invalidTotp}`,
+  );
 
   await selectAllTextarea(page);
   await expect(page.getByRole("alert")).toHaveText(
@@ -418,7 +426,7 @@ test("existing content markers can be changed or removed without nesting", async
   const totpToolbar = page.getByLabel("Current marker: TOTP");
   await expect(totpToolbar).toBeVisible();
   await totpToolbar.getByRole("button", { name: "Remove marker" }).click();
-  await expect(textarea).toHaveValue(original);
+  await expect(textarea).toHaveValue(restored);
 });
 
 test("invalid TOTP content is rejected without changing the node", async ({ page }) => {

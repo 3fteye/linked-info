@@ -7,8 +7,10 @@ export interface ContentMarkerDefinition {
 }
 
 export interface ParsedContentMarker {
+  attributes: Readonly<Record<string, string>>;
   definition: ContentMarkerDefinition | null;
   id: string;
+  malformed: boolean;
   payload: string;
   raw: string;
 }
@@ -59,9 +61,20 @@ export type ContentMarkerMutationResult =
       reason: "conflict" | "invalid-payload" | "not-marker" | "selection-required";
     };
 
-const markerOpeningPattern = /\[\[li:([a-z][a-z0-9-]*)\]\]/gu;
+export const CONTENT_MARKER_NOTE_MAX_LENGTH = 160;
+
+const markerOpeningPrefix = "[[li:";
 const markerClosing = "[[/li]]";
 const markerIdPattern = /^[a-z][a-z0-9-]*$/u;
+const markerIdCharacterPattern = /[a-z0-9-]/u;
+const markerAttributeNamePattern = /^[a-z][a-z0-9-]*$/u;
+
+interface ParsedMarkerOpening {
+  attributes: Record<string, string>;
+  end: number;
+  id: string;
+  malformed: boolean;
+}
 
 function appendText(segments: ContentMarkerSegment[], text: string) {
   if (text.length === 0) {
@@ -104,6 +117,111 @@ function decodedPayload(payload: string): string {
   return result;
 }
 
+function quotedAttributeEnd(source: string, start: number): number | null {
+  for (let index = start + 1; index < source.length; index += 1) {
+    if (source[index] === "\\") {
+      index += 1;
+      continue;
+    }
+    if (source[index] === '"') {
+      return index + 1;
+    }
+    if (source[index] === "\r" || source[index] === "\n") {
+      return null;
+    }
+  }
+  return null;
+}
+
+function malformedOpeningEnd(source: string, start: number): number | null {
+  const closing = source.indexOf("]]", start);
+  return closing < 0 ? null : closing + 2;
+}
+
+function parseMarkerOpening(source: string, start: number): ParsedMarkerOpening | null {
+  if (!source.startsWith(markerOpeningPrefix, start)) {
+    return null;
+  }
+  const idStart = start + markerOpeningPrefix.length;
+  let cursor = idStart;
+  while (cursor < source.length && markerIdCharacterPattern.test(source[cursor])) {
+    cursor += 1;
+  }
+  const id = source.slice(idStart, cursor);
+  if (!markerIdPattern.test(id)) {
+    return null;
+  }
+
+  const malformed = (): ParsedMarkerOpening | null => {
+    const end = malformedOpeningEnd(source, cursor);
+    return end === null ? null : { attributes: {}, end, id, malformed: true };
+  };
+  const attributes: Record<string, string> = {};
+  while (cursor < source.length) {
+    if (source.startsWith("]]", cursor)) {
+      return { attributes, end: cursor + 2, id, malformed: false };
+    }
+    if (source[cursor] !== " ") {
+      return malformed();
+    }
+    while (source[cursor] === " ") {
+      cursor += 1;
+    }
+    const nameStart = cursor;
+    while (cursor < source.length && markerIdCharacterPattern.test(source[cursor])) {
+      cursor += 1;
+    }
+    const name = source.slice(nameStart, cursor);
+    if (!markerAttributeNamePattern.test(name) || source[cursor] !== "=") {
+      return malformed();
+    }
+    cursor += 1;
+    if (source[cursor] !== '"') {
+      return malformed();
+    }
+    const valueEnd = quotedAttributeEnd(source, cursor);
+    if (valueEnd === null) {
+      return malformed();
+    }
+    let value: unknown;
+    try {
+      value = JSON.parse(source.slice(cursor, valueEnd));
+    } catch {
+      return malformed();
+    }
+    if (
+      typeof value !== "string" ||
+      Object.prototype.hasOwnProperty.call(attributes, name)
+    ) {
+      return malformed();
+    }
+    attributes[name] = value;
+    cursor = valueEnd;
+  }
+  return null;
+}
+
+function serializedAttributes(attributes: Readonly<Record<string, string>>): string {
+  return Object.entries(attributes)
+    .filter(([, value]) => value.length > 0)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([name, value]) => {
+      if (!markerAttributeNamePattern.test(name)) {
+        throw new Error(`invalid content marker attribute: ${name}`);
+      }
+      if (name === "note") {
+        if (value.includes("\r") || value.includes("\n")) {
+          throw new Error("content marker note must be one line");
+        }
+        if ([...value].length > CONTENT_MARKER_NOTE_MAX_LENGTH) {
+          throw new Error("content marker note is too long");
+        }
+      }
+      return ` ${name}=${JSON.stringify(value)}`;
+    })
+    .join("");
+}
+
 function closingMarkerIndex(source: string, payloadStart: number): number | null {
   for (let index = payloadStart; index < source.length; index += 1) {
     if (source[index] === "\\") {
@@ -128,25 +246,39 @@ function locateContentMarkers(
   definitionFor: (id: string) => ContentMarkerDefinition | null,
 ): LocatedContentMarker[] {
   const markers: LocatedContentMarker[] = [];
-  const openingPattern = new RegExp(
-    markerOpeningPattern.source,
-    markerOpeningPattern.flags,
-  );
-  let match: RegExpExecArray | null;
-  while ((match = openingPattern.exec(source)) !== null) {
-    const start = match.index;
-    const payloadStart = start + match[0].length;
-    const payloadEnd = closingMarkerIndex(source, payloadStart);
-    if (payloadEnd === null) {
+  let searchStart = 0;
+  while (searchStart < source.length) {
+    const start = source.indexOf(markerOpeningPrefix, searchStart);
+    if (start < 0) {
       break;
     }
+    const opening = parseMarkerOpening(source, start);
+    if (opening === null) {
+      searchStart = start + markerOpeningPrefix.length;
+      continue;
+    }
+    const definition = definitionFor(opening.id);
+    if (
+      opening.malformed &&
+      (definition === null || !definition.excludeFromSemanticAnalysis)
+    ) {
+      searchStart = opening.end;
+      continue;
+    }
+    const payloadStart = opening.end;
+    const payloadEnd = closingMarkerIndex(source, payloadStart);
+    if (payloadEnd === null) {
+      searchStart = opening.end;
+      continue;
+    }
     const end = payloadEnd + markerClosing.length;
-    const id = match[1];
     markers.push({
       end,
       marker: {
-        definition: definitionFor(id),
-        id,
+        attributes: opening.attributes,
+        definition,
+        id: opening.id,
+        malformed: opening.malformed,
         payload: decodedPayload(source.slice(payloadStart, payloadEnd)),
         raw: source.slice(start, end),
       },
@@ -154,7 +286,7 @@ function locateContentMarkers(
       payloadStart,
       start,
     });
-    openingPattern.lastIndex = end;
+    searchStart = end;
   }
   return markers;
 }
@@ -252,11 +384,15 @@ export class ContentMarkerRegistry {
     };
   }
 
-  serialize(id: string, payload: string): string {
+  serialize(
+    id: string,
+    payload: string,
+    attributes: Readonly<Record<string, string>> = {},
+  ): string {
     if (!this.definitions.has(id)) {
       throw new Error(`unknown content marker id: ${id}`);
     }
-    return `[[li:${id}]]${escapedPayload(payload)}${markerClosing}`;
+    return `[[li:${id}${serializedAttributes(attributes)}]]${escapedPayload(payload)}${markerClosing}`;
   }
 
   applyMarker(
@@ -264,6 +400,7 @@ export class ContentMarkerRegistry {
     selectionStart: number,
     selectionEnd: number,
     id: string,
+    attributes?: Readonly<Record<string, string>>,
   ): ContentMarkerMutationResult {
     const definition = this.get(id);
     if (definition === null) {
@@ -288,7 +425,12 @@ export class ContentMarkerRegistry {
     const start =
       selection.kind === "marker" ? selection.located.start : selection.start;
     const end = selection.kind === "marker" ? selection.located.end : selection.end;
-    const marker = this.serialize(id, payload);
+    const marker = this.serialize(
+      id,
+      payload,
+      attributes ??
+        (selection.kind === "marker" ? selection.located.marker.attributes : {}),
+    );
     return {
       caret: start + marker.length,
       content: `${content.slice(0, start)}${marker}${content.slice(end)}`,
@@ -313,9 +455,12 @@ export class ContentMarkerRegistry {
       return { ok: false, reason: "not-marker" };
     }
     const { located } = selection;
+    const note = located.marker.attributes.note?.trim() ?? "";
+    const plainText =
+      note.length > 0 ? `${note}: ${located.marker.payload}` : located.marker.payload;
     return {
-      caret: located.start + located.marker.payload.length,
-      content: `${content.slice(0, located.start)}${located.marker.payload}${content.slice(located.end)}`,
+      caret: located.start + plainText.length,
+      content: `${content.slice(0, located.start)}${plainText}${content.slice(located.end)}`,
       ok: true,
     };
   }
@@ -325,8 +470,15 @@ export class ContentMarkerRegistry {
     selectionStart: number,
     selectionEnd: number,
     id: string,
+    attributes: Readonly<Record<string, string>> = {},
   ): WrappedContentSelection {
-    const result = this.applyMarker(content, selectionStart, selectionEnd, id);
+    const result = this.applyMarker(
+      content,
+      selectionStart,
+      selectionEnd,
+      id,
+      attributes,
+    );
     if (!result.ok) {
       throw new Error(`invalid content marker selection: ${result.reason}`);
     }

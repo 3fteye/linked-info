@@ -147,9 +147,11 @@ export class ContentEnhancerRegistry {
         if (segment.marker.definition === null) {
           return segment.marker.raw;
         }
-        return segment.marker.definition.excludeFromSemanticAnalysis
-          ? ""
-          : segment.marker.payload;
+        const note = segment.marker.attributes.note?.trim() ?? "";
+        if (segment.marker.definition.excludeFromSemanticAnalysis) {
+          return note;
+        }
+        return [note, segment.marker.payload].filter((part) => part.length > 0).join(" ");
       })
       .join("");
     const lines: string[] = [];

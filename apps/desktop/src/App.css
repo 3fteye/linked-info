@@ -896,6 +896,31 @@ h1 {
   cursor: default;
 }
 
+.graph-node-content-marker-note-field {
+  display: grid;
+  width: 100%;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 6px;
+}
+
+.graph-node-content-marker-note-input {
+  min-width: 0;
+  height: 27px;
+  border: 1px solid #c7d3cb;
+  border-radius: 4px;
+  padding: 0 7px;
+  outline: 0;
+  color: #27352d;
+  background: #ffffff;
+  font-size: 10px;
+}
+
+.graph-node-content-marker-note-input:focus {
+  border-color: #3f805f;
+  box-shadow: 0 0 0 2px rgb(45 125 88 / 12%);
+}
+
 .graph-node-content-marker-remove {
   border-color: #d9c3bf;
   color: #7b3f37;
@@ -965,6 +990,30 @@ h1 {
 
 .plain-content-segment {
   display: inline;
+}
+
+.content-marker-presentation {
+  display: inline-flex;
+  max-width: 100%;
+  align-items: center;
+  margin: 3px;
+  gap: 5px;
+  vertical-align: middle;
+}
+
+.content-marker-presentation > .totp-content-line,
+.content-marker-presentation > .secret-content {
+  margin: 0;
+}
+
+.content-marker-note {
+  max-width: 116px;
+  overflow: hidden;
+  color: #3f5f4d;
+  font-size: 10px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .totp-content-line {

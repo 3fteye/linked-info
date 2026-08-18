@@ -27,8 +27,10 @@ function marker(
   definition: ContentMarkerDefinition | null,
 ): ParsedContentMarker {
   return {
+    attributes: {},
     definition,
     id,
+    malformed: false,
     payload: "synthetic-payload",
     raw: `[[li:${id}]]synthetic-payload[[/li]]`,
   };

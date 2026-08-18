@@ -79,40 +79,62 @@ function totpDirective(payload: string): TotpDirective {
 }
 
 export function missingContentMarkerPresentation(marker: ParsedContentMarker): string {
+  const note = marker.attributes.note?.trim();
+  const prefix = note === undefined || note.length === 0 ? "" : `${note}: `;
   return marker.definition?.excludeFromSemanticAnalysis === true
-    ? `${marker.id}: ••••••••`
+    ? `${prefix}${marker.id}: ••••••••`
     : marker.raw;
+}
+
+function withMarkerNote(marker: ParsedContentMarker, content: ReactNode): ReactNode {
+  const note = marker.attributes.note?.trim();
+  if (note === undefined || note.length === 0) {
+    return content;
+  }
+  return (
+    <span className="content-marker-presentation">
+      <span className="content-marker-note">{note}</span>
+      {content}
+    </span>
+  );
+}
+
+function markerListText(marker: ParsedContentMarker, masked: string): string {
+  const note = marker.attributes.note?.trim();
+  return note === undefined || note.length === 0 ? masked : `${note}: ${masked}`;
 }
 
 export const contentMarkerPresentationRegistry = new ContentMarkerPresentationRegistry([
   {
     id: "totp",
     renderCanvas(marker, context) {
-      return (
+      return withMarkerNote(
+        marker,
         <TotpContentLine
           directive={totpDirective(marker.payload)}
           labels={context.labels.totp}
           onCopySecret={context.onCopySecret}
-        />
+        />,
       );
     },
-    renderList(_marker, labels) {
-      return maskedTotpLine(labels.totp);
+    renderList(marker, labels) {
+      return markerListText(marker, maskedTotpLine(labels.totp));
     },
   },
   {
     id: "secret",
     renderCanvas(marker, context) {
-      return (
+      return withMarkerNote(
+        marker,
         <SecretContent
           labels={context.labels.secret}
           onCopySecret={context.onCopySecret}
           value={marker.payload}
-        />
+        />,
       );
     },
-    renderList(_marker, labels) {
-      return maskedSecretText(labels.secret);
+    renderList(marker, labels) {
+      return markerListText(marker, maskedSecretText(labels.secret));
     },
   },
 ]);

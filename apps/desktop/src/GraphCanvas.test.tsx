@@ -10,6 +10,15 @@ import {
 
 const nodeId = "11111111-1111-4111-8111-111111111111";
 
+function enterInputValue(input: HTMLInputElement, value: string) {
+  const setter = Object.getOwnPropertyDescriptor(
+    HTMLInputElement.prototype,
+    "value",
+  )?.set;
+  setter?.call(input, value);
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
 function cardProps(overrides: Record<string, unknown> = {}): NodeProps<any> {
   return {
     id: nodeId,
@@ -38,10 +47,13 @@ function cardProps(overrides: Record<string, unknown> = {}): NodeProps<any> {
       ],
       editMarkerLabel: (markerLabel: string) => `Current marker: ${markerLabel}`,
       markSelectionLabel: "Mark selection",
+      markerNoteLabel: "Description",
+      markerNotePlaceholder: "For example: OpenAI | Sign-in password",
       markerPayloadInvalidLabel: (markerLabel: string) =>
         `Invalid ${markerLabel} payload`,
       markerSelectionConflictLabel: "Selection crosses marker boundaries",
       removeMarkerLabel: "Remove marker",
+      saveMarkerNoteLabel: "Save description",
       unsupportedContentProcessorLabel: (processorId: string) =>
         `Unavailable: ${processorId}`,
       contentLabel: "Content",
@@ -264,8 +276,47 @@ describe("InformationNodeCard", () => {
     const marked = "2FA [[li:totp]]jbsw y3dp ehpk 3pxp[[/li]], note";
     expect(textarea.value).toBe(marked);
     expect(props.data.onContentChange).toHaveBeenCalledWith(nodeId, marked);
-    expect(document.activeElement).toBe(textarea);
-    expect(textarea.selectionStart).toBe(marked.indexOf(", note"));
+    expect(document.activeElement).toBe(
+      container.querySelector('.graph-node-content-marker-note-input'),
+    );
+  });
+
+  it("writes and edits a marker description inside the portable source", () => {
+    vi.useFakeTimers();
+    const content = "API synthetic-api-key";
+    const props = cardProps({ content });
+    renderCard(root, props);
+    act(() => vi.runAllTimers());
+    const textarea = container.querySelector("textarea")!;
+    const start = content.indexOf("synthetic");
+
+    act(() => {
+      textarea.focus();
+      textarea.setSelectionRange(start, content.length);
+      textarea.dispatchEvent(new Event("mouseup", { bubbles: true }));
+    });
+    const secret = Array.from(
+      container.querySelectorAll(".graph-node-content-marker-toolbar button"),
+    ).find((button) => button.textContent === "Secret");
+    act(() => (secret as HTMLButtonElement | undefined)?.click());
+    act(() => vi.runAllTimers());
+
+    const noteInput = container.querySelector<HTMLInputElement>(
+      '.graph-node-content-marker-note-input[aria-label="Description"]',
+    )!;
+    act(() => {
+      enterInputValue(noteInput, "OpenAI | API Key");
+    });
+    const save = Array.from(
+      container.querySelectorAll(".graph-node-content-marker-toolbar button"),
+    ).find((button) => button.textContent === "Save description");
+    act(() => (save as HTMLButtonElement | undefined)?.click());
+    act(() => vi.runAllTimers());
+
+    const marked =
+      'API [[li:secret note="OpenAI | API Key"]]synthetic-api-key[[/li]]';
+    expect(textarea.value).toBe(marked);
+    expect(props.data.onContentChange).toHaveBeenLastCalledWith(nodeId, marked);
   });
 
   it("captures a keyboard range once when Shift is released", () => {

@@ -5641,10 +5641,13 @@ function App({
                 editMarker: (markerLabel) =>
                   t("contentMarkers.current", { marker: markerLabel }),
                 markSelection: t("contentMarkers.markSelection"),
+                markerNote: t("contentMarkers.note"),
+                markerNotePlaceholder: t("contentMarkers.notePlaceholder"),
                 markerPayloadInvalid: (markerLabel) =>
                   t("contentMarkers.invalidPayload", { marker: markerLabel }),
                 markerSelectionConflict: t("contentMarkers.selectionConflict"),
                 removeMarker: t("contentMarkers.remove"),
+                saveMarkerNote: t("contentMarkers.saveNote"),
                 secretCopy: contentEnhancementLabels.secret.copy,
                 secretHide: contentEnhancementLabels.secret.hide,
                 secretLabel: contentEnhancementLabels.secret.label,
