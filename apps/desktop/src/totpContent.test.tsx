@@ -30,6 +30,7 @@ describe("TotpContentLine", () => {
 
   afterEach(() => {
     act(() => root.unmount());
+    vi.useRealTimers();
     vi.restoreAllMocks();
     container.remove();
   });
@@ -77,11 +78,20 @@ describe("TotpContentLine", () => {
   });
 
   it("keeps the previous code and copy button in place while the next period loads", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(100_000);
     const directive = parseTotpDirectiveLine(
       "TOTP: otpauth://totp/Synthetic?secret=JBSWY3DPEHPK3PXP&period=1",
     );
     expect(directive).not.toBeNull();
     const onCopySecret = vi.fn();
+    let signCallCount = 0;
+    vi.spyOn(globalThis.crypto.subtle, "sign").mockImplementation(() => {
+      signCallCount += 1;
+      return signCallCount === 1
+        ? Promise.resolve(new Uint8Array(20).buffer)
+        : new Promise<ArrayBuffer>(() => undefined);
+    });
 
     act(() => {
       root.render(
@@ -93,18 +103,16 @@ describe("TotpContentLine", () => {
       );
     });
     await act(async () => {
-      await new Promise((resolve) => window.setTimeout(resolve, 50));
+      await vi.advanceTimersByTimeAsync(0);
     });
     const firstCode = container.querySelector(".totp-content-code")?.textContent;
     expect(firstCode).toMatch(/^\d{6}$/u);
 
-    vi.spyOn(globalThis.crypto.subtle, "sign").mockImplementation(
-      () => new Promise<ArrayBuffer>(() => undefined),
-    );
     await act(async () => {
-      await new Promise((resolve) => window.setTimeout(resolve, 1_100));
+      await vi.advanceTimersByTimeAsync(1_100);
     });
 
+    expect(signCallCount).toBe(2);
     expect(container.querySelector(".totp-content-code")?.textContent).toBe(firstCode);
     expect(container.querySelector(".totp-content-line")?.getAttribute("data-status")).toBe(
       "refreshing",
