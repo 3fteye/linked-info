@@ -371,8 +371,11 @@ export function buildDocumentImportWorkspace(
     })),
   ];
 
-  const maximumX = base.layout.reduce((value, item) => Math.max(value, item.x), 0);
-  const startX = base.layout.length === 0 ? 80 : maximumX + 360;
+  const maximumRight = base.layout.reduce(
+    (value, item) => Math.max(value, item.x + (item.width ?? 270)),
+    0,
+  );
+  const startX = base.layout.length === 0 ? 80 : maximumRight + 90;
   const layout = [
     ...base.layout,
     { nodeId: sourceNodeId, x: startX, y: 80 },

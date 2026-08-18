@@ -4212,6 +4212,7 @@ function App({
                 removed: t("backup.preview.removed"),
                 modified: t("backup.preview.modified"),
                 moved: t("backup.preview.moved"),
+                resized: t("backup.preview.resized"),
                 stacking: t("backup.preview.stacking"),
                 beforePosition: t("backup.preview.beforePosition"),
                 unnamed: t("nodes.unnamed"),
@@ -4220,6 +4221,7 @@ function App({
                 legendRemoved: t("backup.preview.legendRemoved"),
                 legendModified: t("backup.preview.legendModified"),
                 legendMoved: t("backup.preview.legendMoved"),
+                legendResized: t("backup.preview.legendResized"),
               }}
               onCancel={cancelDocumentImportPreview}
               onConfirm={confirmDocumentImport}
@@ -4241,6 +4243,7 @@ function App({
                 removed: t("backup.preview.removed"),
                 modified: t("backup.preview.modified"),
                 moved: t("backup.preview.moved"),
+                resized: t("backup.preview.resized"),
                 stacking: t("backup.preview.stacking"),
                 beforePosition: t("backup.preview.beforePosition"),
                 unnamed: t("nodes.unnamed"),
@@ -4249,6 +4252,7 @@ function App({
                 legendRemoved: t("backup.preview.legendRemoved"),
                 legendModified: t("backup.preview.legendModified"),
                 legendMoved: t("backup.preview.legendMoved"),
+                legendResized: t("backup.preview.legendResized"),
               }}
               onCancel={cancelWorkspaceReplacement}
               onConfirm={() => void applyWorkspaceReplacement()}
@@ -5671,6 +5675,7 @@ function App({
                 empty: t("empty.canvas"),
                 noMatches: t("empty.search"),
                 filterByNode: t("filters.filterByNode"),
+                fitNodeContent: t("nodeSize.fit"),
                 name: t("editor.name"),
                 nameConflict: t("validation.nameUnique"),
                 namePlaceholder: t("editor.namePlaceholder"),
@@ -5704,6 +5709,7 @@ function App({
                 referenceSearchLabel: t("references.searchLabel"),
                 referenceSearchPlaceholder: t("references.searchPlaceholder"),
                 redo: t("actions.redo"),
+                resetNodeSize: t("nodeSize.reset"),
                 removeNodeFilter: t("filters.removeNodeFilter"),
                 sourceHandle: t("references.sourceHandle"),
                 smartReference: t("smartReference.action"),

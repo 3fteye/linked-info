@@ -5,10 +5,16 @@ export interface InformationNode {
 }
 
 export interface NodeLayout {
+  height?: number;
   nodeId: string;
+  width?: number;
   x: number;
   y: number;
 }
+
+export const minimumManualNodeWidth = 220;
+export const minimumManualNodeHeight = 92;
+export const maximumManualNodeDimension = 5_000;
 
 export interface NodeReference {
   sourceNodeId: string;
@@ -134,6 +140,45 @@ export function updateNodeLayoutPositions(
   return changed ? updated : layout;
 }
 
+export function updateNodeLayoutDimensions(
+  layout: NodeLayout[],
+  nodeId: string,
+  dimensions: { height: number; width: number; x: number; y: number } | null,
+): NodeLayout[] {
+  const index = layout.findIndex((item) => item.nodeId === nodeId);
+  if (index < 0) {
+    return layout;
+  }
+  const current = layout[index];
+  const next =
+    dimensions === null
+      ? { nodeId: current.nodeId, x: current.x, y: current.y }
+      : {
+          nodeId: current.nodeId,
+          x: dimensions.x,
+          y: dimensions.y,
+          width: Math.min(
+            maximumManualNodeDimension,
+            Math.max(minimumManualNodeWidth, dimensions.width),
+          ),
+          height: Math.min(
+            maximumManualNodeDimension,
+            Math.max(minimumManualNodeHeight, dimensions.height),
+          ),
+        };
+  if (
+    current.x === next.x &&
+    current.y === next.y &&
+    current.width === next.width &&
+    current.height === next.height
+  ) {
+    return layout;
+  }
+  const updated = [...layout];
+  updated[index] = next;
+  return updated;
+}
+
 function parseWorkspaceSnapshotValue(
   value: unknown,
   allowMissingView: boolean,
@@ -214,8 +259,33 @@ function parseWorkspaceSnapshotValue(
     ) {
       return null;
     }
+    const hasWidth = candidate.width !== undefined;
+    const hasHeight = candidate.height !== undefined;
+    if (hasWidth !== hasHeight) {
+      return null;
+    }
+    let width: number | undefined;
+    let height: number | undefined;
+    if (hasWidth && hasHeight) {
+      if (
+        !isFiniteNumber(candidate.width) ||
+        !isFiniteNumber(candidate.height) ||
+        candidate.width < minimumManualNodeWidth ||
+        candidate.height < minimumManualNodeHeight ||
+        candidate.width > maximumManualNodeDimension ||
+        candidate.height > maximumManualNodeDimension
+      ) {
+        return null;
+      }
+      width = candidate.width;
+      height = candidate.height;
+    }
     layoutNodeIds.add(nodeId);
-    layout.push({ nodeId, x: candidate.x, y: candidate.y });
+    layout.push(
+      width === undefined || height === undefined
+        ? { nodeId, x: candidate.x, y: candidate.y }
+        : { nodeId, x: candidate.x, y: candidate.y, width, height },
+    );
   }
 
   const references: NodeReference[] = [];

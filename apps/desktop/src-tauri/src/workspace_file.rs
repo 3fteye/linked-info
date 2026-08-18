@@ -46,6 +46,9 @@ const SALT_BYTES: usize = 16;
 const NONCE_BYTES: usize = 24;
 const MINIMUM_PASSWORD_CHARACTERS: usize = 15;
 const MAXIMUM_PASSWORD_BYTES: usize = 1_024;
+const MINIMUM_MANUAL_NODE_WIDTH: f64 = 220.0;
+const MINIMUM_MANUAL_NODE_HEIGHT: f64 = 92.0;
+const MAXIMUM_MANUAL_NODE_DIMENSION: f64 = 5_000.0;
 const BACKUP_INTERVAL_MILLISECONDS: u64 = 60 * 60 * 1_000;
 const BACKUP_MAXIMUM_COUNT: usize = 30;
 const BACKUP_MAXIMUM_BYTES: u64 = 512 * 1024 * 1024;
@@ -3141,6 +3144,31 @@ fn validate_workspace_snapshot(
             .ok_or_else(|| invalid_workspace_data("workspace layout x must be finite"))?;
         finite_json_number(item.get("y"))
             .ok_or_else(|| invalid_workspace_data("workspace layout y must be finite"))?;
+        match (item.get("width"), item.get("height")) {
+            (None, None) => {}
+            (Some(width), Some(height)) => {
+                let width = finite_json_number(Some(width)).ok_or_else(|| {
+                    invalid_workspace_data("workspace layout width must be finite")
+                })?;
+                let height = finite_json_number(Some(height)).ok_or_else(|| {
+                    invalid_workspace_data("workspace layout height must be finite")
+                })?;
+                if !(MINIMUM_MANUAL_NODE_WIDTH..=MAXIMUM_MANUAL_NODE_DIMENSION)
+                    .contains(&width)
+                    || !(MINIMUM_MANUAL_NODE_HEIGHT..=MAXIMUM_MANUAL_NODE_DIMENSION)
+                        .contains(&height)
+                {
+                    return Err(invalid_workspace_data(
+                        "workspace layout dimensions are out of range",
+                    ));
+                }
+            }
+            _ => {
+                return Err(invalid_workspace_data(
+                    "workspace layout width and height must be stored together",
+                ));
+            }
+        }
     }
 
     let mut reference_keys = HashSet::with_capacity(references.len());
@@ -3487,6 +3515,17 @@ mod tests {
             serde_json::from_str(&workspace("OpenAI")).unwrap();
         incomplete_layout["layout"] = serde_json::json!([]);
         assert!(validate_storage_envelope(&incomplete_layout.to_string()).is_err());
+
+        let mut partial_dimensions: serde_json::Value =
+            serde_json::from_str(&workspace("OpenAI")).unwrap();
+        partial_dimensions["layout"][0]["width"] = serde_json::json!(480);
+        assert!(validate_storage_envelope(&partial_dimensions.to_string()).is_err());
+
+        let mut manual_dimensions: serde_json::Value =
+            serde_json::from_str(&workspace("OpenAI")).unwrap();
+        manual_dimensions["layout"][0]["width"] = serde_json::json!(480);
+        manual_dimensions["layout"][0]["height"] = serde_json::json!(360);
+        assert!(validate_storage_envelope(&manual_dimensions.to_string()).is_ok());
     }
 
     #[test]

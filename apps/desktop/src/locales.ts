@@ -85,6 +85,7 @@ export const resources = {
           cancel: { action: "取消操作、清除选择或筛选", keys: "Esc" },
           contextMenu: { action: "上下文菜单", keys: "右键" },
           edit: { action: "编辑唯一选中的节点", keys: "Enter / F2 / 双击" },
+          resize: { action: "调整节点大小", keys: "选中后拖动边缘或四角" },
           frame: { action: "适应全部 / 聚焦所选", keys: "Home / F" },
           help: { action: "显示或隐藏本帮助", keys: "?" },
           history: { action: "撤销 / 重做", keys: "Ctrl/⌘+Z / Ctrl+Y / Ctrl/⌘+Shift+Z" },
@@ -107,6 +108,10 @@ export const resources = {
       nodes: {
         noContent: "无内容",
         unnamed: "未命名",
+      },
+      nodeSize: {
+        fit: "适应内容",
+        reset: "重置大小",
       },
       filters: {
         activeReferences: "当前引用筛选",
@@ -549,13 +554,15 @@ export const resources = {
           removed: "将删除",
           modified: "内容变化",
           moved: "位置变化",
+          resized: "尺寸变化",
           stacking: "层级变化",
-          beforePosition: "原位置",
+          beforePosition: "原布局",
           identical: "这份备份与当前工作区完全一致，无需恢复。",
           legendAdded: "绿色：恢复后新增",
           legendRemoved: "红色：恢复后删除",
           legendModified: "橙色：名称或内容变化",
           legendMoved: "蓝色虚线：原位置到恢复后位置",
+          legendResized: "蓝色叠加：恢复前后尺寸不同",
         },
         errors: {
           invalidJson: "所选文件不是有效的 JSON。",
@@ -807,6 +814,7 @@ export const resources = {
           cancel: { action: "Cancel an action, selection, or filters", keys: "Esc" },
           contextMenu: { action: "Context menu", keys: "Right click" },
           edit: { action: "Edit the sole selected node", keys: "Enter / F2 / double click" },
+          resize: { action: "Resize a node", keys: "Select, then drag an edge or corner" },
           frame: { action: "Frame all / focus selection", keys: "Home / F" },
           help: { action: "Show or hide this help", keys: "?" },
           history: { action: "Undo / redo", keys: "Ctrl/⌘+Z / Ctrl+Y / Ctrl/⌘+Shift+Z" },
@@ -829,6 +837,10 @@ export const resources = {
       nodes: {
         noContent: "No content",
         unnamed: "Unnamed",
+      },
+      nodeSize: {
+        fit: "Fit content",
+        reset: "Reset size",
       },
       filters: {
         activeReferences: "Active reference filters",
@@ -1271,13 +1283,15 @@ export const resources = {
           removed: "Will be removed",
           modified: "Content changed",
           moved: "Position changed",
+          resized: "Size changed",
           stacking: "Stacking changed",
-          beforePosition: "Previous position",
+          beforePosition: "Previous layout",
           identical: "This backup is identical to the current workspace. No restore is needed.",
           legendAdded: "Green: added after restore",
           legendRemoved: "Red: removed after restore",
           legendModified: "Orange: name or content changed",
           legendMoved: "Blue dashed: previous to restored position",
+          legendResized: "Blue overlay: size differs before and after restore",
         },
         errors: {
           invalidJson: "The selected file is not valid JSON.",

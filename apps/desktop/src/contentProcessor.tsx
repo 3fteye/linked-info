@@ -120,6 +120,7 @@ export function canvasContentPreview(text: string | null): string | null {
 }
 
 interface NodeContentHostProps {
+  canvasPreviewEnabled?: boolean;
   className?: string;
   content: string | null;
   emptyContent?: ReactNode;
@@ -169,6 +170,7 @@ function listContent(
 }
 
 export function NodeContentHost({
+  canvasPreviewEnabled = true,
   className,
   content,
   emptyContent = null,
@@ -182,7 +184,10 @@ export function NodeContentHost({
   const presentation = resolved.processor.present(content);
   const source =
     presentation.kind === "text" ? presentation.text : presentation.source;
-  const presentedText = variant === "canvas" ? canvasContentPreview(source) : source;
+  const presentedText =
+    variant === "canvas" && canvasPreviewEnabled
+      ? canvasContentPreview(source)
+      : source;
   const enhancedSegments =
     presentedText === null || presentedText.length === 0
       ? []

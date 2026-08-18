@@ -106,6 +106,8 @@ export function compareWorkspaces(
       currentItem !== undefined &&
       (currentItem.x !== layout.x ||
         currentItem.y !== layout.y ||
+        currentItem.width !== layout.width ||
+        currentItem.height !== layout.height ||
         currentStackIndex.get(layout.nodeId) !==
           replacementStackIndex.get(layout.nodeId))
     ) {

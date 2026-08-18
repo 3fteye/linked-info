@@ -35,6 +35,8 @@ function cardProps(overrides: Record<string, unknown> = {}): NodeProps<any> {
     data: {
       name: "Node",
       content: "a".repeat(2_000),
+      contentFullyRendered: true,
+      contentTruncated: false,
       contentProcessorId: null,
       contentProcessorLabel: "Content format",
       contentProcessorOptions: [
@@ -52,8 +54,10 @@ function cardProps(overrides: Record<string, unknown> = {}): NodeProps<any> {
       markerPayloadInvalidLabel: (markerLabel: string) =>
         `Invalid ${markerLabel} payload`,
       markerSelectionConflictLabel: "Selection crosses marker boundaries",
+      manualSize: false,
       removeMarkerLabel: "Remove marker",
       saveMarkerNoteLabel: "Save description",
+      fitNodeContentLabel: "Fit content",
       unsupportedContentProcessorLabel: (processorId: string) =>
         `Unavailable: ${processorId}`,
       contentLabel: "Content",
@@ -96,7 +100,10 @@ function cardProps(overrides: Record<string, unknown> = {}): NodeProps<any> {
       onContentChange: vi.fn(),
       onContentProcessorChange: vi.fn(),
       onCopyDerivedSecret: null,
+      onFitNodeContent: vi.fn(),
       onNameChange: vi.fn(() => true),
+      onResizeEnd: vi.fn(),
+      onResizeStart: vi.fn(),
       onToggleReferenceFilter: vi.fn(),
       ...overrides,
     },

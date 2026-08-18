@@ -533,7 +533,7 @@ test("canvas shortcut help exposes the complete interaction baseline", async ({ 
   await toggle.click();
   await expect(toggle).toHaveAttribute("aria-expanded", "true");
   await expect(popover).toBeVisible();
-  await expect(popover.locator("dt")).toHaveCount(11);
+  await expect(popover.locator("dt")).toHaveCount(12);
   const canvasBounds = await page.getByTestId("graph-canvas").boundingBox();
   const popoverBounds = await popover.boundingBox();
   expect(canvasBounds).not.toBeNull();
@@ -901,7 +901,7 @@ test("settings operation guide demonstrates every shared canvas control", async 
   const stage = page.getByTestId("canvas-operation-stage");
   await expect(page.getByTestId("operation-guide-heading")).toBeVisible();
   await expect(guide).toBeVisible();
-  await expect(guide.locator(".canvas-operation-picker-item")).toHaveCount(11);
+  await expect(guide.locator(".canvas-operation-picker-item")).toHaveCount(12);
 
   const animatedTargets: Record<string, string> = {
     pan: ".canvas-operation-scene",
@@ -910,6 +910,7 @@ test("settings operation guide demonstrates every shared canvas control", async 
     select: ".canvas-operation-marquee",
     selectAll: ".canvas-operation-node-a",
     edit: ".canvas-operation-editor",
+    resize: ".canvas-operation-node-a",
     search: ".canvas-operation-search",
     history: ".canvas-operation-node-c",
     contextMenu: ".canvas-operation-context-menu",
@@ -949,7 +950,7 @@ test("settings operation guide demonstrates every shared canvas control", async 
   await expect(page.getByTestId("operation-guide-heading")).toHaveText(
     "Operation guide",
   );
-  await expect(guide.locator(".canvas-operation-picker-item")).toHaveCount(11);
+  await expect(guide.locator(".canvas-operation-picker-item")).toHaveCount(12);
 });
 
 test("settings operation guide honors reduced motion", async ({ page }) => {
@@ -1094,6 +1095,134 @@ test("node drag and pane pan persist their geometry", async ({ page }) => {
   await expect
     .poll(async () => (await storedWorkspace(page))?.viewport)
     .not.toEqual({ x: 0, y: 0, zoom: 1 });
+});
+
+test("automatic, fitted and manually resized node dimensions persist and reset", async ({
+  page,
+}) => {
+  const targetNode: SyntheticNode = {
+    content: Array.from(
+      { length: 28 },
+      (_, index) => `Synthetic detail line ${index + 1} with wrapped content`,
+    ).join("\n"),
+    id: syntheticId(1),
+    name: "Resizable synthetic node with a deliberately long title",
+    x: 100,
+    y: 100,
+  };
+  const referenceTarget: SyntheticNode = {
+    id: syntheticId(2),
+    name: "Resize reference target",
+    x: 1_200,
+    y: 160,
+  };
+  await openSyntheticWorkspace(page, [targetNode, referenceTarget], [
+    { sourceNodeId: targetNode.id, targetNodeId: referenceTarget.id },
+  ]);
+  let target = node(page, targetNode.id);
+  const referencePath = page.locator(".graph-reference-path").first();
+  await expect(referencePath).toHaveAttribute("d", /^M/u);
+  const automaticBounds = await target.boundingBox();
+  expect(automaticBounds).not.toBeNull();
+  expect(automaticBounds!.width).toBeGreaterThanOrEqual(270);
+  expect(automaticBounds!.width).toBeLessThanOrEqual(481);
+  expect(automaticBounds!.height).toBeLessThanOrEqual(361);
+  await expect(target.locator(".graph-node-fit-button")).toBeVisible();
+
+  await target.locator(".graph-node-fit-button").click();
+  await expect
+    .poll(async () => {
+      const stored = await storedWorkspace(page);
+      const item = stored?.layout?.find(
+        (candidate: { nodeId: string }) => candidate.nodeId === targetNode.id,
+      );
+      return item?.width === undefined || item?.height === undefined
+        ? null
+        : { height: item.height, width: item.width };
+    })
+    .not.toBeNull();
+  const fittedItem = (await storedWorkspace(page))?.layout?.find(
+    (candidate: { nodeId: string }) => candidate.nodeId === targetNode.id,
+  );
+  expect(fittedItem?.width).toEqual(expect.any(Number));
+
+  await target.click({ position: { x: 30, y: 20 } });
+  const resizeHandle = target.locator(
+    ".graph-node-resize-handle.bottom.right",
+  );
+  await expect(resizeHandle).toBeVisible();
+  const beforeResize = await target.boundingBox();
+  const beforeResizePath = await referencePath.getAttribute("d");
+  const handleBounds = await resizeHandle.boundingBox();
+  expect(beforeResize).not.toBeNull();
+  expect(handleBounds).not.toBeNull();
+  await page.mouse.move(
+    handleBounds!.x + handleBounds!.width / 2,
+    handleBounds!.y + handleBounds!.height / 2,
+  );
+  await page.mouse.down();
+  await page.mouse.move(
+    handleBounds!.x + handleBounds!.width / 2 + 120,
+    handleBounds!.y + handleBounds!.height / 2 + 80,
+    { steps: 8 },
+  );
+  await page.mouse.up();
+  await expect
+    .poll(async () => {
+      const stored = await storedWorkspace(page);
+      const item = stored?.layout?.find(
+        (candidate: { nodeId: string }) => candidate.nodeId === targetNode.id,
+      );
+      return item?.width ?? 0;
+    })
+    .toBeGreaterThan(beforeResize!.width + 100);
+  const resizedItem = (await storedWorkspace(page))?.layout?.find(
+    (candidate: { nodeId: string }) => candidate.nodeId === targetNode.id,
+  );
+  expect(resizedItem?.width).toEqual(expect.any(Number));
+  await expect.poll(() => referencePath.getAttribute("d")).not.toBe(
+    beforeResizePath,
+  );
+  const resizedPath = await referencePath.getAttribute("d");
+
+  await page.keyboard.press("Control+z");
+  await expect
+    .poll(async () => {
+      const stored = await storedWorkspace(page);
+      return stored?.layout?.find(
+        (candidate: { nodeId: string }) => candidate.nodeId === targetNode.id,
+      )?.width;
+    })
+    .toBe(fittedItem!.width);
+  await page.keyboard.press("Control+y");
+  await expect
+    .poll(async () => {
+      const stored = await storedWorkspace(page);
+      return stored?.layout?.find(
+        (candidate: { nodeId: string }) => candidate.nodeId === targetNode.id,
+      )?.width;
+    })
+    .toBe(resizedItem!.width);
+
+  await page.reload();
+  target = node(page, targetNode.id);
+  await expect
+    .poll(async () => (await target.boundingBox())?.width ?? 0)
+    .toBeGreaterThan(beforeResize!.width + 100);
+  await expect(referencePath).toHaveAttribute("d", resizedPath!);
+
+  await target.click({ button: "right", position: { x: 30, y: 20 } });
+  await page.getByRole("button", { name: "Reset size" }).click();
+  await expect
+    .poll(async () => {
+      const stored = await storedWorkspace(page);
+      const item = stored?.layout?.find(
+        (candidate: { nodeId: string }) => candidate.nodeId === targetNode.id,
+      );
+      return item !== undefined && !("width" in item) && !("height" in item);
+    })
+    .toBe(true);
+  await expect(target.locator(".graph-node-fit-button")).toBeVisible();
 });
 
 test("Shift-click keeps an explicit boundary around multiple selected nodes", async ({

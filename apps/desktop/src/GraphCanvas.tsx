@@ -5,6 +5,7 @@ import {
   getViewportForBounds,
   Handle,
   MiniMap,
+  NodeResizer,
   Panel,
   Position,
   ReactFlow,
@@ -27,9 +28,11 @@ import {
   GripVertical,
   Keyboard,
   Link2,
+  Maximize2,
   Pencil,
   Plus,
   Redo2,
+  RotateCcw,
   Search,
   Sparkles,
   Trash2,
@@ -55,7 +58,11 @@ import type {
 } from "./workspaceStore";
 import {
   moveNodeLayoutToFront,
+  maximumManualNodeDimension,
+  minimumManualNodeHeight,
+  minimumManualNodeWidth,
   normalizeNodeName,
+  updateNodeLayoutDimensions,
   updateNodeLayoutPositions,
 } from "./workspaceStore";
 import {
@@ -110,14 +117,18 @@ interface InformationNodeData extends Record<string, unknown> {
   contentProcessorLabel: string;
   contentProcessorOptions: readonly ContentProcessorOption[];
   contentMarkerOptions: readonly ContentMarkerOption[];
+  contentFullyRendered: boolean;
+  contentTruncated: boolean;
   editMarkerLabel: (markerLabel: string) => string;
   markSelectionLabel: string;
   markerNoteLabel: string;
   markerNotePlaceholder: string;
   markerPayloadInvalidLabel: (markerLabel: string) => string;
   markerSelectionConflictLabel: string;
+  manualSize: boolean;
   removeMarkerLabel: string;
   saveMarkerNoteLabel: string;
+  fitNodeContentLabel: string;
   unsupportedContentProcessorLabel: (processorId: string) => string;
   contentLabel: string;
   contentPlaceholder: string;
@@ -148,6 +159,12 @@ interface InformationNodeData extends Record<string, unknown> {
   onContentProcessorChange: (nodeId: string, processorId: string) => void;
   onCopyDerivedSecret: ((value: string) => Promise<void>) | null;
   onNameChange: (nodeId: string, name: string) => boolean;
+  onFitNodeContent: (nodeId: string) => void;
+  onResizeEnd: (
+    nodeId: string,
+    dimensions: { height: number; width: number; x: number; y: number },
+  ) => void;
+  onResizeStart: (nodeId: string) => void;
   onToggleReferenceFilter: (nodeId: string) => void;
 }
 
@@ -226,6 +243,7 @@ interface GraphLabels {
   empty: string;
   noMatches: string;
   filterByNode: string;
+  fitNodeContent: string;
   incomingReferenceBrowserFilter: string;
   incomingReferenceBrowserNoMatches: string;
   incomingReferenceBrowserSearch: string;
@@ -246,6 +264,7 @@ interface GraphLabels {
   referenceSearchLabel: string;
   referenceSearchPlaceholder: string;
   redo: string;
+  resetNodeSize: string;
   removeNodeFilter: string;
   sourceHandle: string;
   smartReference: string;
@@ -341,6 +360,7 @@ export function InformationNodeCard({
   selected,
 }: NodeProps<InformationFlowNode>) {
   const nodeRef = useRef<HTMLElement>(null);
+  const nodeBodyRef = useRef<HTMLDivElement>(null);
   const nameInputRef = useRef<HTMLInputElement>(null);
   const contentInputRef = useRef<HTMLTextAreaElement>(null);
   const contentMarkerNoteInputRef = useRef<HTMLInputElement>(null);
@@ -352,6 +372,8 @@ export function InformationNodeCard({
     useState<ContentMarkerSelection | null>(null);
   const [contentMarkerNote, setContentMarkerNote] = useState("");
   const [contentMarkerError, setContentMarkerError] = useState<string | null>(null);
+  const [bodyOverflowing, setBodyOverflowing] = useState(false);
+  const [resizing, setResizing] = useState(false);
   const wasEditingRef = useRef(data.editing);
 
   useEffect(() => {
@@ -386,6 +408,28 @@ export function InformationNodeCard({
     }, 0);
     return () => window.clearTimeout(focusTimer);
   }, [data.editing]);
+
+  useLayoutEffect(() => {
+    const body = nodeBodyRef.current;
+    if (body === null) {
+      return;
+    }
+    const update = () => {
+      setBodyOverflowing(
+        body.scrollHeight > body.clientHeight + 1 ||
+          body.scrollWidth > body.clientWidth + 1,
+      );
+    };
+    update();
+    if (typeof ResizeObserver === "undefined") {
+      return;
+    }
+    const observer = new ResizeObserver(update);
+    observer.observe(body);
+    return () => observer.disconnect();
+  }, [data.content, data.editing, data.manualSize, data.referencedTargets.length]);
+
+  const contentOverflowing = data.contentTruncated || bodyOverflowing;
 
   useLayoutEffect(() => {
     if (!data.editing || !processorFocusTransferRef.current) {
@@ -580,7 +624,9 @@ export function InformationNodeCard({
       className="graph-node"
       data-editing={data.editing}
       data-interactive={data.interactive}
+      data-manual-size={data.manualSize || resizing}
       data-node-id={id}
+      data-overflowing={contentOverflowing}
       data-selected={selected}
       inert={!data.interactive}
       onBlur={commitWhenLeavingNode}
@@ -606,6 +652,23 @@ export function InformationNodeCard({
       }}
       ref={nodeRef}
     >
+      <NodeResizer
+        handleClassName="graph-node-resize-handle"
+        isVisible={selected && data.interactive}
+        lineClassName="graph-node-resize-line"
+        maxHeight={maximumManualNodeDimension}
+        maxWidth={maximumManualNodeDimension}
+        minHeight={minimumManualNodeHeight}
+        minWidth={minimumManualNodeWidth}
+        onResizeEnd={(_event, dimensions) => {
+          setResizing(false);
+          data.onResizeEnd(id, dimensions);
+        }}
+        onResizeStart={() => {
+          setResizing(true);
+          data.onResizeStart(id);
+        }}
+      />
       <Handle
         className="graph-handle graph-handle-target"
         isConnectable={data.interactive ? undefined : false}
@@ -639,6 +702,21 @@ export function InformationNodeCard({
             <strong data-unnamed={data.name === null}>{data.name ?? data.unnamedLabel}</strong>
           </>
         )}
+        {contentOverflowing && (
+          <button
+            aria-label={data.fitNodeContentLabel}
+            className="nodrag nowheel graph-node-fit-button"
+            onClick={(event) => {
+              event.stopPropagation();
+              data.onFitNodeContent(id);
+            }}
+            onPointerDown={(event) => event.stopPropagation()}
+            title={data.fitNodeContentLabel}
+            type="button"
+          >
+            <Maximize2 aria-hidden="true" size={13} />
+          </button>
+        )}
         <button
           aria-label={data.filterActive ? data.removeNodeFilterLabel : data.filterByNodeLabel}
           aria-pressed={data.filterActive}
@@ -655,6 +733,7 @@ export function InformationNodeCard({
           <Filter aria-hidden="true" size={13} />
         </button>
       </header>
+      <div className="graph-node-body" ref={nodeBodyRef}>
       {data.editing ? (
         <div className="graph-node-editor">
           <label className="graph-node-processor-field">
@@ -830,6 +909,7 @@ export function InformationNodeCard({
         </div>
       ) : (
         <NodeContentHost
+          canvasPreviewEnabled={!data.contentFullyRendered}
           className="graph-node-content"
           content={data.content}
           enhancementLabels={data.enhancementLabels}
@@ -887,6 +967,7 @@ export function InformationNodeCard({
           <span>{data.incomingReferencesLabel}</span>
         </button>
       )}
+      </div>
       <Handle
         className="graph-handle graph-handle-source"
         isConnectable={data.interactive ? undefined : false}
@@ -905,6 +986,26 @@ const minimumCanvasZoom = 0.25;
 const maximumCanvasZoom = 2.2;
 const canvasSelectionAutoPanDelayMs = 160;
 const incomingReferenceBrowserRenderLimit = 100;
+const maximumFitContentNodeWidth = 900;
+const maximumFitContentNodeHeight = 1_200;
+
+function flowNodeWidth(node: InformationFlowNode): number {
+  const styledWidth = node.style?.width;
+  return (
+    node.measured?.width ??
+    node.width ??
+    (typeof styledWidth === "number" ? styledWidth : 270)
+  );
+}
+
+function flowNodeHeight(node: InformationFlowNode): number {
+  const styledHeight = node.style?.height;
+  return (
+    node.measured?.height ??
+    node.height ??
+    (typeof styledHeight === "number" ? styledHeight : 92)
+  );
+}
 
 export function finalizeNodeDragLayout(
   layout: NodeLayout[],
@@ -1042,6 +1143,7 @@ export default function GraphCanvas({
     useState<IncomingReferenceBrowserState | null>(null);
   const [navigationFocusNodeId, setNavigationFocusNodeId] =
     useState<string | null>(null);
+  const [fitContentNodeId, setFitContentNodeId] = useState<string | null>(null);
   const [pendingDeletionNodeIds, setPendingDeletionNodeIds] = useState<string[]>([]);
   const [secretClipboardNotice, setSecretClipboardNotice] = useState<{
     error: boolean;
@@ -1060,7 +1162,88 @@ export default function GraphCanvas({
   const [shortcutHelpOpen, setShortcutHelpOpen] = useState(false);
   const flowNodesRef = useRef(flowNodes);
   flowNodesRef.current = flowNodes;
+  const layoutRef = useRef(layout);
+  layoutRef.current = layout;
   const lastFilteredNodeIdsRef = useRef(filteredNodeIds);
+
+  const commitNodeDimensions = useCallback(
+    (
+      nodeId: string,
+      dimensions: { height: number; width: number; x: number; y: number } | null,
+    ) => {
+      const resized = updateNodeLayoutDimensions(
+        layoutRef.current,
+        nodeId,
+        dimensions,
+      );
+      const nextLayout = moveNodeLayoutToFront(resized, nodeId);
+      if (nextLayout !== layoutRef.current) {
+        onLayoutChange(nextLayout);
+      }
+    },
+    [onLayoutChange],
+  );
+
+  const fitNodeContent = useCallback((nodeId: string) => {
+    setFitContentNodeId(nodeId);
+  }, []);
+
+  useEffect(() => {
+    if (fitContentNodeId === null) {
+      return;
+    }
+    const animationFrame = window.requestAnimationFrame(() => {
+      const nodeElement = containerRef.current?.querySelector<HTMLElement>(
+        `.graph-node[data-node-id="${fitContentNodeId}"]`,
+      );
+      const body = nodeElement?.querySelector<HTMLElement>(".graph-node-body");
+      const flowNode = flowNodesRef.current.find(
+        (node) => node.id === fitContentNodeId,
+      );
+      if (
+        nodeElement === undefined ||
+        nodeElement === null ||
+        body == null ||
+        flowNode === undefined
+      ) {
+        setFitContentNodeId(null);
+        return;
+      }
+      const header = nodeElement.querySelector<HTMLElement>(".graph-node-header");
+      const width = Math.min(
+        maximumFitContentNodeWidth,
+        Math.max(
+          minimumManualNodeWidth,
+          nodeElement.offsetWidth,
+          body.scrollWidth + 2,
+          (header?.scrollWidth ?? 0) + 2,
+        ),
+      );
+      const height = Math.min(
+        maximumFitContentNodeHeight,
+        Math.max(
+          minimumManualNodeHeight,
+          (header?.offsetHeight ?? 0) + body.scrollHeight + 2,
+        ),
+      );
+      commitNodeDimensions(fitContentNodeId, {
+        height,
+        width,
+        x: flowNode.position.x,
+        y: flowNode.position.y,
+      });
+      setFitContentNodeId(null);
+    });
+    return () => window.cancelAnimationFrame(animationFrame);
+  }, [commitNodeDimensions, fitContentNodeId]);
+
+  const resetNodeSize = useCallback(
+    (nodeId: string) => {
+      setFitContentNodeId((current) => (current === nodeId ? null : current));
+      commitNodeDimensions(nodeId, null);
+    },
+    [commitNodeDimensions],
+  );
 
   const frameCanvasNodes = useCallback(
     (nodesToFrame: readonly InformationFlowNode[], maximumZoom: number) => {
@@ -1077,13 +1260,13 @@ export default function GraphCanvas({
       const right = Math.max(
         ...nodesToFrame.map(
           (node) =>
-            node.position.x + (node.measured?.width ?? node.width ?? 270),
+            node.position.x + flowNodeWidth(node),
         ),
       );
       const bottom = Math.max(
         ...nodesToFrame.map(
           (node) =>
-            node.position.y + (node.measured?.height ?? node.height ?? 92),
+            node.position.y + flowNodeHeight(node),
         ),
       );
       const nextViewport = getViewportForBounds(
@@ -1445,10 +1628,10 @@ export default function GraphCanvas({
   const liveReferenceNodeGeometry = useMemo(
     () =>
       flowNodes.map((node) => ({
-        height: node.measured?.height ?? node.height ?? 92,
+        height: flowNodeHeight(node),
         hidden: node.hidden === true,
         id: node.id,
-        width: node.measured?.width ?? node.width ?? 270,
+        width: flowNodeWidth(node),
         x: node.position.x,
         y: node.position.y,
       })),
@@ -1570,11 +1753,11 @@ export default function GraphCanvas({
     () =>
       selectedCanvasNodeBoundary(
         flowNodes.map((node) => ({
-          height: node.measured?.height ?? node.height ?? 92,
+          height: flowNodeHeight(node),
           hidden: node.hidden === true || filteredOutNodeIdSet.has(node.id),
           id: node.id,
           selected: node.selected === true,
-          width: node.measured?.width ?? node.width ?? 270,
+          width: flowNodeWidth(node),
           x: node.position.x,
           y: node.position.y,
         })),
@@ -1630,7 +1813,17 @@ export default function GraphCanvas({
         const referencedNodes = referencedNodesBySource.get(node.id) ?? [];
         const incomingNodes = incomingNodesByTarget.get(node.id) ?? [];
         const interactive = !filteredOutNodeIdSet.has(node.id);
+        const manualSize =
+          savedLayout?.width !== undefined && savedLayout.height !== undefined;
+        const contentFullyRendered =
+          editingNodeId === node.id ||
+          manualSize ||
+          fitContentNodeId === node.id;
+        const renderedContent = contentFullyRendered
+          ? node.content
+          : canvasContentPreview(node.content);
         return {
+          ...(currentNode ?? {}),
           connectable: interactive ? undefined : false,
           draggable: interactive ? undefined : false,
           id: node.id,
@@ -1642,20 +1835,24 @@ export default function GraphCanvas({
             : { x: 80 + (index % 4) * 300, y: 80 + Math.floor(index / 4) * 210 },
           selectable: interactive ? undefined : false,
           selected: interactive && (currentNode?.selected ?? false),
-          style: !interactive
-            ? {
+          style: {
+            ...(manualSize
+              ? { height: savedLayout.height, width: savedLayout.width }
+              : {}),
+            ...(!interactive
+              ? {
                 opacity: clampedUnmatchedNodeOpacity / 100,
                 pointerEvents: "none" as const,
-              }
-            : undefined,
+                }
+              : {}),
+          },
           zIndex: stackOrderByNode.get(node.id) ?? index,
           hidden: hiddenNodeIdSet.has(node.id),
           data: {
             name: node.name,
-            content:
-              editingNodeId === node.id
-                ? node.content
-                : canvasContentPreview(node.content),
+            content: renderedContent,
+            contentFullyRendered,
+            contentTruncated: renderedContent !== node.content,
             contentProcessorId: contentProcessorByNodeId[node.id] ?? null,
             contentProcessorLabel: labels.contentProcessor,
             contentProcessorOptions,
@@ -1666,8 +1863,10 @@ export default function GraphCanvas({
             markerNotePlaceholder: labels.markerNotePlaceholder,
             markerPayloadInvalidLabel: labels.markerPayloadInvalid,
             markerSelectionConflictLabel: labels.markerSelectionConflict,
+            manualSize,
             removeMarkerLabel: labels.removeMarker,
             saveMarkerNoteLabel: labels.saveMarkerNote,
+            fitNodeContentLabel: labels.fitNodeContent,
             unsupportedContentProcessorLabel: labels.unsupportedContentProcessor,
             contentLabel: labels.content,
             contentPlaceholder: labels.contentPlaceholder,
@@ -1723,6 +1922,9 @@ export default function GraphCanvas({
             onCopyDerivedSecret:
               onCopySecret === null ? null : copyTextAsSecret,
             onNameChange: onNodeNameChange,
+            onFitNodeContent: fitNodeContent,
+            onResizeEnd: commitNodeDimensions,
+            onResizeStart: onNodeBringToFront,
             onToggleReferenceFilter,
           },
         };
@@ -1733,11 +1935,14 @@ export default function GraphCanvas({
     contentProcessorByNodeId,
     contentProcessorOptions,
     copyTextAsSecret,
+    commitNodeDimensions,
     canvasReferencePresentation,
     editingNodeId,
+    fitContentNodeId,
     clampedUnmatchedNodeOpacity,
     filteredOutNodeIdSet,
     hiddenNodeIdSet,
+    fitNodeContent,
     incomingNodesByTarget,
     labels,
     layoutByNode,
@@ -2240,7 +2445,11 @@ export default function GraphCanvas({
     [filteredOutNodeIdSet, layout, onLayoutChange],
   );
 
-  const positionContextMenu = useCallback((clientX: number, clientY: number) => {
+  const positionContextMenu = useCallback((
+    clientX: number,
+    clientY: number,
+    estimatedHeight = 70,
+  ) => {
     const bounds = containerRef.current?.getBoundingClientRect();
     if (!bounds) {
       return { left: 0, top: 0 };
@@ -2248,7 +2457,10 @@ export default function GraphCanvas({
 
     return {
       left: Math.min(clientX - bounds.left, Math.max(8, bounds.width - 190)),
-      top: Math.min(clientY - bounds.top, Math.max(8, bounds.height - 70)),
+      top: Math.min(
+        clientY - bounds.top,
+        Math.max(8, bounds.height - estimatedHeight - 8),
+      ),
     };
   }, []);
 
@@ -2295,7 +2507,7 @@ export default function GraphCanvas({
       contextMenuSelectionRef.current = [];
       setContextMenu({
         kind: "node",
-        ...positionContextMenu(event.clientX, event.clientY),
+        ...positionContextMenu(event.clientX, event.clientY, 250),
         nodeId: node.id,
         nodeIds:
           selectedNodeIds.length > 1 ? selectedNodeIds : [node.id],
@@ -2334,10 +2546,10 @@ export default function GraphCanvas({
       const flowRectangle = canvasSelectionRectangle(gesture.startFlow, endFlow);
       const selectedNodeIds = nodesIntersectingCanvasSelection(
         flowNodesRef.current.map((node) => ({
-          height: node.measured?.height ?? node.height ?? 92,
+          height: flowNodeHeight(node),
           hidden: node.hidden === true || filteredOutNodeIdSet.has(node.id),
           id: node.id,
-          width: node.measured?.width ?? node.width ?? 270,
+          width: flowNodeWidth(node),
           x: node.position.x,
           y: node.position.y,
         })),
@@ -3156,6 +3368,28 @@ export default function GraphCanvas({
                 <Pencil size={16} />
                 <span>{labels.editNode}</span>
               </button>
+              <button
+                onClick={() => {
+                  fitNodeContent(contextMenu.nodeId);
+                  setContextMenu(null);
+                }}
+                type="button"
+              >
+                <Maximize2 size={16} />
+                <span>{labels.fitNodeContent}</span>
+              </button>
+              {layoutByNode.get(contextMenu.nodeId)?.width !== undefined && (
+                <button
+                  onClick={() => {
+                    resetNodeSize(contextMenu.nodeId);
+                    setContextMenu(null);
+                  }}
+                  type="button"
+                >
+                  <RotateCcw size={16} />
+                  <span>{labels.resetNodeSize}</span>
+                </button>
+              )}
               {onCopySecret !== null &&
                 (nodes.find((node) => node.id === contextMenu.nodeId)?.content
                   ?.length ?? 0) > 0 && (

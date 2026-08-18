@@ -133,6 +133,25 @@ describe("document import", () => {
     );
   });
 
+  it("places imported nodes after the rendered edge of a manually sized node", () => {
+    const base = structuredClone(existing);
+    base.layout[0] = { ...base.layout[0], height: 300, width: 800 };
+    const draft: DocumentImportDraft = {
+      sourceNodeId: "33333333-3333-4333-8333-333333333333",
+      sourceName: "layout.txt",
+      sourceText: "source",
+      sourceHash: "abc",
+      importedAtMs: 0,
+      modelId: "external",
+      candidates: [],
+    };
+
+    const result = buildDocumentImportWorkspace(base, draft);
+    expect(
+      result.workspace.layout.find((item) => item.nodeId === draft.sourceNodeId)?.x,
+    ).toBe(970);
+  });
+
   it("rejects a selected candidate that conflicts with its source node", () => {
     const draft: DocumentImportDraft = {
       sourceNodeId: "33333333-3333-4333-8333-333333333333",

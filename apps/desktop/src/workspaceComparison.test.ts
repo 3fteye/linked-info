@@ -72,6 +72,18 @@ describe("workspace replacement comparison", () => {
     expect(compareWorkspaces(current, replacement).changedLayouts).toBe(2);
   });
 
+  it("counts manual node dimension changes as layout changes", () => {
+    const current = workspace();
+    const replacement = workspace();
+    replacement.layout[0] = {
+      ...replacement.layout[0],
+      height: 360,
+      width: 480,
+    };
+
+    expect(compareWorkspaces(current, replacement).changedLayouts).toBe(1);
+  });
+
   it("does not report retained stacking changes caused only by node removal", () => {
     const current = workspace();
     const replacement = workspace();

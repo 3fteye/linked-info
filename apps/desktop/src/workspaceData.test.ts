@@ -4,6 +4,7 @@ import {
   moveNodeLayoutToFront,
   parseWorkspaceSnapshot,
   persistedNodeNameFromDraft,
+  updateNodeLayoutDimensions,
   updateNodeLayoutPositions,
   type WorkspaceSnapshot,
 } from "./workspaceData";
@@ -65,6 +66,26 @@ describe("parseWorkspaceSnapshot", () => {
     const duplicate = validWorkspace();
     duplicate.layout[1].nodeId = accountId;
     expect(parseWorkspaceSnapshot(duplicate)).toBeNull();
+  });
+
+  it("accepts complete manual dimensions and rejects partial or unsafe sizes", () => {
+    const manual = validWorkspace();
+    manual.layout[0] = {
+      ...manual.layout[0],
+      height: 360,
+      width: 480,
+    };
+    expect(parseWorkspaceSnapshot(manual)?.layout[0]).toEqual(manual.layout[0]);
+
+    const partial = validWorkspace() as WorkspaceSnapshot & {
+      layout: Array<Record<string, unknown>>;
+    };
+    partial.layout[0].width = 480;
+    expect(parseWorkspaceSnapshot(partial)).toBeNull();
+
+    const unsafe = validWorkspace();
+    unsafe.layout[0] = { ...unsafe.layout[0], height: 91, width: 480 };
+    expect(parseWorkspaceSnapshot(unsafe)).toBeNull();
   });
 
   it("rejects dangling and duplicate references", () => {
@@ -155,5 +176,32 @@ describe("updateNodeLayoutPositions", () => {
     const layout = validWorkspace().layout;
 
     expect(updateNodeLayoutPositions(layout, layout)).toBe(layout);
+  });
+});
+
+describe("updateNodeLayoutDimensions", () => {
+  it("stores a manual size and preserves position changes from top or left resizing", () => {
+    const layout = validWorkspace().layout;
+    expect(
+      updateNodeLayoutDimensions(layout, accountId, {
+        height: 420,
+        width: 560,
+        x: -25,
+        y: -35,
+      }),
+    ).toEqual([
+      { nodeId: accountId, x: -25, y: -35, width: 560, height: 420 },
+      layout[1],
+    ]);
+  });
+
+  it("removes only saved dimensions when returning to automatic size", () => {
+    const layout = validWorkspace().layout;
+    layout[0] = { ...layout[0], height: 420, width: 560 };
+    expect(updateNodeLayoutDimensions(layout, accountId, null)[0]).toEqual({
+      nodeId: accountId,
+      x: 10,
+      y: 20,
+    });
   });
 });

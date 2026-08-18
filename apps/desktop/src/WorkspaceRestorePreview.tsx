@@ -44,6 +44,7 @@ interface RestorePreviewLabels {
   removed: string;
   modified: string;
   moved: string;
+  resized: string;
   stacking: string;
   beforePosition: string;
   unnamed: string;
@@ -52,6 +53,7 @@ interface RestorePreviewLabels {
   legendRemoved: string;
   legendModified: string;
   legendMoved: string;
+  legendResized: string;
 }
 
 interface WorkspaceRestorePreviewProps {
@@ -67,6 +69,7 @@ interface PreviewNodeData extends Record<string, unknown> {
   content: string | null;
   status: PreviewNodeStatus;
   badges: string[];
+  manualSize: boolean;
   unnamedLabel: string;
   noContentLabel: string;
 }
@@ -78,12 +81,17 @@ interface NodeDifference {
   removed: boolean;
   modified: boolean;
   moved: boolean;
+  resized: boolean;
   stackingChanged: boolean;
 }
 
 function PreviewNodeCard({ data }: NodeProps<RestoreFlowNode>) {
   return (
-    <article className="restore-preview-node" data-status={data.status}>
+    <article
+      className="restore-preview-node"
+      data-manual-size={data.manualSize}
+      data-status={data.status}
+    >
       <Handle
         className="restore-preview-handle"
         position={Position.Left}
@@ -139,11 +147,16 @@ function makeNode(
       content: node.content,
       status,
       badges,
+      manualSize: layout.width !== undefined && layout.height !== undefined,
       unnamedLabel: labels.unnamed,
       noContentLabel: labels.noContent,
     },
     draggable: false,
     selectable: false,
+    style:
+      layout.width === undefined || layout.height === undefined
+        ? undefined
+        : { height: layout.height, width: layout.width },
     zIndex,
   };
 }
@@ -215,6 +228,11 @@ function nodeDifferences(
         beforeLayout !== undefined &&
         afterLayout !== undefined &&
         (beforeLayout.x !== afterLayout.x || beforeLayout.y !== afterLayout.y),
+      resized:
+        beforeLayout !== undefined &&
+        afterLayout !== undefined &&
+        (beforeLayout.width !== afterLayout.width ||
+          beforeLayout.height !== afterLayout.height),
       stackingChanged:
         before !== undefined &&
         after !== undefined &&
@@ -230,13 +248,16 @@ function badgesFor(
   labels: RestorePreviewLabels,
 ): string[] {
   if (status === "before-position") {
-    return [labels.beforePosition];
+    return difference.resized
+      ? [labels.beforePosition, labels.resized]
+      : [labels.beforePosition];
   }
   const badges: string[] = [];
   if (difference.added) badges.push(labels.added);
   if (difference.removed) badges.push(labels.removed);
   if (difference.modified) badges.push(labels.modified);
   if (difference.moved) badges.push(labels.moved);
+  if (difference.resized) badges.push(labels.resized);
   if (difference.stackingChanged) badges.push(labels.stacking);
   return badges;
 }
@@ -362,7 +383,7 @@ export default function WorkspaceRestorePreview({
       const node = currentNodes.get(layout.nodeId);
       const difference = differences.get(layout.nodeId);
       if (node === undefined || difference === undefined) return;
-      if (difference.removed || difference.moved) {
+      if (difference.removed || difference.moved || difference.resized) {
         const ghostId = `before:${node.id}`;
         beforeEndpoint.set(node.id, ghostId);
         const status: PreviewNodeStatus = difference.removed
@@ -514,6 +535,7 @@ export default function WorkspaceRestorePreview({
             <span data-status="removed">{labels.legendRemoved}</span>
             <span data-status="modified">{labels.legendModified}</span>
             <span data-status="moved">{labels.legendMoved}</span>
+            <span data-status="moved">{labels.legendResized}</span>
           </div>
           {identical && <p className="restore-preview-identical">{labels.identical}</p>}
           <div className="restore-preview-actions">
