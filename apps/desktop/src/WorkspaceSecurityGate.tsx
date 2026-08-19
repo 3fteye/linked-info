@@ -78,7 +78,9 @@ export default function WorkspaceSecurityGate({
         setNotice(
           reason === "workspace_data_key_rotated"
             ? t("security.rotateSuccessLocked")
-            : null,
+            : reason === "workspace_password_changed_locked"
+              ? t("security.changeSuccessLocked")
+              : null,
         );
         setError(
           reason === "workspace_destroy_failed" ||
