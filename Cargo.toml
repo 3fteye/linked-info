@@ -7,6 +7,7 @@ members = [
     "crates/backup-port",
     "crates/contracts",
     "crates/domain",
+    "crates/extension-contracts",
     "crates/storage-d1",
     "crates/storage-memory",
     "crates/storage-port",
@@ -19,9 +20,16 @@ license = "Apache-2.0"
 
 [workspace.dependencies]
 chrono = { version = "0.4", features = ["serde"] }
+ed25519-dalek = { version = "2.2", default-features = false, features = ["std"] }
+regex = "1"
+semver = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 thiserror = "2"
 utoipa = { version = "5", features = ["uuid"] }
 uuid = { version = "1", features = ["serde", "v4", "js"] }
+wasmparser = "0.256"
+wit-component = "0.256"
+wit-parser = "0.256"
+zip = { version = "8.6", default-features = false, features = ["deflate"] }
