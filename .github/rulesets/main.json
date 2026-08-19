@@ -32,7 +32,6 @@
     {
       "type": "required_status_checks",
       "parameters": {
-        "do_not_enforce_on_create_repository": false,
         "required_status_checks": [
           {
             "context": "Windows core, frontend and Worker"
