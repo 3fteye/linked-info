@@ -9,6 +9,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use wasmparser::Validator;
+use wit_parser::Resolve;
 use zip::ZipArchive;
 
 use crate::protocol::{
@@ -213,7 +214,10 @@ pub fn validate_extension_package(
     validate_checksums(&files, checksums_bytes)?;
 
     let wasm = required_file(&files, ENTRYPOINT_PATH)?;
-    if !wasm.starts_with(&WASM_COMPONENT_HEADER) || Validator::new().validate_all(wasm).is_err() {
+    if !wasm.starts_with(&WASM_COMPONENT_HEADER)
+        || Validator::new().validate_all(wasm).is_err()
+        || !component_targets_extension_world(wasm)
+    {
         return Err(ExtensionPackageError::InvalidWasmComponent);
     }
 
@@ -228,6 +232,17 @@ pub fn validate_extension_package(
         file_count: files.len(),
         uncompressed_bytes,
     })
+}
+
+fn component_targets_extension_world(component: &[u8]) -> bool {
+    let mut resolve = Resolve::new();
+    let Ok(package) = resolve.push_str("linked-info-extension.wit", crate::EXTENSION_WIT) else {
+        return false;
+    };
+    let Ok(world) = resolve.select_world(&[package], Some("node-extension")) else {
+        return false;
+    };
+    wit_component::targets(&resolve, world, component).is_ok()
 }
 
 fn required_file<'a>(
@@ -502,10 +517,27 @@ fn validate_schema_node(schema: &Value, depth: usize) -> Result<(), ExtensionPac
             validate_metadata_value(value, depth + 1)?;
         }
     }
-    if let (Some(minimum), Some(maximum)) = (
-        object.get("minimum").and_then(Value::as_f64),
-        object.get("maximum").and_then(Value::as_f64),
-    ) && minimum > maximum
+    let minimum = object
+        .get("minimum")
+        .map(|value| {
+            value
+                .as_f64()
+                .ok_or(ExtensionPackageError::InvalidMetadataSchema)
+        })
+        .transpose()?;
+    let maximum = object
+        .get("maximum")
+        .map(|value| {
+            value
+                .as_f64()
+                .ok_or(ExtensionPackageError::InvalidMetadataSchema)
+        })
+        .transpose()?;
+    if (minimum.is_some() || maximum.is_some()) && !matches!(value_type, "number" | "integer") {
+        return Err(ExtensionPackageError::InvalidMetadataSchema);
+    }
+    if let (Some(minimum), Some(maximum)) = (minimum, maximum)
+        && minimum > maximum
     {
         return Err(ExtensionPackageError::InvalidMetadataSchema);
     }
@@ -677,6 +709,8 @@ mod tests {
 
     use ed25519_dalek::{Signer, SigningKey};
     use serde_json::json;
+    use wit_component::{ComponentEncoder, StringEncoding, dummy_module, embed_component_metadata};
+    use wit_parser::ManglingAndAbi;
     use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
 
     use super::*;
@@ -748,7 +782,7 @@ mod tests {
                 MANIFEST_PATH.to_owned(),
                 serde_json::to_vec(&manifest(signing_key)).unwrap(),
             ),
-            (ENTRYPOINT_PATH.to_owned(), WASM_COMPONENT_HEADER.to_vec()),
+            (ENTRYPOINT_PATH.to_owned(), valid_wasm_component()),
             (METADATA_SCHEMA_PATH.to_owned(), metadata_schema()),
             (
                 "locales/en.json".to_owned(),
@@ -759,6 +793,24 @@ mod tests {
                 serde_json::to_vec(&json!({ "processor.label": "JSON 工具" })).unwrap(),
             ),
         ])
+    }
+
+    fn valid_wasm_component() -> Vec<u8> {
+        let mut resolve = Resolve::new();
+        let package = resolve
+            .push_str("linked-info-extension.wit", crate::EXTENSION_WIT)
+            .unwrap();
+        let world = resolve
+            .select_world(&[package], Some("node-extension"))
+            .unwrap();
+        let mut module = dummy_module(&resolve, world, ManglingAndAbi::Standard32);
+        embed_component_metadata(&mut module, &resolve, world, StringEncoding::UTF8).unwrap();
+        ComponentEncoder::default()
+            .module(&module)
+            .unwrap()
+            .validate(true)
+            .encode()
+            .unwrap()
     }
 
     fn checksum_bytes(files: &BTreeMap<String, Vec<u8>>) -> Vec<u8> {
@@ -884,6 +936,21 @@ mod tests {
     }
 
     #[test]
+    fn rejects_an_empty_component_that_does_not_implement_the_wit_world() {
+        let signing_key = SigningKey::from_bytes(&[7_u8; 32]);
+        let mut files = protected_files(Some(&signing_key));
+        files.insert(ENTRYPOINT_PATH.to_owned(), WASM_COMPONENT_HEADER.to_vec());
+        let checksums = checksum_bytes(&files);
+        let signature = signing_key.sign(&checksums).to_bytes().to_vec();
+        let package = write_package(files, checksums, Some(signature));
+
+        assert_eq!(
+            validate_extension_package(&package, SignaturePolicy::RequireSigned),
+            Err(ExtensionPackageError::InvalidWasmComponent)
+        );
+    }
+
+    #[test]
     fn rejects_archive_path_traversal_before_reading_unknown_files() {
         let signing_key = SigningKey::from_bytes(&[7_u8; 32]);
         let mut files = protected_files(Some(&signing_key));
@@ -922,6 +989,35 @@ mod tests {
         assert_eq!(
             validate_extension_package(&package, SignaturePolicy::RequireSigned),
             Err(ExtensionPackageError::HiddenRelationshipMetadata)
+        );
+    }
+
+    #[test]
+    fn rejects_non_numeric_schema_bounds() {
+        let signing_key = SigningKey::from_bytes(&[7_u8; 32]);
+        let mut files = protected_files(Some(&signing_key));
+        files.insert(
+            METADATA_SCHEMA_PATH.to_owned(),
+            serde_json::to_vec(&json!({
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "indentSize": {
+                        "type": "integer",
+                        "minimum": "zero",
+                        "maximum": 8
+                    }
+                }
+            }))
+            .unwrap(),
+        );
+        let checksums = checksum_bytes(&files);
+        let signature = signing_key.sign(&checksums).to_bytes().to_vec();
+        let package = write_package(files, checksums, Some(signature));
+
+        assert_eq!(
+            validate_extension_package(&package, SignaturePolicy::RequireSigned),
+            Err(ExtensionPackageError::InvalidMetadataSchema)
         );
     }
 

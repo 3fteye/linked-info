@@ -405,6 +405,8 @@ pub struct ExtensionActionResultV1 {
 
 #[cfg(test)]
 mod tests {
+    use regex::Regex;
+
     use super::*;
 
     fn manifest() -> ExtensionManifestV1 {
@@ -486,5 +488,21 @@ mod tests {
     fn published_manifest_schema_is_valid_json() {
         let value = serde_json::from_str::<Value>(crate::EXTENSION_MANIFEST_SCHEMA).unwrap();
         assert_eq!(value["properties"]["apiVersion"]["const"], "1.0");
+    }
+
+    #[test]
+    fn published_manifest_schema_matches_semantic_versions() {
+        let value = serde_json::from_str::<Value>(crate::EXTENSION_MANIFEST_SCHEMA).unwrap();
+        let pattern = value["properties"]["version"]["pattern"].as_str().unwrap();
+        let regex = Regex::new(pattern).unwrap();
+
+        for version in ["0.1.0", "1.2.3", "1.0.0-alpha.1", "2.0.0+build.7"] {
+            assert!(Version::parse(version).is_ok());
+            assert!(regex.is_match(version));
+        }
+        for invalid in ["not-semver", "1.0", "01.0.0", "1.0.0-01"] {
+            assert!(Version::parse(invalid).is_err());
+            assert!(!regex.is_match(invalid));
+        }
     }
 }
