@@ -89,10 +89,8 @@ import {
   contentContainsSensitive,
   type ContentEnhancementLabels,
 } from "./contentProcessor";
-import {
-  codePreviewLanguageFromProcessorId,
-  type CodePreviewLanguage,
-} from "./codePreviewLanguages";
+import type { CodePreviewLanguage } from "./codePreviewLanguages";
+import { CodePreviewSensitivityCache } from "./codePreviewSensitivity";
 import { TotpSecondClockProvider } from "./totpContent";
 import type { CanvasOperationItem } from "./canvasOperations";
 import {
@@ -1182,6 +1180,9 @@ export default function GraphCanvas({
   } | null>(null);
   const canvasSelectionGestureRef = useRef<CanvasSelectionGesture | null>(null);
   const contextMenuSelectionRef = useRef<string[]>([]);
+  const codePreviewSensitivityCacheRef = useRef(
+    new CodePreviewSensitivityCache(),
+  );
   const nodesRef = useRef(nodes);
   nodesRef.current = nodes;
   const referencesRef = useRef(references);
@@ -2158,17 +2159,11 @@ export default function GraphCanvas({
   }, [filteredOutNodeIdSet, referenceSearch]);
 
   const sensitiveCodeContentByNodeId = useMemo(() => {
-    const result = new Map<string, boolean>();
-    for (const node of nodes) {
-      if (
-        codePreviewLanguageFromProcessorId(
-          contentProcessorByNodeId[node.id] ?? "",
-        ) !== null
-      ) {
-        result.set(node.id, contentContainsSensitive(node.content));
-      }
-    }
-    return result;
+    return codePreviewSensitivityCacheRef.current.update(
+      nodes,
+      contentProcessorByNodeId,
+      contentContainsSensitive,
+    );
   }, [contentProcessorByNodeId, nodes]);
 
   useEffect(() => {
