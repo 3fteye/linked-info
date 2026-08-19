@@ -142,7 +142,16 @@ export function createTauriWorkspacePersistence(
       return saveSlot("recovery", workspace);
     },
     async runExclusiveTransaction(transaction) {
+      if (writesQuarantined) {
+        throw new Error("workspace_persistence_transaction_in_progress");
+      }
       await writeTail.catch(() => undefined);
+      // Two callers can both start while the same write tail is pending. The
+      // second caller must re-check after the await; otherwise its pre-commit
+      // failure could clear the first transaction's quarantine.
+      if (writesQuarantined) {
+        throw new Error("workspace_persistence_transaction_in_progress");
+      }
       writeGeneration += 1;
       writesQuarantined = true;
       try {

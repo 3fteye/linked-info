@@ -436,4 +436,48 @@ describe("createTauriWorkspacePersistence", () => {
 
     expect(await persistence.load()).toEqual({ status: "ready", workspace: after });
   });
+
+  it("does not let an overlapping transaction clear the active quarantine", async () => {
+    const bridge = new MemoryFileBridge();
+    const persistence = createTauriWorkspacePersistence(
+      bridge,
+      new MemoryLegacySource(),
+    );
+    const before = validWorkspace("Before overlapping transaction");
+    const restored = validWorkspace("Committed by first transaction");
+    await persistence.save(before);
+    let signalFirstStarted: () => void = () => {};
+    const firstStarted = new Promise<void>((resolve) => {
+      signalFirstStarted = resolve;
+    });
+    let releaseFirst: () => void = () => {};
+    const firstBlocked = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+
+    const first = persistence.runExclusiveTransaction(async () => {
+      signalFirstStarted();
+      await firstBlocked;
+      bridge.files.set("primary", JSON.stringify({ version: 2, ...restored }));
+      return { status: "committed" as const };
+    });
+    await firstStarted;
+
+    await expect(
+      persistence.runExclusiveTransaction(async () => {
+        throw new Error("second transaction must not start");
+      }),
+    ).rejects.toThrow("workspace_persistence_transaction_in_progress");
+    await expect(persistence.save(before)).rejects.toThrow(
+      "workspace_persistence_reload_required",
+    );
+
+    releaseFirst();
+    await expect(first).resolves.toEqual({ status: "committed" });
+    await expect(persistence.save(before)).rejects.toThrow(
+      "workspace_persistence_reload_required",
+    );
+    expect(await persistence.load()).toEqual({ status: "ready", workspace: restored });
+    await expect(persistence.save(restored)).resolves.toBeUndefined();
+  });
 });

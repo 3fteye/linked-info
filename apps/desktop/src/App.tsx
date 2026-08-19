@@ -405,6 +405,7 @@ function App({
   const workspaceReplacementHistoryBoundaryRef =
     useRef<WorkspaceReplacementHistoryBoundary>(null);
   const workspaceReplacementHistoryBusyRef = useRef(false);
+  const workspaceReplacementApplyBusyRef = useRef(false);
   const workspaceMutationBlockedRef = useRef(false);
   const [historyAvailability, setHistoryAvailability] = useState({
     canUndo: false,
@@ -3650,10 +3651,14 @@ function App({
   }
 
   async function applyWorkspaceReplacement() {
-    if (pendingWorkspaceReplacement === null) {
+    if (
+      pendingWorkspaceReplacement === null ||
+      workspaceReplacementApplyBusyRef.current
+    ) {
       return;
     }
 
+    workspaceReplacementApplyBusyRef.current = true;
     let bootstrapStarted = false;
     let bootstrapCommitted = false;
     try {
@@ -3744,6 +3749,8 @@ function App({
         }
         setBackupStatus(t("backup.importFailed"));
       }
+    } finally {
+      workspaceReplacementApplyBusyRef.current = false;
     }
   }
 

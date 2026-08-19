@@ -296,6 +296,15 @@ describe("App recovery transaction boundary", () => {
     const authoritative = workspace(recoveryNodeId, "Authoritative Rust workspace");
     let primary = workspace(currentNodeId, "Stale React workspace");
     let exclusiveTransactions = 0;
+    let commitCalls = 0;
+    let signalCommitStarted: () => void = () => {};
+    const commitStarted = new Promise<void>((resolve) => {
+      signalCommitStarted = resolve;
+    });
+    let releaseCommit: () => void = () => {};
+    const commitBlocked = new Promise<void>((resolve) => {
+      releaseCommit = resolve;
+    });
     workspaceFileHarness.imported = {
       name: "encrypted-backup.json",
       text: JSON.stringify({
@@ -335,6 +344,9 @@ describe("App recovery transaction boundary", () => {
         return { id: "prepared-restore", plaintext: workspaceExport(preview) };
       },
       async commitRestore() {
+        commitCalls += 1;
+        signalCommitStarted();
+        await commitBlocked;
         primary = authoritative;
         return { status: "committed", securityStatus: restoredStatus };
       },
@@ -347,7 +359,19 @@ describe("App recovery transaction boundary", () => {
       updateStatus,
     });
     await beginEncryptedBootstrapRestore();
-    await click("workspace-restore-confirm");
+    const confirm = await find("workspace-restore-confirm");
+    await act(async () => {
+      confirm.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      confirm.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await Promise.resolve();
+    });
+    await commitStarted;
+    expect(commitCalls).toBe(1);
+    releaseCommit();
+    await act(async () => {
+      await commitBlocked;
+      await Promise.resolve();
+    });
 
     expect((await find("mock-canvas")).textContent).toBe(
       "Authoritative Rust workspace",
