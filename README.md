@@ -143,7 +143,7 @@ Windows 便携版尚未进行商业代码签名，系统可能显示 SmartScreen
 - 正式 WebView 已启用仅允许打包资源与必要 IPC 的 CSP；主窗口 capability 只保留事件监听，文件导入导出和秘密剪贴板都由限定用途的 Rust 命令执行。设置页可在重新认证后清除全部自动历史与恢复副本而保留当前工作区，也可以在再次验证身份并输入确认短语后销毁当前工作区、加密元数据、本机历史、恢复副本和设备快速解锁入口。销毁不会寻找或删除用户已经保存到其他目录的导出文件；文件系统也不保证 SSD 单文件安全擦除，存储介质残留仍依赖 BitLocker 等全盘加密。仍不应加载不可信 HTML、插件或脚本。
 - 公开构建尚未提供代码签名和稳定更新通道。
 
-开发环境、架构和贡献说明见 [DEVELOPMENT.md](DEVELOPMENT.md)。安全承诺和威胁边界见 [SECURITY.md](SECURITY.md)。项目规划见 [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)，主体框架之后的候选功能见 [BACKLOG.md](BACKLOG.md)。
+开发提交与 PR 审查流程见 [CONTRIBUTING.md](CONTRIBUTING.md)，架构和开发环境见 [DEVELOPMENT.md](DEVELOPMENT.md)。安全承诺和独立 Security Review 的规则来源见 [SECURITY.md](SECURITY.md)。项目规划见 [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)，主体框架之后的候选功能见 [BACKLOG.md](BACKLOG.md)。
 
 ## 许可证
 
