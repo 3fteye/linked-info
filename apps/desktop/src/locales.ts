@@ -737,6 +737,9 @@ export const resources = {
       },
       storageProblem: {
         loading: "正在读取本地工作区……",
+        recoveryRequiredTitle: "正在完成工作区恢复事务",
+        recoveryRequiredDescription: "工作区交换已经进入提交阶段，但磁盘操作未能在本次会话中全部完成。自动保存已停止；重新加载后，Rust 会先完成或恢复事务，再读取工作区。",
+        restart: "重新加载并恢复",
         title: "本地工作区无法安全读取",
         description: "应用已停止自动保存，因此原始数据还没有被覆盖。建议先导出原始数据；只有确认不再需要修复时才清空工作区。",
         exportRaw: "导出原始数据",
@@ -1490,6 +1493,9 @@ export const resources = {
       },
       storageProblem: {
         loading: "Loading the local workspace…",
+        recoveryRequiredTitle: "Finishing workspace recovery",
+        recoveryRequiredDescription: "The workspace swap reached its commit point, but the disk operation did not finish in this session. Automatic saving has stopped. Reload to let Rust finish or recover the transaction before loading the workspace.",
+        restart: "Reload and recover",
         title: "The local workspace cannot be read safely",
         description: "Automatic saving has stopped, so the original data has not been overwritten. Export the raw data first; clear the workspace only if you no longer need to repair it.",
         exportRaw: "Export raw data",

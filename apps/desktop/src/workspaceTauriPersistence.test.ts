@@ -29,6 +29,17 @@ class MemoryFileBridge implements WorkspaceFileBridge {
     return this.files.get(slot) ?? null;
   }
 
+  async swap() {
+    const primary = this.files.get("primary");
+    const recovery = this.files.get("recovery");
+    if (primary === undefined || recovery === undefined) {
+      throw new Error("workspace_recovery_unavailable");
+    }
+    this.files.set("primary", recovery);
+    this.files.set("recovery", primary);
+    return { status: "committed" as const, contents: recovery };
+  }
+
   async write(slot: WorkspaceStorageSlot, contents: string): Promise<void> {
     this.files.set(slot, contents);
   }
@@ -139,6 +150,9 @@ describe("createTauriWorkspacePersistence", () => {
       async read(slot) {
         return files.get(slot) ?? null;
       },
+      async swap() {
+        throw new Error("swap is not used in this test");
+      },
       async write(slot, contents) {
         writeCount += 1;
         const currentWrite = writeCount;
@@ -181,32 +195,36 @@ describe("createTauriWorkspacePersistence", () => {
     await persistence.preserveForRecovery(first);
     await persistence.save(second);
 
-    expect(await persistence.swapWithRecovery()).toEqual(first);
+    expect(await persistence.swapWithRecovery()).toEqual({
+      status: "committed",
+      workspace: first,
+    });
     expect(await persistence.load()).toEqual({ status: "ready", workspace: first });
     expect(await persistence.loadRecovery()).toEqual({
       status: "ready",
       workspace: second,
     });
 
-    expect(await persistence.swapWithRecovery()).toEqual(second);
+    expect(await persistence.swapWithRecovery()).toEqual({
+      status: "committed",
+      workspace: second,
+    });
     expect(await persistence.loadRecovery()).toEqual({
       status: "ready",
       workspace: first,
     });
   });
 
-  it("restores the old recovery copy if replacing primary fails", async () => {
+  it("does not modify either slot when the Rust swap fails before commit", async () => {
     const files = new Map<WorkspaceStorageSlot, string>();
-    let writeCount = 0;
     const bridge: WorkspaceFileBridge = {
       async read(slot) {
         return files.get(slot) ?? null;
       },
+      async swap() {
+        throw new Error("swap preparation failed");
+      },
       async write(slot, contents) {
-        writeCount += 1;
-        if (writeCount === 4) {
-          throw new Error("primary write failed");
-        }
         files.set(slot, contents);
       },
     };
@@ -220,12 +238,159 @@ describe("createTauriWorkspacePersistence", () => {
     await persistence.save(second);
 
     await expect(persistence.swapWithRecovery()).rejects.toThrow(
-      "primary write failed",
+      "swap preparation failed",
     );
     expect(await persistence.load()).toEqual({ status: "ready", workspace: second });
     expect(await persistence.loadRecovery()).toEqual({
       status: "ready",
       workspace: first,
     });
+  });
+
+  it("never performs partial JavaScript writes after the Rust commit point", async () => {
+    const files = new Map<WorkspaceStorageSlot, string>();
+    let writeCount = 0;
+    let swapCount = 0;
+    const bridge: WorkspaceFileBridge = {
+      async read(slot) {
+        return files.get(slot) ?? null;
+      },
+      async swap() {
+        swapCount += 1;
+        return { status: "recoveryRequired" as const };
+      },
+      async write(slot, contents) {
+        writeCount += 1;
+        files.set(slot, contents);
+      },
+    };
+    const persistence = createTauriWorkspacePersistence(
+      bridge,
+      new MemoryLegacySource(),
+    );
+    const recovery = validWorkspace("Unique recovery");
+    const primary = validWorkspace("Current primary");
+    await persistence.preserveForRecovery(recovery);
+    await persistence.save(primary);
+
+    expect(await persistence.swapWithRecovery()).toEqual({
+      status: "reloadRequired",
+    });
+    expect(swapCount).toBe(1);
+    expect(writeCount).toBe(2);
+    await expect(persistence.save(validWorkspace("Must not write"))).rejects.toThrow(
+      "workspace_recovery_swap_reload_required",
+    );
+    expect(await persistence.load()).toEqual({ status: "ready", workspace: primary });
+    expect(await persistence.loadRecovery()).toEqual({
+      status: "ready",
+      workspace: recovery,
+    });
+    const afterRecoveryRead = validWorkspace("Writable after recovered primary read");
+    await persistence.save(afterRecoveryRead);
+    expect(await persistence.load()).toEqual({
+      status: "ready",
+      workspace: afterRecoveryRead,
+    });
+  });
+
+  it("drops stale saves queued while Rust owns the recovery transaction", async () => {
+    const files = new Map<WorkspaceStorageSlot, string>();
+    let signalSwapStarted: () => void = () => {};
+    const swapStarted = new Promise<void>((resolve) => {
+      signalSwapStarted = resolve;
+    });
+    let releaseSwap: () => void = () => {};
+    const swapBlocked = new Promise<void>((resolve) => {
+      releaseSwap = resolve;
+    });
+    const bridge: WorkspaceFileBridge = {
+      async read(slot) {
+        return files.get(slot) ?? null;
+      },
+      async swap() {
+        signalSwapStarted();
+        await swapBlocked;
+        const primary = files.get("primary");
+        const recovery = files.get("recovery");
+        if (primary === undefined || recovery === undefined) {
+          throw new Error("workspace_recovery_unavailable");
+        }
+        files.set("primary", recovery);
+        files.set("recovery", primary);
+        return { status: "committed" as const, contents: recovery };
+      },
+      async write(slot, contents) {
+        files.set(slot, contents);
+      },
+    };
+    const persistence = createTauriWorkspacePersistence(
+      bridge,
+      new MemoryLegacySource(),
+    );
+    const recovery = validWorkspace("Recovery becomes primary");
+    const stalePrimary = validWorkspace("Stale React primary");
+    await persistence.preserveForRecovery(recovery);
+    await persistence.save(stalePrimary);
+
+    const swapping = persistence.swapWithRecovery();
+    await swapStarted;
+    const staleSave = persistence.save(stalePrimary);
+    releaseSwap();
+    await expect(swapping).resolves.toEqual({
+      status: "committed",
+      workspace: recovery,
+    });
+    await staleSave;
+
+    expect(await persistence.load()).toEqual({
+      status: "ready",
+      workspace: recovery,
+    });
+    expect(await persistence.loadRecovery()).toEqual({
+      status: "ready",
+      workspace: stalePrimary,
+    });
+  });
+
+  it("preserves a save queued while a pre-commit swap attempt fails", async () => {
+    const files = new Map<WorkspaceStorageSlot, string>();
+    let signalSwapStarted: () => void = () => {};
+    const swapStarted = new Promise<void>((resolve) => {
+      signalSwapStarted = resolve;
+    });
+    let rejectSwap: (error: Error) => void = () => {};
+    const swapBlocked = new Promise<never>((_resolve, reject) => {
+      rejectSwap = reject;
+    });
+    const bridge: WorkspaceFileBridge = {
+      async read(slot) {
+        return files.get(slot) ?? null;
+      },
+      async swap() {
+        signalSwapStarted();
+        return swapBlocked;
+      },
+      async write(slot, contents) {
+        files.set(slot, contents);
+      },
+    };
+    const persistence = createTauriWorkspacePersistence(
+      bridge,
+      new MemoryLegacySource(),
+    );
+    const primary = validWorkspace("Before failed swap");
+    const edited = validWorkspace("Edit during failed swap");
+    await persistence.preserveForRecovery(validWorkspace("Recovery"));
+    await persistence.save(primary);
+
+    const swapping = persistence.swapWithRecovery();
+    await swapStarted;
+    const queuedSave = persistence.save(edited);
+    rejectSwap(new Error("swap failed before commit"));
+
+    await expect(swapping).rejects.toThrow("swap failed before commit");
+    await queuedSave;
+    expect(await persistence.load()).toEqual({ status: "ready", workspace: edited });
   });
 });

@@ -11,8 +11,14 @@ import {
 
 export interface WorkspaceFileBridge {
   read(slot: WorkspaceStorageSlot): Promise<string | null>;
+  swap(): Promise<WorkspaceFileSwapResult>;
   write(slot: WorkspaceStorageSlot, contents: string): Promise<void>;
 }
+
+export type WorkspaceFileSwapResult =
+  | { status: "committed"; contents: string }
+  | { status: "committedLocked" }
+  | { status: "recoveryRequired" };
 
 export interface LegacyWorkspaceSource {
   load(slot: WorkspaceStorageSlot): WorkspaceLoadResult;
@@ -22,6 +28,9 @@ export interface LegacyWorkspaceSource {
 const invokeWorkspaceFileBridge: WorkspaceFileBridge = {
   read(slot) {
     return invoke<string | null>("read_workspace_file", { slot });
+  },
+  swap() {
+    return invoke<WorkspaceFileSwapResult>("swap_workspace_recovery_files");
   },
   write(slot, contents) {
     return invoke<void>("write_workspace_file", { contents, slot });
@@ -38,14 +47,28 @@ export function createTauriWorkspacePersistence(
   legacy: LegacyWorkspaceSource,
 ): WorkspacePersistence {
   let writeTail: Promise<void> = Promise.resolve();
+  let writeGeneration = 0;
+  let writesQuarantined = false;
 
   function enqueueWrite(
     slot: WorkspaceStorageSlot,
     contents: string,
   ): Promise<void> {
+    if (writesQuarantined) {
+      return Promise.reject(new Error("workspace_recovery_swap_reload_required"));
+    }
+    const generation = writeGeneration;
     const write = writeTail
       .catch(() => undefined)
-      .then(() => bridge.write(slot, contents));
+      .then(() => {
+        if (writesQuarantined) {
+          throw new Error("workspace_recovery_swap_reload_required");
+        }
+        if (generation !== writeGeneration) {
+          return;
+        }
+        return bridge.write(slot, contents);
+      });
     writeTail = write;
     return write;
   }
@@ -53,7 +76,15 @@ export function createTauriWorkspacePersistence(
   async function loadSlot(slot: WorkspaceStorageSlot): Promise<WorkspaceLoadResult> {
     const contents = await bridge.read(slot);
     if (contents !== null) {
-      return parseStoredWorkspaceText(contents);
+      const loaded = parseStoredWorkspaceText(contents);
+      if (slot === "primary" && loaded.status === "ready" && writesQuarantined) {
+        // A successful Rust primary read first completes any pending recovery
+        // transaction. A remounted App can persist again only after that
+        // authoritative read has succeeded.
+        writeGeneration += 1;
+        writesQuarantined = false;
+      }
+      return loaded;
     }
 
     const legacyWorkspace = legacy.load(slot);
@@ -74,27 +105,30 @@ export function createTauriWorkspacePersistence(
 
   async function swapWithRecovery() {
     await writeTail.catch(() => undefined);
-    const primary = await loadSlot("primary");
-    const recovery = await loadSlot("recovery");
-    if (primary.status !== "ready" || recovery.status === "missing") {
-      throw new Error("workspace_recovery_unavailable");
+    writeGeneration += 1;
+    const swap = bridge.swap().then((result) => {
+      writeGeneration += 1;
+      if (result.status !== "committed") {
+        writesQuarantined = true;
+      }
+      return result;
+    });
+    writeTail = swap.then(
+      () => undefined,
+      () => undefined,
+    );
+    const result = await swap;
+    if (result.status !== "committed") {
+      return { status: "reloadRequired" } as const;
     }
-    if (recovery.status !== "ready") {
+    const parsed = parseStoredWorkspaceText(result.contents);
+    if (parsed.status !== "ready") {
+      writesQuarantined = true;
       throw new Error("workspace_recovery_invalid");
     }
-
-    await saveSlot("recovery", primary.workspace);
-    try {
-      await saveSlot("primary", recovery.workspace);
-    } catch (error) {
-      try {
-        await saveSlot("recovery", recovery.workspace);
-      } catch {
-        throw new Error("workspace_recovery_swap_rollback_failed");
-      }
-      throw error;
-    }
-    return recovery.workspace;
+    legacy.remove("primary");
+    legacy.remove("recovery");
+    return { status: "committed", workspace: parsed.workspace } as const;
   }
 
   return {

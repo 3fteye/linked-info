@@ -180,6 +180,8 @@ node scripts/prepare-public-document-import-benchmark.mjs docred <train_annotate
 
 ## 开发环境
 
+2026-08-19 的只读全面架构审查及逐项证据见 [docs/architecture-review-2026-08-19.md](docs/architecture-review-2026-08-19.md)。该报告没有要求推翻 `Node + Reference`、端口/适配器或本地优先方向，但在继续内容功能扩展前，必须先按依赖顺序收口跨文件事务、提交结果、容量、异步 revision 和大工作区热路径。Finding 只有在对应回归、故障注入或性能预算通过后才能标记完成，不能仅靠重写文档关闭。
+
 CI 当前使用：
 
 - Rust stable，工作区 edition 2024。

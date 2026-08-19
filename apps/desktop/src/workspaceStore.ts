@@ -32,12 +32,16 @@ export type WorkspaceLoadResult =
   | { status: "ready"; workspace: WorkspaceSnapshot }
   | { status: "invalid"; raw: string };
 
+export type WorkspaceSwapResult =
+  | { status: "committed"; workspace: WorkspaceSnapshot }
+  | { status: "reloadRequired" };
+
 export interface WorkspacePersistence {
   load(): Promise<WorkspaceLoadResult>;
   loadRecovery(): Promise<WorkspaceLoadResult>;
   preserveForRecovery(workspace: WorkspaceSnapshot): Promise<void>;
   save(workspace: WorkspaceSnapshot): Promise<void>;
-  swapWithRecovery(): Promise<WorkspaceSnapshot>;
+  swapWithRecovery(): Promise<WorkspaceSwapResult>;
 }
 
 export type WorkspaceStorageSlot = "primary" | "recovery";
@@ -138,6 +142,6 @@ export const localWorkspacePersistence: WorkspacePersistence = {
       }
       throw error;
     }
-    return recovery.workspace;
+    return { status: "committed", workspace: recovery.workspace };
   },
 };

@@ -153,7 +153,10 @@ describe("localWorkspacePersistence", () => {
 
     await localWorkspacePersistence.preserveForRecovery(first);
     await localWorkspacePersistence.save(second);
-    expect(await localWorkspacePersistence.swapWithRecovery()).toEqual(first);
+    expect(await localWorkspacePersistence.swapWithRecovery()).toEqual({
+      status: "committed",
+      workspace: first,
+    });
 
     expect(await localWorkspacePersistence.load()).toEqual({
       status: "ready",
@@ -164,7 +167,10 @@ describe("localWorkspacePersistence", () => {
       workspace: second,
     });
 
-    expect(await localWorkspacePersistence.swapWithRecovery()).toEqual(second);
+    expect(await localWorkspacePersistence.swapWithRecovery()).toEqual({
+      status: "committed",
+      workspace: second,
+    });
     expect(await localWorkspacePersistence.loadRecovery()).toEqual({
       status: "ready",
       workspace: first,

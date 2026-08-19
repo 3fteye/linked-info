@@ -5,6 +5,7 @@ use chacha20poly1305::{
     aead::{Aead, Payload},
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     collections::HashSet,
     fs::{self, OpenOptions},
@@ -34,12 +35,17 @@ const DATA_KEY_ROTATION_DIRECTORY_NAME: &str = ".workspace.data-key-rotation.v1.
 const DATA_KEY_ROTATION_MANIFEST_FILE_NAME: &str = "manifest.json";
 const DATA_KEY_ROTATION_VAULT_FILE_NAME: &str = "workspace.vault.v1.json";
 const DATA_KEY_ROTATION_BACKUP_DIRECTORY_NAME: &str = "backups";
+const RECOVERY_SWAP_DIRECTORY_NAME: &str = ".workspace.recovery-swap.v1.pending";
+const RECOVERY_SWAP_MANIFEST_FILE_NAME: &str = "manifest.json";
+const RECOVERY_SWAP_PRIMARY_FILE_NAME: &str = "workspace.v1.json";
+const RECOVERY_SWAP_RECOVERY_FILE_NAME: &str = "workspace.recovery.v1.json";
 const ENCRYPTED_WORKSPACE_FORMAT: &str = "linked-info-encrypted-workspace";
 const ENCRYPTED_EXPORT_FORMAT: &str = "linked-info-encrypted-workspace-export";
 const WORKSPACE_EXPORT_FORMAT: &str = "linked-info-workspace";
 const CURRENT_WORKSPACE_STORAGE_VERSION: u64 = 2;
 const VAULT_FORMAT: &str = "linked-info-workspace-vault";
 const DATA_KEY_ROTATION_FORMAT: &str = "linked-info-data-key-rotation";
+const RECOVERY_SWAP_FORMAT: &str = "linked-info-recovery-swap";
 const CRYPTO_VERSION: u32 = 1;
 const DATA_KEY_BYTES: usize = 32;
 const SALT_BYTES: usize = 16;
@@ -238,6 +244,31 @@ struct DataKeyRotationManifest {
     previous_system_credential: Option<RotationSystemCredential>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     next_system_credential: Option<RotationSystemCredential>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RecoverySwapManifest {
+    format: String,
+    version: u32,
+    primary_sha256: String,
+    recovery_sha256: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+enum WorkspaceRecoverySwapStatus {
+    Committed,
+    CommittedLocked,
+    RecoveryRequired,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceRecoverySwapResult {
+    status: WorkspaceRecoverySwapStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    contents: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -620,6 +651,22 @@ impl WorkspaceFileStore {
             .join(format!("{id}.json")))
     }
 
+    fn recovery_swap_directory(&self) -> PathBuf {
+        self.base_directory.join(RECOVERY_SWAP_DIRECTORY_NAME)
+    }
+
+    fn recovery_swap_manifest_path(&self) -> PathBuf {
+        self.recovery_swap_directory()
+            .join(RECOVERY_SWAP_MANIFEST_FILE_NAME)
+    }
+
+    fn recovery_swap_slot_path(&self, slot: WorkspaceFileSlot) -> PathBuf {
+        self.recovery_swap_directory().join(match slot {
+            WorkspaceFileSlot::Primary => RECOVERY_SWAP_PRIMARY_FILE_NAME,
+            WorkspaceFileSlot::Recovery => RECOVERY_SWAP_RECOVERY_FILE_NAME,
+        })
+    }
+
     fn backup_path(&self, id: &str) -> Result<PathBuf, String> {
         parse_backup_id(id)?;
         Ok(self.backup_directory().join(format!("{id}.json")))
@@ -666,10 +713,7 @@ impl WorkspaceFileStore {
     ) -> Result<(), String> {
         let normalized = normalize_storage_envelope(contents).map_err(|error| error.to_string())?;
         fs::create_dir_all(&self.base_directory).map_err(|error| error.to_string())?;
-        let serialized = match data_key {
-            Some(key) => encrypt_workspace_file(&normalized, slot, key)?,
-            None => normalized,
-        };
+        let serialized = serialize_workspace_for_slot(&normalized, slot, data_key)?;
         write_atomically(&self.path(slot), serialized.as_bytes()).map_err(|e| e.to_string())
     }
 
@@ -796,6 +840,83 @@ pub async fn write_workspace_file(
     .await
     .map_err(|error| error.to_string())??;
     ensure_workspace_access(&app, &state, permit)
+}
+
+enum WorkspaceRecoverySwapOperation {
+    Committed(String),
+    RecoveryRequired,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum WorkspaceRecoverySwapPreparation {
+    Ready(String),
+    RecoveryRequired,
+}
+
+#[tauri::command]
+pub async fn swap_workspace_recovery_files(
+    app: AppHandle,
+    state: tauri::State<'_, WorkspaceVaultState>,
+) -> Result<WorkspaceRecoverySwapResult, String> {
+    let permit = begin_workspace_access(&app, &state)?;
+    let store = workspace_store(&app).map_err(|error| error.to_string())?;
+    let operation_lock = Arc::clone(&state.operation_lock);
+    let access_generation = state.access_generation();
+    let data_key = state.optional_data_key()?;
+    let operation = tauri::async_runtime::spawn_blocking(move || {
+        let _guard = operation_lock
+            .lock()
+            .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
+        ensure_access_generation(&access_generation, permit)?;
+        recover_pending_encryption_migration(&store)?;
+        let recovered_existing = finish_pending_workspace_recovery_swap(&store)?;
+        if store.data_key_rotation_directory().exists() {
+            return Err("workspace_vault_data_key_rotation_recovery_required".to_owned());
+        }
+        let active_key = active_workspace_key(&store, data_key.as_deref())?;
+        if recovered_existing {
+            let contents = store
+                .read(WorkspaceFileSlot::Primary, active_key)?
+                .ok_or_else(|| "workspace_recovery_unavailable".to_owned())?;
+            return Ok(WorkspaceRecoverySwapOperation::Committed(contents));
+        }
+
+        let next_primary = match prepare_workspace_recovery_swap(&store, active_key)? {
+            WorkspaceRecoverySwapPreparation::Ready(contents) => contents,
+            WorkspaceRecoverySwapPreparation::RecoveryRequired => {
+                return Ok(WorkspaceRecoverySwapOperation::RecoveryRequired);
+            }
+        };
+        match finish_pending_workspace_recovery_swap(&store) {
+            Ok(true) => Ok(WorkspaceRecoverySwapOperation::Committed(next_primary)),
+            Ok(false) | Err(_) => Ok(WorkspaceRecoverySwapOperation::RecoveryRequired),
+        }
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+
+    match operation {
+        WorkspaceRecoverySwapOperation::Committed(contents) => {
+            if ensure_workspace_access(&app, &state, permit).is_ok() {
+                Ok(WorkspaceRecoverySwapResult {
+                    status: WorkspaceRecoverySwapStatus::Committed,
+                    contents: Some(contents),
+                })
+            } else {
+                Ok(WorkspaceRecoverySwapResult {
+                    status: WorkspaceRecoverySwapStatus::CommittedLocked,
+                    contents: None,
+                })
+            }
+        }
+        WorkspaceRecoverySwapOperation::RecoveryRequired => {
+            lock_workspace_runtime(&app, "workspace_recovery_swap_pending");
+            Ok(WorkspaceRecoverySwapResult {
+                status: WorkspaceRecoverySwapStatus::RecoveryRequired,
+                contents: None,
+            })
+        }
+    }
 }
 
 #[tauri::command]
@@ -1912,6 +2033,7 @@ fn remove_all_workspace_files(store: &WorkspaceFileStore) -> Result<(), String> 
     remove_workspace_subdirectory(&store.base_directory, &store.backup_directory())?;
     remove_workspace_subdirectory(&store.base_directory, &store.pending_backup_directory())?;
     remove_workspace_subdirectory(&store.base_directory, &store.data_key_rotation_directory())?;
+    remove_workspace_subdirectory(&store.base_directory, &store.recovery_swap_directory())?;
     remove_file_if_exists(&store.pending_vault_path())?;
     remove_file_if_exists(&store.vault_path())?;
     sync_parent_directory(&store.base_directory).map_err(|error| error.to_string())
@@ -2387,6 +2509,17 @@ fn encrypt_workspace_file(
     serde_json::to_string(&envelope).map_err(|error| error.to_string())
 }
 
+fn serialize_workspace_for_slot(
+    normalized: &str,
+    slot: WorkspaceFileSlot,
+    data_key: Option<&[u8; DATA_KEY_BYTES]>,
+) -> Result<String, String> {
+    match data_key {
+        Some(key) => encrypt_workspace_file(normalized, slot, key),
+        None => Ok(normalized.to_owned()),
+    }
+}
+
 fn decrypt_workspace_file(
     contents: &str,
     slot: WorkspaceFileSlot,
@@ -2540,6 +2673,151 @@ fn finish_pending_migration(
     sync_parent_directory(&store.base_directory).map_err(|error| error.to_string())
 }
 
+fn recovery_swap_sha256(contents: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(contents))
+}
+
+fn validate_recovery_swap_manifest(manifest: &RecoverySwapManifest) -> Result<(), String> {
+    let valid_hash =
+        |value: &str| value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit());
+    if manifest.format != RECOVERY_SWAP_FORMAT
+        || manifest.version != CRYPTO_VERSION
+        || !valid_hash(&manifest.primary_sha256)
+        || !valid_hash(&manifest.recovery_sha256)
+    {
+        Err("workspace_recovery_swap_invalid_manifest".to_owned())
+    } else {
+        Ok(())
+    }
+}
+
+fn read_recovery_swap_manifest(
+    store: &WorkspaceFileStore,
+) -> Result<Option<RecoverySwapManifest>, String> {
+    let directory = store.recovery_swap_directory();
+    if !directory.exists() {
+        return Ok(None);
+    }
+    let Some(contents) = WorkspaceFileStore::read_text_path(&store.recovery_swap_manifest_path())
+        .map_err(|error| error.to_string())?
+    else {
+        remove_workspace_subdirectory(&store.base_directory, &directory)?;
+        sync_parent_directory(&store.base_directory).map_err(|error| error.to_string())?;
+        return Ok(None);
+    };
+    let manifest: RecoverySwapManifest = serde_json::from_str(&contents)
+        .map_err(|_| "workspace_recovery_swap_invalid_manifest".to_owned())?;
+    validate_recovery_swap_manifest(&manifest)?;
+    Ok(Some(manifest))
+}
+
+fn read_recovery_swap_payload(
+    store: &WorkspaceFileStore,
+    slot: WorkspaceFileSlot,
+    expected_sha256: &str,
+) -> Result<Vec<u8>, String> {
+    let contents = fs::read(store.recovery_swap_slot_path(slot))
+        .map_err(|_| "workspace_recovery_swap_pending_file_missing".to_owned())?;
+    if recovery_swap_sha256(&contents) != expected_sha256 {
+        return Err("workspace_recovery_swap_pending_file_invalid".to_owned());
+    }
+    Ok(contents)
+}
+
+fn finish_pending_workspace_recovery_swap(store: &WorkspaceFileStore) -> Result<bool, String> {
+    let Some(manifest) = read_recovery_swap_manifest(store)? else {
+        return Ok(false);
+    };
+    let primary =
+        read_recovery_swap_payload(store, WorkspaceFileSlot::Primary, &manifest.primary_sha256)?;
+    let recovery = read_recovery_swap_payload(
+        store,
+        WorkspaceFileSlot::Recovery,
+        &manifest.recovery_sha256,
+    )?;
+
+    write_atomically(&store.path(WorkspaceFileSlot::Primary), &primary)
+        .map_err(|error| error.to_string())?;
+    write_atomically(&store.path(WorkspaceFileSlot::Recovery), &recovery)
+        .map_err(|error| error.to_string())?;
+    sync_parent_directory(&store.base_directory).map_err(|error| error.to_string())?;
+    remove_workspace_subdirectory(&store.base_directory, &store.recovery_swap_directory())?;
+    sync_parent_directory(&store.base_directory).map_err(|error| error.to_string())?;
+    Ok(true)
+}
+
+fn prepare_workspace_recovery_swap(
+    store: &WorkspaceFileStore,
+    data_key: Option<&[u8; DATA_KEY_BYTES]>,
+) -> Result<WorkspaceRecoverySwapPreparation, String> {
+    let primary = store
+        .read(WorkspaceFileSlot::Primary, data_key)?
+        .ok_or_else(|| "workspace_recovery_unavailable".to_owned())?;
+    let recovery = store
+        .read(WorkspaceFileSlot::Recovery, data_key)?
+        .ok_or_else(|| "workspace_recovery_unavailable".to_owned())?;
+    let primary = normalize_storage_envelope(&primary).map_err(|error| error.to_string())?;
+    let recovery = normalize_storage_envelope(&recovery).map_err(|error| error.to_string())?;
+    let next_primary =
+        serialize_workspace_for_slot(&recovery, WorkspaceFileSlot::Primary, data_key)?;
+    let next_recovery =
+        serialize_workspace_for_slot(&primary, WorkspaceFileSlot::Recovery, data_key)?;
+    let manifest = RecoverySwapManifest {
+        format: RECOVERY_SWAP_FORMAT.to_owned(),
+        version: CRYPTO_VERSION,
+        primary_sha256: recovery_swap_sha256(next_primary.as_bytes()),
+        recovery_sha256: recovery_swap_sha256(next_recovery.as_bytes()),
+    };
+
+    fs::create_dir_all(&store.base_directory).map_err(|error| error.to_string())?;
+    let directory = store.recovery_swap_directory();
+    fs::create_dir(&directory).map_err(|error| {
+        if error.kind() == io::ErrorKind::AlreadyExists {
+            "workspace_recovery_swap_pending".to_owned()
+        } else {
+            error.to_string()
+        }
+    })?;
+    let prepare_result = (|| {
+        write_atomically(
+            &store.recovery_swap_slot_path(WorkspaceFileSlot::Primary),
+            next_primary.as_bytes(),
+        )
+        .map_err(|error| error.to_string())?;
+        write_atomically(
+            &store.recovery_swap_slot_path(WorkspaceFileSlot::Recovery),
+            next_recovery.as_bytes(),
+        )
+        .map_err(|error| error.to_string())?;
+        let serialized = serde_json::to_vec(&manifest).map_err(|error| error.to_string())?;
+        write_atomically(&store.recovery_swap_manifest_path(), &serialized)
+            .map_err(|error| error.to_string())?;
+        sync_parent_directory(&directory).map_err(|error| error.to_string())?;
+        sync_parent_directory(&store.base_directory).map_err(|error| error.to_string())
+    })();
+    if let Err(error) = prepare_result {
+        return classify_recovery_swap_prepare_failure(store, error);
+    }
+    Ok(WorkspaceRecoverySwapPreparation::Ready(recovery))
+}
+
+fn classify_recovery_swap_prepare_failure(
+    store: &WorkspaceFileStore,
+    error: String,
+) -> Result<WorkspaceRecoverySwapPreparation, String> {
+    match fs::metadata(store.recovery_swap_manifest_path()) {
+        Ok(_) => return Ok(WorkspaceRecoverySwapPreparation::RecoveryRequired),
+        Err(metadata_error) if metadata_error.kind() != io::ErrorKind::NotFound => {
+            return Ok(WorkspaceRecoverySwapPreparation::RecoveryRequired);
+        }
+        Err(_) => {}
+    }
+    match remove_workspace_subdirectory(&store.base_directory, &store.recovery_swap_directory()) {
+        Ok(()) => Err(error),
+        Err(_) => Ok(WorkspaceRecoverySwapPreparation::RecoveryRequired),
+    }
+}
+
 fn recover_pending_encryption_migration(store: &WorkspaceFileStore) -> Result<(), String> {
     if store.encryption_configured() {
         return Ok(());
@@ -2555,6 +2833,7 @@ fn recover_pending_encryption_migration(store: &WorkspaceFileStore) -> Result<()
 
 fn recover_pending_migration(store: &WorkspaceFileStore) -> Result<(), String> {
     recover_pending_encryption_migration(store)?;
+    finish_pending_workspace_recovery_swap(store)?;
     if store.data_key_rotation_directory().exists() {
         return Err("workspace_vault_data_key_rotation_recovery_required".to_owned());
     }
@@ -2566,6 +2845,7 @@ fn recover_pending_workspace_transactions(
     provider: &dyn SystemUnlockProvider,
 ) -> Result<(), String> {
     recover_pending_encryption_migration(store)?;
+    finish_pending_workspace_recovery_swap(store)?;
     recover_pending_data_key_rotation(store, provider)
 }
 
@@ -3700,6 +3980,7 @@ mod tests {
         fs::create_dir_all(store.backup_directory()).unwrap();
         fs::create_dir_all(store.pending_backup_directory()).unwrap();
         fs::create_dir_all(store.data_key_rotation_directory()).unwrap();
+        fs::create_dir_all(store.recovery_swap_directory()).unwrap();
         for path in [
             store.path(WorkspaceFileSlot::Primary),
             store.pending_path(WorkspaceFileSlot::Primary),
@@ -3710,6 +3991,7 @@ mod tests {
             store.backup_directory().join("snapshot.json"),
             store.pending_backup_directory().join("snapshot.json"),
             store.data_key_rotation_manifest_path(),
+            store.recovery_swap_manifest_path(),
         ] {
             fs::write(path, b"managed workspace data").unwrap();
         }
@@ -3725,6 +4007,7 @@ mod tests {
         assert!(!store.backup_directory().exists());
         assert!(!store.pending_backup_directory().exists());
         assert!(!store.data_key_rotation_directory().exists());
+        assert!(!store.recovery_swap_directory().exists());
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -3807,6 +4090,164 @@ mod tests {
         assert_eq!(
             store.read_plaintext(WorkspaceFileSlot::Recovery).unwrap(),
             Some(recovery)
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn recovery_swap_transaction_recovers_after_only_primary_was_replaced() {
+        let directory = test_directory();
+        let store = WorkspaceFileStore::new(directory.clone());
+        let primary = workspace("Current primary");
+        let recovery = workspace("Unique recovery");
+        store
+            .write_plaintext(WorkspaceFileSlot::Primary, &primary)
+            .unwrap();
+        store
+            .write_plaintext(WorkspaceFileSlot::Recovery, &recovery)
+            .unwrap();
+
+        let WorkspaceRecoverySwapPreparation::Ready(next_primary) =
+            prepare_workspace_recovery_swap(&store, None).unwrap()
+        else {
+            panic!("recovery swap should be prepared");
+        };
+        let prepared_primary =
+            fs::read(store.recovery_swap_slot_path(WorkspaceFileSlot::Primary)).unwrap();
+        write_atomically(&store.path(WorkspaceFileSlot::Primary), &prepared_primary).unwrap();
+
+        assert_eq!(
+            store.read_plaintext(WorkspaceFileSlot::Primary).unwrap(),
+            Some(next_primary.clone())
+        );
+        assert_eq!(
+            store.read_plaintext(WorkspaceFileSlot::Recovery).unwrap(),
+            Some(next_primary)
+        );
+
+        assert!(finish_pending_workspace_recovery_swap(&store).unwrap());
+        assert_eq!(
+            store.read_plaintext(WorkspaceFileSlot::Primary).unwrap(),
+            Some(normalize_storage_envelope(&recovery).unwrap())
+        );
+        assert_eq!(
+            store.read_plaintext(WorkspaceFileSlot::Recovery).unwrap(),
+            Some(normalize_storage_envelope(&primary).unwrap())
+        );
+        assert!(!store.recovery_swap_directory().exists());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn recovery_swap_treats_a_visible_manifest_as_committed_after_sync_failure() {
+        let directory = test_directory();
+        let store = WorkspaceFileStore::new(directory.clone());
+        let primary = workspace("Primary before sync failure");
+        let recovery = workspace("Recovery before sync failure");
+        store
+            .write_plaintext(WorkspaceFileSlot::Primary, &primary)
+            .unwrap();
+        store
+            .write_plaintext(WorkspaceFileSlot::Recovery, &recovery)
+            .unwrap();
+        assert!(matches!(
+            prepare_workspace_recovery_swap(&store, None).unwrap(),
+            WorkspaceRecoverySwapPreparation::Ready(_)
+        ));
+
+        assert_eq!(
+            classify_recovery_swap_prepare_failure(&store, "directory sync failed".to_owned())
+                .unwrap(),
+            WorkspaceRecoverySwapPreparation::RecoveryRequired
+        );
+        assert!(store.recovery_swap_directory().exists());
+        assert!(finish_pending_workspace_recovery_swap(&store).unwrap());
+        assert_eq!(
+            store.read_plaintext(WorkspaceFileSlot::Primary).unwrap(),
+            Some(normalize_storage_envelope(&recovery).unwrap())
+        );
+        assert_eq!(
+            store.read_plaintext(WorkspaceFileSlot::Recovery).unwrap(),
+            Some(normalize_storage_envelope(&primary).unwrap())
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn recovery_swap_quarantines_an_unknown_manifest_object() {
+        let directory = test_directory();
+        let store = WorkspaceFileStore::new(directory.clone());
+        fs::create_dir_all(store.recovery_swap_manifest_path()).unwrap();
+
+        assert_eq!(
+            classify_recovery_swap_prepare_failure(&store, "directory sync failed".to_owned())
+                .unwrap(),
+            WorkspaceRecoverySwapPreparation::RecoveryRequired
+        );
+        assert!(store.recovery_swap_directory().exists());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn recovery_swap_transaction_rebinds_encrypted_slots() {
+        let directory = test_directory();
+        let store = WorkspaceFileStore::new(directory.clone());
+        let data_key = [31; DATA_KEY_BYTES];
+        let primary = workspace("Encrypted primary");
+        let recovery = workspace("Encrypted recovery");
+        store
+            .write(WorkspaceFileSlot::Primary, &primary, Some(&data_key))
+            .unwrap();
+        store
+            .write(WorkspaceFileSlot::Recovery, &recovery, Some(&data_key))
+            .unwrap();
+
+        prepare_workspace_recovery_swap(&store, Some(&data_key)).unwrap();
+        assert!(finish_pending_workspace_recovery_swap(&store).unwrap());
+
+        assert_eq!(
+            store
+                .read(WorkspaceFileSlot::Primary, Some(&data_key))
+                .unwrap(),
+            Some(normalize_storage_envelope(&recovery).unwrap())
+        );
+        assert_eq!(
+            store
+                .read(WorkspaceFileSlot::Recovery, Some(&data_key))
+                .unwrap(),
+            Some(normalize_storage_envelope(&primary).unwrap())
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn recovery_swap_discards_an_uncommitted_preparation() {
+        let directory = test_directory();
+        let store = WorkspaceFileStore::new(directory.clone());
+        let primary = workspace("Primary stays");
+        let recovery = workspace("Recovery stays");
+        store
+            .write_plaintext(WorkspaceFileSlot::Primary, &primary)
+            .unwrap();
+        store
+            .write_plaintext(WorkspaceFileSlot::Recovery, &recovery)
+            .unwrap();
+        fs::create_dir_all(store.recovery_swap_directory()).unwrap();
+        fs::write(
+            store.recovery_swap_slot_path(WorkspaceFileSlot::Primary),
+            b"incomplete",
+        )
+        .unwrap();
+
+        assert!(!finish_pending_workspace_recovery_swap(&store).unwrap());
+        assert!(!store.recovery_swap_directory().exists());
+        assert_eq!(
+            store.read_plaintext(WorkspaceFileSlot::Primary).unwrap(),
+            Some(normalize_storage_envelope(&primary).unwrap())
+        );
+        assert_eq!(
+            store.read_plaintext(WorkspaceFileSlot::Recovery).unwrap(),
+            Some(normalize_storage_envelope(&recovery).unwrap())
         );
         fs::remove_dir_all(directory).unwrap();
     }

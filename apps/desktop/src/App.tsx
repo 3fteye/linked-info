@@ -389,6 +389,8 @@ function App({
   const documentImportCancelledRef = useRef(false);
   const workspaceChangedInSessionRef = useRef(false);
   const [persistenceReady, setPersistenceReady] = useState(false);
+  const [persistenceRecoveryRequired, setPersistenceRecoveryRequired] =
+    useState(false);
   const [primaryStorageProblem, setPrimaryStorageProblem] = useState<string | null>(null);
   const [recoveryStorageProblem, setRecoveryStorageProblem] = useState<string | null>(null);
   const [confirmClearUnreadable, setConfirmClearUnreadable] = useState(false);
@@ -403,6 +405,7 @@ function App({
   const workspaceReplacementHistoryBoundaryRef =
     useRef<WorkspaceReplacementHistoryBoundary>(null);
   const workspaceReplacementHistoryBusyRef = useRef(false);
+  const workspaceMutationBlockedRef = useRef(false);
   const [historyAvailability, setHistoryAvailability] = useState({
     canUndo: false,
     canRedo: false,
@@ -1195,6 +1198,7 @@ function App({
         if (primary.status === "ready") {
           workspaceRef.current = primary.workspace;
           setWorkspace(primary.workspace);
+          setPersistenceRecoveryRequired(false);
           setPersistenceReady(true);
         } else if (primary.status === "missing") {
           const initialWorkspace = emptyWorkspace();
@@ -2494,6 +2498,9 @@ function App({
     options: WorkspaceUpdateOptions = {},
   ): WorkspaceSnapshot {
     const current = workspaceRef.current;
+    if (workspaceMutationBlockedRef.current) {
+      return current;
+    }
     const next = updater(current);
     if (next === current) {
       return current;
@@ -3699,10 +3706,22 @@ function App({
       return;
     }
     workspaceReplacementHistoryBusyRef.current = true;
+    workspaceMutationBlockedRef.current = true;
+    skipUnmountFlushRef.current = true;
     workspaceReplacementHistoryBoundaryRef.current = null;
     syncHistoryAvailability();
+    setPersistenceReady(false);
     try {
-      const next = await persistence.swapWithRecovery();
+      const result = await persistence.swapWithRecovery();
+      if (result.status === "reloadRequired") {
+        // The Rust transaction may already be committed. Do not let the
+        // lifecycle cleanup flush the stale React snapshot over it.
+        skipUnmountFlushRef.current = true;
+        setPersistenceRecoveryRequired(true);
+        setPersistenceReady(false);
+        return;
+      }
+      const next = result.workspace;
       workspaceChangedInSessionRef.current = true;
       automaticOffsiteRevisionRef.current += 1;
       workspaceReplacementGenerationRef.current += 1;
@@ -3722,6 +3741,9 @@ function App({
       setRecoveryStorageProblem(null);
       setActiveView("canvas");
       setWorkspaceReplacementHistoryBoundary(direction === "undo" ? "redo" : "undo");
+      workspaceMutationBlockedRef.current = false;
+      skipUnmountFlushRef.current = false;
+      setPersistenceReady(true);
       showAppNotice(
         direction === "undo"
           ? t("backup.replacementUndoSuccess")
@@ -3736,6 +3758,9 @@ function App({
         },
       );
     } catch {
+      workspaceMutationBlockedRef.current = false;
+      skipUnmountFlushRef.current = false;
+      setPersistenceReady(true);
       workspaceReplacementHistoryBoundaryRef.current = direction;
       setBackupStatus(t("backup.replacementUndoFailed"));
     } finally {
@@ -3825,7 +3850,24 @@ function App({
   if (!persistenceReady) {
     return (
       <main className="storage-problem-shell">
-        {primaryStorageProblem === null ? (
+        {persistenceRecoveryRequired ? (
+          <section className="storage-problem-card" aria-labelledby="storage-recovery-title">
+            <AlertTriangle aria-hidden="true" className="storage-problem-icon" size={28} />
+            <h1 id="storage-recovery-title">
+              {t("storageProblem.recoveryRequiredTitle")}
+            </h1>
+            <p>{t("storageProblem.recoveryRequiredDescription")}</p>
+            <div className="storage-problem-actions">
+              <button
+                className="primary-button"
+                onClick={() => window.location.reload()}
+                type="button"
+              >
+                {t("storageProblem.restart")}
+              </button>
+            </div>
+          </section>
+        ) : primaryStorageProblem === null ? (
           <section className="storage-problem-card" aria-live="polite">
             <p>{t("storageProblem.loading")}</p>
           </section>
