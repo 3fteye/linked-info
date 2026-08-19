@@ -158,7 +158,7 @@ pub fn validate_extension_package(
     let mut files = BTreeMap::<String, Vec<u8>>::new();
     let mut uncompressed_bytes = 0_u64;
     for index in 0..archive.len() {
-        let mut entry = archive
+        let entry = archive
             .by_index(index)
             .map_err(|_| ExtensionPackageError::InvalidArchive)?;
         let path = entry.name().to_owned();
