@@ -1520,18 +1520,31 @@ pub async fn clear_workspace_recovery_data(
             .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
         ensure_access_generation(&access_generation, Some(permit))?;
         recover_pending_migration(&store)?;
-        let recovery = store.path(WorkspaceFileSlot::Recovery);
-        let pending_recovery = store.pending_path(WorkspaceFileSlot::Recovery);
-        remove_file_if_exists(&recovery)?;
-        remove_file_if_exists(&pending_recovery)?;
-        remove_workspace_subdirectory(&store.base_directory, &store.backup_directory())?;
-        remove_workspace_subdirectory(&store.base_directory, &store.pending_backup_directory())?;
-        Ok::<(), String>(())
+        clear_recovery_data_from_store(&store)
     })
     .await
     .map_err(|error| error.to_string())??;
     ensure_workspace_access(&app, &state, Some(permit))?;
     Ok(())
+}
+
+fn clear_recovery_data_from_store(store: &WorkspaceFileStore) -> Result<(), String> {
+    if let Some(mut metadata) = store.read_vault_metadata()?
+        && metadata
+            .migrated_slots
+            .contains(&WorkspaceFileSlot::Recovery)
+    {
+        metadata
+            .migrated_slots
+            .retain(|slot| *slot != WorkspaceFileSlot::Recovery);
+        let serialized = serde_json::to_vec(&metadata).map_err(|error| error.to_string())?;
+        write_atomically(&store.vault_path(), &serialized).map_err(|error| error.to_string())?;
+    }
+
+    remove_file_if_exists(&store.path(WorkspaceFileSlot::Recovery))?;
+    remove_file_if_exists(&store.pending_path(WorkspaceFileSlot::Recovery))?;
+    remove_workspace_subdirectory(&store.base_directory, &store.backup_directory())?;
+    remove_workspace_subdirectory(&store.base_directory, &store.pending_backup_directory())
 }
 
 #[tauri::command]
@@ -5308,6 +5321,28 @@ mod tests {
             .unwrap(),
             PreparedRestoreInstallOutcome::RecoveryRequired
         );
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn clearing_encrypted_recovery_removes_its_required_slot() {
+        let directory = test_directory();
+        let store = WorkspaceFileStore::new(directory.clone());
+        store
+            .write_plaintext(WorkspaceFileSlot::Primary, &workspace("current"))
+            .unwrap();
+        store
+            .write_plaintext(WorkspaceFileSlot::Recovery, &workspace("recoverable"))
+            .unwrap();
+        let data_key = migrate_plaintext_store(&store, "correct horse battery").unwrap();
+
+        clear_recovery_data_from_store(&store).unwrap();
+
+        let metadata = store.read_vault_metadata().unwrap().unwrap();
+        assert_eq!(metadata.migrated_slots, vec![WorkspaceFileSlot::Primary]);
+        assert!(!store.path(WorkspaceFileSlot::Recovery).exists());
+        verify_encrypted_store(&store, &metadata, &data_key).unwrap();
 
         fs::remove_dir_all(directory).unwrap();
     }
