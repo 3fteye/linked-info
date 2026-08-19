@@ -927,7 +927,7 @@ pub async fn swap_workspace_recovery_files(
             }
         }
         WorkspaceRecoverySwapOperation::RecoveryRequired => {
-            lock_workspace_runtime(&app, "workspace_recovery_swap_pending");
+            lock_workspace_runtime_with_terminal_event(&app, "workspace_recovery_swap_pending");
             Ok(WorkspaceRecoverySwapResult {
                 status: WorkspaceRecoverySwapStatus::RecoveryRequired,
                 contents: None,
@@ -1209,7 +1209,10 @@ pub async fn change_workspace_password(
     .map_err(|error| error.to_string())??;
     let (write_status, system_unlock_enabled, idle_timeout_minutes) = changed;
     if write_status == VaultMetadataWriteStatus::RecoveryRequired {
-        lock_workspace_runtime(&app, "workspace_password_change_recovery_required");
+        lock_workspace_runtime_with_terminal_event(
+            &app,
+            "workspace_password_change_recovery_required",
+        );
         return Ok(WorkspaceSecurityTransactionResult {
             status: WorkspaceSecurityTransactionStatus::RecoveryRequired,
             security_status: None,
@@ -1218,7 +1221,7 @@ pub async fn change_workspace_password(
     let session_current = ensure_workspace_access(&app, &state, Some(permit)).is_ok();
     let locked = !session_current;
     if locked {
-        lock_workspace_runtime(&app, "workspace_password_changed_locked");
+        lock_workspace_runtime_with_terminal_event(&app, "workspace_password_changed_locked");
     }
     Ok(WorkspaceSecurityTransactionResult {
         status: if locked {
@@ -1972,11 +1975,11 @@ pub async fn commit_workspace_restore(
     let data_key = match outcome {
         PreparedRestoreInstallOutcome::Committed(data_key) => data_key,
         PreparedRestoreInstallOutcome::CommittedLocked => {
-            lock_workspace_runtime(&app, "workspace_restore_committed_locked");
+            lock_workspace_runtime_with_terminal_event(&app, "workspace_restore_committed_locked");
             return Ok(locked_result());
         }
         PreparedRestoreInstallOutcome::RecoveryRequired => {
-            lock_workspace_runtime(&app, "workspace_restore_recovery_required");
+            lock_workspace_runtime_with_terminal_event(&app, "workspace_restore_recovery_required");
             return Ok(WorkspaceSecurityTransactionResult {
                 status: WorkspaceSecurityTransactionStatus::RecoveryRequired,
                 security_status: None,
@@ -1989,7 +1992,7 @@ pub async fn commit_workspace_restore(
             .await
             .is_err()
     {
-        lock_workspace_runtime(&app, "workspace_restore_committed_locked");
+        lock_workspace_runtime_with_terminal_event(&app, "workspace_restore_committed_locked");
         return Ok(locked_result());
     }
     let _ = embedding_state.shutdown();
@@ -2074,6 +2077,20 @@ pub fn lock_workspace_runtime(app: &AppHandle, reason: &str) -> bool {
     cleanup_locked_workspace(app);
     crate::secret_clipboard::clear_active(app);
     was_unlocked
+}
+
+fn emit_terminal_lock_event_if_needed(event_already_emitted: bool, emit: impl FnOnce()) {
+    if !event_already_emitted {
+        emit();
+    }
+}
+
+fn lock_workspace_runtime_with_terminal_event(app: &AppHandle, reason: &str) -> bool {
+    let event_already_emitted = lock_workspace_runtime(app, reason);
+    emit_terminal_lock_event_if_needed(event_already_emitted, || {
+        let _ = app.emit(WORKSPACE_LOCKED_EVENT, reason);
+    });
+    event_already_emitted
 }
 
 fn validate_new_password(password: &str) -> Result<(), String> {
@@ -3820,6 +3837,7 @@ fn sync_parent_directory(_parent: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
     use std::collections::HashMap;
 
     #[derive(Default)]
@@ -4015,6 +4033,24 @@ mod tests {
             "workspace_vault_session_expired"
         );
         assert!(!state.shutdown());
+    }
+
+    #[test]
+    fn terminal_lock_outcomes_still_emit_when_the_runtime_was_already_locked() {
+        let emitted = Cell::new(false);
+
+        emit_terminal_lock_event_if_needed(false, || emitted.set(true));
+
+        assert!(emitted.get());
+    }
+
+    #[test]
+    fn terminal_lock_outcomes_do_not_duplicate_the_initial_lock_event() {
+        let emitted = Cell::new(false);
+
+        emit_terminal_lock_event_if_needed(true, || emitted.set(true));
+
+        assert!(!emitted.get());
     }
 
     #[test]

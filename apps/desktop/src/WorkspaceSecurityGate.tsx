@@ -67,7 +67,8 @@ export default function WorkspaceSecurityGate({
         }
         if (
           reason === "workspace_password_change_recovery_required" ||
-          reason === "workspace_restore_recovery_required"
+          reason === "workspace_restore_recovery_required" ||
+          reason === "workspace_recovery_swap_pending"
         ) {
           setRecoveryRequired(true);
         }
