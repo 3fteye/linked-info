@@ -4,6 +4,7 @@ import {
   canvasContentPreview,
   canvasExpandedCodeContentPreview,
   contentContainsSensitive,
+  contentProcessorUsesCodePresentation,
   contentProcessorRegistry,
   markdownContentProcessor,
   maximumCanvasContentPreviewCharacters,
@@ -14,6 +15,7 @@ import {
   codeContentProcessorId,
   codePreviewLanguages,
 } from "./codePreviewLanguages";
+import { builtInJsonInspectorProcessorId } from "./builtinJsonInspector";
 
 describe("content processor registry", () => {
   it("uses plain text by default", () => {
@@ -21,7 +23,12 @@ describe("content processor registry", () => {
 
     expect(resolved.processor.id).toBe("text");
     expect(resolved.supported).toBe(true);
-    expect(resolved.processor.present("secret")).toEqual({
+    expect(resolved.processor.kind).toBe("legacy");
+    expect(
+      resolved.processor.kind === "legacy"
+        ? resolved.processor.present("secret")
+        : null,
+    ).toEqual({
       kind: "text",
       text: "secret",
     });
@@ -32,9 +39,14 @@ describe("content processor registry", () => {
       "text",
       "markdown",
       ...codePreviewLanguages.map(codeContentProcessorId),
+      builtInJsonInspectorProcessorId,
     ]);
     expect(contentProcessorRegistry.has("markdown")).toBe(true);
     expect(contentProcessorRegistry.has("code.typescript")).toBe(true);
+    expect(contentProcessorRegistry.has(builtInJsonInspectorProcessorId)).toBe(true);
+    expect(contentProcessorUsesCodePresentation(builtInJsonInspectorProcessorId)).toBe(
+      true,
+    );
     expect(markdownContentProcessor.present("# Heading")).toEqual({
       kind: "markdown",
       source: "# Heading",

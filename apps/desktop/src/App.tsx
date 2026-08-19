@@ -58,8 +58,10 @@ import {
 import { importDocumentDraft, importTextDocument } from "./documentImportBridge";
 import {
   NodeContentHost,
+  contentProcessorExtensionId,
   contentProcessorRegistry,
 } from "./contentProcessor";
+import { builtInJsonInspectorProcessorId } from "./builtinJsonInspector";
 import {
   codePreviewLanguageFromProcessorId,
   codePreviewLanguages,
@@ -74,10 +76,12 @@ import {
   isUnnamedNode,
   moveNodeLayoutToFront,
   normalizeNodeName,
+  parseStoredWorkspaceText,
   persistedNodeNameFromDraft,
   removeNodesFromWorkspaceView,
-  parseStoredWorkspaceText,
+  updateNodeExtensionMetadata,
   type CanvasViewport,
+  type ExtensionMetadataPayload,
   type InformationNode,
   type NodeLayout,
   type NodeReference,
@@ -1315,6 +1319,17 @@ function App({
     );
   }, [workspace.nodes]);
 
+  const builtInExtensionLabels = useMemo(
+    () => ({
+      "action.set-indent": t("extensions.jsonInspector.actions.setIndent"),
+      "indent.four": t("extensions.jsonInspector.indent.four"),
+      "indent.label": t("extensions.jsonInspector.indent.label"),
+      "indent.two": t("extensions.jsonInspector.indent.two"),
+      "processor.label": t("editor.contentProcessors.jsonInspector"),
+    }),
+    [t],
+  );
+
   const contentProcessorOptions = useMemo(
     () =>
       contentProcessorRegistry.list().map((processor) => {
@@ -1326,9 +1341,11 @@ function App({
               ? t("editor.contentProcessors.text")
               : processor.id === "markdown"
                 ? t("editor.contentProcessors.markdown")
-                : codeLanguage === null
-                  ? processor.id
-                  : t(`editor.codeLanguages.${codeLanguage}`),
+                : processor.id === builtInJsonInspectorProcessorId
+                  ? t("editor.contentProcessors.jsonInspector")
+                  : codeLanguage === null
+                    ? processor.id
+                    : t(`editor.codeLanguages.${codeLanguage}`),
         };
       }),
     [t],
@@ -1362,6 +1379,12 @@ function App({
         ) as Record<CodePreviewLanguage, string>,
         truncated: t("codePreview.truncated"),
       },
+      extension: {
+        resolve: (key: string) =>
+          builtInExtensionLabels[
+            key as keyof typeof builtInExtensionLabels
+          ] ?? null,
+      },
       secret: {
         copy: t("secret.copy"),
         hide: t("secret.hide"),
@@ -1377,7 +1400,7 @@ function App({
         remaining: (seconds: number) => t("totp.remaining", { seconds }),
       },
     }),
-    [t],
+    [builtInExtensionLabels, t],
   );
 
   useEffect(() => {
@@ -2824,6 +2847,32 @@ function App({
         },
       };
     });
+  }
+
+  function applyNodeExtensionMetadata(
+    nodeId: string,
+    extensionId: string,
+    schemaVersion: number,
+    nodeMetadata: ExtensionMetadataPayload | null,
+    workspaceMetadata: ExtensionMetadataPayload | null,
+  ) {
+    updateWorkspace(
+      (current) => {
+        const view = updateNodeExtensionMetadata(
+          current.view,
+          current.nodes,
+          extensionId,
+          schemaVersion,
+          nodeId,
+          nodeMetadata,
+          workspaceMetadata,
+        );
+        return view === null || view === current.view
+          ? current
+          : { ...current, view };
+      },
+      { flushImmediately: true, recordHistory: true },
+    );
   }
 
   function commitNode(nodeId: string) {
@@ -5790,6 +5839,7 @@ function App({
                 codeCopy: contentEnhancementLabels.code.copy,
                 codeLanguages: contentEnhancementLabels.code.languages,
                 codeTruncated: contentEnhancementLabels.code.truncated,
+                extensionLabels: builtInExtensionLabels,
                 content: t("editor.content"),
                 contentPlaceholder: t("editor.contentPlaceholder"),
                 contentProcessor: t("editor.contentProcessor"),
@@ -5908,6 +5958,7 @@ function App({
               }}
               layout={workspace.layout}
               contentProcessorByNodeId={workspace.view.contentProcessorByNodeId}
+              extensionMetadata={workspace.view.extensionMetadata}
               contentProcessorOptions={contentProcessorOptions}
               contentMarkerOptions={contentMarkerOptions}
               nameConflictNodeIds={nameConflictNodeIds}
@@ -5930,6 +5981,7 @@ function App({
               onNodeCommit={commitNode}
               onNodeContentChange={updateNodeContent}
               onNodeContentProcessorChange={updateNodeContentProcessor}
+              onNodeExtensionMetadataChange={applyNodeExtensionMetadata}
               onNodeBringToFront={bringNodeToFront}
               onNodeNameChange={updateNodeName}
               onReferencesChange={updateReferences}
@@ -5949,27 +6001,46 @@ function App({
                 <div className="list-empty">{t("empty.nodes")}</div>
               ) : (
                 <div className="node-list">
-                  {filteredNodes.map((node) => (
-                    <button
-                      className="node-list-row"
-                      key={node.id}
-                      onClick={() => editNode(node.id)}
-                      type="button"
-                    >
-                      <strong data-unnamed={isUnnamedNode(node)}>
-                        {node.name ?? t("nodes.unnamed")}
-                      </strong>
-                      <NodeContentHost
-                        content={node.content}
-                        emptyContent={t("nodes.noContent")}
-                        enhancementLabels={contentEnhancementLabels}
-                        processorId={
-                          workspace.view.contentProcessorByNodeId[node.id] ?? null
-                        }
-                        variant="list"
-                      />
-                    </button>
-                  ))}
+                  {filteredNodes.map((node) => {
+                    const processorId =
+                      workspace.view.contentProcessorByNodeId[node.id] ?? null;
+                    const extensionId = contentProcessorExtensionId(processorId);
+                    const storedExtensionMetadata =
+                      extensionId === null
+                        ? undefined
+                        : workspace.view.extensionMetadata[extensionId];
+                    return (
+                      <button
+                        className="node-list-row"
+                        key={node.id}
+                        onClick={() => editNode(node.id)}
+                        type="button"
+                      >
+                        <strong data-unnamed={isUnnamedNode(node)}>
+                          {node.name ?? t("nodes.unnamed")}
+                        </strong>
+                        <NodeContentHost
+                          content={node.content}
+                          emptyContent={t("nodes.noContent")}
+                          enhancementLabels={contentEnhancementLabels}
+                          extensionMetadata={
+                            storedExtensionMetadata === undefined
+                              ? null
+                              : {
+                                  node:
+                                    storedExtensionMetadata.byNodeId[node.id] ?? {},
+                                  schemaVersion:
+                                    storedExtensionMetadata.schemaVersion,
+                                  workspace: storedExtensionMetadata.workspace,
+                                }
+                          }
+                          nodeName={node.name}
+                          processorId={processorId}
+                          variant="list"
+                        />
+                      </button>
+                    );
+                  })}
                 </div>
               )}
             </section>

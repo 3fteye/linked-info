@@ -663,3 +663,61 @@ export function removeNodesFromWorkspaceView(
     extensionMetadata,
   };
 }
+
+function extensionMetadataPayloadIsEmpty(
+  payload: ExtensionMetadataPayload,
+): boolean {
+  return Object.keys(payload).length === 0;
+}
+
+export function updateNodeExtensionMetadata(
+  view: WorkspaceViewMetadata,
+  nodes: readonly InformationNode[],
+  extensionId: string,
+  schemaVersion: number,
+  nodeId: string,
+  nodeMetadata: ExtensionMetadataPayload | null,
+  workspaceMetadata: ExtensionMetadataPayload | null = null,
+): WorkspaceViewMetadata | null {
+  const nodeIds = new Set(nodes.map((node) => node.id));
+  if (!nodeIds.has(nodeId)) {
+    return null;
+  }
+  const current = view.extensionMetadata[extensionId];
+  if (current !== undefined && current.schemaVersion !== schemaVersion) {
+    return null;
+  }
+  if (current === undefined && nodeMetadata === null && workspaceMetadata === null) {
+    return view;
+  }
+  const nextWorkspace = workspaceMetadata ?? current?.workspace ?? {};
+  const nextByNodeId = { ...(current?.byNodeId ?? {}) };
+  if (nodeMetadata !== null) {
+    if (extensionMetadataPayloadIsEmpty(nodeMetadata)) {
+      delete nextByNodeId[nodeId];
+    } else {
+      nextByNodeId[nodeId] = nodeMetadata;
+    }
+  }
+  const nextExtensionMetadata = { ...view.extensionMetadata };
+  if (
+    extensionMetadataPayloadIsEmpty(nextWorkspace) &&
+    Object.keys(nextByNodeId).length === 0
+  ) {
+    delete nextExtensionMetadata[extensionId];
+  } else {
+    nextExtensionMetadata[extensionId] = {
+      schemaVersion,
+      workspace: nextWorkspace,
+      byNodeId: nextByNodeId,
+    };
+  }
+  const parsed = parseWorkspaceExtensionMetadata(nextExtensionMetadata, nodeIds);
+  if (parsed === null) {
+    return null;
+  }
+  return {
+    ...view,
+    extensionMetadata: parsed,
+  };
+}

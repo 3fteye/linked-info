@@ -53,9 +53,11 @@ import {
 } from "react";
 import type {
   CanvasViewport,
+  ExtensionMetadataPayload,
   InformationNode,
   NodeLayout,
   NodeReference,
+  WorkspaceExtensionMetadata,
 } from "./workspaceStore";
 import {
   moveNodeLayoutToFront,
@@ -88,8 +90,11 @@ import {
   canvasContentPreview,
   canvasExpandedCodeContentPreview,
   contentContainsSensitive,
+  contentProcessorExtensionId,
+  contentProcessorUsesCodePresentation,
   type ContentEnhancementLabels,
 } from "./contentProcessor";
+import type { BuiltInExtensionMetadataInput } from "./builtinExtensionHost";
 import {
   codePreviewLanguageFromProcessorId,
   type CodePreviewLanguage,
@@ -153,6 +158,7 @@ interface InformationNodeData extends Record<string, unknown> {
   contentLabel: string;
   contentPlaceholder: string;
   enhancementLabels: ContentEnhancementLabels;
+  extensionMetadata: BuiltInExtensionMetadataInput | null;
   editing: boolean;
   interactive: boolean;
   nameConflict: boolean;
@@ -177,6 +183,13 @@ interface InformationNodeData extends Record<string, unknown> {
   ) => void;
   onContentChange: (nodeId: string, content: string) => void;
   onContentProcessorChange: (nodeId: string, processorId: string) => void;
+  onExtensionMetadataChange: (
+    nodeId: string,
+    extensionId: string,
+    schemaVersion: number,
+    nodeMetadata: ExtensionMetadataPayload | null,
+    workspaceMetadata: ExtensionMetadataPayload | null,
+  ) => void;
   onCopyCodeSource: ((containsSensitive: boolean) => Promise<void>) | null;
   onCopyDerivedSecret: ((value: string) => Promise<void>) | null;
   onNameChange: (nodeId: string, name: string) => boolean;
@@ -241,6 +254,7 @@ interface GraphLabels {
   codeCopy: string;
   codeLanguages: Record<CodePreviewLanguage, string>;
   codeTruncated: string;
+  extensionLabels: Readonly<Record<string, string>>;
   unsupportedContentProcessor: (processorId: string) => string;
   copySecret: string;
   copyCodeFailed: string;
@@ -321,6 +335,7 @@ interface GraphCanvasProps {
   layout: NodeLayout[];
   references: NodeReference[];
   contentProcessorByNodeId: Readonly<Record<string, string>>;
+  extensionMetadata: Readonly<Record<string, WorkspaceExtensionMetadata>>;
   contentProcessorOptions: readonly ContentProcessorOption[];
   contentMarkerOptions: readonly ContentMarkerOption[];
   viewport: CanvasViewport | null;
@@ -349,6 +364,13 @@ interface GraphCanvasProps {
   onNodeCommit: (nodeId: string) => void;
   onNodeContentChange: (nodeId: string, content: string) => void;
   onNodeContentProcessorChange: (nodeId: string, processorId: string) => void;
+  onNodeExtensionMetadataChange: (
+    nodeId: string,
+    extensionId: string,
+    schemaVersion: number,
+    nodeMetadata: ExtensionMetadataPayload | null,
+    workspaceMetadata: ExtensionMetadataPayload | null,
+  ) => void;
   onNodeBringToFront: (nodeId: string) => void;
   onNodeNameChange: (nodeId: string, name: string) => boolean;
   onReferencesChange: (references: NodeReference[]) => void;
@@ -963,9 +985,25 @@ export function InformationNodeCard({
           codeSourceContainsSensitive={data.codeSourceContainsSensitive}
           content={data.content}
           enhancementLabels={data.enhancementLabels}
+          extensionMetadata={data.extensionMetadata}
           hideWhenEmpty
+          nodeName={data.name}
           onCopyCodeSource={data.onCopyCodeSource ?? undefined}
           onCopySecret={data.onCopyDerivedSecret ?? undefined}
+          onExtensionMetadataChange={(
+            extensionId,
+            schemaVersion,
+            nodeMetadata,
+            workspaceMetadata,
+          ) =>
+            data.onExtensionMetadataChange(
+              id,
+              extensionId,
+              schemaVersion,
+              nodeMetadata,
+              workspaceMetadata,
+            )
+          }
           processorId={data.contentProcessorId}
           sourceTruncated={data.contentTruncated}
           variant="canvas"
@@ -1143,6 +1181,7 @@ export default function GraphCanvas({
   contentMarkerOptions,
   contentProcessorByNodeId,
   contentProcessorOptions,
+  extensionMetadata,
   nodes,
   layout,
   references,
@@ -1168,6 +1207,7 @@ export default function GraphCanvas({
   onNodeCommit,
   onNodeContentChange,
   onNodeContentProcessorChange,
+  onNodeExtensionMetadataChange,
   onNodeBringToFront,
   onNodeNameChange,
   onReferencesChange,
@@ -2187,17 +2227,30 @@ export default function GraphCanvas({
         const manualWidth = savedLayout?.width !== undefined;
         const manualHeight = savedLayout?.height !== undefined;
         const manualSize = manualWidth || manualHeight;
-        const codeLanguage = codePreviewLanguageFromProcessorId(
-          contentProcessorByNodeId[node.id] ?? "",
+        const contentProcessorId = contentProcessorByNodeId[node.id] ?? null;
+        const usesCodePresentation = contentProcessorUsesCodePresentation(
+          contentProcessorId,
         );
+        const extensionId = contentProcessorExtensionId(contentProcessorId);
+        const storedExtensionMetadata =
+          extensionId === null ? undefined : extensionMetadata[extensionId];
+        const nodeExtensionMetadata =
+          storedExtensionMetadata === undefined
+            ? null
+            : {
+                node: storedExtensionMetadata.byNodeId[node.id] ?? {},
+                schemaVersion: storedExtensionMetadata.schemaVersion,
+                workspace: storedExtensionMetadata.workspace,
+              };
         const codeSourceContainsSensitive =
           sensitiveCodeContentByNodeId.get(node.id) ?? false;
         const editing = editingNodeId === node.id;
         const expanded = manualHeight || fitContentNodeId === node.id;
-        const contentFullyRendered = editing || (codeLanguage === null && expanded);
+        const contentFullyRendered =
+          editing || (!usesCodePresentation && expanded);
         const renderedContent = editing
           ? node.content
-          : codeLanguage !== null && expanded
+          : usesCodePresentation && expanded
             ? canvasExpandedCodeContentPreview(node.content)
             : contentFullyRendered
               ? node.content
@@ -2232,7 +2285,7 @@ export default function GraphCanvas({
             content: renderedContent,
             contentFullyRendered,
             contentTruncated: renderedContent !== node.content,
-            contentProcessorId: contentProcessorByNodeId[node.id] ?? null,
+            contentProcessorId,
             codeSourceContainsSensitive,
             contentProcessorLabel: labels.contentProcessor,
             contentProcessorOptions,
@@ -2258,6 +2311,9 @@ export default function GraphCanvas({
                 languages: labels.codeLanguages,
                 truncated: labels.codeTruncated,
               },
+              extension: {
+                resolve: (key) => labels.extensionLabels[key] ?? null,
+              },
               secret: {
                 copy: labels.secretCopy,
                 hide: labels.secretHide,
@@ -2274,6 +2330,7 @@ export default function GraphCanvas({
               },
             },
             editing,
+            extensionMetadata: nodeExtensionMetadata,
             interactive,
             nameConflict: nameConflictNodeIds.has(node.id),
             nameConflictLabel: labels.nameConflict,
@@ -2306,6 +2363,7 @@ export default function GraphCanvas({
             onBrowseIncomingReferences: openIncomingReferenceBrowser,
             onContentChange: onNodeContentChange,
             onContentProcessorChange: onNodeContentProcessorChange,
+            onExtensionMetadataChange: onNodeExtensionMetadataChange,
             onCopyCodeSource:
               codeSourceContainsSensitive && onCopySecret === null
                 ? null
@@ -2331,6 +2389,7 @@ export default function GraphCanvas({
     commitNodeAndScheduleAvoidance,
     canvasReferencePresentation,
     editingNodeId,
+    extensionMetadata,
     fitContentNodeId,
     clampedUnmatchedNodeOpacity,
     filteredOutNodeIdSet,
@@ -2343,6 +2402,7 @@ export default function GraphCanvas({
     nodes,
     onNodeContentChange,
     onNodeContentProcessorChange,
+    onNodeExtensionMetadataChange,
     onCopySecret,
     onNodeNameChange,
     openIncomingReferenceBrowser,

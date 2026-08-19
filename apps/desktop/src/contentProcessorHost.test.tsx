@@ -4,6 +4,10 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { contentEnhancerRegistry } from "./contentEnhancer";
 import { NodeContentHost } from "./contentProcessor";
+import {
+  builtInJsonInspectorExtensionId,
+  builtInJsonInspectorProcessorId,
+} from "./builtinJsonInspector";
 
 const enhancementLabels = {
   code: {
@@ -20,6 +24,14 @@ const enhancementLabels = {
       sql: "SQL",
     },
     truncated: "Preview truncated",
+  },
+  extension: {
+    resolve: (key: string) =>
+      ({
+        "indent.label": "Indentation",
+        "indent.two": "2 spaces",
+        "indent.four": "4 spaces",
+      })[key] ?? null,
   },
   secret: {
     copy: "Copy secret",
@@ -126,6 +138,95 @@ describe("NodeContentHost", () => {
         ?.click(),
     );
     expect(onCopyCodeSource).toHaveBeenCalledWith(false);
+  });
+
+  it("renders the built-in JSON adapter through declarative UI and stores its action result", async () => {
+    const onExtensionMetadataChange = vi.fn();
+    await import("./codePreview");
+    await act(async () => {
+      root.render(
+        <NodeContentHost
+          content={'{"outer":{"value":1}}'}
+          enhancementLabels={enhancementLabels}
+          extensionMetadata={{ node: {}, schemaVersion: 1, workspace: {} }}
+          onExtensionMetadataChange={onExtensionMetadataChange}
+          processorId={builtInJsonInspectorProcessorId}
+          variant="canvas"
+        />,
+      );
+    });
+
+    expect(container.querySelector(".extension-presentation")).not.toBeNull();
+    expect(container.querySelector(".code-preview")?.getAttribute("data-language"))
+      .toBe("json");
+    expect(container.textContent).toContain('"outer"');
+    expect(container.textContent).toContain("Indentation");
+    const select = container.querySelector<HTMLSelectElement>(
+      ".extension-presentation-select select",
+    )!;
+    act(() => {
+      select.value = "4";
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(onExtensionMetadataChange).toHaveBeenCalledWith(
+      builtInJsonInspectorExtensionId,
+      1,
+      { indentSize: 4 },
+      null,
+    );
+  });
+
+  it("never exposes marked secrets to an extension-backed processor", async () => {
+    await import("./codePreview");
+    await act(async () => {
+      root.render(
+        <NodeContentHost
+          content={
+            '{"apiKey":"[[li:secret note=\"API key\"]]synthetic-secret[[/li]]"}'
+          }
+          enhancementLabels={enhancementLabels}
+          processorId={builtInJsonInspectorProcessorId}
+          variant="canvas"
+        />,
+      );
+    });
+
+    expect(container.textContent).toContain("API key");
+    expect(container.textContent).not.toContain("synthetic-secret");
+  });
+
+  it("keeps extension-backed list rows compact and non-interactive", () => {
+    act(() =>
+      root.render(
+        <NodeContentHost
+          content={'{"value":1}'}
+          enhancementLabels={enhancementLabels}
+          processorId={builtInJsonInspectorProcessorId}
+          variant="list"
+        />,
+      ),
+    );
+
+    expect(container.textContent).toContain('"value"');
+    expect(container.querySelector("select")).toBeNull();
+    expect(container.querySelector("button")).toBeNull();
+  });
+
+  it("keeps the list empty-content fallback for extension processors", () => {
+    act(() =>
+      root.render(
+        <NodeContentHost
+          content={null}
+          emptyContent="No content"
+          enhancementLabels={enhancementLabels}
+          processorId={builtInJsonInspectorProcessorId}
+          variant="list"
+        />,
+      ),
+    );
+
+    expect(container.querySelector(".node-content-host")?.tagName).toBe("SPAN");
+    expect(container.textContent).toBe("No content");
   });
 
   it("masks marked secrets before highlighting and routes source copy through the secret boundary", async () => {
