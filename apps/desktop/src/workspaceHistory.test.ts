@@ -18,7 +18,7 @@ function workspace(): WorkspaceSnapshot {
     layout: [{ nodeId, x: 10, y: 20 }],
     references: [],
     viewport: { x: 100, y: -50, zoom: 1.2 },
-    view: { contentProcessorByNodeId: {} },
+    view: { contentProcessorByNodeId: {}, extensionMetadata: {} },
   };
 }
 
@@ -58,10 +58,31 @@ describe("workspace history", () => {
       ...before,
       view: {
         contentProcessorByNodeId: { [nodeId]: "plugin.example" },
+        extensionMetadata: {},
       },
     };
 
     expect(workspaceHistoryStatesEqual(before, after)).toBe(false);
+    expect(restoreWorkspaceHistory(after, null).view).toEqual(after.view);
+  });
+
+  it("keeps unknown extension metadata inside the same undo transaction", () => {
+    const before = captureWorkspaceHistory(workspace());
+    const after = structuredClone(before);
+    after.view.extensionMetadata["dev.example.preview"] = {
+      schemaVersion: 1,
+      workspace: { theme: "dark" },
+      byNodeId: { [nodeId]: { collapsed: true } },
+    };
+
+    const timeline = appendWorkspaceHistory(
+      emptyWorkspaceHistoryTimeline(),
+      before,
+      after,
+      100,
+    );
+
+    expect(stepWorkspaceHistoryBackward(timeline)?.state).toEqual(before);
     expect(restoreWorkspaceHistory(after, null).view).toEqual(after.view);
   });
 

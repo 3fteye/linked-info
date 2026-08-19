@@ -1,11 +1,12 @@
 import {
   migrateWorkspaceSnapshotV1,
+  migrateWorkspaceSnapshotV2,
   parseWorkspaceSnapshot,
   type WorkspaceSnapshot,
 } from "./workspaceData";
 
 const exportFormat = "linked-info-workspace";
-const exportVersion = 2;
+const exportVersion = 3;
 
 export type WorkspaceImportFailure =
   | "invalidJson"
@@ -57,7 +58,11 @@ export function parseWorkspaceExport(text: string): WorkspaceImportResult {
   if (!isRecord(document) || document.format !== exportFormat) {
     return { ok: false, reason: "invalidFormat" };
   }
-  if (document.version !== 1 && document.version !== exportVersion) {
+  if (
+    document.version !== 1 &&
+    document.version !== 2 &&
+    document.version !== exportVersion
+  ) {
     return { ok: false, reason: "unsupportedVersion" };
   }
   if (
@@ -70,7 +75,9 @@ export function parseWorkspaceExport(text: string): WorkspaceImportResult {
   const workspace =
     document.version === 1
       ? migrateWorkspaceSnapshotV1(document.workspace)
-      : parseWorkspaceSnapshot(document.workspace);
+      : document.version === 2
+        ? migrateWorkspaceSnapshotV2(document.workspace)
+        : parseWorkspaceSnapshot(document.workspace);
   if (workspace === null) {
     return { ok: false, reason: "invalidWorkspace" };
   }

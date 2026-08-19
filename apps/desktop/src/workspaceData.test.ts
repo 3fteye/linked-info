@@ -4,6 +4,7 @@ import {
   moveNodeLayoutToFront,
   parseWorkspaceSnapshot,
   persistedNodeNameFromDraft,
+  removeNodesFromWorkspaceView,
   updateNodeLayoutDimensions,
   updateNodeLayoutSizeOverrides,
   updateNodeLayoutPositions,
@@ -25,7 +26,7 @@ function validWorkspace(): WorkspaceSnapshot {
     ],
     references: [{ sourceNodeId: accountId, targetNodeId: serviceId }],
     viewport: { x: 100, y: -50, zoom: 1.25 },
-    view: { contentProcessorByNodeId: {} },
+    view: { contentProcessorByNodeId: {}, extensionMetadata: {} },
   };
 }
 
@@ -117,6 +118,125 @@ describe("parseWorkspaceSnapshot", () => {
       "33333333-3333-4333-8333-333333333333"
     ] = "plugin.example";
     expect(parseWorkspaceSnapshot(workspace)).toBeNull();
+  });
+
+  it("preserves namespaced metadata for unknown extensions", () => {
+    const workspace = validWorkspace();
+    workspace.view.extensionMetadata["dev.example.preview"] = {
+      schemaVersion: 3,
+      workspace: { theme: "dark", columns: ["name", "value"] },
+      byNodeId: {
+        [accountId.toUpperCase()]: {
+          collapsed: false,
+          options: { wrapLines: true },
+        },
+      },
+    };
+
+    const parsed = parseWorkspaceSnapshot(workspace);
+
+    expect(parsed?.view.extensionMetadata).toEqual({
+      "dev.example.preview": {
+        schemaVersion: 3,
+        workspace: { theme: "dark", columns: ["name", "value"] },
+        byNodeId: {
+          [accountId]: {
+            collapsed: false,
+            options: { wrapLines: true },
+          },
+        },
+      },
+    });
+  });
+
+  it("rejects invalid extension metadata envelopes, values, and dangling nodes", () => {
+    const tooDeep: Record<string, unknown> = {};
+    let cursor = tooDeep;
+    for (let depth = 0; depth < 17; depth += 1) {
+      const next: Record<string, unknown> = {};
+      cursor.next = next;
+      cursor = next;
+    }
+    const oversizedNodePayload = Object.fromEntries(
+      Array.from({ length: 5 }, (_, index) => [
+        `value${index}`,
+        "x".repeat(4_096),
+      ]),
+    );
+    const invalidCases = [
+      {
+        schemaVersion: 0,
+        workspace: {},
+        byNodeId: {},
+      },
+      {
+        schemaVersion: 1,
+        workspace: { output: "x".repeat(4_097) },
+        byNodeId: {},
+      },
+      {
+        schemaVersion: 1,
+        workspace: { unsafeNumber: Number.MAX_SAFE_INTEGER + 1 },
+        byNodeId: {},
+      },
+      {
+        schemaVersion: 1,
+        workspace: tooDeep,
+        byNodeId: {},
+      },
+      {
+        schemaVersion: 1,
+        workspace: {},
+        byNodeId: { [accountId]: oversizedNodePayload },
+      },
+      {
+        schemaVersion: 1,
+        workspace: {},
+        byNodeId: {
+          "33333333-3333-4333-8333-333333333333": {},
+        },
+      },
+      {
+        schemaVersion: 1,
+        workspace: {},
+        byNodeId: {},
+        hiddenField: true,
+      },
+    ];
+
+    for (const metadata of invalidCases) {
+      const workspace = validWorkspace();
+      workspace.view.extensionMetadata["dev.example.preview"] = metadata as never;
+      expect(parseWorkspaceSnapshot(workspace)).toBeNull();
+    }
+  });
+});
+
+describe("removeNodesFromWorkspaceView", () => {
+  it("removes node-owned built-in and extension metadata without touching workspace metadata", () => {
+    const workspace = validWorkspace();
+    workspace.view.contentProcessorByNodeId[accountId] = "markdown";
+    workspace.view.extensionMetadata["dev.example.preview"] = {
+      schemaVersion: 1,
+      workspace: { theme: "dark" },
+      byNodeId: {
+        [accountId]: { collapsed: true },
+        [serviceId]: { collapsed: false },
+      },
+    };
+
+    expect(
+      removeNodesFromWorkspaceView(workspace.view, new Set([accountId])),
+    ).toEqual({
+      contentProcessorByNodeId: {},
+      extensionMetadata: {
+        "dev.example.preview": {
+          schemaVersion: 1,
+          workspace: { theme: "dark" },
+          byNodeId: { [serviceId]: { collapsed: false } },
+        },
+      },
+    });
   });
 });
 

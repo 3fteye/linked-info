@@ -42,7 +42,7 @@ const RECOVERY_SWAP_RECOVERY_FILE_NAME: &str = "workspace.recovery.v1.json";
 const ENCRYPTED_WORKSPACE_FORMAT: &str = "linked-info-encrypted-workspace";
 const ENCRYPTED_EXPORT_FORMAT: &str = "linked-info-encrypted-workspace-export";
 const WORKSPACE_EXPORT_FORMAT: &str = "linked-info-workspace";
-const CURRENT_WORKSPACE_STORAGE_VERSION: u64 = 2;
+const CURRENT_WORKSPACE_STORAGE_VERSION: u64 = 3;
 const VAULT_FORMAT: &str = "linked-info-workspace-vault";
 const DATA_KEY_ROTATION_FORMAT: &str = "linked-info-data-key-rotation";
 const RECOVERY_SWAP_FORMAT: &str = "linked-info-recovery-swap";
@@ -55,6 +55,16 @@ const MAXIMUM_PASSWORD_BYTES: usize = 1_024;
 const MINIMUM_MANUAL_NODE_WIDTH: f64 = 220.0;
 const MINIMUM_MANUAL_NODE_HEIGHT: f64 = 92.0;
 const MAXIMUM_MANUAL_NODE_DIMENSION: f64 = 5_000.0;
+const MAXIMUM_EXTENSION_COUNT: usize = 256;
+const MAXIMUM_EXTENSION_METADATA_DEPTH: usize = 16;
+const MAXIMUM_EXTENSION_METADATA_OBJECT_PROPERTIES: usize = 128;
+const MAXIMUM_EXTENSION_METADATA_ARRAY_ITEMS: usize = 1_024;
+const MAXIMUM_EXTENSION_METADATA_STRING_CHARACTERS: usize = 4_096;
+const MAXIMUM_NODE_EXTENSION_METADATA_BYTES: usize = 16 * 1024;
+const MAXIMUM_WORKSPACE_EXTENSION_METADATA_BYTES: usize = 64 * 1024;
+const MAXIMUM_SINGLE_EXTENSION_METADATA_BYTES: usize = 4 * 1024 * 1024;
+const MAXIMUM_TOTAL_EXTENSION_METADATA_BYTES: usize = 16 * 1024 * 1024;
+const MAXIMUM_EXACT_JSON_INTEGER: u64 = 9_007_199_254_740_991;
 const BACKUP_INTERVAL_MILLISECONDS: u64 = 60 * 60 * 1_000;
 const BACKUP_MAXIMUM_COUNT: usize = 30;
 const BACKUP_MAXIMUM_BYTES: u64 = 512 * 1024 * 1024;
@@ -3573,10 +3583,203 @@ fn finite_json_number(value: Option<&serde_json::Value>) -> Option<f64> {
         .filter(|value| value.is_finite())
 }
 
-fn validate_workspace_snapshot(
+fn valid_extension_identifier_segment(segment: &str) -> bool {
+    let bytes = segment.as_bytes();
+    bytes.first().is_some_and(u8::is_ascii_lowercase)
+        && bytes.last().is_some_and(u8::is_ascii_alphanumeric)
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
+}
+
+fn valid_workspace_extension_id(extension_id: &str) -> bool {
+    if extension_id.is_empty() || extension_id.len() > 128 || !extension_id.is_ascii() {
+        return false;
+    }
+    let segments = extension_id.split('.').collect::<Vec<_>>();
+    segments.len() >= 3 && segments.into_iter().all(valid_extension_identifier_segment)
+}
+
+fn valid_extension_metadata_property_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name.is_ascii()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
+fn exact_extension_metadata_number(value: &serde_json::Value) -> Option<f64> {
+    if let Some(number) = value.as_i64() {
+        return (number.unsigned_abs() <= MAXIMUM_EXACT_JSON_INTEGER).then_some(number as f64);
+    }
+    if let Some(number) = value.as_u64() {
+        return (number <= MAXIMUM_EXACT_JSON_INTEGER).then_some(number as f64);
+    }
+    let number = value.as_f64()?;
+    (number.is_finite() && number.abs() <= MAXIMUM_EXACT_JSON_INTEGER as f64).then_some(number)
+}
+
+fn validate_extension_metadata_value(value: &serde_json::Value, depth: usize) -> io::Result<()> {
+    if depth > MAXIMUM_EXTENSION_METADATA_DEPTH {
+        return Err(invalid_workspace_data(
+            "workspace extension metadata exceeds the depth limit",
+        ));
+    }
+    match value {
+        serde_json::Value::Null | serde_json::Value::Bool(_) => Ok(()),
+        serde_json::Value::Number(_) => exact_extension_metadata_number(value)
+            .map(|_| ())
+            .ok_or_else(|| {
+                invalid_workspace_data("workspace extension metadata number is invalid")
+            }),
+        serde_json::Value::String(value) => {
+            if value.chars().count() > MAXIMUM_EXTENSION_METADATA_STRING_CHARACTERS {
+                Err(invalid_workspace_data(
+                    "workspace extension metadata string is too long",
+                ))
+            } else {
+                Ok(())
+            }
+        }
+        serde_json::Value::Array(values) => {
+            if values.len() > MAXIMUM_EXTENSION_METADATA_ARRAY_ITEMS {
+                return Err(invalid_workspace_data(
+                    "workspace extension metadata array is too large",
+                ));
+            }
+            for value in values {
+                validate_extension_metadata_value(value, depth + 1)?;
+            }
+            Ok(())
+        }
+        serde_json::Value::Object(values) => {
+            if values.len() > MAXIMUM_EXTENSION_METADATA_OBJECT_PROPERTIES
+                || values
+                    .keys()
+                    .any(|key| !valid_extension_metadata_property_name(key))
+            {
+                return Err(invalid_workspace_data(
+                    "workspace extension metadata object is invalid",
+                ));
+            }
+            for value in values.values() {
+                validate_extension_metadata_value(value, depth + 1)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+fn validate_extension_metadata_payload(
     value: &serde_json::Value,
-    allow_missing_view: bool,
+    maximum_bytes: usize,
 ) -> io::Result<()> {
+    if !value.is_object() {
+        return Err(invalid_workspace_data(
+            "workspace extension metadata payload must be an object",
+        ));
+    }
+    validate_extension_metadata_value(value, 1)?;
+    let size = serde_json::to_vec(value)
+        .map_err(|_| invalid_workspace_data("workspace extension metadata is not serializable"))?
+        .len();
+    if size > maximum_bytes {
+        return Err(invalid_workspace_data(
+            "workspace extension metadata payload is too large",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_workspace_extension_metadata(
+    value: &serde_json::Value,
+    node_ids: &HashSet<String>,
+) -> io::Result<()> {
+    let extensions = value
+        .as_object()
+        .ok_or_else(|| invalid_workspace_data("workspace extension metadata must be an object"))?;
+    if extensions.len() > MAXIMUM_EXTENSION_COUNT {
+        return Err(invalid_workspace_data(
+            "workspace contains too many extension metadata namespaces",
+        ));
+    }
+    for (extension_id, value) in extensions {
+        if !valid_workspace_extension_id(extension_id) {
+            return Err(invalid_workspace_data(
+                "workspace extension metadata id is invalid",
+            ));
+        }
+        let metadata = value.as_object().ok_or_else(|| {
+            invalid_workspace_data("workspace extension metadata entry must be an object")
+        })?;
+        if metadata.len() != 3
+            || !metadata.contains_key("schemaVersion")
+            || !metadata.contains_key("workspace")
+            || !metadata.contains_key("byNodeId")
+        {
+            return Err(invalid_workspace_data(
+                "workspace extension metadata entry is invalid",
+            ));
+        }
+        metadata
+            .get("schemaVersion")
+            .and_then(serde_json::Value::as_u64)
+            .filter(|version| (1..=u32::MAX as u64).contains(version))
+            .ok_or_else(|| {
+                invalid_workspace_data("workspace extension metadata schema version is invalid")
+            })?;
+        validate_extension_metadata_payload(
+            metadata
+                .get("workspace")
+                .expect("validated extension metadata field"),
+            MAXIMUM_WORKSPACE_EXTENSION_METADATA_BYTES,
+        )?;
+        let by_node_id = metadata
+            .get("byNodeId")
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| {
+                invalid_workspace_data("workspace extension node metadata must be an object")
+            })?;
+        let mut metadata_node_ids = HashSet::with_capacity(by_node_id.len());
+        for (node_id, payload) in by_node_id {
+            let canonical_node_id =
+                canonical_workspace_node_id(&serde_json::Value::String(node_id.to_owned()))
+                    .ok_or_else(|| {
+                        invalid_workspace_data("workspace extension metadata node id is invalid")
+                    })?;
+            if !node_ids.contains(&canonical_node_id)
+                || !metadata_node_ids.insert(canonical_node_id)
+            {
+                return Err(invalid_workspace_data(
+                    "workspace extension metadata node id is invalid",
+                ));
+            }
+            validate_extension_metadata_payload(payload, MAXIMUM_NODE_EXTENSION_METADATA_BYTES)?;
+        }
+        let extension_size = serde_json::to_vec(value)
+            .map_err(|_| {
+                invalid_workspace_data("workspace extension metadata is not serializable")
+            })?
+            .len();
+        if extension_size > MAXIMUM_SINGLE_EXTENSION_METADATA_BYTES {
+            return Err(invalid_workspace_data(
+                "workspace extension metadata namespace is too large",
+            ));
+        }
+    }
+    let total_size = serde_json::to_vec(value)
+        .map_err(|_| invalid_workspace_data("workspace extension metadata is not serializable"))?
+        .len();
+    if total_size > MAXIMUM_TOTAL_EXTENSION_METADATA_BYTES {
+        return Err(invalid_workspace_data(
+            "workspace extension metadata is too large",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_workspace_snapshot(value: &serde_json::Value, version: u64) -> io::Result<()> {
     let workspace = value
         .as_object()
         .ok_or_else(|| invalid_workspace_data("workspace snapshot must be an object"))?;
@@ -3714,11 +3917,19 @@ fn validate_workspace_snapshot(
         }
     }
 
-    match workspace.get("view").filter(|_| !allow_missing_view) {
+    match workspace.get("view").filter(|_| version != 1) {
         Some(view) => {
-            let processors = view
+            let view = view
                 .as_object()
-                .and_then(|view| view.get("contentProcessorByNodeId"))
+                .ok_or_else(|| invalid_workspace_data("workspace view metadata is invalid"))?;
+            let expected_fields = if version == 2 { 1 } else { 2 };
+            if view.len() != expected_fields
+                || (version == 2 && view.contains_key("extensionMetadata"))
+            {
+                return Err(invalid_workspace_data("workspace view metadata is invalid"));
+            }
+            let processors = view
+                .get("contentProcessorByNodeId")
                 .and_then(serde_json::Value::as_object)
                 .ok_or_else(|| invalid_workspace_data("workspace view metadata is invalid"))?;
             let mut processor_node_ids = HashSet::with_capacity(processors.len());
@@ -3747,8 +3958,16 @@ fn validate_workspace_snapshot(
                     ));
                 }
             }
+            if version == CURRENT_WORKSPACE_STORAGE_VERSION {
+                validate_workspace_extension_metadata(
+                    view.get("extensionMetadata").ok_or_else(|| {
+                        invalid_workspace_data("workspace extension metadata is missing")
+                    })?,
+                    &node_ids,
+                )?;
+            }
         }
-        None if allow_missing_view => {}
+        None if version == 1 => {}
         None => return Err(invalid_workspace_data("workspace view metadata is missing")),
     }
     Ok(())
@@ -3762,20 +3981,33 @@ fn normalize_storage_envelope(contents: &str) -> io::Result<String> {
     let mut value: serde_json::Value = serde_json::from_str(contents)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
     let version = value.get("version").and_then(serde_json::Value::as_u64);
-    if !matches!(version, Some(1) | Some(CURRENT_WORKSPACE_STORAGE_VERSION)) {
+    if !matches!(
+        version,
+        Some(1) | Some(2) | Some(CURRENT_WORKSPACE_STORAGE_VERSION)
+    ) {
         return Err(invalid_workspace_data(
             "workspace storage envelope version is unsupported",
         ));
     }
-    validate_workspace_snapshot(&value, version == Some(1))?;
-    if version == Some(1) {
+    let version = version.expect("validated workspace storage version");
+    validate_workspace_snapshot(&value, version)?;
+    if version == 1 {
         let workspace = value
             .as_object_mut()
             .ok_or_else(|| invalid_workspace_data("workspace snapshot must be an object"))?;
         workspace.insert(
             "view".to_owned(),
-            serde_json::json!({ "contentProcessorByNodeId": {} }),
+            serde_json::json!({
+                "contentProcessorByNodeId": {},
+                "extensionMetadata": {}
+            }),
         );
+    } else if version == 2 {
+        value
+            .get_mut("view")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("validated version 2 view metadata")
+            .insert("extensionMetadata".to_owned(), serde_json::json!({}));
     }
     value["version"] = serde_json::Value::from(CURRENT_WORKSPACE_STORAGE_VERSION);
     serde_json::to_string(&value).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
@@ -3790,7 +4022,7 @@ fn workspace_storage_from_export(contents: &str) -> io::Result<String> {
     if document.get("format").and_then(serde_json::Value::as_str) != Some(WORKSPACE_EXPORT_FORMAT)
         || !matches!(
             document.get("version").and_then(serde_json::Value::as_u64),
-            Some(1) | Some(2)
+            Some(1) | Some(2) | Some(CURRENT_WORKSPACE_STORAGE_VERSION)
         )
         || document
             .get("exportedAt")
@@ -3808,7 +4040,7 @@ fn workspace_storage_from_export(contents: &str) -> io::Result<String> {
         .get("version")
         .and_then(serde_json::Value::as_u64)
         .expect("validated export version");
-    validate_workspace_snapshot(workspace, export_version == 1)?;
+    validate_workspace_snapshot(workspace, export_version)?;
     let mut storage = workspace
         .as_object()
         .cloned()
@@ -3816,8 +4048,17 @@ fn workspace_storage_from_export(contents: &str) -> io::Result<String> {
     if export_version == 1 {
         storage.insert(
             "view".to_owned(),
-            serde_json::json!({ "contentProcessorByNodeId": {} }),
+            serde_json::json!({
+                "contentProcessorByNodeId": {},
+                "extensionMetadata": {}
+            }),
         );
+    } else if export_version == 2 {
+        storage
+            .get_mut("view")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("validated version 2 export view metadata")
+            .insert("extensionMetadata".to_owned(), serde_json::json!({}));
     }
     storage.insert(
         "version".to_owned(),
@@ -3977,7 +4218,10 @@ mod tests {
             }],
             "references": [],
             "viewport": null,
-            "view": { "contentProcessorByNodeId": {} }
+            "view": {
+                "contentProcessorByNodeId": {},
+                "extensionMetadata": {}
+            }
         })
         .to_string()
     }
@@ -3991,7 +4235,7 @@ mod tests {
             .remove("version");
         serde_json::json!({
             "format": WORKSPACE_EXPORT_FORMAT,
-            "version": 2,
+            "version": 3,
             "exportedAt": "2026-08-13T00:00:00.000Z",
             "workspace": workspace
         })
@@ -4056,6 +4300,76 @@ mod tests {
         manual_dimensions["layout"][0]["width"] = serde_json::json!(480);
         manual_dimensions["layout"][0]["height"] = serde_json::json!(360);
         assert!(validate_storage_envelope(&manual_dimensions.to_string()).is_ok());
+    }
+
+    #[test]
+    fn storage_validation_preserves_unknown_extension_metadata_within_limits() {
+        let mut valid: serde_json::Value = serde_json::from_str(&workspace("OpenAI")).unwrap();
+        valid["view"]["extensionMetadata"] = serde_json::json!({
+            "dev.example.preview": {
+                "schemaVersion": 3,
+                "workspace": { "theme": "dark" },
+                "byNodeId": {
+                    "11111111-1111-4111-8111-111111111111": {
+                        "collapsed": false,
+                        "columns": ["name", "value"]
+                    }
+                }
+            }
+        });
+
+        let normalized = normalize_storage_envelope(&valid.to_string()).unwrap();
+        let normalized: serde_json::Value = serde_json::from_str(&normalized).unwrap();
+        assert_eq!(
+            normalized["view"]["extensionMetadata"],
+            valid["view"]["extensionMetadata"]
+        );
+
+        let invalid_metadata = [
+            serde_json::json!({
+                "schemaVersion": 0,
+                "workspace": {},
+                "byNodeId": {}
+            }),
+            serde_json::json!({
+                "schemaVersion": 1,
+                "workspace": { "output": "x".repeat(4_097) },
+                "byNodeId": {}
+            }),
+            serde_json::json!({
+                "schemaVersion": 1,
+                "workspace": { "unsafeNumber": 9_007_199_254_740_992_u64 },
+                "byNodeId": {}
+            }),
+            serde_json::json!({
+                "schemaVersion": 1,
+                "workspace": {},
+                "byNodeId": {
+                    "11111111-1111-4111-8111-111111111111": {
+                        "value0": "x".repeat(4_096),
+                        "value1": "x".repeat(4_096),
+                        "value2": "x".repeat(4_096),
+                        "value3": "x".repeat(4_096),
+                        "value4": "x".repeat(4_096)
+                    }
+                }
+            }),
+            serde_json::json!({
+                "schemaVersion": 1,
+                "workspace": {},
+                "byNodeId": {
+                    "22222222-2222-4222-8222-222222222222": {}
+                }
+            }),
+        ];
+        for metadata in invalid_metadata {
+            let mut invalid = valid.clone();
+            invalid["view"]["extensionMetadata"]["dev.example.preview"] = metadata;
+            assert!(
+                validate_storage_envelope(&invalid.to_string()).is_err(),
+                "invalid extension metadata must fail closed"
+            );
+        }
     }
 
     #[test]

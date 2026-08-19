@@ -20,7 +20,10 @@ import type {
   NodeReference,
   WorkspaceSnapshot,
 } from "./workspaceData";
-import { compareWorkspaces } from "./workspaceComparison";
+import {
+  compareWorkspaces,
+  nodeViewMetadataEqual,
+} from "./workspaceComparison";
 import "@xyflow/react/dist/style.css";
 
 type PreviewMode = "before" | "after" | "overlay";
@@ -228,8 +231,7 @@ function nodeDifferences(
         after !== undefined &&
         (before.name !== after.name ||
           before.content !== after.content ||
-          current.view.contentProcessorByNodeId[nodeId] !==
-            replacement.view.contentProcessorByNodeId[nodeId]),
+          !nodeViewMetadataEqual(current, replacement, nodeId)),
       moved:
         beforeLayout !== undefined &&
         afterLayout !== undefined &&

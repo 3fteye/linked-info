@@ -27,6 +27,62 @@ function stringRecordsEqual(
   );
 }
 
+function jsonValuesEqual(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) {
+    return true;
+  }
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return (
+      Array.isArray(left) &&
+      Array.isArray(right) &&
+      left.length === right.length &&
+      left.every((value, index) => jsonValuesEqual(value, right[index]))
+    );
+  }
+  if (
+    typeof left !== "object" ||
+    left === null ||
+    typeof right !== "object" ||
+    right === null
+  ) {
+    return false;
+  }
+  const leftRecord = left as Record<string, unknown>;
+  const rightRecord = right as Record<string, unknown>;
+  const leftKeys = Object.keys(leftRecord);
+  return (
+    leftKeys.length === Object.keys(rightRecord).length &&
+    leftKeys.every(
+      (key) =>
+        Object.prototype.hasOwnProperty.call(rightRecord, key) &&
+        jsonValuesEqual(leftRecord[key], rightRecord[key]),
+    )
+  );
+}
+
+export function nodeViewMetadataEqual(
+  current: WorkspaceSnapshot,
+  replacement: WorkspaceSnapshot,
+  nodeId: string,
+): boolean {
+  if (
+    current.view.contentProcessorByNodeId[nodeId] !==
+    replacement.view.contentProcessorByNodeId[nodeId]
+  ) {
+    return false;
+  }
+  const extensionIds = new Set([
+    ...Object.keys(current.view.extensionMetadata),
+    ...Object.keys(replacement.view.extensionMetadata),
+  ]);
+  return [...extensionIds].every((extensionId) =>
+    jsonValuesEqual(
+      current.view.extensionMetadata[extensionId]?.byNodeId[nodeId],
+      replacement.view.extensionMetadata[extensionId]?.byNodeId[nodeId],
+    ),
+  );
+}
+
 export function compareWorkspaces(
   current: WorkspaceSnapshot,
   replacement: WorkspaceSnapshot,
@@ -46,8 +102,7 @@ export function compareWorkspaces(
     } else if (
       currentNode.name !== node.name ||
       currentNode.content !== node.content ||
-      current.view.contentProcessorByNodeId[nodeId] !==
-        replacement.view.contentProcessorByNodeId[nodeId]
+      !nodeViewMetadataEqual(current, replacement, nodeId)
     ) {
       modifiedNodes += 1;
     }
@@ -119,10 +174,15 @@ export function compareWorkspaces(
     current.viewport?.x !== replacement.viewport?.x ||
     current.viewport?.y !== replacement.viewport?.y ||
     current.viewport?.zoom !== replacement.viewport?.zoom;
-  const viewMetadataChanged = !stringRecordsEqual(
-    current.view.contentProcessorByNodeId,
-    replacement.view.contentProcessorByNodeId,
-  );
+  const viewMetadataChanged =
+    !stringRecordsEqual(
+      current.view.contentProcessorByNodeId,
+      replacement.view.contentProcessorByNodeId,
+    ) ||
+    !jsonValuesEqual(
+      current.view.extensionMetadata,
+      replacement.view.extensionMetadata,
+    );
   const identical =
     addedNodes === 0 &&
     removedNodes === 0 &&

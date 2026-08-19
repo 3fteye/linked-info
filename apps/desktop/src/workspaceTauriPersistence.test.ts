@@ -18,7 +18,7 @@ function validWorkspace(name = "OpenAI"): WorkspaceSnapshot {
     layout: [{ nodeId, x: 10, y: 20 }],
     references: [],
     viewport: null,
-    view: { contentProcessorByNodeId: {} },
+    view: { contentProcessorByNodeId: {}, extensionMetadata: {} },
   };
 }
 
@@ -69,7 +69,7 @@ describe("createTauriWorkspacePersistence", () => {
 
     expect(await persistence.load()).toEqual({ status: "ready", workspace });
     expect(JSON.parse(bridge.files.get("primary") ?? "null")).toEqual({
-      version: 2,
+      version: 3,
       ...workspace,
     });
     expect(legacy.removed).toEqual(["primary"]);
@@ -405,7 +405,7 @@ describe("createTauriWorkspacePersistence", () => {
     await persistence.save(before);
 
     const result = await persistence.runExclusiveTransaction(async () => {
-      bridge.files.set("primary", JSON.stringify({ version: 2, ...restored }));
+      bridge.files.set("primary", JSON.stringify({ version: 3, ...restored }));
       return { status: "committed" as const };
     });
 
@@ -458,7 +458,7 @@ describe("createTauriWorkspacePersistence", () => {
     const first = persistence.runExclusiveTransaction(async () => {
       signalFirstStarted();
       await firstBlocked;
-      bridge.files.set("primary", JSON.stringify({ version: 2, ...restored }));
+      bridge.files.set("primary", JSON.stringify({ version: 3, ...restored }));
       return { status: "committed" as const };
     });
     await firstStarted;

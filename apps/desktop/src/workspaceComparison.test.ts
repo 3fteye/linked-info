@@ -18,7 +18,7 @@ function workspace(): WorkspaceSnapshot {
       { nodeId: secondId, x: 30, y: 40 },
     ],
     viewport: { x: 0, y: 0, zoom: 1 },
-    view: { contentProcessorByNodeId: {} },
+    view: { contentProcessorByNodeId: {}, extensionMetadata: {} },
   };
 }
 
@@ -117,6 +117,38 @@ describe("workspace replacement comparison", () => {
     });
   });
 
+  it("attributes node extension metadata changes to that node", () => {
+    const current = workspace();
+    const replacement = workspace();
+    replacement.view.extensionMetadata["dev.example.preview"] = {
+      schemaVersion: 1,
+      workspace: {},
+      byNodeId: { [firstId]: { collapsed: true } },
+    };
+
+    expect(compareWorkspaces(current, replacement)).toMatchObject({
+      modifiedNodes: 1,
+      viewMetadataChanged: true,
+      identical: false,
+    });
+  });
+
+  it("reports workspace-level extension metadata without modifying a node", () => {
+    const current = workspace();
+    const replacement = workspace();
+    replacement.view.extensionMetadata["dev.example.preview"] = {
+      schemaVersion: 1,
+      workspace: { theme: "dark" },
+      byNodeId: {},
+    };
+
+    expect(compareWorkspaces(current, replacement)).toMatchObject({
+      modifiedNodes: 0,
+      viewMetadataChanged: true,
+      identical: false,
+    });
+  });
+
   it("ignores JSON key insertion order when comparing view metadata", () => {
     const current = workspace();
     const replacement = workspace();
@@ -127,6 +159,20 @@ describe("workspace replacement comparison", () => {
     replacement.view.contentProcessorByNodeId = {
       [secondId]: "plugin.second",
       [firstId]: "plugin.first",
+    };
+    current.view.extensionMetadata = {
+      "dev.example.preview": {
+        schemaVersion: 1,
+        workspace: { first: 1, second: 2 },
+        byNodeId: {},
+      },
+    };
+    replacement.view.extensionMetadata = {
+      "dev.example.preview": {
+        schemaVersion: 1,
+        workspace: { second: 2, first: 1 },
+        byNodeId: {},
+      },
     };
 
     expect(compareWorkspaces(current, replacement)).toMatchObject({

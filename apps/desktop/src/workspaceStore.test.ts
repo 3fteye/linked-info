@@ -43,7 +43,7 @@ function validWorkspace(): WorkspaceSnapshot {
     layout: [{ nodeId, x: 10, y: 20 }],
     references: [],
     viewport: { x: 12, y: 34, zoom: 0.8 },
-    view: { contentProcessorByNodeId: {} },
+    view: { contentProcessorByNodeId: {}, extensionMetadata: {} },
   };
 }
 
@@ -60,7 +60,7 @@ describe("localWorkspacePersistence", () => {
       layout: [],
       references: [],
       viewport: null,
-      view: { contentProcessorByNodeId: {} },
+      view: { contentProcessorByNodeId: {}, extensionMetadata: {} },
     });
     expect(await localWorkspacePersistence.load()).toEqual({
       status: "ready",
@@ -69,7 +69,7 @@ describe("localWorkspacePersistence", () => {
         layout: [],
         references: [],
         viewport: null,
-        view: { contentProcessorByNodeId: {} },
+        view: { contentProcessorByNodeId: {}, extensionMetadata: {} },
       },
     });
   });
@@ -85,11 +85,25 @@ describe("localWorkspacePersistence", () => {
     });
   });
 
-  it("migrates version 1 storage to version 2 view metadata", () => {
+  it("migrates version 1 storage through the complete version 3 view", () => {
     const workspace = validWorkspace();
     const { view: _view, ...versionOne } = workspace;
     const result = parseStoredWorkspaceText(
       JSON.stringify({ version: 1, ...versionOne }),
+    );
+
+    expect(result).toEqual({ status: "ready", workspace });
+  });
+
+  it("migrates version 2 storage by adding an empty extension namespace", () => {
+    const workspace = validWorkspace();
+    const { extensionMetadata: _metadata, ...versionTwoView } = workspace.view;
+    const result = parseStoredWorkspaceText(
+      JSON.stringify({
+        version: 2,
+        ...workspace,
+        view: versionTwoView,
+      }),
     );
 
     expect(result).toEqual({ status: "ready", workspace });
@@ -107,7 +121,7 @@ describe("localWorkspacePersistence", () => {
   });
 
   it("preserves an unsupported local format version for recovery", async () => {
-    const raw = JSON.stringify({ version: 3, ...validWorkspace() });
+    const raw = JSON.stringify({ version: 4, ...validWorkspace() });
     localStorage.setItem(workspaceKey, raw);
 
     expect(await localWorkspacePersistence.load()).toEqual({

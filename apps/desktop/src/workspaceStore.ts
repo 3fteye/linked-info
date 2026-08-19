@@ -1,5 +1,6 @@
 import {
   migrateWorkspaceSnapshotV1,
+  migrateWorkspaceSnapshotV2,
   parseWorkspaceSnapshot,
   type WorkspaceSnapshot,
 } from "./workspaceData";
@@ -23,7 +24,10 @@ export {
   type NodeLayout,
   type NodeLayoutSizeOverrideUpdate,
   type NodeReference,
+  type ExtensionMetadataJsonValue,
+  type ExtensionMetadataPayload,
   type WorkspaceSnapshot,
+  type WorkspaceExtensionMetadata,
   type WorkspaceViewMetadata,
 } from "./workspaceData";
 
@@ -49,7 +53,7 @@ export type WorkspaceStorageSlot = "primary" | "recovery";
 
 const workspaceStorageKey = "linked-info.workspace.v1";
 const workspaceRecoveryStorageKey = "linked-info.workspace.recovery.v1";
-export const currentWorkspaceStorageVersion = 2;
+export const currentWorkspaceStorageVersion = 3;
 
 function storageKey(slot: WorkspaceStorageSlot): string {
   return slot === "primary" ? workspaceStorageKey : workspaceRecoveryStorageKey;
@@ -70,9 +74,11 @@ export function parseStoredWorkspaceText(raw: string): WorkspaceLoadResult {
   const workspace =
     stored.version === 1
       ? migrateWorkspaceSnapshotV1(stored)
-      : stored.version === currentWorkspaceStorageVersion
-        ? parseWorkspaceSnapshot(stored)
-        : null;
+      : stored.version === 2
+        ? migrateWorkspaceSnapshotV2(stored)
+        : stored.version === currentWorkspaceStorageVersion
+          ? parseWorkspaceSnapshot(stored)
+          : null;
   return workspace === null
     ? { status: "invalid", raw }
     : { status: "ready", workspace };
