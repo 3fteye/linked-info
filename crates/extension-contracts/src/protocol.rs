@@ -256,13 +256,22 @@ fn valid_label_key(value: &str) -> bool {
     if value.is_empty() || value.len() > MAXIMUM_LABEL_KEY_BYTES || !value.is_ascii() {
         return false;
     }
-    let bytes = value.as_bytes();
-    bytes.first().is_some_and(u8::is_ascii_lowercase)
+    let mut segments = value.split('.');
+    let Some(first) = segments.next() else {
+        return false;
+    };
+    first.as_bytes().first().is_some_and(u8::is_ascii_lowercase)
+        && valid_label_segment(first)
+        && segments.all(valid_label_segment)
+}
+
+fn valid_label_segment(segment: &str) -> bool {
+    let bytes = segment.as_bytes();
+    bytes.first().is_some_and(u8::is_ascii_alphanumeric)
         && bytes.last().is_some_and(u8::is_ascii_alphanumeric)
         && bytes
             .iter()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b'.' | b'-' | b'_'))
-        && !value.contains("..")
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b'-' | b'_'))
 }
 
 fn valid_locale(locale: &str) -> bool {
@@ -327,11 +336,10 @@ pub enum PresentationElement {
     Divider,
     Button {
         action_id: String,
-        label: String,
     },
     Select {
         action_id: String,
-        label: String,
+        label_key: String,
         selected: Option<String>,
         options: Vec<SelectOption>,
     },
@@ -357,7 +365,7 @@ pub enum BadgeTone {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SelectOption {
     pub value: String,
-    pub label: String,
+    pub label_key: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -374,16 +382,23 @@ pub enum ProposalEndpoint {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "operation", content = "value", rename_all = "kebab-case")]
+pub enum StringPatch {
+    Unchanged,
+    Set(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum ChangeOperation {
     CreateNode {
         temporary_id: String,
-        name: Option<String>,
-        content: Option<String>,
+        name: String,
+        content: String,
     },
     UpdateCurrentNode {
-        name: Option<String>,
-        content: Option<String>,
+        name: StringPatch,
+        content: StringPatch,
     },
     CreateReference {
         source: ProposalEndpoint,
@@ -399,7 +414,7 @@ pub enum ChangeOperation {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ChangeProposalV1 {
     pub base_revision: u64,
-    pub title: String,
+    pub title_key: String,
     pub operations: Vec<ChangeOperation>,
 }
 
@@ -461,6 +476,16 @@ mod tests {
             validate_extension_manifest(&invalid),
             Err(ManifestValidationError::InvalidContribution)
         );
+    }
+
+    #[test]
+    fn label_keys_use_the_same_nonempty_segment_rules() {
+        for valid in ["processor", "processor.label", "json-tools.option_1"] {
+            assert!(valid_label_key(valid));
+        }
+        for invalid in ["", "Processor", "processor..label", "processor.-label"] {
+            assert!(!valid_label_key(invalid));
+        }
     }
 
     #[test]
@@ -540,5 +565,29 @@ mod tests {
             assert!(Version::parse(invalid).is_err());
             assert!(!regex.is_match(invalid));
         }
+    }
+
+    #[test]
+    fn published_manifest_schema_rejects_empty_and_malformed_label_keys() {
+        let value = serde_json::from_str::<Value>(crate::EXTENSION_MANIFEST_SCHEMA).unwrap();
+        let pattern = value["$defs"]["processor"]["properties"]["labelKey"]["pattern"]
+            .as_str()
+            .unwrap();
+        let regex = Regex::new(pattern).unwrap();
+
+        for valid in ["processor", "processor.label", "json-tools.option_1"] {
+            assert!(regex.is_match(valid));
+        }
+        for invalid in ["", "Processor", "processor..label", "processor.-label"] {
+            assert!(!regex.is_match(invalid));
+        }
+    }
+
+    #[test]
+    fn explicit_string_patch_distinguishes_unchanged_from_clear() {
+        assert_ne!(
+            serde_json::to_value(StringPatch::Unchanged).unwrap(),
+            serde_json::to_value(StringPatch::Set(String::new())).unwrap()
+        );
     }
 }

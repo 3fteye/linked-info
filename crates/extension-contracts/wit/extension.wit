@@ -49,17 +49,16 @@ interface types {
 
   record button-element {
     action-id: string,
-    label: string,
   }
 
   record select-option {
     value: string,
-    label: string,
+    label-key: string,
   }
 
   record select-element {
     action-id: string,
-    label: string,
+    label-key: string,
     selected: option<string>,
     options: list<select-option>,
   }
@@ -84,15 +83,20 @@ interface types {
     created(string),
   }
 
+  variant string-patch {
+    unchanged,
+    set(string),
+  }
+
   record create-node-operation {
     temporary-id: string,
-    name: option<string>,
-    content: option<string>,
+    name: string,
+    content: string,
   }
 
   record update-current-node-operation {
-    name: option<string>,
-    content: option<string>,
+    name: string-patch,
+    content: string-patch,
   }
 
   record reference-operation {
@@ -109,7 +113,7 @@ interface types {
 
   record change-proposal {
     base-revision: u64,
-    title: string,
+    title-key: string,
     operations: list<change-operation>,
   }
 
