@@ -113,6 +113,12 @@ describe("NodeContentHost", () => {
     expect(container.querySelectorAll(".code-preview-line")).toHaveLength(2);
     expect(container.querySelector(".token.keyword")?.textContent).toBe("const");
     expect(container.textContent).toContain("TypeScript");
+    expect(container.querySelector(".code-preview-scroll")?.classList).toContain(
+      "nodrag",
+    );
+    expect(container.querySelector(".code-preview-scroll")?.classList).toContain(
+      "nowheel",
+    );
 
     act(() =>
       container

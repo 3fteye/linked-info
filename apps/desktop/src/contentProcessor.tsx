@@ -313,7 +313,7 @@ export function NodeContentHost({
       <div {...sharedProps}>
         <Suspense
           fallback={
-            <pre className="code-preview-fallback">
+            <pre className="nodrag nowheel code-preview-fallback">
               <code>{codeSource}</code>
             </pre>
           }

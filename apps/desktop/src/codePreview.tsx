@@ -142,7 +142,7 @@ export function CodePreview({
           </button>
         )}
       </header>
-      <pre className="code-preview-scroll">
+      <pre className="nodrag nowheel code-preview-scroll">
         <code>
           {lines.map((line, lineIndex) => (
             <span className="code-preview-line" key={lineIndex}>

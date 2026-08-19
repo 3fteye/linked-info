@@ -426,7 +426,7 @@ test("an explicit code language highlights safely and survives reload", async ({
   const codeNode = {
     content: Array.from({ length: 600 }, (_, index) =>
       index === 0
-        ? "const answer: number = 42;"
+        ? `const answer: number = 42; // ${"x".repeat(800)}`
         : `const value${index}: number = ${index};`,
     ).join("\n"),
     height: 420,
@@ -447,6 +447,13 @@ test("an explicit code language highlights safely and survives reload", async ({
   await expect(preview.locator(".token.keyword").first()).toHaveText("const");
   await expect(preview).toHaveAttribute("data-truncated", "true");
   await expect(preview.locator(".code-preview-truncated")).toBeVisible();
+  const scroll = preview.locator(".code-preview-scroll");
+  const viewport = page.locator(".react-flow__viewport");
+  const viewportTransform = await viewport.getAttribute("style");
+  await scroll.hover();
+  await page.mouse.wheel(400, 0);
+  await expect.poll(() => scroll.evaluate((element) => element.scrollLeft)).toBeGreaterThan(0);
+  await expect(viewport).toHaveAttribute("style", viewportTransform ?? "");
   await preview.locator(".code-preview-copy").click();
   await expect
     .poll(async () =>
