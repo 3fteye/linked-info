@@ -429,6 +429,36 @@ test("existing content markers can be changed or removed without nesting", async
   await expect(textarea).toHaveValue(restored);
 });
 
+test("triple-clicking a marked line tolerates the selected line ending", async ({
+  page,
+}) => {
+  const markedLine = "[[li:secret]]synthetic-value[[/li]]";
+  const markedNode = {
+    content: `${markedLine}\nnext line`,
+    id: syntheticId(1),
+    name: "Triple-click marker",
+    x: 100,
+    y: 100,
+  };
+  await openSyntheticWorkspace(page, [markedNode]);
+  await node(page, markedNode.id).dblclick({ position: { x: 80, y: 24 } });
+  const textarea = page.locator('[data-node-id][data-editing="true"] textarea');
+  await expect(textarea).toBeVisible();
+
+  await textarea.click({ clickCount: 3, position: { x: 60, y: 12 } });
+
+  await expect
+    .poll(() =>
+      textarea.evaluate((element) => {
+        const input = element as HTMLTextAreaElement;
+        return input.value.slice(input.selectionStart, input.selectionEnd);
+      }),
+    )
+    .toBe(`${markedLine}\n`);
+  await expect(page.getByLabel("Current marker: Secret")).toBeVisible();
+  await expect(page.getByRole("alert")).toHaveCount(0);
+});
+
 test("invalid TOTP content is rejected without changing the node", async ({ page }) => {
   const invalidTotp = "synthetic-invalid-key";
   const invalidNode = {

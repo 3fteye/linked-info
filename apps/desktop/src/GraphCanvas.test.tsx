@@ -453,6 +453,25 @@ describe("InformationNodeCard", () => {
     expect(props.data.onContentChange).not.toHaveBeenCalled();
   });
 
+  it("accepts a whole-line selection whose only marker padding is whitespace", () => {
+    const content = "[[li:secret]]synthetic-value[[/li]]\nnext line";
+    renderCard(root, cardProps({ content }));
+    const textarea = container.querySelector("textarea")!;
+
+    act(() => {
+      textarea.focus();
+      textarea.setSelectionRange(0, content.indexOf("next line"));
+      textarea.dispatchEvent(new Event("mouseup", { bubbles: true }));
+    });
+
+    expect(
+      container.querySelector(
+        '.graph-node-content-marker-toolbar[aria-label="Current marker: Secret"]',
+      ),
+    ).not.toBeNull();
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+  });
+
   it("opens incoming reference browsing while preserving the folded-edge hint", () => {
     const props = cardProps({
       collapsedIncomingReferenceLabel: "182 incoming references folded",

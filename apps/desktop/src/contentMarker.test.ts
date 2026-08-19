@@ -118,7 +118,7 @@ describe("content markers", () => {
       ),
     ).toMatchObject({ kind: "marker" });
     expect(
-      contentMarkerRegistry.inspectSelection(source, firstOpening - 1, firstEnd),
+      contentMarkerRegistry.inspectSelection(source, firstOpening - 2, firstEnd),
     ).toMatchObject({ kind: "conflict" });
     expect(
       contentMarkerRegistry.inspectSelection(
@@ -127,6 +127,19 @@ describe("content markers", () => {
         source.indexOf(" after"),
       ),
     ).toMatchObject({ kind: "conflict" });
+  });
+
+  it("normalizes a triple-click line selection around one complete marker", () => {
+    const source =
+      "  [[li:secret]]synthetic-value[[/li]]  \r\nnext line";
+    const lineEnd = source.indexOf("next line");
+
+    expect(contentMarkerRegistry.inspectSelection(source, 0, lineEnd)).toMatchObject({
+      kind: "marker",
+      located: {
+        marker: { id: "secret", payload: "synthetic-value" },
+      },
+    });
   });
 
   it("changes a complete marker type and removes its wrapper without changing payload", () => {

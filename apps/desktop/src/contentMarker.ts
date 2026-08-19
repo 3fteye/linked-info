@@ -301,6 +301,23 @@ function validSelectionRange(source: string, start: number, end: number): boolea
   );
 }
 
+function selectionOnlyAddsWhitespaceAroundMarker(
+  source: string,
+  selectionStart: number,
+  selectionEnd: number,
+  marker: LocatedContentMarker,
+): boolean {
+  const beforeMarker = source.slice(
+    selectionStart,
+    Math.min(selectionEnd, marker.start),
+  );
+  const afterMarker = source.slice(
+    Math.max(selectionStart, marker.end),
+    selectionEnd,
+  );
+  return /^\s*$/u.test(beforeMarker) && /^\s*$/u.test(afterMarker);
+}
+
 export class ContentMarkerRegistry {
   private readonly definitions: ReadonlyMap<string, ContentMarkerDefinition>;
 
@@ -370,12 +387,19 @@ export class ContentMarkerRegistry {
         start: selectionStart,
       };
     }
-    if (
-      overlapping.length === 1 &&
-      selectionStart >= overlapping[0].start &&
-      selectionEnd <= overlapping[0].end
-    ) {
-      return { kind: "marker", located: overlapping[0] };
+    if (overlapping.length === 1) {
+      const located = overlapping[0];
+      if (
+        (selectionStart >= located.start && selectionEnd <= located.end) ||
+        selectionOnlyAddsWhitespaceAroundMarker(
+          source,
+          selectionStart,
+          selectionEnd,
+          located,
+        )
+      ) {
+        return { kind: "marker", located };
+      }
     }
     return {
       end: selectionEnd,
