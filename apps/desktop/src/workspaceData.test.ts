@@ -176,6 +176,11 @@ describe("parseWorkspaceSnapshot", () => {
       },
       {
         schemaVersion: 1,
+        workspace: { invalidUnicode: "\ud800" },
+        byNodeId: {},
+      },
+      {
+        schemaVersion: 1,
         workspace: { unsafeNumber: Number.MAX_SAFE_INTEGER + 1 },
         byNodeId: {},
       },

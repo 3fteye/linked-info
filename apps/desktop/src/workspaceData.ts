@@ -96,6 +96,22 @@ function utf8JsonSize(value: unknown): number {
   return extensionMetadataUtf8Encoder.encode(JSON.stringify(value)).byteLength;
 }
 
+function hasValidExtensionMetadataString(value: string): boolean {
+  let characterCount = 0;
+  for (const scalar of value) {
+    const codePoint = scalar.codePointAt(0);
+    characterCount += 1;
+    if (
+      codePoint === undefined ||
+      (codePoint >= 0xd800 && codePoint <= 0xdfff) ||
+      characterCount > maximumExtensionMetadataStringCharacters
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function parseExtensionMetadataJsonValue(
   value: unknown,
   depth: number,
@@ -112,7 +128,7 @@ function parseExtensionMetadataJsonValue(
       : invalidExtensionMetadataValue;
   }
   if (typeof value === "string") {
-    return [...value].length <= maximumExtensionMetadataStringCharacters
+    return hasValidExtensionMetadataString(value)
       ? value
       : invalidExtensionMetadataValue;
   }
