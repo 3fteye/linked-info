@@ -86,8 +86,15 @@ import {
 import {
   NodeContentHost,
   canvasContentPreview,
+  canvasExpandedCodeContentPreview,
+  contentContainsSensitive,
   type ContentEnhancementLabels,
 } from "./contentProcessor";
+import {
+  codePreviewLanguageFromProcessorId,
+  type CodePreviewLanguage,
+} from "./codePreviewLanguages";
+import { CodePreviewSensitivityCache } from "./codePreviewSensitivity";
 import { TotpSecondClockProvider } from "./totpContent";
 import type { CanvasOperationItem } from "./canvasOperations";
 import {
@@ -124,6 +131,7 @@ interface InformationNodeData extends Record<string, unknown> {
   name: string | null;
   content: string | null;
   contentProcessorId: string | null;
+  codeSourceContainsSensitive: boolean;
   contentProcessorLabel: string;
   contentProcessorOptions: readonly ContentProcessorOption[];
   contentMarkerOptions: readonly ContentMarkerOption[];
@@ -169,6 +177,7 @@ interface InformationNodeData extends Record<string, unknown> {
   ) => void;
   onContentChange: (nodeId: string, content: string) => void;
   onContentProcessorChange: (nodeId: string, processorId: string) => void;
+  onCopyCodeSource: ((containsSensitive: boolean) => Promise<void>) | null;
   onCopyDerivedSecret: ((value: string) => Promise<void>) | null;
   onNameChange: (nodeId: string, name: string) => boolean;
   onFitNodeContent: (nodeId: string) => void;
@@ -229,8 +238,13 @@ interface GraphLabels {
   content: string;
   contentPlaceholder: string;
   contentProcessor: string;
+  codeCopy: string;
+  codeLanguages: Record<CodePreviewLanguage, string>;
+  codeTruncated: string;
   unsupportedContentProcessor: (processorId: string) => string;
   copySecret: string;
+  copyCodeFailed: string;
+  copyCodeSuccess: string;
   copySecretFailed: string;
   copySecretSuccess: string;
   editMarker: (markerLabel: string) => string;
@@ -941,13 +955,19 @@ export function InformationNodeCard({
         </div>
       ) : (
         <NodeContentHost
-          canvasPreviewEnabled={!data.contentFullyRendered}
+          canvasPreviewEnabled={
+            !data.contentFullyRendered &&
+            codePreviewLanguageFromProcessorId(data.contentProcessorId ?? "") === null
+          }
           className="graph-node-content"
+          codeSourceContainsSensitive={data.codeSourceContainsSensitive}
           content={data.content}
           enhancementLabels={data.enhancementLabels}
           hideWhenEmpty
+          onCopyCodeSource={data.onCopyCodeSource ?? undefined}
           onCopySecret={data.onCopyDerivedSecret ?? undefined}
           processorId={data.contentProcessorId}
+          sourceTruncated={data.contentTruncated}
           variant="canvas"
         />
       )}
@@ -1169,6 +1189,11 @@ export default function GraphCanvas({
   } | null>(null);
   const canvasSelectionGestureRef = useRef<CanvasSelectionGesture | null>(null);
   const contextMenuSelectionRef = useRef<string[]>([]);
+  const codePreviewSensitivityCacheRef = useRef(
+    new CodePreviewSensitivityCache(),
+  );
+  const nodesRef = useRef(nodes);
+  nodesRef.current = nodes;
   const referencesRef = useRef(references);
   const [flowInstance, setFlowInstance] =
     useState<ReactFlowInstance<InformationFlowNode, Edge> | null>(null);
@@ -1656,6 +1681,40 @@ export default function GraphCanvas({
     }, 6_000);
   }, [labels.copySecretFailed, labels.copySecretSuccess, onCopySecret]);
 
+  const copyText = useCallback(async (text: string) => {
+    if (text.length === 0) {
+      return;
+    }
+    if (secretClipboardNoticeTimerRef.current !== null) {
+      window.clearTimeout(secretClipboardNoticeTimerRef.current);
+    }
+    try {
+      await navigator.clipboard.writeText(text);
+      setSecretClipboardNotice({ error: false, message: labels.copyCodeSuccess });
+    } catch {
+      setSecretClipboardNotice({ error: true, message: labels.copyCodeFailed });
+    }
+    secretClipboardNoticeTimerRef.current = window.setTimeout(() => {
+      setSecretClipboardNotice(null);
+      secretClipboardNoticeTimerRef.current = null;
+    }, 6_000);
+  }, [labels.copyCodeFailed, labels.copyCodeSuccess]);
+
+  const copyCodeSource = useCallback(async (
+    nodeId: string,
+    containsSensitive: boolean,
+  ) => {
+    const content = nodesRef.current.find((node) => node.id === nodeId)?.content;
+    if (content === null || content === undefined || content.length === 0) {
+      return;
+    }
+    if (containsSensitive) {
+      await copyTextAsSecret(content);
+    } else {
+      await copyText(content);
+    }
+  }, [copyText, copyTextAsSecret]);
+
   const copyNodeContentAsSecret = async (nodeId: string) => {
     const content = nodes.find((node) => node.id === nodeId)?.content;
     if (content === null || content === undefined || content.length === 0) {
@@ -2108,6 +2167,14 @@ export default function GraphCanvas({
     }
   }, [filteredOutNodeIdSet, referenceSearch]);
 
+  const sensitiveCodeContentByNodeId = useMemo(() => {
+    return codePreviewSensitivityCacheRef.current.update(
+      nodes,
+      contentProcessorByNodeId,
+      contentContainsSensitive,
+    );
+  }, [contentProcessorByNodeId, nodes]);
+
   useEffect(() => {
     setFlowNodes((current) => {
       const currentById = new Map(current.map((node) => [node.id, node]));
@@ -2120,13 +2187,21 @@ export default function GraphCanvas({
         const manualWidth = savedLayout?.width !== undefined;
         const manualHeight = savedLayout?.height !== undefined;
         const manualSize = manualWidth || manualHeight;
-        const contentFullyRendered =
-          editingNodeId === node.id ||
-          manualHeight ||
-          fitContentNodeId === node.id;
-        const renderedContent = contentFullyRendered
+        const codeLanguage = codePreviewLanguageFromProcessorId(
+          contentProcessorByNodeId[node.id] ?? "",
+        );
+        const codeSourceContainsSensitive =
+          sensitiveCodeContentByNodeId.get(node.id) ?? false;
+        const editing = editingNodeId === node.id;
+        const expanded = manualHeight || fitContentNodeId === node.id;
+        const contentFullyRendered = editing || (codeLanguage === null && expanded);
+        const renderedContent = editing
           ? node.content
-          : canvasContentPreview(node.content);
+          : codeLanguage !== null && expanded
+            ? canvasExpandedCodeContentPreview(node.content)
+            : contentFullyRendered
+              ? node.content
+              : canvasContentPreview(node.content);
         return {
           ...(currentNode ?? {}),
           connectable: interactive ? undefined : false,
@@ -2158,6 +2233,7 @@ export default function GraphCanvas({
             contentFullyRendered,
             contentTruncated: renderedContent !== node.content,
             contentProcessorId: contentProcessorByNodeId[node.id] ?? null,
+            codeSourceContainsSensitive,
             contentProcessorLabel: labels.contentProcessor,
             contentProcessorOptions,
             contentMarkerOptions,
@@ -2177,6 +2253,11 @@ export default function GraphCanvas({
             contentLabel: labels.content,
             contentPlaceholder: labels.contentPlaceholder,
             enhancementLabels: {
+              code: {
+                copy: labels.codeCopy,
+                languages: labels.codeLanguages,
+                truncated: labels.codeTruncated,
+              },
               secret: {
                 copy: labels.secretCopy,
                 hide: labels.secretHide,
@@ -2192,7 +2273,7 @@ export default function GraphCanvas({
                 remaining: labels.totpRemaining,
               },
             },
-            editing: editingNodeId === node.id,
+            editing,
             interactive,
             nameConflict: nameConflictNodeIds.has(node.id),
             nameConflictLabel: labels.nameConflict,
@@ -2225,6 +2306,10 @@ export default function GraphCanvas({
             onBrowseIncomingReferences: openIncomingReferenceBrowser,
             onContentChange: onNodeContentChange,
             onContentProcessorChange: onNodeContentProcessorChange,
+            onCopyCodeSource:
+              codeSourceContainsSensitive && onCopySecret === null
+                ? null
+                : (containsSensitive) => copyCodeSource(node.id, containsSensitive),
             onCopyDerivedSecret:
               onCopySecret === null ? null : copyTextAsSecret,
             onNameChange: onNodeNameChange,
@@ -2240,6 +2325,7 @@ export default function GraphCanvas({
     contentMarkerOptions,
     contentProcessorByNodeId,
     contentProcessorOptions,
+    copyCodeSource,
     copyTextAsSecret,
     commitNodeDimensions,
     commitNodeAndScheduleAvoidance,
@@ -2264,6 +2350,7 @@ export default function GraphCanvas({
     referenceFilterNodeIdSet,
     referencedNodesBySource,
     setFlowNodes,
+    sensitiveCodeContentByNodeId,
     stackOrderByNode,
   ]);
 

@@ -2,11 +2,18 @@ import { describe, expect, it } from "vitest";
 import {
   ContentProcessorRegistry,
   canvasContentPreview,
+  canvasExpandedCodeContentPreview,
+  contentContainsSensitive,
   contentProcessorRegistry,
   markdownContentProcessor,
   maximumCanvasContentPreviewCharacters,
+  maximumExpandedCodePreviewLines,
   textContentProcessor,
 } from "./contentProcessor";
+import {
+  codeContentProcessorId,
+  codePreviewLanguages,
+} from "./codePreviewLanguages";
 
 describe("content processor registry", () => {
   it("uses plain text by default", () => {
@@ -24,8 +31,10 @@ describe("content processor registry", () => {
     expect(contentProcessorRegistry.list().map((processor) => processor.id)).toEqual([
       "text",
       "markdown",
+      ...codePreviewLanguages.map(codeContentProcessorId),
     ]);
     expect(contentProcessorRegistry.has("markdown")).toBe(true);
+    expect(contentProcessorRegistry.has("code.typescript")).toBe(true);
     expect(markdownContentProcessor.present("# Heading")).toEqual({
       kind: "markdown",
       source: "# Heading",
@@ -64,5 +73,25 @@ describe("content processor registry", () => {
     expect(preview).toBe(`${prefix}…`);
     expect(preview).not.toContain("synthetic-secret");
     expect(content).toContain(payload);
+  });
+
+  it("classifies sensitive content beyond the bounded canvas preview", () => {
+    const content = `${"x".repeat(maximumCanvasContentPreviewCharacters + 100)}[[li:secret]]synthetic-secret[[/li]]`;
+
+    expect(canvasContentPreview(content)).not.toContain("synthetic-secret");
+    expect(contentContainsSensitive(content)).toBe(true);
+  });
+
+  it("bounds expanded code previews by both characters and lines", () => {
+    const dense = Array.from({ length: maximumExpandedCodePreviewLines + 100 }, (_, index) =>
+      `line ${index + 1}`,
+    ).join("\n");
+    const preview = canvasExpandedCodeContentPreview(dense);
+
+    expect(preview?.endsWith("…")).toBe(true);
+    expect(preview?.split("\n")).toHaveLength(maximumExpandedCodePreviewLines);
+    expect(canvasExpandedCodeContentPreview("x".repeat(30_000))?.length).toBe(
+      20_001,
+    );
   });
 });

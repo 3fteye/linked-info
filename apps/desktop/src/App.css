@@ -1022,6 +1022,154 @@ h1 {
   white-space: normal;
 }
 
+.graph-node-content.node-content-code {
+  display: block;
+  overflow: hidden;
+  padding: 0;
+  white-space: normal;
+}
+
+.code-preview {
+  display: grid;
+  min-width: 0;
+  color: #d9e1dc;
+  background: #1f2622;
+}
+
+.code-preview-toolbar {
+  display: flex;
+  min-height: 30px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 5px 8px 5px 11px;
+  gap: 8px;
+  border-bottom: 1px solid #38433d;
+  color: #aebbb3;
+  background: #28302c;
+  font-family: system-ui, sans-serif;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.code-preview-copy {
+  flex: 0 0 auto;
+  border: 1px solid #56665d;
+  border-radius: 4px;
+  padding: 3px 6px;
+  color: #dce7e0;
+  background: #344039;
+  font-size: 9px;
+  cursor: pointer;
+}
+
+.code-preview-copy:hover,
+.code-preview-copy:focus-visible {
+  border-color: #85a491;
+  background: #415047;
+}
+
+.code-preview-scroll,
+.code-preview-fallback {
+  max-width: 100%;
+  margin: 0;
+  overflow: auto;
+  padding: 8px 0;
+  color: inherit;
+  background: inherit;
+  font-family: Consolas, "SFMono-Regular", monospace;
+  font-size: 10px;
+  line-height: 1.5;
+  tab-size: 2;
+}
+
+.code-preview-fallback {
+  padding: 9px 11px;
+  white-space: pre;
+}
+
+.code-preview-line {
+  display: grid;
+  min-width: max-content;
+  grid-template-columns: 4.5ch max-content;
+}
+
+.code-preview-line-number {
+  padding: 0 1ch 0 0.5ch;
+  color: #6f8076;
+  text-align: right;
+  user-select: none;
+}
+
+.code-preview-line-content {
+  min-width: max-content;
+  padding-right: 12px;
+  white-space: pre;
+}
+
+.code-preview-truncated {
+  border-top: 1px solid #38433d;
+  padding: 6px 10px;
+  color: #aebbb3;
+  background: #28302c;
+  font-family: system-ui, sans-serif;
+  font-size: 9px;
+  line-height: 1.35;
+}
+
+.code-preview .token.comment,
+.code-preview .token.prolog,
+.code-preview .token.doctype,
+.code-preview .token.cdata {
+  color: #839187;
+}
+
+.code-preview .token.punctuation {
+  color: #b8c5bd;
+}
+
+.code-preview .token.property,
+.code-preview .token.tag,
+.code-preview .token.boolean,
+.code-preview .token.number,
+.code-preview .token.constant,
+.code-preview .token.symbol,
+.code-preview .token.deleted {
+  color: #e8a884;
+}
+
+.code-preview .token.selector,
+.code-preview .token.attr-name,
+.code-preview .token.string,
+.code-preview .token.char,
+.code-preview .token.builtin,
+.code-preview .token.inserted {
+  color: #a9d18e;
+}
+
+.code-preview .token.operator,
+.code-preview .token.entity,
+.code-preview .token.url,
+.code-preview .token.variable {
+  color: #d8c98d;
+}
+
+.code-preview .token.atrule,
+.code-preview .token.attr-value,
+.code-preview .token.function,
+.code-preview .token.class-name {
+  color: #91c9da;
+}
+
+.code-preview .token.keyword {
+  color: #c7a6df;
+}
+
+.code-preview .token.regex,
+.code-preview .token.important {
+  color: #e4bd74;
+}
+
 .graph-node-content.node-content-enhanced {
   display: block;
   white-space: normal;

@@ -1,5 +1,10 @@
-import { Fragment, type ReactNode } from "react";
+import { Fragment, lazy, Suspense, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
+import {
+  codeContentProcessorId,
+  codePreviewLanguages,
+  type CodePreviewLanguage,
+} from "./codePreviewLanguages";
 import {
   contentEnhancerRegistry,
   type EnhancedContentSegment,
@@ -16,9 +21,15 @@ import {
 } from "./totpContent";
 import type { SecretContentLabels } from "./secretContent";
 
+const LazyCodePreview = lazy(async () => {
+  const module = await import("./codePreview");
+  return { default: module.CodePreview };
+});
+
 export type ContentPresentation =
   | { kind: "text"; text: string | null }
-  | { kind: "markdown"; source: string | null };
+  | { kind: "markdown"; source: string | null }
+  | { kind: "code"; language: CodePreviewLanguage; source: string | null };
 
 export interface ContentProcessor {
   readonly id: string;
@@ -84,26 +95,46 @@ export const markdownContentProcessor: ContentProcessor = {
   },
 };
 
+export const codeContentProcessors: readonly ContentProcessor[] =
+  codePreviewLanguages.map((language) => ({
+    id: codeContentProcessorId(language),
+    version: 1,
+    present(content: string | null): ContentPresentation {
+      return { kind: "code", language, source: content };
+    },
+  }));
+
 export const contentProcessorRegistry = new ContentProcessorRegistry([
   textContentProcessor,
   markdownContentProcessor,
+  ...codeContentProcessors,
 ]);
 
 export const maximumCanvasContentPreviewCharacters = 600;
+export const maximumExpandedCodePreviewCharacters = 20_000;
+export const maximumExpandedCodePreviewLines = 500;
 
 export interface ContentEnhancementLabels {
+  code: {
+    copy: string;
+    languages: Record<CodePreviewLanguage, string>;
+    truncated: string;
+  };
   secret: SecretContentLabels;
   totp: TotpContentLabels;
 }
 
-export function canvasContentPreview(text: string | null): string | null {
-  if (text === null || text.length <= maximumCanvasContentPreviewCharacters) {
+function boundedCanvasContentPreview(
+  text: string | null,
+  maximumCharacters: number,
+): string | null {
+  if (text === null || text.length <= maximumCharacters) {
     return text;
   }
   let preview = "";
   for (const segment of contentMarkerRegistry.segment(text)) {
     const source = segment.kind === "text" ? segment.text : segment.marker.raw;
-    const remaining = maximumCanvasContentPreviewCharacters - preview.length;
+    const remaining = maximumCharacters - preview.length;
     if (source.length <= remaining) {
       preview += source;
       continue;
@@ -116,7 +147,37 @@ export function canvasContentPreview(text: string | null): string | null {
     }
     return `${preview}${source.slice(0, Math.max(0, remaining))}…`;
   }
-  return `${preview.slice(0, maximumCanvasContentPreviewCharacters)}…`;
+  return `${preview.slice(0, maximumCharacters)}…`;
+}
+
+export function canvasContentPreview(text: string | null): string | null {
+  return boundedCanvasContentPreview(
+    text,
+    maximumCanvasContentPreviewCharacters,
+  );
+}
+
+export function canvasExpandedCodeContentPreview(
+  text: string | null,
+): string | null {
+  if (text === null) {
+    return null;
+  }
+  let maximumCharacters = Math.min(
+    text.length,
+    maximumExpandedCodePreviewCharacters,
+  );
+  let newlineCount = 0;
+  for (let index = 0; index < maximumCharacters; index += 1) {
+    if (text[index] === "\n") {
+      newlineCount += 1;
+      if (newlineCount >= maximumExpandedCodePreviewLines) {
+        maximumCharacters = index;
+        break;
+      }
+    }
+  }
+  return boundedCanvasContentPreview(text, maximumCharacters);
 }
 
 interface NodeContentHostProps {
@@ -126,8 +187,11 @@ interface NodeContentHostProps {
   emptyContent?: ReactNode;
   enhancementLabels: ContentEnhancementLabels;
   hideWhenEmpty?: boolean;
+  codeSourceContainsSensitive?: boolean;
+  onCopyCodeSource?: (containsSensitive: boolean) => void;
   onCopySecret?: (value: string) => void;
   processorId: string | null;
+  sourceTruncated?: boolean;
   variant: "canvas" | "list";
 }
 
@@ -169,21 +233,41 @@ function listContent(
     .join("");
 }
 
+function containsSensitiveSegments(
+  segments: readonly EnhancedContentSegment[],
+): boolean {
+  return segments.some(
+    (segment) =>
+      segment.kind === "totp" ||
+      (segment.kind === "marker" &&
+        segment.marker.definition?.excludeFromSemanticAnalysis === true),
+  );
+}
+
+export function contentContainsSensitive(content: string | null): boolean {
+  return (
+    content !== null &&
+    containsSensitiveSegments(contentEnhancerRegistry.segment(content, false))
+  );
+}
+
 export function NodeContentHost({
   canvasPreviewEnabled = true,
   className,
   content,
+  codeSourceContainsSensitive,
   emptyContent = null,
   enhancementLabels,
   hideWhenEmpty = false,
+  onCopyCodeSource,
   onCopySecret,
   processorId,
+  sourceTruncated = false,
   variant,
 }: NodeContentHostProps) {
   const resolved = contentProcessorRegistry.resolve(processorId);
   const presentation = resolved.processor.present(content);
-  const source =
-    presentation.kind === "text" ? presentation.text : presentation.source;
+  const source = presentation.kind === "text" ? presentation.text : presentation.source;
   const presentedText =
     variant === "canvas" && canvasPreviewEnabled
       ? canvasContentPreview(source)
@@ -205,6 +289,7 @@ export function NodeContentHost({
       className,
       "node-content-host",
       presentation.kind === "markdown" ? "node-content-markdown" : null,
+      presentation.kind === "code" ? "node-content-code" : null,
       hasEnhancements ? "node-content-enhanced" : null,
     ]
       .filter(Boolean)
@@ -218,6 +303,38 @@ export function NodeContentHost({
       <span {...sharedProps}>
         {hasEnhancements ? listContent(enhancedSegments, enhancementLabels) : rendered}
       </span>
+    );
+  }
+  if (presentation.kind === "code" && presentedText) {
+    const codeSource = listContent(enhancedSegments, enhancementLabels);
+    const containsSensitive =
+      codeSourceContainsSensitive ?? contentContainsSensitive(source);
+    return (
+      <div {...sharedProps}>
+        <Suspense
+          fallback={
+            <pre className="nodrag nowheel code-preview-fallback">
+              <code>{codeSource}</code>
+            </pre>
+          }
+        >
+          <LazyCodePreview
+            labels={{
+              copy: enhancementLabels.code.copy,
+              truncated: enhancementLabels.code.truncated,
+            }}
+            language={presentation.language}
+            languageLabel={enhancementLabels.code.languages[presentation.language]}
+            onCopy={
+              onCopyCodeSource === undefined
+                ? undefined
+                : () => onCopyCodeSource(containsSensitive)
+            }
+            source={codeSource}
+            sourceTruncated={sourceTruncated}
+          />
+        </Suspense>
+      </div>
     );
   }
   if (hasEnhancements) {

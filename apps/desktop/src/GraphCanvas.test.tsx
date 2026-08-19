@@ -38,10 +38,12 @@ function cardProps(overrides: Record<string, unknown> = {}): NodeProps<any> {
       contentFullyRendered: true,
       contentTruncated: false,
       contentProcessorId: null,
+      codeSourceContainsSensitive: false,
       contentProcessorLabel: "Content format",
       contentProcessorOptions: [
         { id: "text", label: "Plain text" },
         { id: "markdown", label: "Markdown" },
+        { id: "code.typescript", label: "TypeScript" },
       ],
       contentMarkerOptions: [
         { id: "totp", invalidPayloadLabel: "Invalid TOTP secret", label: "TOTP" },
@@ -65,6 +67,21 @@ function cardProps(overrides: Record<string, unknown> = {}): NodeProps<any> {
       contentLabel: "Content",
       contentPlaceholder: "Content",
       enhancementLabels: {
+        code: {
+          copy: "Copy source",
+          languages: {
+            powershell: "PowerShell",
+            bash: "Bash",
+            python: "Python",
+            javascript: "JavaScript",
+            typescript: "TypeScript",
+            rust: "Rust",
+            json: "JSON",
+            yaml: "YAML",
+            sql: "SQL",
+          },
+          truncated: "Preview truncated",
+        },
         secret: {
           copy: "Copy secret",
           hide: "Hide",
@@ -101,6 +118,7 @@ function cardProps(overrides: Record<string, unknown> = {}): NodeProps<any> {
       onCommit: vi.fn(),
       onContentChange: vi.fn(),
       onContentProcessorChange: vi.fn(),
+      onCopyCodeSource: vi.fn(),
       onCopyDerivedSecret: null,
       onFitNodeContent: vi.fn(),
       onNameChange: vi.fn(() => true),

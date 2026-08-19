@@ -417,6 +417,66 @@ test("low-zoom TOTP updates keep every connected path stable", async ({ page }) 
   expect(new Set(samples.map((sample) => sample.viewportTransform)).size).toBe(1);
 });
 
+test("an explicit code language highlights safely and survives reload", async ({
+  page,
+}) => {
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"], {
+    origin: "http://127.0.0.1:1422",
+  });
+  const codeNode = {
+    content: Array.from({ length: 600 }, (_, index) =>
+      index === 0
+        ? `const answer: number = 42; // ${"x".repeat(800)}`
+        : `const value${index}: number = ${index};`,
+    ).join("\n"),
+    height: 420,
+    id: syntheticId(1),
+    name: "TypeScript example",
+    x: 100,
+    y: 100,
+  };
+  await openSyntheticWorkspace(page, [codeNode]);
+  await node(page, codeNode.id).dblclick({ position: { x: 80, y: 24 } });
+  await page.getByLabel("Content format").selectOption("code.typescript");
+  await page.locator(".react-flow__pane").click({ position: { x: 700, y: 500 } });
+
+  const preview = node(page, codeNode.id).locator(".code-preview");
+  await expect(preview).toBeVisible();
+  await expect(preview).toHaveAttribute("data-language", "typescript");
+  await expect(preview.locator(".code-preview-line")).toHaveCount(500);
+  await expect(preview.locator(".token.keyword").first()).toHaveText("const");
+  await expect(preview).toHaveAttribute("data-truncated", "true");
+  await expect(preview.locator(".code-preview-truncated")).toBeVisible();
+  const scroll = preview.locator(".code-preview-scroll");
+  const viewport = page.locator(".react-flow__viewport");
+  const viewportTransform = await viewport.getAttribute("style");
+  await scroll.hover();
+  await page.mouse.wheel(400, 0);
+  await expect.poll(() => scroll.evaluate((element) => element.scrollLeft)).toBeGreaterThan(0);
+  await expect(viewport).toHaveAttribute("style", viewportTransform ?? "");
+  await preview.locator(".code-preview-copy").click();
+  await expect
+    .poll(async () =>
+      (await page.evaluate(() => navigator.clipboard.readText())).replace(
+        /\r\n/gu,
+        "\n",
+      ),
+    )
+    .toBe(codeNode.content);
+  await expect.poll(() => storedWorkspace(page)).toMatchObject({
+    nodes: [{ content: codeNode.content, id: codeNode.id }],
+    view: {
+      contentProcessorByNodeId: { [codeNode.id]: "code.typescript" },
+    },
+  });
+
+  await page.reload();
+  await expect(node(page, codeNode.id).locator(".code-preview")).toHaveAttribute(
+    "data-language",
+    "typescript",
+  );
+});
+
 test("existing content markers can be changed or removed without nesting", async ({
   page,
 }) => {
@@ -932,7 +992,9 @@ test("canvas select all, delete, undo, redo and context menu share one keyboard 
   await expect(page.locator("[data-node-id]")).toHaveCount(0);
 
   await canvas.click({ position: { x: 30, y: 30 } });
-  await page.keyboard.press("Control+z");
+  const undo = page.getByRole("button", { name: "Undo" });
+  await expect(undo).toBeEnabled();
+  await undo.click();
   await expect(page.locator("[data-node-id]")).toHaveCount(3);
   await page.keyboard.press("Control+Shift+z");
   await expect(page.locator("[data-node-id]")).toHaveCount(0);
