@@ -49,6 +49,7 @@ jobs:
           -p linked-info-backup-port
           -p linked-info-contracts
           -p linked-info-domain
+          -p linked-info-extension-contracts
           -p linked-info-storage-port
           -p linked-info-storage-memory
           -p linked-info-application
@@ -60,6 +61,7 @@ jobs:
           -p linked-info-backup-port
           -p linked-info-contracts
           -p linked-info-domain
+          -p linked-info-extension-contracts
           -p linked-info-storage-port
           -p linked-info-storage-memory
           -p linked-info-application

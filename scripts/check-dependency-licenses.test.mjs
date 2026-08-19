@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   approvedFrontendLicenseExpressions,
+  approvedRustLicenseExpressions,
   findUnapprovedLicenseGroups,
   inspectFrontendLicenses,
 } from "./check-dependency-licenses.mjs";
@@ -26,6 +27,17 @@ test("license review accepts the explicitly reviewed BSD-2-Clause expression", (
       ],
     ]),
     approvedFrontendLicenseExpressions,
+  );
+
+  assert.equal(failures.length, 0);
+});
+
+test("license review accepts wasmparser's exact reviewed expression", () => {
+  const expression =
+    "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT";
+  const failures = findUnapprovedLicenseGroups(
+    new Map([[expression, [{ name: "wasmparser", versions: ["0.256.0"] }]]]),
+    approvedRustLicenseExpressions,
   );
 
   assert.equal(failures.length, 0);

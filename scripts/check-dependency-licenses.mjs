@@ -17,6 +17,7 @@ export const approvedRustLicenseExpressions = new Set([
   "Apache-2.0 AND MIT",
   "Apache-2.0 OR BSL-1.0",
   "Apache-2.0 OR ISC OR MIT",
+  "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
   "Apache-2.0 OR MIT OR Zlib",
   "Apache-2.0 OR MIT",
   "Apache-2.0",
