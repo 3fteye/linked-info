@@ -263,6 +263,22 @@ enum WorkspaceRecoverySwapStatus {
     RecoveryRequired,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+enum WorkspaceSecurityTransactionStatus {
+    Committed,
+    CommittedLocked,
+    RecoveryRequired,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceSecurityTransactionResult {
+    status: WorkspaceSecurityTransactionStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    security_status: Option<WorkspaceSecurityStatus>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceRecoverySwapResult {
@@ -588,6 +604,7 @@ impl WorkspaceVaultState {
     }
 }
 
+#[derive(Clone)]
 struct WorkspaceFileStore {
     base_directory: PathBuf,
 }
@@ -1157,9 +1174,10 @@ pub async fn enable_workspace_encryption(
 pub async fn change_workspace_password(
     app: AppHandle,
     state: tauri::State<'_, WorkspaceVaultState>,
+    system_unlock_state: tauri::State<'_, SystemUnlockState>,
     password: String,
     authorization: String,
-) -> Result<(), String> {
+) -> Result<WorkspaceSecurityTransactionResult, String> {
     validate_new_password(&password)?;
     let permit = state
         .consume_sensitive_authorization(SensitiveOperation::ChangePassword, &authorization)?;
@@ -1167,8 +1185,10 @@ pub async fn change_workspace_password(
     let operation_lock = Arc::clone(&state.operation_lock);
     let access_generation = state.access_generation();
     let data_key = state.data_key()?;
+    let provider = system_unlock_state.provider();
+    let provider_for_change = Arc::clone(&provider);
     let password = Zeroizing::new(password);
-    tauri::async_runtime::spawn_blocking(move || {
+    let changed = tauri::async_runtime::spawn_blocking(move || {
         let _guard = operation_lock
             .lock()
             .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
@@ -1177,13 +1197,43 @@ pub async fn change_workspace_password(
         let previous = store
             .read_vault_metadata()?
             .ok_or_else(|| "workspace_vault_not_configured".to_owned())?;
+        let system_unlock_enabled =
+            system_unlock_enabled(Some(&previous), provider_for_change.as_ref());
+        let idle_timeout_minutes = previous.idle_timeout_minutes;
         let metadata = rewrap_vault_metadata(previous, &password, &data_key)?;
         let serialized = serde_json::to_vec(&metadata).map_err(|error| error.to_string())?;
-        write_atomically(&store.vault_path(), &serialized).map_err(|error| error.to_string())
+        let write_status = write_vault_metadata_commit_aware(&store, &serialized)?;
+        Ok::<_, String>((write_status, system_unlock_enabled, idle_timeout_minutes))
     })
     .await
     .map_err(|error| error.to_string())??;
-    ensure_workspace_access(&app, &state, Some(permit))
+    let (write_status, system_unlock_enabled, idle_timeout_minutes) = changed;
+    if write_status == VaultMetadataWriteStatus::RecoveryRequired {
+        lock_workspace_runtime(&app, "workspace_password_change_recovery_required");
+        return Ok(WorkspaceSecurityTransactionResult {
+            status: WorkspaceSecurityTransactionStatus::RecoveryRequired,
+            security_status: None,
+        });
+    }
+    let session_current = ensure_workspace_access(&app, &state, Some(permit)).is_ok();
+    let locked = !session_current;
+    if locked {
+        lock_workspace_runtime(&app, "workspace_password_changed_locked");
+    }
+    Ok(WorkspaceSecurityTransactionResult {
+        status: if locked {
+            WorkspaceSecurityTransactionStatus::CommittedLocked
+        } else {
+            WorkspaceSecurityTransactionStatus::Committed
+        },
+        security_status: Some(WorkspaceSecurityStatus {
+            encrypted: true,
+            locked,
+            system_unlock_available: provider.available(),
+            system_unlock_enabled,
+            idle_timeout_minutes,
+        }),
+    })
 }
 
 #[tauri::command]
@@ -1866,7 +1916,7 @@ pub async fn commit_workspace_restore(
     llm_state: tauri::State<'_, crate::llm::LlmState>,
     system_unlock_state: tauri::State<'_, SystemUnlockState>,
     restore_id: uuid::Uuid,
-) -> Result<WorkspaceSecurityStatus, String> {
+) -> Result<WorkspaceSecurityTransactionResult, String> {
     crate::vector_cache::purge_for_encryption(&app, &vector_cache_state).await?;
     crate::smart_reference_cache::purge(&app, &smart_reference_cache_state).await?;
     let prepared = {
@@ -1884,30 +1934,69 @@ pub async fn commit_workspace_restore(
             .ok_or_else(|| "workspace_restore_not_prepared".to_owned())?
     };
     let store = workspace_store(&app).map_err(|error| error.to_string())?;
+    let store_for_install = store.clone();
     let operation_lock = Arc::clone(&state.operation_lock);
-    let data_key = tauri::async_runtime::spawn_blocking(move || {
+    let install_result = tauri::async_runtime::spawn_blocking(move || {
         let _guard = operation_lock
             .lock()
             .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
-        recover_pending_migration(&store)?;
-        if store.encryption_configured() {
+        recover_pending_migration(&store_for_install)?;
+        if store_for_install.encryption_configured() {
             return Err("workspace_vault_already_configured".to_owned());
         }
-        install_prepared_workspace_restore(&store, prepared)
+        Ok::<_, String>(install_prepared_workspace_restore(
+            &store_for_install,
+            prepared,
+        ))
     })
     .await
     .map_err(|error| error.to_string())??;
-    state.replace_data_key(data_key)?;
+    let provider_available = system_unlock_state.provider().available();
+    let outcome = classify_prepared_restore_install(&store, install_result)?;
+    let locked_result = || WorkspaceSecurityTransactionResult {
+        status: WorkspaceSecurityTransactionStatus::CommittedLocked,
+        security_status: Some(WorkspaceSecurityStatus {
+            encrypted: true,
+            locked: true,
+            system_unlock_available: provider_available,
+            system_unlock_enabled: false,
+            idle_timeout_minutes: default_idle_timeout_minutes(),
+        }),
+    };
+    let data_key = match outcome {
+        PreparedRestoreInstallOutcome::Committed(data_key) => data_key,
+        PreparedRestoreInstallOutcome::CommittedLocked => {
+            lock_workspace_runtime(&app, "workspace_restore_committed_locked");
+            return Ok(locked_result());
+        }
+        PreparedRestoreInstallOutcome::RecoveryRequired => {
+            lock_workspace_runtime(&app, "workspace_restore_recovery_required");
+            return Ok(WorkspaceSecurityTransactionResult {
+                status: WorkspaceSecurityTransactionStatus::RecoveryRequired,
+                security_status: None,
+            });
+        }
+    };
     state.set_idle_timeout(default_idle_timeout_minutes());
-    crate::vector_cache::purge_for_encryption(&app, &vector_cache_state).await?;
+    if state.replace_data_key(data_key).is_err()
+        || crate::vector_cache::purge_for_encryption(&app, &vector_cache_state)
+            .await
+            .is_err()
+    {
+        lock_workspace_runtime(&app, "workspace_restore_committed_locked");
+        return Ok(locked_result());
+    }
     let _ = embedding_state.shutdown();
     llm_state.shutdown();
-    Ok(WorkspaceSecurityStatus {
-        encrypted: true,
-        locked: false,
-        system_unlock_available: system_unlock_state.provider().available(),
-        system_unlock_enabled: false,
-        idle_timeout_minutes: default_idle_timeout_minutes(),
+    Ok(WorkspaceSecurityTransactionResult {
+        status: WorkspaceSecurityTransactionStatus::Committed,
+        security_status: Some(WorkspaceSecurityStatus {
+            encrypted: true,
+            locked: false,
+            system_unlock_available: provider_available,
+            system_unlock_enabled: false,
+            idle_timeout_minutes: default_idle_timeout_minutes(),
+        }),
     })
 }
 
@@ -2351,6 +2440,30 @@ fn rewrap_vault_metadata(
     Ok(metadata)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VaultMetadataWriteStatus {
+    Committed,
+    RecoveryRequired,
+}
+
+fn write_vault_metadata_commit_aware(
+    store: &WorkspaceFileStore,
+    serialized: &[u8],
+) -> Result<VaultMetadataWriteStatus, String> {
+    match write_atomically(&store.vault_path(), serialized) {
+        Ok(()) => Ok(VaultMetadataWriteStatus::Committed),
+        Err(write_error) => match fs::read(store.vault_path()) {
+            Ok(current) if current == serialized => {
+                // Replacement happened, but the final durability step reported
+                // an error. The caller must not report a pre-commit failure.
+                Ok(VaultMetadataWriteStatus::RecoveryRequired)
+            }
+            Ok(_) => Err(write_error.to_string()),
+            Err(_) => Ok(VaultMetadataWriteStatus::RecoveryRequired),
+        },
+    }
+}
+
 fn create_system_unlock_envelope(
     provider: &str,
     credential_id: &str,
@@ -2581,6 +2694,40 @@ fn migrate_plaintext_store(
         .map_err(|error| error.to_string())?;
     finish_pending_migration(store, &metadata)?;
     Ok(data_key)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum PreparedRestoreInstallOutcome {
+    Committed([u8; DATA_KEY_BYTES]),
+    CommittedLocked,
+    RecoveryRequired,
+}
+
+fn classify_prepared_restore_install(
+    store: &WorkspaceFileStore,
+    result: Result<[u8; DATA_KEY_BYTES], String>,
+) -> Result<PreparedRestoreInstallOutcome, String> {
+    let error = match result {
+        Ok(data_key) => return Ok(PreparedRestoreInstallOutcome::Committed(data_key)),
+        Err(error) => error,
+    };
+    match fs::metadata(store.vault_path()) {
+        Ok(metadata) if metadata.is_file() => {
+            return Ok(PreparedRestoreInstallOutcome::CommittedLocked);
+        }
+        Ok(_) => return Ok(PreparedRestoreInstallOutcome::RecoveryRequired),
+        Err(metadata_error) if metadata_error.kind() != io::ErrorKind::NotFound => {
+            return Ok(PreparedRestoreInstallOutcome::RecoveryRequired);
+        }
+        Err(_) => {}
+    }
+    match fs::metadata(store.pending_vault_path()) {
+        Ok(_) => Ok(PreparedRestoreInstallOutcome::RecoveryRequired),
+        Err(metadata_error) if metadata_error.kind() != io::ErrorKind::NotFound => {
+            Ok(PreparedRestoreInstallOutcome::RecoveryRequired)
+        }
+        Err(_) => Err(error),
+    }
 }
 
 fn install_prepared_workspace_restore(
@@ -4932,6 +5079,48 @@ mod tests {
             Some(current)
         );
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn restore_failure_after_vault_commit_is_not_reported_as_precommit_error() {
+        let directory = test_directory();
+        let store = WorkspaceFileStore::new(directory.clone());
+        fs::create_dir_all(&directory).unwrap();
+        write_atomically(&store.vault_path(), b"committed-vault").unwrap();
+
+        assert_eq!(
+            classify_prepared_restore_install(&store, Err("followup failed".to_owned())).unwrap(),
+            PreparedRestoreInstallOutcome::CommittedLocked
+        );
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn restore_failure_with_durable_pending_vault_requires_recovery() {
+        let directory = test_directory();
+        let store = WorkspaceFileStore::new(directory.clone());
+        fs::create_dir_all(&directory).unwrap();
+        write_atomically(&store.pending_vault_path(), b"pending-vault").unwrap();
+
+        assert_eq!(
+            classify_prepared_restore_install(&store, Err("replacement failed".to_owned()))
+                .unwrap(),
+            PreparedRestoreInstallOutcome::RecoveryRequired
+        );
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn restore_failure_before_any_durable_intent_remains_an_error() {
+        let directory = test_directory();
+        let store = WorkspaceFileStore::new(directory.clone());
+
+        assert_eq!(
+            classify_prepared_restore_install(&store, Err("not committed".to_owned())).unwrap_err(),
+            "not committed"
+        );
     }
 
     #[test]

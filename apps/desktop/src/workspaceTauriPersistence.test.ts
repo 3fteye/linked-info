@@ -279,7 +279,7 @@ describe("createTauriWorkspacePersistence", () => {
     expect(swapCount).toBe(1);
     expect(writeCount).toBe(2);
     await expect(persistence.save(validWorkspace("Must not write"))).rejects.toThrow(
-      "workspace_recovery_swap_reload_required",
+      "workspace_persistence_reload_required",
     );
     expect(await persistence.load()).toEqual({ status: "ready", workspace: primary });
     expect(await persistence.loadRecovery()).toEqual({
@@ -392,5 +392,48 @@ describe("createTauriWorkspacePersistence", () => {
     await expect(swapping).rejects.toThrow("swap failed before commit");
     await queuedSave;
     expect(await persistence.load()).toEqual({ status: "ready", workspace: edited });
+  });
+
+  it("quarantines stale writes after an external transaction commits until Rust is reloaded", async () => {
+    const bridge = new MemoryFileBridge();
+    const persistence = createTauriWorkspacePersistence(
+      bridge,
+      new MemoryLegacySource(),
+    );
+    const before = validWorkspace("Before external commit");
+    const restored = validWorkspace("Authoritative restored workspace");
+    await persistence.save(before);
+
+    const result = await persistence.runExclusiveTransaction(async () => {
+      bridge.files.set("primary", JSON.stringify({ version: 2, ...restored }));
+      return { status: "committed" as const };
+    });
+
+    expect(result).toEqual({ status: "committed" });
+    await expect(persistence.save(before)).rejects.toThrow(
+      "workspace_persistence_reload_required",
+    );
+    expect(await persistence.load()).toEqual({ status: "ready", workspace: restored });
+    await expect(persistence.save(restored)).resolves.toBeUndefined();
+  });
+
+  it("allows writes again when an external transaction rejects before commit", async () => {
+    const bridge = new MemoryFileBridge();
+    const persistence = createTauriWorkspacePersistence(
+      bridge,
+      new MemoryLegacySource(),
+    );
+    const before = validWorkspace("Before rejected transaction");
+    const after = validWorkspace("After rejected transaction");
+    await persistence.save(before);
+
+    await expect(
+      persistence.runExclusiveTransaction(async () => {
+        throw new Error("not committed");
+      }),
+    ).rejects.toThrow("not committed");
+    await persistence.save(after);
+
+    expect(await persistence.load()).toEqual({ status: "ready", workspace: after });
   });
 });

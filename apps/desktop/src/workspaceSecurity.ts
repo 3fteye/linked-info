@@ -14,6 +14,13 @@ export interface PreparedWorkspaceRestorePreview {
   plaintext: string;
 }
 
+export type WorkspaceSecurityTransactionResult =
+  | {
+      status: "committed" | "committedLocked";
+      securityStatus: WorkspaceSecurityStatus;
+    }
+  | { status: "recoveryRequired" };
+
 export type SensitiveOperation =
   | "backupRetentionChange"
   | "backupSnapshotDelete"
@@ -42,7 +49,10 @@ export interface WorkspaceSecurity {
     operation: SensitiveOperation,
     authentication: SensitiveAuthentication,
   ): Promise<string>;
-  changePassword(password: string, authorization: string): Promise<void>;
+  changePassword(
+    password: string,
+    authorization: string,
+  ): Promise<WorkspaceSecurityTransactionResult>;
   rotateDataKey(password: string, authorization: string): Promise<void>;
   clearRecoveryData(authorization: string): Promise<void>;
   destroyWorkspace(authorization: string): Promise<void>;
@@ -57,7 +67,7 @@ export interface WorkspaceSecurity {
     password: string,
   ): Promise<PreparedWorkspaceRestorePreview>;
   cancelRestore(restoreId: string): Promise<void>;
-  commitRestore(restoreId: string): Promise<WorkspaceSecurityStatus>;
+  commitRestore(restoreId: string): Promise<WorkspaceSecurityTransactionResult>;
 }
 
 const plaintextStatus: WorkspaceSecurityStatus = {
@@ -101,7 +111,7 @@ export const tauriWorkspaceSecurity: WorkspaceSecurity = {
     });
   },
   changePassword(password, authorization) {
-    return invoke<void>("change_workspace_password", {
+    return invoke<WorkspaceSecurityTransactionResult>("change_workspace_password", {
       password,
       authorization,
     });
@@ -156,7 +166,7 @@ export const tauriWorkspaceSecurity: WorkspaceSecurity = {
     return invoke<void>("cancel_workspace_restore", { restoreId });
   },
   commitRestore(restoreId) {
-    return invoke<WorkspaceSecurityStatus>("commit_workspace_restore", {
+    return invoke<WorkspaceSecurityTransactionResult>("commit_workspace_restore", {
       restoreId,
     });
   },

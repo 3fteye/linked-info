@@ -1554,10 +1554,21 @@ function App({
             : { method: "password", password: securityCurrentPassword },
         );
         if (securityDialog === "change") {
-          await workspaceSecurity.changePassword(
+          const result = await workspaceSecurity.changePassword(
             securityPassword,
             authorization,
           );
+          if (result.status === "recoveryRequired") {
+            skipUnmountFlushRef.current = true;
+            workspaceMutationBlockedRef.current = true;
+            setPersistenceRecoveryRequired(true);
+            setPersistenceReady(false);
+            return;
+          }
+          if (result.status === "committedLocked") {
+            skipUnmountFlushRef.current = true;
+          }
+          updateWorkspaceSecurityStatus(result.securityStatus);
           showAppNotice(t("security.changeSuccess"));
         } else if (securityDialog === "rotate") {
           // Rotation revokes the current Rust plaintext session before it starts.
@@ -3643,17 +3654,38 @@ function App({
       return;
     }
 
+    let bootstrapStarted = false;
+    let bootstrapCommitted = false;
     try {
+      let replacementWorkspace = pendingWorkspaceReplacement.workspace;
       if (pendingWorkspaceReplacement.kind === "bootstrapRestore") {
-        if (pendingWorkspaceReplacement.preparedRestoreId === undefined) {
+        const preparedRestoreId = pendingWorkspaceReplacement.preparedRestoreId;
+        if (preparedRestoreId === undefined) {
           throw new Error("workspace_restore_not_prepared");
         }
+        bootstrapStarted = true;
+        workspaceMutationBlockedRef.current = true;
+        skipUnmountFlushRef.current = true;
+        setPersistenceReady(false);
         await persistence.save(workspaceRef.current);
-        updateWorkspaceSecurityStatus(
-          await workspaceSecurity.commitRestore(
-            pendingWorkspaceReplacement.preparedRestoreId,
-          ),
+        const result = await persistence.runExclusiveTransaction(() =>
+          workspaceSecurity.commitRestore(preparedRestoreId),
         );
+        bootstrapCommitted = true;
+        if (result.status === "recoveryRequired") {
+          setPersistenceRecoveryRequired(true);
+          return;
+        }
+        updateWorkspaceSecurityStatus(result.securityStatus);
+        if (result.status === "committedLocked") {
+          return;
+        }
+        const authoritative = await persistence.load();
+        if (authoritative.status !== "ready") {
+          setPersistenceRecoveryRequired(true);
+          return;
+        }
+        replacementWorkspace = authoritative.workspace;
         setOffsiteEndpoint("");
         offsiteRecoveryConnectionRef.current = null;
         setOffsiteRecoveryPage(null);
@@ -3664,8 +3696,8 @@ function App({
       workspaceChangedInSessionRef.current = true;
       automaticOffsiteRevisionRef.current += 1;
       workspaceReplacementGenerationRef.current += 1;
-      workspaceRef.current = pendingWorkspaceReplacement.workspace;
-      setWorkspace(pendingWorkspaceReplacement.workspace);
+      workspaceRef.current = replacementWorkspace;
+      setWorkspace(replacementWorkspace);
       clearHistory();
       setWorkspaceReplacementHistoryBoundary("undo");
       setEditingNodeId(null);
@@ -3692,8 +3724,26 @@ function App({
         run: () => void swapWorkspaceWithRecovery("undo"),
       });
       setPendingWorkspaceReplacement(null);
+      if (bootstrapStarted) {
+        workspaceMutationBlockedRef.current = false;
+        skipUnmountFlushRef.current = false;
+        setPersistenceReady(true);
+      }
     } catch {
-      setBackupStatus(t("backup.importFailed"));
+      if (bootstrapCommitted) {
+        // Rust has crossed its durable commit point. Keep stale React state
+        // unmounted and require recovery instead of reporting a false import
+        // failure that would allow the old snapshot to be saved again.
+        setPersistenceRecoveryRequired(true);
+        setPersistenceReady(false);
+      } else {
+        if (bootstrapStarted) {
+          workspaceMutationBlockedRef.current = false;
+          skipUnmountFlushRef.current = false;
+          setPersistenceReady(true);
+        }
+        setBackupStatus(t("backup.importFailed"));
+      }
     }
   }
 
@@ -5036,6 +5086,7 @@ function App({
                   </button>
                   <button
                     className="secondary-button"
+                    data-testid="import-workspace"
                     onClick={() => void chooseWorkspaceImport()}
                     type="button"
                   >

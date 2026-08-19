@@ -55,14 +55,14 @@ export function createTauriWorkspacePersistence(
     contents: string,
   ): Promise<void> {
     if (writesQuarantined) {
-      return Promise.reject(new Error("workspace_recovery_swap_reload_required"));
+      return Promise.reject(new Error("workspace_persistence_reload_required"));
     }
     const generation = writeGeneration;
     const write = writeTail
       .catch(() => undefined)
       .then(() => {
         if (writesQuarantined) {
-          throw new Error("workspace_recovery_swap_reload_required");
+          throw new Error("workspace_persistence_reload_required");
         }
         if (generation !== writeGeneration) {
           return;
@@ -140,6 +140,21 @@ export function createTauriWorkspacePersistence(
     },
     preserveForRecovery(workspace) {
       return saveSlot("recovery", workspace);
+    },
+    async runExclusiveTransaction(transaction) {
+      await writeTail.catch(() => undefined);
+      writeGeneration += 1;
+      writesQuarantined = true;
+      try {
+        return await transaction();
+      } catch (error) {
+        // The transaction contract only rejects before its durable commit
+        // point. A structured committed/recovery-required result keeps the
+        // quarantine active until an authoritative Rust read succeeds.
+        writeGeneration += 1;
+        writesQuarantined = false;
+        throw error;
+      }
     },
     save(workspace) {
       return saveSlot("primary", workspace);
