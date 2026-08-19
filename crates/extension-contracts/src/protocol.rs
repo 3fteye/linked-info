@@ -500,7 +500,14 @@ mod tests {
             assert!(Version::parse(version).is_ok());
             assert!(regex.is_match(version));
         }
-        for invalid in ["not-semver", "1.0", "01.0.0", "1.0.0-01"] {
+        for invalid in [
+            "not-semver",
+            "1.0",
+            "01.0.0",
+            "1.0.0-01",
+            "1.١.0",
+            "1.0.0-α",
+        ] {
             assert!(Version::parse(invalid).is_err());
             assert!(!regex.is_match(invalid));
         }

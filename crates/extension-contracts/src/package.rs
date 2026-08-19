@@ -432,6 +432,15 @@ fn validate_schema_node(schema: &Value, depth: usize) -> Result<(), ExtensionPac
     ) {
         return Err(ExtensionPackageError::InvalidMetadataSchema);
     }
+    for key in ["title", "description"] {
+        if object.get(key).is_some_and(|value| {
+            value
+                .as_str()
+                .is_none_or(|value| value.chars().count() > 4_096)
+        }) {
+            return Err(ExtensionPackageError::InvalidMetadataSchema);
+        }
+    }
     if value_type == "object" {
         if object.get("additionalProperties").and_then(Value::as_bool) != Some(false) {
             return Err(ExtensionPackageError::InvalidMetadataSchema);
@@ -477,11 +486,19 @@ fn validate_schema_node(schema: &Value, depth: usize) -> Result<(), ExtensionPac
             .get("items")
             .ok_or(ExtensionPackageError::InvalidMetadataSchema)?;
         validate_schema_node(items, depth + 1)?;
+        let minimum = object
+            .get("minItems")
+            .map(|value| {
+                value
+                    .as_u64()
+                    .ok_or(ExtensionPackageError::InvalidMetadataSchema)
+            })
+            .transpose()?;
         let maximum = object
             .get("maxItems")
             .and_then(Value::as_u64)
             .ok_or(ExtensionPackageError::InvalidMetadataSchema)?;
-        if maximum > 1_024 {
+        if maximum > 1_024 || minimum.is_some_and(|minimum| minimum > maximum) {
             return Err(ExtensionPackageError::InvalidMetadataSchema);
         }
     } else if object.contains_key("items")
@@ -491,11 +508,19 @@ fn validate_schema_node(schema: &Value, depth: usize) -> Result<(), ExtensionPac
         return Err(ExtensionPackageError::InvalidMetadataSchema);
     }
     if value_type == "string" {
+        let minimum = object
+            .get("minLength")
+            .map(|value| {
+                value
+                    .as_u64()
+                    .ok_or(ExtensionPackageError::InvalidMetadataSchema)
+            })
+            .transpose()?;
         let maximum = object
             .get("maxLength")
             .and_then(Value::as_u64)
             .ok_or(ExtensionPackageError::InvalidMetadataSchema)?;
-        if maximum > 4_096 {
+        if maximum > 4_096 || minimum.is_some_and(|minimum| minimum > maximum) {
             return Err(ExtensionPackageError::InvalidMetadataSchema);
         }
     } else if object.contains_key("minLength") || object.contains_key("maxLength") {
@@ -508,13 +533,19 @@ fn validate_schema_node(schema: &Value, depth: usize) -> Result<(), ExtensionPac
         if values.is_empty() || values.len() > 128 {
             return Err(ExtensionPackageError::InvalidMetadataSchema);
         }
-        for value in values {
+        for (index, value) in values.iter().enumerate() {
             validate_metadata_value(value, depth + 1)?;
+            if !metadata_value_matches_type(value, value_type) || values[..index].contains(value) {
+                return Err(ExtensionPackageError::InvalidMetadataSchema);
+            }
         }
     }
     for key in ["const", "default"] {
         if let Some(value) = object.get(key) {
             validate_metadata_value(value, depth + 1)?;
+            if !metadata_value_matches_type(value, value_type) {
+                return Err(ExtensionPackageError::InvalidMetadataSchema);
+            }
         }
     }
     let minimum = object
@@ -542,6 +573,19 @@ fn validate_schema_node(schema: &Value, depth: usize) -> Result<(), ExtensionPac
         return Err(ExtensionPackageError::InvalidMetadataSchema);
     }
     Ok(())
+}
+
+fn metadata_value_matches_type(value: &Value, value_type: &str) -> bool {
+    match value_type {
+        "object" => value.is_object(),
+        "array" => value.is_array(),
+        "string" => value.is_string(),
+        "number" => value.is_number(),
+        "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
+        "boolean" => value.is_boolean(),
+        "null" => value.is_null(),
+        _ => false,
+    }
 }
 
 fn validate_metadata_value(value: &Value, depth: usize) -> Result<(), ExtensionPackageError> {
@@ -1020,6 +1064,43 @@ mod tests {
             validate_extension_package(&package, SignaturePolicy::RequireSigned),
             Err(ExtensionPackageError::InvalidMetadataSchema)
         );
+    }
+
+    #[test]
+    fn rejects_malformed_collection_and_default_constraints() {
+        let signing_key = SigningKey::from_bytes(&[7_u8; 32]);
+        let invalid_properties = [
+            json!({ "type": "string", "minLength": "zero", "maxLength": 8 }),
+            json!({
+                "type": "array",
+                "items": { "type": "boolean" },
+                "minItems": "zero",
+                "maxItems": 8
+            }),
+            json!({ "type": "string", "maxLength": 8, "enum": ["x", "x"] }),
+            json!({ "type": "string", "maxLength": 8, "default": false }),
+        ];
+
+        for invalid_property in invalid_properties {
+            let mut files = protected_files(Some(&signing_key));
+            files.insert(
+                METADATA_SCHEMA_PATH.to_owned(),
+                serde_json::to_vec(&json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": { "value": invalid_property }
+                }))
+                .unwrap(),
+            );
+            let checksums = checksum_bytes(&files);
+            let signature = signing_key.sign(&checksums).to_bytes().to_vec();
+            let package = write_package(files, checksums, Some(signature));
+
+            assert_eq!(
+                validate_extension_package(&package, SignaturePolicy::RequireSigned),
+                Err(ExtensionPackageError::InvalidMetadataSchema)
+            );
+        }
     }
 
     #[test]
