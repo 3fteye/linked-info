@@ -908,7 +908,8 @@ mod tests {
         let mut files = protected_files(Some(&signing_key));
         let checksums = checksum_bytes(&files);
         let signature = signing_key.sign(&checksums).to_bytes().to_vec();
-        files.insert(ENTRYPOINT_PATH.to_owned(), b"tampered".to_vec());
+        let wasm = files.get_mut(ENTRYPOINT_PATH).unwrap();
+        wasm[0] ^= 0xff;
         let package = write_package(files, checksums, Some(signature));
 
         assert!(matches!(
