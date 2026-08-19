@@ -19,6 +19,7 @@ const enhancementLabels = {
       yaml: "YAML",
       sql: "SQL",
     },
+    truncated: "Preview truncated",
   },
   secret: {
     copy: "Copy secret",

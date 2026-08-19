@@ -1107,6 +1107,16 @@ h1 {
   white-space: pre;
 }
 
+.code-preview-truncated {
+  border-top: 1px solid #38433d;
+  padding: 6px 10px;
+  color: #aebbb3;
+  background: #28302c;
+  font-family: system-ui, sans-serif;
+  font-size: 9px;
+  line-height: 1.35;
+}
+
 .code-preview .token.comment,
 .code-preview .token.prolog,
 .code-preview .token.doctype,

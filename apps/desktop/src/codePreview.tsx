@@ -10,7 +10,8 @@ import "prismjs/components/prism-typescript";
 import "prismjs/components/prism-yaml";
 import type { CodePreviewLanguage } from "./codePreviewLanguages";
 
-const maximumHighlightedCodeCharacters = 50_000;
+const maximumRenderedCodeCharacters = 20_000;
+const maximumRenderedCodeLines = 500;
 
 interface CodeSegment {
   classNames: string[];
@@ -19,6 +20,7 @@ interface CodeSegment {
 
 export interface CodePreviewLabels {
   copy: string;
+  truncated: string;
 }
 
 interface CodePreviewProps {
@@ -27,6 +29,27 @@ interface CodePreviewProps {
   languageLabel: string;
   onCopy?: () => void;
   source: string;
+  sourceTruncated?: boolean;
+}
+
+export function boundedCodePreviewSource(source: string): {
+  source: string;
+  truncated: boolean;
+} {
+  let end = Math.min(source.length, maximumRenderedCodeCharacters);
+  let newlineCount = 0;
+  for (let index = 0; index < end; index += 1) {
+    if (source[index] === "\n") {
+      newlineCount += 1;
+      if (newlineCount >= maximumRenderedCodeLines) {
+        end = index;
+        break;
+      }
+    }
+  }
+  return end < source.length
+    ? { source: `${source.slice(0, end)}…`, truncated: true }
+    : { source, truncated: false };
 }
 
 function tokenClassNames(token: Prism.Token): string[] {
@@ -64,7 +87,7 @@ export function codePreviewLines(
 ): CodeSegment[][] {
   const grammar = Prism.languages[language];
   const segments =
-    source.length <= maximumHighlightedCodeCharacters && grammar !== undefined
+    grammar !== undefined
       ? flattenTokenStream(Prism.tokenize(source, grammar))
       : [{ classNames: [], text: source }];
   const lines: CodeSegment[][] = [[]];
@@ -88,16 +111,19 @@ export function CodePreview({
   languageLabel,
   onCopy,
   source,
+  sourceTruncated = false,
 }: CodePreviewProps) {
+  const bounded = useMemo(() => boundedCodePreviewSource(source), [source]);
   const lines = useMemo(
-    () => codePreviewLines(source, language),
-    [language, source],
+    () => codePreviewLines(bounded.source, language),
+    [bounded.source, language],
   );
+  const truncated = sourceTruncated || bounded.truncated;
 
   return (
     <section
       className="code-preview"
-      data-highlighted={source.length <= maximumHighlightedCodeCharacters}
+      data-truncated={truncated}
       data-language={language}
     >
       <header className="code-preview-toolbar">
@@ -139,6 +165,9 @@ export function CodePreview({
           ))}
         </code>
       </pre>
+      {truncated && (
+        <footer className="code-preview-truncated">{labels.truncated}</footer>
+      )}
     </section>
   );
 }

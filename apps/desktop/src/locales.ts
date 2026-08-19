@@ -174,6 +174,7 @@ export const resources = {
         copy: "复制原文",
         copied: "代码原文已复制",
         copyFailed: "无法复制代码原文",
+        truncated: "画布预览已截断；编辑或复制原文可查看全部内容",
       },
       validation: {
         nameUnique: "该名称已经存在",
@@ -947,6 +948,7 @@ export const resources = {
         copy: "Copy source",
         copied: "Code source copied",
         copyFailed: "Could not copy code source",
+        truncated: "Canvas preview truncated; edit or copy the source to view everything",
       },
       validation: {
         nameUnique: "This name already exists",

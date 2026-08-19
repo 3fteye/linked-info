@@ -1360,6 +1360,7 @@ function App({
             t(`editor.codeLanguages.${language}`),
           ]),
         ) as Record<CodePreviewLanguage, string>,
+        truncated: t("codePreview.truncated"),
       },
       secret: {
         copy: t("secret.copy"),
@@ -5788,6 +5789,7 @@ function App({
                 createNode: t("actions.newNode"),
                 codeCopy: contentEnhancementLabels.code.copy,
                 codeLanguages: contentEnhancementLabels.code.languages,
+                codeTruncated: contentEnhancementLabels.code.truncated,
                 content: t("editor.content"),
                 contentPlaceholder: t("editor.contentPlaceholder"),
                 contentProcessor: t("editor.contentProcessor"),

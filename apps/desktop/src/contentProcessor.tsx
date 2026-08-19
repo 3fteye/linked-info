@@ -111,24 +111,30 @@ export const contentProcessorRegistry = new ContentProcessorRegistry([
 ]);
 
 export const maximumCanvasContentPreviewCharacters = 600;
+export const maximumExpandedCodePreviewCharacters = 20_000;
+export const maximumExpandedCodePreviewLines = 500;
 
 export interface ContentEnhancementLabels {
   code: {
     copy: string;
     languages: Record<CodePreviewLanguage, string>;
+    truncated: string;
   };
   secret: SecretContentLabels;
   totp: TotpContentLabels;
 }
 
-export function canvasContentPreview(text: string | null): string | null {
-  if (text === null || text.length <= maximumCanvasContentPreviewCharacters) {
+function boundedCanvasContentPreview(
+  text: string | null,
+  maximumCharacters: number,
+): string | null {
+  if (text === null || text.length <= maximumCharacters) {
     return text;
   }
   let preview = "";
   for (const segment of contentMarkerRegistry.segment(text)) {
     const source = segment.kind === "text" ? segment.text : segment.marker.raw;
-    const remaining = maximumCanvasContentPreviewCharacters - preview.length;
+    const remaining = maximumCharacters - preview.length;
     if (source.length <= remaining) {
       preview += source;
       continue;
@@ -141,7 +147,37 @@ export function canvasContentPreview(text: string | null): string | null {
     }
     return `${preview}${source.slice(0, Math.max(0, remaining))}…`;
   }
-  return `${preview.slice(0, maximumCanvasContentPreviewCharacters)}…`;
+  return `${preview.slice(0, maximumCharacters)}…`;
+}
+
+export function canvasContentPreview(text: string | null): string | null {
+  return boundedCanvasContentPreview(
+    text,
+    maximumCanvasContentPreviewCharacters,
+  );
+}
+
+export function canvasExpandedCodeContentPreview(
+  text: string | null,
+): string | null {
+  if (text === null) {
+    return null;
+  }
+  let maximumCharacters = Math.min(
+    text.length,
+    maximumExpandedCodePreviewCharacters,
+  );
+  let newlineCount = 0;
+  for (let index = 0; index < maximumCharacters; index += 1) {
+    if (text[index] === "\n") {
+      newlineCount += 1;
+      if (newlineCount >= maximumExpandedCodePreviewLines) {
+        maximumCharacters = index;
+        break;
+      }
+    }
+  }
+  return boundedCanvasContentPreview(text, maximumCharacters);
 }
 
 interface NodeContentHostProps {
@@ -155,6 +191,7 @@ interface NodeContentHostProps {
   onCopyCodeSource?: (containsSensitive: boolean) => void;
   onCopySecret?: (value: string) => void;
   processorId: string | null;
+  sourceTruncated?: boolean;
   variant: "canvas" | "list";
 }
 
@@ -225,6 +262,7 @@ export function NodeContentHost({
   onCopyCodeSource,
   onCopySecret,
   processorId,
+  sourceTruncated = false,
   variant,
 }: NodeContentHostProps) {
   const resolved = contentProcessorRegistry.resolve(processorId);
@@ -281,7 +319,10 @@ export function NodeContentHost({
           }
         >
           <LazyCodePreview
-            labels={{ copy: enhancementLabels.code.copy }}
+            labels={{
+              copy: enhancementLabels.code.copy,
+              truncated: enhancementLabels.code.truncated,
+            }}
             language={presentation.language}
             languageLabel={enhancementLabels.code.languages[presentation.language]}
             onCopy={
@@ -290,6 +331,7 @@ export function NodeContentHost({
                 : () => onCopyCodeSource(containsSensitive)
             }
             source={codeSource}
+            sourceTruncated={sourceTruncated}
           />
         </Suspense>
       </div>

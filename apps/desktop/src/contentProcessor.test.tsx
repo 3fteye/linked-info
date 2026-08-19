@@ -2,10 +2,12 @@ import { describe, expect, it } from "vitest";
 import {
   ContentProcessorRegistry,
   canvasContentPreview,
+  canvasExpandedCodeContentPreview,
   contentContainsSensitive,
   contentProcessorRegistry,
   markdownContentProcessor,
   maximumCanvasContentPreviewCharacters,
+  maximumExpandedCodePreviewLines,
   textContentProcessor,
 } from "./contentProcessor";
 import {
@@ -78,5 +80,18 @@ describe("content processor registry", () => {
 
     expect(canvasContentPreview(content)).not.toContain("synthetic-secret");
     expect(contentContainsSensitive(content)).toBe(true);
+  });
+
+  it("bounds expanded code previews by both characters and lines", () => {
+    const dense = Array.from({ length: maximumExpandedCodePreviewLines + 100 }, (_, index) =>
+      `line ${index + 1}`,
+    ).join("\n");
+    const preview = canvasExpandedCodeContentPreview(dense);
+
+    expect(preview?.endsWith("…")).toBe(true);
+    expect(preview?.split("\n")).toHaveLength(maximumExpandedCodePreviewLines);
+    expect(canvasExpandedCodeContentPreview("x".repeat(30_000))?.length).toBe(
+      20_001,
+    );
   });
 });

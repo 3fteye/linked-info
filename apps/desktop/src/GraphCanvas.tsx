@@ -86,10 +86,14 @@ import {
 import {
   NodeContentHost,
   canvasContentPreview,
+  canvasExpandedCodeContentPreview,
   contentContainsSensitive,
   type ContentEnhancementLabels,
 } from "./contentProcessor";
-import type { CodePreviewLanguage } from "./codePreviewLanguages";
+import {
+  codePreviewLanguageFromProcessorId,
+  type CodePreviewLanguage,
+} from "./codePreviewLanguages";
 import { CodePreviewSensitivityCache } from "./codePreviewSensitivity";
 import { TotpSecondClockProvider } from "./totpContent";
 import type { CanvasOperationItem } from "./canvasOperations";
@@ -236,6 +240,7 @@ interface GraphLabels {
   contentProcessor: string;
   codeCopy: string;
   codeLanguages: Record<CodePreviewLanguage, string>;
+  codeTruncated: string;
   unsupportedContentProcessor: (processorId: string) => string;
   copySecret: string;
   copyCodeFailed: string;
@@ -950,7 +955,10 @@ export function InformationNodeCard({
         </div>
       ) : (
         <NodeContentHost
-          canvasPreviewEnabled={!data.contentFullyRendered}
+          canvasPreviewEnabled={
+            !data.contentFullyRendered &&
+            codePreviewLanguageFromProcessorId(data.contentProcessorId ?? "") === null
+          }
           className="graph-node-content"
           codeSourceContainsSensitive={data.codeSourceContainsSensitive}
           content={data.content}
@@ -959,6 +967,7 @@ export function InformationNodeCard({
           onCopyCodeSource={data.onCopyCodeSource ?? undefined}
           onCopySecret={data.onCopyDerivedSecret ?? undefined}
           processorId={data.contentProcessorId}
+          sourceTruncated={data.contentTruncated}
           variant="canvas"
         />
       )}
@@ -2178,15 +2187,21 @@ export default function GraphCanvas({
         const manualWidth = savedLayout?.width !== undefined;
         const manualHeight = savedLayout?.height !== undefined;
         const manualSize = manualWidth || manualHeight;
+        const codeLanguage = codePreviewLanguageFromProcessorId(
+          contentProcessorByNodeId[node.id] ?? "",
+        );
         const codeSourceContainsSensitive =
           sensitiveCodeContentByNodeId.get(node.id) ?? false;
-        const contentFullyRendered =
-          editingNodeId === node.id ||
-          manualHeight ||
-          fitContentNodeId === node.id;
-        const renderedContent = contentFullyRendered
+        const editing = editingNodeId === node.id;
+        const expanded = manualHeight || fitContentNodeId === node.id;
+        const contentFullyRendered = editing || (codeLanguage === null && expanded);
+        const renderedContent = editing
           ? node.content
-          : canvasContentPreview(node.content);
+          : codeLanguage !== null && expanded
+            ? canvasExpandedCodeContentPreview(node.content)
+            : contentFullyRendered
+              ? node.content
+              : canvasContentPreview(node.content);
         return {
           ...(currentNode ?? {}),
           connectable: interactive ? undefined : false,
@@ -2241,6 +2256,7 @@ export default function GraphCanvas({
               code: {
                 copy: labels.codeCopy,
                 languages: labels.codeLanguages,
+                truncated: labels.codeTruncated,
               },
               secret: {
                 copy: labels.secretCopy,
@@ -2257,7 +2273,7 @@ export default function GraphCanvas({
                 remaining: labels.totpRemaining,
               },
             },
-            editing: editingNodeId === node.id,
+            editing,
             interactive,
             nameConflict: nameConflictNodeIds.has(node.id),
             nameConflictLabel: labels.nameConflict,

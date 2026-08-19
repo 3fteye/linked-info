@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { codePreviewLines } from "./codePreview";
+import { boundedCodePreviewSource, codePreviewLines } from "./codePreview";
 import { codePreviewLanguages } from "./codePreviewLanguages";
 
 function sourceFromLines(lines: ReturnType<typeof codePreviewLines>): string {
@@ -32,5 +32,20 @@ describe("codePreviewLines", () => {
     expect(sourceFromLines(lines)).toBe(
       "const answer: number = 42;\nconsole.log(answer);",
     );
+  });
+
+  it("defensively bounds direct code rendering by characters and lines", () => {
+    const dense = Array.from({ length: 600 }, (_, index) => `line ${index + 1}`).join(
+      "\n",
+    );
+    const byLines = boundedCodePreviewSource(dense);
+    const byCharacters = boundedCodePreviewSource("x".repeat(30_000));
+
+    expect(byLines.truncated).toBe(true);
+    expect(byLines.source.split("\n")).toHaveLength(500);
+    expect(byCharacters).toEqual({
+      source: `${"x".repeat(20_000)}…`,
+      truncated: true,
+    });
   });
 });

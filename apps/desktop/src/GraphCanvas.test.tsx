@@ -80,6 +80,7 @@ function cardProps(overrides: Record<string, unknown> = {}): NodeProps<any> {
             yaml: "YAML",
             sql: "SQL",
           },
+          truncated: "Preview truncated",
         },
         secret: {
           copy: "Copy secret",

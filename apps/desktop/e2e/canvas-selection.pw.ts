@@ -424,10 +424,12 @@ test("an explicit code language highlights safely and survives reload", async ({
     origin: "http://127.0.0.1:1422",
   });
   const codeNode = {
-    content: [
-      "const answer: number = 42;",
-      `const padding = "${"x".repeat(700)}";`,
-    ].join("\n"),
+    content: Array.from({ length: 600 }, (_, index) =>
+      index === 0
+        ? "const answer: number = 42;"
+        : `const value${index}: number = ${index};`,
+    ).join("\n"),
+    height: 420,
     id: syntheticId(1),
     name: "TypeScript example",
     x: 100,
@@ -441,8 +443,10 @@ test("an explicit code language highlights safely and survives reload", async ({
   const preview = node(page, codeNode.id).locator(".code-preview");
   await expect(preview).toBeVisible();
   await expect(preview).toHaveAttribute("data-language", "typescript");
-  await expect(preview.locator(".code-preview-line")).toHaveCount(2);
+  await expect(preview.locator(".code-preview-line")).toHaveCount(500);
   await expect(preview.locator(".token.keyword").first()).toHaveText("const");
+  await expect(preview).toHaveAttribute("data-truncated", "true");
+  await expect(preview.locator(".code-preview-truncated")).toBeVisible();
   await preview.locator(".code-preview-copy").click();
   await expect
     .poll(async () =>
