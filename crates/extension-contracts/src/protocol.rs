@@ -85,6 +85,7 @@ pub struct ExtensionManifestV1 {
     pub locales: Vec<String>,
     pub entrypoint: String,
     pub metadata_schema: String,
+    pub metadata_schema_version: u32,
     pub capabilities: Vec<ExtensionCapability>,
     pub contributions: ExtensionContributions,
 }
@@ -109,6 +110,8 @@ pub enum ManifestValidationError {
     InvalidEntrypoint,
     #[error("extension metadata schema path is invalid")]
     InvalidMetadataSchemaPath,
+    #[error("extension metadata schema version is invalid")]
+    InvalidMetadataSchemaVersion,
     #[error("extension capabilities contain a duplicate or exceed the limit")]
     InvalidCapabilities,
     #[error("extension must contribute at least one processor or action")]
@@ -129,6 +132,9 @@ impl ManifestValidationError {
             Self::InvalidLocale => "extension_manifest_locale_invalid",
             Self::InvalidEntrypoint => "extension_manifest_entrypoint_invalid",
             Self::InvalidMetadataSchemaPath => "extension_manifest_metadata_schema_invalid",
+            Self::InvalidMetadataSchemaVersion => {
+                "extension_manifest_metadata_schema_version_invalid"
+            }
             Self::InvalidCapabilities => "extension_manifest_capabilities_invalid",
             Self::MissingContribution => "extension_manifest_contribution_missing",
             Self::InvalidContribution => "extension_manifest_contribution_invalid",
@@ -178,6 +184,9 @@ pub fn validate_extension_manifest(
     }
     if manifest.metadata_schema != "metadata.schema.json" {
         return Err(ManifestValidationError::InvalidMetadataSchemaPath);
+    }
+    if manifest.metadata_schema_version == 0 {
+        return Err(ManifestValidationError::InvalidMetadataSchemaVersion);
     }
     if manifest.capabilities.len() > MAXIMUM_MANIFEST_CAPABILITIES
         || manifest.capabilities.iter().collect::<BTreeSet<_>>().len()
@@ -423,6 +432,7 @@ mod tests {
             locales: vec!["en".to_owned(), "zh-CN".to_owned()],
             entrypoint: "extension.wasm".to_owned(),
             metadata_schema: "metadata.schema.json".to_owned(),
+            metadata_schema_version: 1,
             capabilities: vec![
                 ExtensionCapability::NodeReadContent,
                 ExtensionCapability::MetadataNodeWrite,
@@ -467,6 +477,17 @@ mod tests {
     }
 
     #[test]
+    fn rejects_zero_metadata_schema_version() {
+        let mut invalid = manifest();
+        invalid.metadata_schema_version = 0;
+
+        assert_eq!(
+            validate_extension_manifest(&invalid),
+            Err(ManifestValidationError::InvalidMetadataSchemaVersion)
+        );
+    }
+
+    #[test]
     fn rejects_unknown_manifest_fields_during_deserialization() {
         let mut value = serde_json::to_value(manifest()).unwrap();
         value
@@ -488,6 +509,14 @@ mod tests {
     fn published_manifest_schema_is_valid_json() {
         let value = serde_json::from_str::<Value>(crate::EXTENSION_MANIFEST_SCHEMA).unwrap();
         assert_eq!(value["properties"]["apiVersion"]["const"], "1.0");
+        assert_eq!(value["properties"]["metadataSchemaVersion"]["minimum"], 1);
+        assert_eq!(
+            value["properties"]["contributions"]["anyOf"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
     }
 
     #[test]

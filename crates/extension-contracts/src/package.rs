@@ -782,6 +782,7 @@ mod tests {
             locales: vec!["en".to_owned(), "zh-CN".to_owned()],
             entrypoint: ENTRYPOINT_PATH.to_owned(),
             metadata_schema: METADATA_SCHEMA_PATH.to_owned(),
+            metadata_schema_version: 1,
             capabilities: vec![
                 ExtensionCapability::NodeReadContent,
                 ExtensionCapability::MetadataNodeRead,
