@@ -8,7 +8,7 @@ use thiserror::Error;
 pub const EXTENSION_MANIFEST_SCHEMA_VERSION: u32 = 1;
 pub const EXTENSION_API_VERSION: &str = "1.0";
 pub const MAXIMUM_EXTENSION_ID_BYTES: usize = 128;
-pub const MAXIMUM_CONTRIBUTION_ID_BYTES: usize = 192;
+pub const MAXIMUM_CONTRIBUTION_ID_BYTES: usize = 64;
 pub const MAXIMUM_LABEL_KEY_BYTES: usize = 128;
 pub const MAXIMUM_MANIFEST_CAPABILITIES: usize = 9;
 pub const MAXIMUM_PROCESSOR_CONTRIBUTIONS: usize = 32;
@@ -204,7 +204,7 @@ pub fn validate_extension_manifest(
     }
     let mut contribution_ids = BTreeSet::new();
     for processor in &manifest.contributions.processors {
-        if !valid_contribution_id(&manifest.id, &processor.id)
+        if !valid_contribution_id(&processor.id)
             || !valid_label_key(&processor.label_key)
             || !contribution_ids.insert(&processor.id)
         {
@@ -212,7 +212,7 @@ pub fn validate_extension_manifest(
         }
     }
     for action in &manifest.contributions.actions {
-        if !valid_contribution_id(&manifest.id, &action.id)
+        if !valid_contribution_id(&action.id)
             || !valid_label_key(&action.label_key)
             || !contribution_ids.insert(&action.id)
         {
@@ -239,17 +239,18 @@ fn valid_identifier_segment(segment: &str) -> bool {
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
 }
 
-fn valid_contribution_id(extension_id: &str, id: &str) -> bool {
-    if id.len() > MAXIMUM_CONTRIBUTION_ID_BYTES {
+fn valid_contribution_id(id: &str) -> bool {
+    if id.is_empty() || id.len() > MAXIMUM_CONTRIBUTION_ID_BYTES || !id.is_ascii() {
         return false;
     }
-    let Some(suffix) = id
-        .strip_prefix(extension_id)
-        .and_then(|value| value.strip_prefix('.'))
-    else {
-        return false;
-    };
-    !suffix.is_empty() && suffix.split('.').all(valid_identifier_segment)
+    id.split('.').all(valid_identifier_segment)
+}
+
+pub fn qualified_contribution_id(extension_id: &str, contribution_id: &str) -> Option<String> {
+    if !valid_extension_id(extension_id) || !valid_contribution_id(contribution_id) {
+        return None;
+    }
+    Some(format!("{extension_id}.{contribution_id}"))
 }
 
 fn valid_label_key(value: &str) -> bool {
@@ -454,7 +455,7 @@ mod tests {
             ],
             contributions: ExtensionContributions {
                 processors: vec![ProcessorContribution {
-                    id: "dev.example.json-tools.processor".to_owned(),
+                    id: "processor".to_owned(),
                     label_key: "processor.label".to_owned(),
                 }],
                 actions: Vec::new(),
@@ -463,14 +464,18 @@ mod tests {
     }
 
     #[test]
-    fn accepts_a_namespaced_manifest() {
+    fn accepts_local_contribution_ids_and_qualifies_them_in_the_host() {
         assert_eq!(validate_extension_manifest(&manifest()), Ok(()));
+        assert_eq!(
+            qualified_contribution_id("dev.example.json-tools", "processor.format-json"),
+            Some("dev.example.json-tools.processor.format-json".to_owned())
+        );
     }
 
     #[test]
-    fn rejects_non_namespaced_contributions() {
+    fn rejects_invalid_local_contribution_ids() {
         let mut invalid = manifest();
-        invalid.contributions.processors[0].id = "processor".to_owned();
+        invalid.contributions.processors[0].id = "Processor".to_owned();
 
         assert_eq!(
             validate_extension_manifest(&invalid),
@@ -581,6 +586,43 @@ mod tests {
         for invalid in ["", "Processor", "processor..label", "processor.-label"] {
             assert!(!regex.is_match(invalid));
         }
+    }
+
+    #[test]
+    fn published_manifest_schema_matches_local_contribution_id_rules() {
+        let value = serde_json::from_str::<Value>(crate::EXTENSION_MANIFEST_SCHEMA).unwrap();
+        let pattern = value["$defs"]["processor"]["properties"]["id"]["pattern"]
+            .as_str()
+            .unwrap();
+        let regex = Regex::new(pattern).unwrap();
+
+        for valid in [
+            "processor",
+            "format-json",
+            "format.json",
+            "dev.example.json-tools.processor",
+        ] {
+            assert!(valid_contribution_id(valid));
+            assert!(regex.is_match(valid));
+        }
+        for invalid in ["", "Processor", "format..json"] {
+            assert!(!valid_contribution_id(invalid));
+            assert!(!regex.is_match(invalid));
+        }
+    }
+
+    #[test]
+    fn wit_badge_tones_match_the_closed_rust_enum() {
+        for (tone, name) in [
+            (BadgeTone::Neutral, "neutral"),
+            (BadgeTone::Positive, "positive"),
+            (BadgeTone::Warning, "warning"),
+            (BadgeTone::Critical, "critical"),
+        ] {
+            assert_eq!(serde_json::to_value(tone).unwrap(), name);
+            assert!(crate::EXTENSION_WIT.contains(&format!("    {name},")));
+        }
+        assert!(crate::EXTENSION_WIT.contains("tone: badge-tone"));
     }
 
     #[test]

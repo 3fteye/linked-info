@@ -42,9 +42,16 @@ interface types {
     rows: list<list<string>>,
   }
 
+  enum badge-tone {
+    neutral,
+    positive,
+    warning,
+    critical,
+  }
+
   record badge-element {
     text: string,
-    tone: string,
+    tone: badge-tone,
   }
 
   record button-element {

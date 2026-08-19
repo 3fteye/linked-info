@@ -121,8 +121,8 @@
       "properties": {
         "id": {
           "type": "string",
-          "pattern": "^[a-z](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z](?:[a-z0-9-]*[a-z0-9])?)+$",
-          "maxLength": 192
+          "pattern": "^[a-z](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z](?:[a-z0-9-]*[a-z0-9])?)*$",
+          "maxLength": 64
         },
         "labelKey": {
           "type": "string",
@@ -138,8 +138,8 @@
       "properties": {
         "id": {
           "type": "string",
-          "pattern": "^[a-z](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z](?:[a-z0-9-]*[a-z0-9])?)+$",
-          "maxLength": 192
+          "pattern": "^[a-z](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z](?:[a-z0-9-]*[a-z0-9])?)*$",
+          "maxLength": 64
         },
         "labelKey": {
           "type": "string",
