@@ -1944,17 +1944,28 @@ pub async fn commit_workspace_restore(
         let _guard = operation_lock
             .lock()
             .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
-        recover_pending_migration(&store_for_install)?;
-        if store_for_install.encryption_configured() {
-            return Err("workspace_vault_already_configured".to_owned());
+        if recover_before_prepared_restore(&store_for_install) {
+            return Ok::<_, String>(None);
         }
-        Ok::<_, String>(install_prepared_workspace_restore(
+        Ok::<_, String>(Some(install_prepared_workspace_restore(
             &store_for_install,
             prepared,
-        ))
+        )))
     });
     let install_result = match install_task.await {
-        Ok(result) => result?,
+        Ok(result) => match result? {
+            Some(result) => result,
+            None => {
+                lock_workspace_runtime_with_terminal_event(
+                    &app,
+                    "workspace_restore_recovery_required",
+                );
+                return Ok(WorkspaceSecurityTransactionResult {
+                    status: WorkspaceSecurityTransactionStatus::RecoveryRequired,
+                    security_status: None,
+                });
+            }
+        },
         // A panic/cancellation can occur after the filesystem commit point.
         // Classify the on-disk state instead of blindly reporting pre-commit
         // failure to React.
@@ -3012,6 +3023,13 @@ fn recover_pending_migration(store: &WorkspaceFileStore) -> Result<(), String> {
         return Err("workspace_vault_data_key_rotation_recovery_required".to_owned());
     }
     Ok(())
+}
+
+fn recover_before_prepared_restore(store: &WorkspaceFileStore) -> bool {
+    match recover_pending_migration(store) {
+        Ok(()) => store.encryption_configured(),
+        Err(_) => true,
+    }
 }
 
 fn recover_pending_workspace_transactions(
@@ -5048,6 +5066,47 @@ mod tests {
                 .unwrap(),
             Some(primary)
         );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn prepared_restore_requires_recovery_after_an_older_migration_commits() {
+        let directory = test_directory();
+        let store = WorkspaceFileStore::new(directory.clone());
+        let primary = workspace("older-pending-restore");
+        store
+            .write_plaintext(WorkspaceFileSlot::Primary, &primary)
+            .unwrap();
+        let data_key = random_array::<DATA_KEY_BYTES>().unwrap();
+        let encrypted =
+            encrypt_workspace_file(&primary, WorkspaceFileSlot::Primary, &data_key).unwrap();
+        write_atomically(
+            &store.pending_path(WorkspaceFileSlot::Primary),
+            encrypted.as_bytes(),
+        )
+        .unwrap();
+        let metadata = create_vault_metadata(
+            "correct horse battery",
+            &data_key,
+            vec![WorkspaceFileSlot::Primary],
+        )
+        .unwrap();
+        write_atomically(
+            &store.pending_vault_path(),
+            &serde_json::to_vec(&metadata).unwrap(),
+        )
+        .unwrap();
+        assert!(!store.encryption_configured());
+
+        assert!(recover_before_prepared_restore(&store));
+        assert!(store.encryption_configured());
+        assert_eq!(
+            store
+                .read(WorkspaceFileSlot::Primary, Some(&data_key))
+                .unwrap(),
+            Some(primary)
+        );
+
         fs::remove_dir_all(directory).unwrap();
     }
 
