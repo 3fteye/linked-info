@@ -366,16 +366,6 @@ test("low-zoom TOTP updates keep every connected path stable", async ({ page }) 
   );
   await expect(page.locator(".totp-content-line")).toHaveCount(15);
   await expect(page.locator(".graph-reference-path").first()).toHaveAttribute("d", /^M/u);
-  const secondTimerStats = await page.evaluate(
-    () =>
-      Reflect.get(window, "__linkedInfoSecondTimerStats") as {
-        maximumConcurrent: number;
-        scheduled: number;
-      },
-  );
-  expect(secondTimerStats.scheduled).toBeGreaterThan(0);
-  expect(secondTimerStats.maximumConcurrent).toBeLessThanOrEqual(1);
-
   const samples = await page.evaluate(async () => {
     const geometry: Array<{
       nodeRects: string;
@@ -411,7 +401,16 @@ test("low-zoom TOTP updates keep every connected path stable", async ({ page }) 
     }
     return geometry;
   });
+  const secondTimerStats = await page.evaluate(
+    () =>
+      Reflect.get(window, "__linkedInfoSecondTimerStats") as {
+        maximumConcurrent: number;
+        scheduled: number;
+      },
+  );
 
+  expect(secondTimerStats.scheduled).toBeGreaterThan(0);
+  expect(secondTimerStats.maximumConcurrent).toBeLessThanOrEqual(1);
   expect(new Set(samples.map((sample) => sample.nodeRects)).size).toBe(1);
   expect(new Set(samples.map((sample) => sample.paths)).size).toBe(1);
   expect(new Set(samples.map((sample) => sample.pathBounds)).size).toBe(1);
