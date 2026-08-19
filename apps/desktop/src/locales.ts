@@ -157,6 +157,7 @@ export const resources = {
         contentProcessors: {
           text: "纯文本",
           markdown: "Markdown",
+          jsonInspector: "JSON 检查器",
         },
         codeLanguages: {
           powershell: "PowerShell",
@@ -175,6 +176,18 @@ export const resources = {
         copied: "代码原文已复制",
         copyFailed: "无法复制代码原文",
         truncated: "画布预览已截断；编辑或复制原文可查看全部内容",
+      },
+      extensions: {
+        jsonInspector: {
+          actions: {
+            setIndent: "设置缩进",
+          },
+          indent: {
+            four: "4 个空格",
+            label: "缩进",
+            two: "2 个空格",
+          },
+        },
       },
       validation: {
         nameUnique: "该名称已经存在",
@@ -931,6 +944,7 @@ export const resources = {
         contentProcessors: {
           text: "Plain text",
           markdown: "Markdown",
+          jsonInspector: "JSON Inspector",
         },
         codeLanguages: {
           powershell: "PowerShell",
@@ -949,6 +963,18 @@ export const resources = {
         copied: "Code source copied",
         copyFailed: "Could not copy code source",
         truncated: "Canvas preview truncated; edit or copy the source to view everything",
+      },
+      extensions: {
+        jsonInspector: {
+          actions: {
+            setIndent: "Set indentation",
+          },
+          indent: {
+            four: "4 spaces",
+            label: "Indentation",
+            two: "2 spaces",
+          },
+        },
       },
       validation: {
         nameUnique: "This name already exists",

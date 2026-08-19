@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   contentEnhancerRegistry,
+  contentForExtensionSnapshot,
   contentForSemanticAnalysis,
   ContentEnhancerRegistry,
   totpContentEnhancer,
@@ -122,6 +123,30 @@ describe("content enhancement", () => {
 
     expect(sanitized).toBe(
       "2FA OpenAI 2FA, note\nAPI GitHub API Key retained\nUnknown [[li:plugin-x]]payload[[/li]] retained",
+    );
+    expect(sanitized).not.toContain("synthetic-api-key");
+    expect(sanitized).not.toContain("jbsw");
+  });
+
+  it("strips known secrets for extension snapshots without normalizing layout", () => {
+    const source = [
+      "{",
+      '  "password": "[[li:secret note=\"login\"]]synthetic-api-key[[/li]]",',
+      '  "ordinary": "retained"',
+      "}",
+      `TOTP: ${syntheticSecret}`,
+    ].join("\n");
+
+    const sanitized = contentForExtensionSnapshot(source);
+
+    expect(sanitized).toBe(
+      [
+        "{",
+        '  "password": "login",',
+        '  "ordinary": "retained"',
+        "}",
+        "",
+      ].join("\n"),
     );
     expect(sanitized).not.toContain("synthetic-api-key");
     expect(sanitized).not.toContain("jbsw");

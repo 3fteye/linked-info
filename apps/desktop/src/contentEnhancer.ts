@@ -192,3 +192,29 @@ export function contentForSemanticAnalysis(content: string | null): string | nul
   }
   return contentEnhancerRegistry.semanticText(content);
 }
+
+export function contentForExtensionSnapshot(
+  content: string | null,
+): string | null {
+  if (content === null) {
+    return null;
+  }
+  return contentEnhancerRegistry
+    .segment(content, false)
+    .map((segment) => {
+      if (segment.kind === "text") {
+        return segment.text;
+      }
+      if (segment.kind === "totp") {
+        return "";
+      }
+      if (segment.marker.definition === null) {
+        return segment.marker.raw;
+      }
+      if (!segment.marker.definition.excludeFromSemanticAnalysis) {
+        return segment.marker.raw;
+      }
+      return segment.marker.attributes.note?.trim() ?? "";
+    })
+    .join("");
+}

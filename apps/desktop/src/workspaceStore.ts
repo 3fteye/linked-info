@@ -19,6 +19,7 @@ export {
   updateNodeLayoutDimensions,
   updateNodeLayoutSizeOverrides,
   updateNodeLayoutPositions,
+  updateNodeExtensionMetadata,
   type CanvasViewport,
   type InformationNode,
   type NodeLayout,

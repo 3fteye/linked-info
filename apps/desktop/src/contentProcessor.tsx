@@ -20,6 +20,12 @@ import {
   type TotpContentLabels,
 } from "./totpContent";
 import type { SecretContentLabels } from "./secretContent";
+import {
+  type BuiltInExtensionMetadataInput,
+} from "./builtinExtensionHost";
+import { builtInExtensionHost } from "./builtinExtensions";
+import { ExtensionPresentationHost } from "./extensionPresentation";
+import type { ExtensionMetadataPayload } from "./workspaceData";
 
 const LazyCodePreview = lazy(async () => {
   const module = await import("./codePreview");
@@ -31,11 +37,23 @@ export type ContentPresentation =
   | { kind: "markdown"; source: string | null }
   | { kind: "code"; language: CodePreviewLanguage; source: string | null };
 
-export interface ContentProcessor {
+export interface LegacyContentProcessor {
+  readonly kind: "legacy";
   readonly id: string;
   readonly version: number;
   present(content: string | null): ContentPresentation;
 }
+
+export interface ExtensionContentProcessor {
+  readonly extensionId: string;
+  readonly kind: "extension";
+  readonly id: string;
+  readonly localId: string;
+  readonly presentationKind: "code";
+  readonly version: number;
+}
+
+export type ContentProcessor = LegacyContentProcessor | ExtensionContentProcessor;
 
 export interface ResolvedContentProcessor {
   processor: ContentProcessor;
@@ -79,7 +97,8 @@ export class ContentProcessorRegistry {
   }
 }
 
-export const textContentProcessor: ContentProcessor = {
+export const textContentProcessor: LegacyContentProcessor = {
+  kind: "legacy",
   id: "text",
   version: 1,
   present(content) {
@@ -87,7 +106,8 @@ export const textContentProcessor: ContentProcessor = {
   },
 };
 
-export const markdownContentProcessor: ContentProcessor = {
+export const markdownContentProcessor: LegacyContentProcessor = {
+  kind: "legacy",
   id: "markdown",
   version: 1,
   present(content) {
@@ -95,8 +115,9 @@ export const markdownContentProcessor: ContentProcessor = {
   },
 };
 
-export const codeContentProcessors: readonly ContentProcessor[] =
+export const codeContentProcessors: readonly LegacyContentProcessor[] =
   codePreviewLanguages.map((language) => ({
+    kind: "legacy" as const,
     id: codeContentProcessorId(language),
     version: 1,
     present(content: string | null): ContentPresentation {
@@ -104,11 +125,42 @@ export const codeContentProcessors: readonly ContentProcessor[] =
     },
   }));
 
+export const builtInExtensionContentProcessors: readonly ContentProcessor[] =
+  builtInExtensionHost.listProcessors().map((processor) => ({
+    extensionId: processor.extensionId,
+    id: processor.id,
+    kind: "extension" as const,
+    localId: processor.localId,
+    presentationKind: "code" as const,
+    version: 1,
+  }));
+
 export const contentProcessorRegistry = new ContentProcessorRegistry([
   textContentProcessor,
   markdownContentProcessor,
   ...codeContentProcessors,
+  ...builtInExtensionContentProcessors,
 ]);
+
+export function contentProcessorUsesCodePresentation(
+  processorId: string | null,
+): boolean {
+  const processor = contentProcessorRegistry.resolve(processorId).processor;
+  return (
+    (processor.kind === "legacy" &&
+      processor.present(null).kind === "code") ||
+    (processor.kind === "extension" && processor.presentationKind === "code")
+  );
+}
+
+export function contentProcessorExtensionId(
+  processorId: string | null,
+): string | null {
+  const resolved = contentProcessorRegistry.resolve(processorId);
+  return resolved.supported && resolved.processor.kind === "extension"
+    ? resolved.processor.extensionId
+    : null;
+}
 
 export const maximumCanvasContentPreviewCharacters = 600;
 export const maximumExpandedCodePreviewCharacters = 20_000;
@@ -119,6 +171,9 @@ export interface ContentEnhancementLabels {
     copy: string;
     languages: Record<CodePreviewLanguage, string>;
     truncated: string;
+  };
+  extension: {
+    resolve: (key: string) => string | null;
   };
   secret: SecretContentLabels;
   totp: TotpContentLabels;
@@ -186,10 +241,18 @@ interface NodeContentHostProps {
   content: string | null;
   emptyContent?: ReactNode;
   enhancementLabels: ContentEnhancementLabels;
+  extensionMetadata?: BuiltInExtensionMetadataInput | null;
   hideWhenEmpty?: boolean;
   codeSourceContainsSensitive?: boolean;
   onCopyCodeSource?: (containsSensitive: boolean) => void;
   onCopySecret?: (value: string) => void;
+  onExtensionMetadataChange?: (
+    extensionId: string,
+    schemaVersion: number,
+    nodeMetadata: ExtensionMetadataPayload | null,
+    workspaceMetadata: ExtensionMetadataPayload | null,
+  ) => void;
+  nodeName?: string | null;
   processorId: string | null;
   sourceTruncated?: boolean;
   variant: "canvas" | "list";
@@ -258,15 +321,112 @@ export function NodeContentHost({
   codeSourceContainsSensitive,
   emptyContent = null,
   enhancementLabels,
+  extensionMetadata = null,
   hideWhenEmpty = false,
   onCopyCodeSource,
   onCopySecret,
+  onExtensionMetadataChange,
+  nodeName = null,
   processorId,
   sourceTruncated = false,
   variant,
 }: NodeContentHostProps) {
   const resolved = contentProcessorRegistry.resolve(processorId);
-  const presentation = resolved.processor.present(content);
+  if (resolved.processor.kind === "extension") {
+    if (content === null || content.length === 0) {
+      if (hideWhenEmpty) {
+        return null;
+      }
+      return variant === "list" ? (
+        <span
+          className={[className, "node-content-host"]
+            .filter(Boolean)
+            .join(" ")}
+          data-content-processor={resolved.processor.id}
+          data-content-processor-supported={resolved.supported}
+        >
+          {emptyContent}
+        </span>
+      ) : (
+        <p
+          className={[className, "node-content-host"]
+            .filter(Boolean)
+            .join(" ")}
+          data-content-processor={resolved.processor.id}
+          data-content-processor-supported={resolved.supported}
+        >
+          {emptyContent}
+        </p>
+      );
+    }
+    try {
+      const result = builtInExtensionHost.renderProcessor(
+        resolved.processor.id,
+        { content, name: nodeName },
+        extensionMetadata,
+      );
+      return (
+        <div
+          className={[className, "node-content-host", "node-content-extension"]
+            .filter(Boolean)
+            .join(" ")}
+          data-content-processor={resolved.processor.id}
+          data-content-processor-supported={resolved.supported}
+          data-extension-id={result.extensionId}
+          data-requested-content-processor={resolved.requestedId ?? undefined}
+        >
+          <ExtensionPresentationHost
+            actionLabelKey={(actionId) =>
+              builtInExtensionHost.actionLabelKey(result.extensionId, actionId)
+            }
+            labels={{
+              code: enhancementLabels.code,
+              resolve: enhancementLabels.extension.resolve,
+            }}
+            onAction={
+              variant === "list" || onExtensionMetadataChange === undefined
+                ? undefined
+                : (actionId, inputValue) => {
+                    let actionResult;
+                    try {
+                      actionResult = builtInExtensionHost.invokeAction(
+                        result.extensionId,
+                        actionId,
+                        { content, name: nodeName },
+                        extensionMetadata,
+                        inputValue,
+                      );
+                    } catch {
+                      return;
+                    }
+                    if (
+                      actionResult.nodeMetadata !== null ||
+                      actionResult.workspaceMetadata !== null
+                    ) {
+                      onExtensionMetadataChange(
+                        actionResult.extensionId,
+                        actionResult.metadataSchemaVersion,
+                        actionResult.nodeMetadata,
+                        actionResult.workspaceMetadata,
+                      );
+                    }
+                  }
+            }
+            presentation={result.presentation}
+            sourceTruncated={sourceTruncated || result.inputTruncated}
+            variant={variant}
+          />
+        </div>
+      );
+    } catch {
+      // An extension failure is isolated to this presentation. Plain text remains readable.
+    }
+  }
+  const legacyProcessor =
+    resolved.processor.kind === "legacy"
+      ? resolved.processor
+      : textContentProcessor;
+  const presentation = legacyProcessor.present(content);
   const source = presentation.kind === "text" ? presentation.text : presentation.source;
   const presentedText =
     variant === "canvas" && canvasPreviewEnabled

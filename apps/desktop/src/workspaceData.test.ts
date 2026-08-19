@@ -5,6 +5,7 @@ import {
   parseWorkspaceSnapshot,
   persistedNodeNameFromDraft,
   removeNodesFromWorkspaceView,
+  updateNodeExtensionMetadata,
   updateNodeLayoutDimensions,
   updateNodeLayoutSizeOverrides,
   updateNodeLayoutPositions,
@@ -242,6 +243,78 @@ describe("removeNodesFromWorkspaceView", () => {
         },
       },
     });
+  });
+});
+
+describe("updateNodeExtensionMetadata", () => {
+  it("updates only the selected extension and node namespace", () => {
+    const workspace = validWorkspace();
+    workspace.view.extensionMetadata["dev.example.other"] = {
+      schemaVersion: 3,
+      workspace: { retained: true },
+      byNodeId: { [serviceId]: { retained: true } },
+    };
+
+    const next = updateNodeExtensionMetadata(
+      workspace.view,
+      workspace.nodes,
+      "app.linked-info.json-inspector",
+      1,
+      accountId,
+      { indentSize: 4 },
+    );
+
+    expect(next?.extensionMetadata).toEqual({
+      "dev.example.other": workspace.view.extensionMetadata["dev.example.other"],
+      "app.linked-info.json-inspector": {
+        schemaVersion: 1,
+        workspace: {},
+        byNodeId: { [accountId]: { indentSize: 4 } },
+      },
+    });
+    expect(workspace.view.extensionMetadata).not.toHaveProperty(
+      "app.linked-info.json-inspector",
+    );
+  });
+
+  it("removes canonical defaults and refuses stale schemas or missing nodes", () => {
+    const workspace = validWorkspace();
+    workspace.view.extensionMetadata["app.linked-info.json-inspector"] = {
+      schemaVersion: 1,
+      workspace: {},
+      byNodeId: { [accountId]: { indentSize: 4 } },
+    };
+
+    expect(
+      updateNodeExtensionMetadata(
+        workspace.view,
+        workspace.nodes,
+        "app.linked-info.json-inspector",
+        1,
+        accountId,
+        {},
+      )?.extensionMetadata,
+    ).toEqual({});
+    expect(
+      updateNodeExtensionMetadata(
+        workspace.view,
+        workspace.nodes,
+        "app.linked-info.json-inspector",
+        2,
+        accountId,
+        { indentSize: 2 },
+      ),
+    ).toBeNull();
+    expect(
+      updateNodeExtensionMetadata(
+        workspace.view,
+        workspace.nodes,
+        "app.linked-info.json-inspector",
+        1,
+        "33333333-3333-4333-8333-333333333333",
+        { indentSize: 4 },
+      ),
+    ).toBeNull();
   });
 });
 

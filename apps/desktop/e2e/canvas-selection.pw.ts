@@ -477,6 +477,65 @@ test("an explicit code language highlights safely and survives reload", async ({
   );
 });
 
+test("the built-in JSON adapter persists one undoable namespaced preference", async ({
+  page,
+}) => {
+  const jsonNode = {
+    content: '{"outer":{"value":1}}',
+    id: syntheticId(1),
+    name: "JSON adapter",
+    x: 100,
+    y: 100,
+  };
+  const processorId = "app.linked-info.json-inspector.inspect";
+  const extensionId = "app.linked-info.json-inspector";
+  await openSyntheticWorkspace(page, [jsonNode]);
+  await node(page, jsonNode.id).dblclick({ position: { x: 80, y: 24 } });
+  await page.getByLabel("Content format").selectOption(processorId);
+  await page.locator(".react-flow__pane").click({ position: { x: 700, y: 500 } });
+
+  const presentation = node(page, jsonNode.id).locator(
+    ".extension-presentation",
+  );
+  await expect(presentation.locator(".code-preview")).toHaveAttribute(
+    "data-language",
+    "json",
+  );
+  const indent = presentation.locator(".extension-presentation-select select");
+  await expect(indent).toHaveValue("2");
+  await indent.selectOption("4");
+  await expect(indent).toHaveValue("4");
+  await expect
+    .poll(() => storedWorkspace(page))
+    .toMatchObject({
+      version: 3,
+      view: {
+        contentProcessorByNodeId: { [jsonNode.id]: processorId },
+        extensionMetadata: {
+          [extensionId]: {
+            schemaVersion: 1,
+            workspace: {},
+            byNodeId: { [jsonNode.id]: { indentSize: 4 } },
+          },
+        },
+      },
+    });
+
+  await page.locator(".react-flow__pane").click({ position: { x: 700, y: 500 } });
+  await page.keyboard.press("Control+Z");
+  await expect(indent).toHaveValue("2");
+  await expect
+    .poll(async () => (await storedWorkspace(page))?.view?.extensionMetadata)
+    .toEqual({});
+
+  await page.keyboard.press("Control+Y");
+  await expect(indent).toHaveValue("4");
+  await page.reload();
+  await expect(
+    node(page, jsonNode.id).locator(".extension-presentation-select select"),
+  ).toHaveValue("4");
+});
+
 test("existing content markers can be changed or removed without nesting", async ({
   page,
 }) => {
