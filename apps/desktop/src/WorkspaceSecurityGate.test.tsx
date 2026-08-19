@@ -117,4 +117,37 @@ describe("WorkspaceSecurityGate", () => {
       "new master password",
     );
   });
+
+  it("does not let a stale command result reopen the App after a lock event", async () => {
+    const listenerRef = { current: null as ((reason: string) => void) | null };
+    const workspaceSecurity = security(listenerRef);
+    vi.mocked(workspaceSecurity.inspect)
+      .mockResolvedValueOnce(unlocked)
+      .mockResolvedValue({ ...unlocked, locked: true });
+    let updateFromWorkspace: ((status: WorkspaceSecurityStatus) => void) | null = null;
+    await act(async () => {
+      root.render(
+        <WorkspaceSecurityGate security={workspaceSecurity}>
+          {(_status, updateStatus) => {
+            updateFromWorkspace = updateStatus;
+            return <div data-testid="secret-content">secret</div>;
+          }}
+        </WorkspaceSecurityGate>,
+      );
+    });
+
+    await act(async () => {
+      listenerRef.current?.("idle_timeout");
+      await Promise.resolve();
+    });
+    act(() => {
+      const update = updateFromWorkspace as
+        | ((status: WorkspaceSecurityStatus) => void)
+        | null;
+      update?.(unlocked);
+    });
+
+    expect(container.querySelector('[data-testid="secret-content"]')).toBeNull();
+    expect(container.querySelector("#workspace-unlock-password")).not.toBeNull();
+  });
 });

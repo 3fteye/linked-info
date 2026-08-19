@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import {
   AlertTriangle,
   Fingerprint,
@@ -36,6 +36,14 @@ export default function WorkspaceSecurityGate({
   const [busy, setBusy] = useState(false);
   const [recoveryRequired, setRecoveryRequired] = useState(false);
   const [retryGeneration, setRetryGeneration] = useState(0);
+  const updateStatusFromWorkspace = useCallback(
+    (next: WorkspaceSecurityStatus) => {
+      setStatus((current) =>
+        current?.locked === true && !next.locked ? current : next,
+      );
+    },
+    [],
+  );
 
   useEffect(() => {
     let active = true;
@@ -194,7 +202,7 @@ export default function WorkspaceSecurityGate({
   }
 
   if (status !== null && !status.locked) {
-    return <>{children(status, setStatus)}</>;
+    return <>{children(status, updateStatusFromWorkspace)}</>;
   }
 
   if (status === null && error === null) {
