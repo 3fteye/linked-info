@@ -1,5 +1,11 @@
-import { useEffect, useState, type ReactNode } from "react";
-import { Fingerprint, KeyRound, LockKeyhole, RotateCcw } from "lucide-react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
+import {
+  AlertTriangle,
+  Fingerprint,
+  KeyRound,
+  LockKeyhole,
+  RotateCcw,
+} from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type {
   WorkspaceSecurity,
@@ -28,7 +34,16 @@ export default function WorkspaceSecurityGate({
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [recoveryRequired, setRecoveryRequired] = useState(false);
   const [retryGeneration, setRetryGeneration] = useState(0);
+  const updateStatusFromWorkspace = useCallback(
+    (next: WorkspaceSecurityStatus) => {
+      setStatus((current) =>
+        current?.locked === true && !next.locked ? current : next,
+      );
+    },
+    [],
+  );
 
   useEffect(() => {
     let active = true;
@@ -58,6 +73,13 @@ export default function WorkspaceSecurityGate({
         if (!active) {
           return;
         }
+        if (
+          reason === "workspace_password_change_recovery_required" ||
+          reason === "workspace_restore_recovery_required" ||
+          reason === "workspace_recovery_swap_pending"
+        ) {
+          setRecoveryRequired(true);
+        }
         setStatus((current) =>
           current === null ? current : { ...current, locked: true },
         );
@@ -65,7 +87,9 @@ export default function WorkspaceSecurityGate({
         setNotice(
           reason === "workspace_data_key_rotated"
             ? t("security.rotateSuccessLocked")
-            : null,
+            : reason === "workspace_password_changed_locked"
+              ? t("security.changeSuccessLocked")
+              : null,
         );
         setError(
           reason === "workspace_destroy_failed" ||
@@ -159,8 +183,26 @@ export default function WorkspaceSecurityGate({
     }
   }
 
+  if (recoveryRequired) {
+    return (
+      <main className="security-gate" data-testid="workspace-security-recovery-required">
+        <AlertTriangle aria-hidden="true" size={34} />
+        <h1>{t("storageProblem.recoveryRequiredTitle")}</h1>
+        <p>{t("storageProblem.recoveryRequiredDescription")}</p>
+        <button
+          className="primary-button"
+          onClick={() => window.location.reload()}
+          type="button"
+        >
+          <RotateCcw aria-hidden="true" size={16} />
+          {t("storageProblem.restart")}
+        </button>
+      </main>
+    );
+  }
+
   if (status !== null && !status.locked) {
-    return <>{children(status, setStatus)}</>;
+    return <>{children(status, updateStatusFromWorkspace)}</>;
   }
 
   if (status === null && error === null) {

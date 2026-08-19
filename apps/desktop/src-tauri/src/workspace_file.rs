@@ -263,6 +263,22 @@ enum WorkspaceRecoverySwapStatus {
     RecoveryRequired,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+enum WorkspaceSecurityTransactionStatus {
+    Committed,
+    CommittedLocked,
+    RecoveryRequired,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceSecurityTransactionResult {
+    status: WorkspaceSecurityTransactionStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    security_status: Option<WorkspaceSecurityStatus>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceRecoverySwapResult {
@@ -588,6 +604,7 @@ impl WorkspaceVaultState {
     }
 }
 
+#[derive(Clone)]
 struct WorkspaceFileStore {
     base_directory: PathBuf,
 }
@@ -910,7 +927,7 @@ pub async fn swap_workspace_recovery_files(
             }
         }
         WorkspaceRecoverySwapOperation::RecoveryRequired => {
-            lock_workspace_runtime(&app, "workspace_recovery_swap_pending");
+            lock_workspace_runtime_with_terminal_event(&app, "workspace_recovery_swap_pending");
             Ok(WorkspaceRecoverySwapResult {
                 status: WorkspaceRecoverySwapStatus::RecoveryRequired,
                 contents: None,
@@ -1040,7 +1057,7 @@ pub async fn unlock_workspace(
             .read_vault_metadata()?
             .ok_or_else(|| "workspace_vault_not_configured".to_owned())?;
         let data_key = unwrap_data_key(&metadata, &password)?;
-        verify_encrypted_store(&store, &data_key)?;
+        verify_encrypted_store(&store, &metadata, &data_key)?;
         let system_unlock_enabled =
             system_unlock_enabled(Some(&metadata), provider_for_unlock.as_ref());
         Ok::<([u8; DATA_KEY_BYTES], bool, Option<u32>), String>((
@@ -1096,7 +1113,7 @@ pub async fn unlock_workspace_with_system(
             .read_vault_metadata()?
             .ok_or_else(|| "workspace_vault_not_configured".to_owned())?;
         let data_key = unwrap_data_key_with_system(&metadata, provider_for_unlock.as_ref())?;
-        verify_encrypted_store(&store, &data_key)?;
+        verify_encrypted_store(&store, &metadata, &data_key)?;
         Ok::<([u8; DATA_KEY_BYTES], Option<u32>), String>((data_key, metadata.idle_timeout_minutes))
     })
     .await
@@ -1157,9 +1174,10 @@ pub async fn enable_workspace_encryption(
 pub async fn change_workspace_password(
     app: AppHandle,
     state: tauri::State<'_, WorkspaceVaultState>,
+    system_unlock_state: tauri::State<'_, SystemUnlockState>,
     password: String,
     authorization: String,
-) -> Result<(), String> {
+) -> Result<WorkspaceSecurityTransactionResult, String> {
     validate_new_password(&password)?;
     let permit = state
         .consume_sensitive_authorization(SensitiveOperation::ChangePassword, &authorization)?;
@@ -1167,8 +1185,10 @@ pub async fn change_workspace_password(
     let operation_lock = Arc::clone(&state.operation_lock);
     let access_generation = state.access_generation();
     let data_key = state.data_key()?;
+    let provider = system_unlock_state.provider();
+    let provider_for_change = Arc::clone(&provider);
     let password = Zeroizing::new(password);
-    tauri::async_runtime::spawn_blocking(move || {
+    let changed = tauri::async_runtime::spawn_blocking(move || {
         let _guard = operation_lock
             .lock()
             .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
@@ -1177,13 +1197,43 @@ pub async fn change_workspace_password(
         let previous = store
             .read_vault_metadata()?
             .ok_or_else(|| "workspace_vault_not_configured".to_owned())?;
+        let system_unlock_enabled =
+            system_unlock_enabled(Some(&previous), provider_for_change.as_ref());
+        let idle_timeout_minutes = previous.idle_timeout_minutes;
         let metadata = rewrap_vault_metadata(previous, &password, &data_key)?;
         let serialized = serde_json::to_vec(&metadata).map_err(|error| error.to_string())?;
-        write_atomically(&store.vault_path(), &serialized).map_err(|error| error.to_string())
+        let write_status = write_vault_metadata_commit_aware(&store, &serialized)?;
+        Ok::<_, String>((write_status, system_unlock_enabled, idle_timeout_minutes))
     })
     .await
     .map_err(|error| error.to_string())??;
-    ensure_workspace_access(&app, &state, Some(permit))
+    let (write_status, system_unlock_enabled, idle_timeout_minutes) = changed;
+    if let Some(result) = password_change_recovery_result(write_status) {
+        lock_workspace_runtime_with_terminal_event(
+            &app,
+            "workspace_password_change_recovery_required",
+        );
+        return Ok(result);
+    }
+    let session_current = ensure_workspace_access(&app, &state, Some(permit)).is_ok();
+    let locked = !session_current;
+    if locked {
+        lock_workspace_runtime_with_terminal_event(&app, "workspace_password_changed_locked");
+    }
+    Ok(WorkspaceSecurityTransactionResult {
+        status: if locked {
+            WorkspaceSecurityTransactionStatus::CommittedLocked
+        } else {
+            WorkspaceSecurityTransactionStatus::Committed
+        },
+        security_status: Some(WorkspaceSecurityStatus {
+            encrypted: true,
+            locked,
+            system_unlock_available: provider.available(),
+            system_unlock_enabled,
+            idle_timeout_minutes,
+        }),
+    })
 }
 
 #[tauri::command]
@@ -1467,18 +1517,31 @@ pub async fn clear_workspace_recovery_data(
             .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
         ensure_access_generation(&access_generation, Some(permit))?;
         recover_pending_migration(&store)?;
-        let recovery = store.path(WorkspaceFileSlot::Recovery);
-        let pending_recovery = store.pending_path(WorkspaceFileSlot::Recovery);
-        remove_file_if_exists(&recovery)?;
-        remove_file_if_exists(&pending_recovery)?;
-        remove_workspace_subdirectory(&store.base_directory, &store.backup_directory())?;
-        remove_workspace_subdirectory(&store.base_directory, &store.pending_backup_directory())?;
-        Ok::<(), String>(())
+        clear_recovery_data_from_store(&store)
     })
     .await
     .map_err(|error| error.to_string())??;
     ensure_workspace_access(&app, &state, Some(permit))?;
     Ok(())
+}
+
+fn clear_recovery_data_from_store(store: &WorkspaceFileStore) -> Result<(), String> {
+    if let Some(mut metadata) = store.read_vault_metadata()?
+        && metadata
+            .migrated_slots
+            .contains(&WorkspaceFileSlot::Recovery)
+    {
+        metadata
+            .migrated_slots
+            .retain(|slot| *slot != WorkspaceFileSlot::Recovery);
+        let serialized = serde_json::to_vec(&metadata).map_err(|error| error.to_string())?;
+        write_atomically(&store.vault_path(), &serialized).map_err(|error| error.to_string())?;
+    }
+
+    remove_file_if_exists(&store.path(WorkspaceFileSlot::Recovery))?;
+    remove_file_if_exists(&store.pending_path(WorkspaceFileSlot::Recovery))?;
+    remove_workspace_subdirectory(&store.base_directory, &store.backup_directory())?;
+    remove_workspace_subdirectory(&store.base_directory, &store.pending_backup_directory())
 }
 
 #[tauri::command]
@@ -1866,7 +1929,7 @@ pub async fn commit_workspace_restore(
     llm_state: tauri::State<'_, crate::llm::LlmState>,
     system_unlock_state: tauri::State<'_, SystemUnlockState>,
     restore_id: uuid::Uuid,
-) -> Result<WorkspaceSecurityStatus, String> {
+) -> Result<WorkspaceSecurityTransactionResult, String> {
     crate::vector_cache::purge_for_encryption(&app, &vector_cache_state).await?;
     crate::smart_reference_cache::purge(&app, &smart_reference_cache_state).await?;
     let prepared = {
@@ -1884,30 +1947,86 @@ pub async fn commit_workspace_restore(
             .ok_or_else(|| "workspace_restore_not_prepared".to_owned())?
     };
     let store = workspace_store(&app).map_err(|error| error.to_string())?;
+    let store_for_install = store.clone();
     let operation_lock = Arc::clone(&state.operation_lock);
-    let data_key = tauri::async_runtime::spawn_blocking(move || {
+    let prepared_data_key = *prepared.data_key;
+    let install_task = tauri::async_runtime::spawn_blocking(move || {
         let _guard = operation_lock
             .lock()
             .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
-        recover_pending_migration(&store)?;
-        if store.encryption_configured() {
-            return Err("workspace_vault_already_configured".to_owned());
+        if recover_before_prepared_restore(&store_for_install) {
+            return Ok::<_, String>(None);
         }
-        install_prepared_workspace_restore(&store, prepared)
-    })
-    .await
-    .map_err(|error| error.to_string())??;
-    state.replace_data_key(data_key)?;
+        Ok::<_, String>(Some(install_prepared_workspace_restore(
+            &store_for_install,
+            prepared,
+        )))
+    });
+    let install_result = match install_task.await {
+        Ok(result) => match result? {
+            Some(result) => result,
+            None => {
+                lock_workspace_runtime_with_terminal_event(
+                    &app,
+                    "workspace_restore_recovery_required",
+                );
+                return Ok(WorkspaceSecurityTransactionResult {
+                    status: WorkspaceSecurityTransactionStatus::RecoveryRequired,
+                    security_status: None,
+                });
+            }
+        },
+        // A panic/cancellation can occur after the filesystem commit point.
+        // Classify the on-disk state instead of blindly reporting pre-commit
+        // failure to React.
+        Err(error) => Err(error.to_string()),
+    };
+    let provider_available = system_unlock_state.provider().available();
+    let outcome = classify_prepared_restore_install(&store, &prepared_data_key, install_result)?;
+    let locked_result = || WorkspaceSecurityTransactionResult {
+        status: WorkspaceSecurityTransactionStatus::CommittedLocked,
+        security_status: Some(WorkspaceSecurityStatus {
+            encrypted: true,
+            locked: true,
+            system_unlock_available: provider_available,
+            system_unlock_enabled: false,
+            idle_timeout_minutes: default_idle_timeout_minutes(),
+        }),
+    };
+    let data_key = match outcome {
+        PreparedRestoreInstallOutcome::Committed(data_key) => data_key,
+        PreparedRestoreInstallOutcome::CommittedLocked => {
+            lock_workspace_runtime_with_terminal_event(&app, "workspace_restore_committed_locked");
+            return Ok(locked_result());
+        }
+        PreparedRestoreInstallOutcome::RecoveryRequired => {
+            lock_workspace_runtime_with_terminal_event(&app, "workspace_restore_recovery_required");
+            return Ok(WorkspaceSecurityTransactionResult {
+                status: WorkspaceSecurityTransactionStatus::RecoveryRequired,
+                security_status: None,
+            });
+        }
+    };
     state.set_idle_timeout(default_idle_timeout_minutes());
-    crate::vector_cache::purge_for_encryption(&app, &vector_cache_state).await?;
+    if state.replace_data_key(data_key).is_err()
+        || crate::vector_cache::purge_for_encryption(&app, &vector_cache_state)
+            .await
+            .is_err()
+    {
+        lock_workspace_runtime_with_terminal_event(&app, "workspace_restore_committed_locked");
+        return Ok(locked_result());
+    }
     let _ = embedding_state.shutdown();
     llm_state.shutdown();
-    Ok(WorkspaceSecurityStatus {
-        encrypted: true,
-        locked: false,
-        system_unlock_available: system_unlock_state.provider().available(),
-        system_unlock_enabled: false,
-        idle_timeout_minutes: default_idle_timeout_minutes(),
+    Ok(WorkspaceSecurityTransactionResult {
+        status: WorkspaceSecurityTransactionStatus::Committed,
+        security_status: Some(WorkspaceSecurityStatus {
+            encrypted: true,
+            locked: false,
+            system_unlock_available: provider_available,
+            system_unlock_enabled: false,
+            idle_timeout_minutes: default_idle_timeout_minutes(),
+        }),
     })
 }
 
@@ -1979,6 +2098,20 @@ pub fn lock_workspace_runtime(app: &AppHandle, reason: &str) -> bool {
     cleanup_locked_workspace(app);
     crate::secret_clipboard::clear_active(app);
     was_unlocked
+}
+
+fn emit_terminal_lock_event_if_needed(event_already_emitted: bool, emit: impl FnOnce()) {
+    if !event_already_emitted {
+        emit();
+    }
+}
+
+fn lock_workspace_runtime_with_terminal_event(app: &AppHandle, reason: &str) -> bool {
+    let event_already_emitted = lock_workspace_runtime(app, reason);
+    emit_terminal_lock_event_if_needed(event_already_emitted, || {
+        let _ = app.emit(WORKSPACE_LOCKED_EVENT, reason);
+    });
+    event_already_emitted
 }
 
 fn validate_new_password(password: &str) -> Result<(), String> {
@@ -2351,6 +2484,54 @@ fn rewrap_vault_metadata(
     Ok(metadata)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VaultMetadataWriteStatus {
+    Committed,
+    RecoveryRequired,
+}
+
+fn password_change_recovery_result(
+    write_status: VaultMetadataWriteStatus,
+) -> Option<WorkspaceSecurityTransactionResult> {
+    match write_status {
+        VaultMetadataWriteStatus::RecoveryRequired => Some(WorkspaceSecurityTransactionResult {
+            status: WorkspaceSecurityTransactionStatus::RecoveryRequired,
+            security_status: None,
+        }),
+        VaultMetadataWriteStatus::Committed => None,
+    }
+}
+
+fn write_vault_metadata_commit_aware(
+    store: &WorkspaceFileStore,
+    serialized: &[u8],
+) -> Result<VaultMetadataWriteStatus, String> {
+    write_vault_metadata_commit_aware_with_parent_sync(store, serialized, sync_parent_directory)
+}
+
+fn write_vault_metadata_commit_aware_with_parent_sync(
+    store: &WorkspaceFileStore,
+    serialized: &[u8],
+    confirm_parent_durability: impl FnOnce(&Path) -> io::Result<()>,
+) -> Result<VaultMetadataWriteStatus, String> {
+    match write_atomically_with_parent_sync(
+        &store.vault_path(),
+        serialized,
+        confirm_parent_durability,
+    ) {
+        Ok(()) => Ok(VaultMetadataWriteStatus::Committed),
+        Err(write_error) => match fs::read(store.vault_path()) {
+            Ok(current) if current == serialized => {
+                // Replacement happened, but the final durability step reported
+                // an error. The caller must not report a pre-commit failure.
+                Ok(VaultMetadataWriteStatus::RecoveryRequired)
+            }
+            Ok(_) => Err(write_error.to_string()),
+            Err(_) => Ok(VaultMetadataWriteStatus::RecoveryRequired),
+        },
+    }
+}
+
 fn create_system_unlock_envelope(
     provider: &str,
     credential_id: &str,
@@ -2539,12 +2720,17 @@ fn decrypt_workspace_file(
 
 fn verify_encrypted_store(
     store: &WorkspaceFileStore,
+    metadata: &VaultMetadata,
     data_key: &[u8; DATA_KEY_BYTES],
 ) -> Result<(), String> {
     for slot in [WorkspaceFileSlot::Primary, WorkspaceFileSlot::Recovery] {
-        if let Some(contents) = store.read(slot, Some(data_key))? {
-            validate_storage_envelope(&contents)
-                .map_err(|error| format!("workspace_vault_invalid_decrypted_workspace:{error}"))?;
+        match store.read(slot, Some(data_key))? {
+            Some(contents) => validate_storage_envelope(&contents)
+                .map_err(|error| format!("workspace_vault_invalid_decrypted_workspace:{error}"))?,
+            None if metadata.migrated_slots.contains(&slot) => {
+                return Err("workspace_vault_declared_workspace_missing".to_owned());
+            }
+            None => {}
         }
     }
     Ok(())
@@ -2581,6 +2767,56 @@ fn migrate_plaintext_store(
         .map_err(|error| error.to_string())?;
     finish_pending_migration(store, &metadata)?;
     Ok(data_key)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum PreparedRestoreInstallOutcome {
+    Committed([u8; DATA_KEY_BYTES]),
+    CommittedLocked,
+    RecoveryRequired,
+}
+
+fn classify_prepared_restore_install(
+    store: &WorkspaceFileStore,
+    prepared_data_key: &[u8; DATA_KEY_BYTES],
+    result: Result<[u8; DATA_KEY_BYTES], String>,
+) -> Result<PreparedRestoreInstallOutcome, String> {
+    let error = match result {
+        Ok(data_key) => return Ok(PreparedRestoreInstallOutcome::Committed(data_key)),
+        Err(error) => error,
+    };
+    match store.read_vault_metadata() {
+        Ok(Some(metadata)) => {
+            return Ok(classify_committed_restore_store(
+                store,
+                &metadata,
+                prepared_data_key,
+                || sync_parent_directory(&store.base_directory),
+            ));
+        }
+        Ok(None) => {}
+        Err(_) => return Ok(PreparedRestoreInstallOutcome::RecoveryRequired),
+    }
+    match fs::metadata(store.pending_vault_path()) {
+        Ok(_) => Ok(PreparedRestoreInstallOutcome::RecoveryRequired),
+        Err(metadata_error) if metadata_error.kind() != io::ErrorKind::NotFound => {
+            Ok(PreparedRestoreInstallOutcome::RecoveryRequired)
+        }
+        Err(_) => Err(error),
+    }
+}
+
+fn classify_committed_restore_store(
+    store: &WorkspaceFileStore,
+    metadata: &VaultMetadata,
+    data_key: &[u8; DATA_KEY_BYTES],
+    confirm_durability: impl FnOnce() -> io::Result<()>,
+) -> PreparedRestoreInstallOutcome {
+    if verify_encrypted_store(store, metadata, data_key).is_ok() && confirm_durability().is_ok() {
+        PreparedRestoreInstallOutcome::CommittedLocked
+    } else {
+        PreparedRestoreInstallOutcome::RecoveryRequired
+    }
 }
 
 fn install_prepared_workspace_restore(
@@ -2638,7 +2874,7 @@ fn install_prepared_workspace_restore(
     write_atomically(&store.pending_vault_path(), &serialized)
         .map_err(|error| error.to_string())?;
     finish_pending_migration(store, &metadata)?;
-    verify_encrypted_store(store, &prepared.data_key)?;
+    verify_encrypted_store(store, &metadata, &prepared.data_key)?;
     Ok(*prepared.data_key)
 }
 
@@ -2840,6 +3076,13 @@ fn recover_pending_migration(store: &WorkspaceFileStore) -> Result<(), String> {
     Ok(())
 }
 
+fn recover_before_prepared_restore(store: &WorkspaceFileStore) -> bool {
+    match recover_pending_migration(store) {
+        Ok(()) => store.encryption_configured(),
+        Err(_) => true,
+    }
+}
+
 fn recover_pending_workspace_transactions(
     store: &WorkspaceFileStore,
     provider: &dyn SystemUnlockProvider,
@@ -3035,7 +3278,7 @@ fn prepare_data_key_rotation(
     let previous_metadata = store
         .read_vault_metadata()?
         .ok_or_else(|| "workspace_vault_not_configured".to_owned())?;
-    verify_encrypted_store(store, previous_data_key)?;
+    verify_encrypted_store(store, &previous_metadata, previous_data_key)?;
 
     let mut slots = Vec::new();
     for slot in [WorkspaceFileSlot::Primary, WorkspaceFileSlot::Recovery] {
@@ -3585,6 +3828,14 @@ fn workspace_storage_from_export(contents: &str) -> io::Result<String> {
 }
 
 pub(crate) fn write_atomically(target: &Path, contents: &[u8]) -> io::Result<()> {
+    write_atomically_with_parent_sync(target, contents, sync_parent_directory)
+}
+
+fn write_atomically_with_parent_sync(
+    target: &Path,
+    contents: &[u8],
+    confirm_parent_durability: impl FnOnce(&Path) -> io::Result<()>,
+) -> io::Result<()> {
     let parent = target.parent().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -3613,7 +3864,7 @@ pub(crate) fn write_atomically(target: &Path, contents: &[u8]) -> io::Result<()>
         file.sync_all()?;
         drop(file);
         replace_file(&temporary, target)?;
-        sync_parent_directory(parent)
+        confirm_parent_durability(parent)
     })();
 
     if write_result.is_err() {
@@ -3663,6 +3914,7 @@ fn sync_parent_directory(_parent: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
     use std::collections::HashMap;
 
     #[derive(Default)]
@@ -3858,6 +4110,24 @@ mod tests {
             "workspace_vault_session_expired"
         );
         assert!(!state.shutdown());
+    }
+
+    #[test]
+    fn terminal_lock_outcomes_still_emit_when_the_runtime_was_already_locked() {
+        let emitted = Cell::new(false);
+
+        emit_terminal_lock_event_if_needed(false, || emitted.set(true));
+
+        assert!(emitted.get());
+    }
+
+    #[test]
+    fn terminal_lock_outcomes_do_not_duplicate_the_initial_lock_event() {
+        let emitted = Cell::new(false);
+
+        emit_terminal_lock_event_if_needed(true, || emitted.set(true));
+
+        assert!(!emitted.get());
     }
 
     #[test]
@@ -4859,6 +5129,47 @@ mod tests {
     }
 
     #[test]
+    fn prepared_restore_requires_recovery_after_an_older_migration_commits() {
+        let directory = test_directory();
+        let store = WorkspaceFileStore::new(directory.clone());
+        let primary = workspace("older-pending-restore");
+        store
+            .write_plaintext(WorkspaceFileSlot::Primary, &primary)
+            .unwrap();
+        let data_key = random_array::<DATA_KEY_BYTES>().unwrap();
+        let encrypted =
+            encrypt_workspace_file(&primary, WorkspaceFileSlot::Primary, &data_key).unwrap();
+        write_atomically(
+            &store.pending_path(WorkspaceFileSlot::Primary),
+            encrypted.as_bytes(),
+        )
+        .unwrap();
+        let metadata = create_vault_metadata(
+            "correct horse battery",
+            &data_key,
+            vec![WorkspaceFileSlot::Primary],
+        )
+        .unwrap();
+        write_atomically(
+            &store.pending_vault_path(),
+            &serde_json::to_vec(&metadata).unwrap(),
+        )
+        .unwrap();
+        assert!(!store.encryption_configured());
+
+        assert!(recover_before_prepared_restore(&store));
+        assert!(store.encryption_configured());
+        assert_eq!(
+            store
+                .read(WorkspaceFileSlot::Primary, Some(&data_key))
+                .unwrap(),
+            Some(primary)
+        );
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn encrypts_exports_with_an_independent_authenticated_envelope() {
         let data_key = random_array::<DATA_KEY_BYTES>().unwrap();
         let metadata =
@@ -4932,6 +5243,171 @@ mod tests {
             Some(current)
         );
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn restore_failure_after_vault_commit_is_not_reported_as_precommit_error() {
+        let directory = test_directory();
+        let store = WorkspaceFileStore::new(directory.clone());
+        store
+            .write_plaintext(WorkspaceFileSlot::Primary, &workspace("committed"))
+            .unwrap();
+        let data_key = migrate_plaintext_store(&store, "correct horse battery").unwrap();
+        let metadata = store.read_vault_metadata().unwrap().unwrap();
+
+        assert_eq!(
+            classify_prepared_restore_install(
+                &store,
+                &data_key,
+                Err("followup failed".to_owned()),
+            )
+            .unwrap(),
+            PreparedRestoreInstallOutcome::CommittedLocked
+        );
+        assert_eq!(
+            classify_committed_restore_store(&store, &metadata, &data_key, || {
+                Err(io::Error::other("injected directory sync failure"))
+            }),
+            PreparedRestoreInstallOutcome::RecoveryRequired
+        );
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn restore_failure_with_an_invalid_vault_requires_recovery() {
+        let directory = test_directory();
+        let store = WorkspaceFileStore::new(directory.clone());
+        fs::create_dir_all(&directory).unwrap();
+        write_atomically(&store.vault_path(), b"invalid-vault").unwrap();
+        let data_key = random_array::<DATA_KEY_BYTES>().unwrap();
+
+        assert_eq!(
+            classify_prepared_restore_install(
+                &store,
+                &data_key,
+                Err("followup failed".to_owned()),
+            )
+            .unwrap(),
+            PreparedRestoreInstallOutcome::RecoveryRequired
+        );
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn restore_failure_with_an_unverified_committed_store_requires_recovery() {
+        let directory = test_directory();
+        let store = WorkspaceFileStore::new(directory.clone());
+        fs::create_dir_all(&directory).unwrap();
+        let data_key = random_array::<DATA_KEY_BYTES>().unwrap();
+        let metadata = create_vault_metadata(
+            "correct horse battery",
+            &data_key,
+            vec![WorkspaceFileSlot::Primary],
+        )
+        .unwrap();
+        write_atomically(&store.vault_path(), &serde_json::to_vec(&metadata).unwrap()).unwrap();
+        write_atomically(&store.path(WorkspaceFileSlot::Primary), b"damaged-primary").unwrap();
+
+        assert_eq!(
+            classify_prepared_restore_install(
+                &store,
+                &data_key,
+                Err("verification failed".to_owned()),
+            )
+            .unwrap(),
+            PreparedRestoreInstallOutcome::RecoveryRequired
+        );
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn restore_failure_with_a_missing_declared_primary_requires_recovery() {
+        let directory = test_directory();
+        let store = WorkspaceFileStore::new(directory.clone());
+        fs::create_dir_all(&directory).unwrap();
+        let data_key = random_array::<DATA_KEY_BYTES>().unwrap();
+        let metadata = create_vault_metadata(
+            "correct horse battery",
+            &data_key,
+            vec![WorkspaceFileSlot::Primary],
+        )
+        .unwrap();
+        write_atomically(&store.vault_path(), &serde_json::to_vec(&metadata).unwrap()).unwrap();
+
+        assert_eq!(
+            verify_encrypted_store(&store, &metadata, &data_key).unwrap_err(),
+            "workspace_vault_declared_workspace_missing"
+        );
+        assert_eq!(
+            classify_prepared_restore_install(
+                &store,
+                &data_key,
+                Err("verification failed".to_owned()),
+            )
+            .unwrap(),
+            PreparedRestoreInstallOutcome::RecoveryRequired
+        );
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn clearing_encrypted_recovery_removes_its_required_slot() {
+        let directory = test_directory();
+        let store = WorkspaceFileStore::new(directory.clone());
+        store
+            .write_plaintext(WorkspaceFileSlot::Primary, &workspace("current"))
+            .unwrap();
+        store
+            .write_plaintext(WorkspaceFileSlot::Recovery, &workspace("recoverable"))
+            .unwrap();
+        let data_key = migrate_plaintext_store(&store, "correct horse battery").unwrap();
+
+        clear_recovery_data_from_store(&store).unwrap();
+
+        let metadata = store.read_vault_metadata().unwrap().unwrap();
+        assert_eq!(metadata.migrated_slots, vec![WorkspaceFileSlot::Primary]);
+        assert!(!store.path(WorkspaceFileSlot::Recovery).exists());
+        verify_encrypted_store(&store, &metadata, &data_key).unwrap();
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn restore_failure_with_durable_pending_vault_requires_recovery() {
+        let directory = test_directory();
+        let store = WorkspaceFileStore::new(directory.clone());
+        fs::create_dir_all(&directory).unwrap();
+        write_atomically(&store.pending_vault_path(), b"pending-vault").unwrap();
+        let data_key = random_array::<DATA_KEY_BYTES>().unwrap();
+
+        assert_eq!(
+            classify_prepared_restore_install(
+                &store,
+                &data_key,
+                Err("replacement failed".to_owned()),
+            )
+            .unwrap(),
+            PreparedRestoreInstallOutcome::RecoveryRequired
+        );
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn restore_failure_before_any_durable_intent_remains_an_error() {
+        let directory = test_directory();
+        let store = WorkspaceFileStore::new(directory.clone());
+        let data_key = random_array::<DATA_KEY_BYTES>().unwrap();
+
+        assert_eq!(
+            classify_prepared_restore_install(&store, &data_key, Err("not committed".to_owned()),)
+                .unwrap_err(),
+            "not committed"
+        );
     }
 
     #[test]
@@ -5190,6 +5666,42 @@ mod tests {
             unwrap_data_key_with_system(&changed, &provider).unwrap(),
             data_key
         );
+    }
+
+    #[test]
+    fn password_change_requires_recovery_after_vault_replace_sync_failure() {
+        let directory = test_directory();
+        let store = WorkspaceFileStore::new(directory.clone());
+        fs::create_dir_all(&directory).unwrap();
+        let data_key = random_array::<DATA_KEY_BYTES>().unwrap();
+        let metadata =
+            create_vault_metadata("replacement master password", &data_key, Vec::new()).unwrap();
+        let serialized = serde_json::to_vec(&metadata).unwrap();
+
+        let write_status =
+            write_vault_metadata_commit_aware_with_parent_sync(&store, &serialized, |_| {
+                Err(io::Error::other("injected parent-directory sync failure"))
+            })
+            .unwrap();
+
+        assert_eq!(write_status, VaultMetadataWriteStatus::RecoveryRequired);
+        let result = password_change_recovery_result(write_status).unwrap();
+        assert_eq!(
+            result.status,
+            WorkspaceSecurityTransactionStatus::RecoveryRequired
+        );
+        assert!(result.security_status.is_none());
+        assert_eq!(fs::read(store.vault_path()).unwrap(), serialized);
+        assert_eq!(
+            unwrap_data_key(
+                &store.read_vault_metadata().unwrap().unwrap(),
+                "replacement master password",
+            )
+            .unwrap(),
+            data_key
+        );
+
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

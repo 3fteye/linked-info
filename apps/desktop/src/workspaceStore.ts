@@ -40,6 +40,7 @@ export interface WorkspacePersistence {
   load(): Promise<WorkspaceLoadResult>;
   loadRecovery(): Promise<WorkspaceLoadResult>;
   preserveForRecovery(workspace: WorkspaceSnapshot): Promise<void>;
+  runExclusiveTransaction<T>(transaction: () => Promise<T>): Promise<T>;
   save(workspace: WorkspaceSnapshot): Promise<void>;
   swapWithRecovery(): Promise<WorkspaceSwapResult>;
 }
@@ -115,6 +116,9 @@ export const localWorkspacePersistence: WorkspacePersistence = {
   },
   async preserveForRecovery(workspace) {
     saveLegacyBrowserWorkspace("recovery", workspace);
+  },
+  runExclusiveTransaction(transaction) {
+    return transaction();
   },
   async save(workspace) {
     saveLegacyBrowserWorkspace("primary", workspace);
