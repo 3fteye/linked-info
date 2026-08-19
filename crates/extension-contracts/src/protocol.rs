@@ -240,10 +240,7 @@ fn valid_identifier_segment(segment: &str) -> bool {
 }
 
 fn valid_contribution_id(id: &str) -> bool {
-    if id.is_empty() || id.len() > MAXIMUM_CONTRIBUTION_ID_BYTES || !id.is_ascii() {
-        return false;
-    }
-    id.split('.').all(valid_identifier_segment)
+    id.len() <= MAXIMUM_CONTRIBUTION_ID_BYTES && valid_identifier_segment(id)
 }
 
 pub fn qualified_contribution_id(extension_id: &str, contribution_id: &str) -> Option<String> {
@@ -467,8 +464,12 @@ mod tests {
     fn accepts_local_contribution_ids_and_qualifies_them_in_the_host() {
         assert_eq!(validate_extension_manifest(&manifest()), Ok(()));
         assert_eq!(
-            qualified_contribution_id("dev.example.json-tools", "processor.format-json"),
-            Some("dev.example.json-tools.processor.format-json".to_owned())
+            qualified_contribution_id("dev.example.json-tools", "format-json"),
+            Some("dev.example.json-tools.format-json".to_owned())
+        );
+        assert_eq!(
+            qualified_contribution_id("dev.example.foo", "bar.baz"),
+            None
         );
     }
 
@@ -596,16 +597,16 @@ mod tests {
             .unwrap();
         let regex = Regex::new(pattern).unwrap();
 
-        for valid in [
-            "processor",
-            "format-json",
-            "format.json",
-            "dev.example.json-tools.processor",
-        ] {
+        for valid in ["processor", "format-json", "processor2"] {
             assert!(valid_contribution_id(valid));
             assert!(regex.is_match(valid));
         }
-        for invalid in ["", "Processor", "format..json"] {
+        for invalid in [
+            "",
+            "Processor",
+            "format.json",
+            "dev.example.json-tools.processor",
+        ] {
             assert!(!valid_contribution_id(invalid));
             assert!(!regex.is_match(invalid));
         }

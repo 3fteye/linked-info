@@ -30,6 +30,7 @@ const METADATA_SCHEMA_PATH: &str = "metadata.schema.json";
 const CHECKSUMS_PATH: &str = "checksums.json";
 const SIGNATURE_PATH: &str = "signature.ed25519";
 const WASM_COMPONENT_HEADER: [u8; 8] = [0x00, 0x61, 0x73, 0x6d, 0x0d, 0x00, 0x01, 0x00];
+const MAXIMUM_EXACT_JSON_INTEGER: u64 = 9_007_199_254_740_991;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SignaturePolicy {
@@ -546,17 +547,13 @@ fn validate_schema_node(schema: &Value, depth: usize) -> Result<(), ExtensionPac
     let minimum = object
         .get("minimum")
         .map(|value| {
-            value
-                .as_f64()
-                .ok_or(ExtensionPackageError::InvalidMetadataSchema)
+            exact_metadata_number(value).ok_or(ExtensionPackageError::InvalidMetadataSchema)
         })
         .transpose()?;
     let maximum = object
         .get("maximum")
         .map(|value| {
-            value
-                .as_f64()
-                .ok_or(ExtensionPackageError::InvalidMetadataSchema)
+            exact_metadata_number(value).ok_or(ExtensionPackageError::InvalidMetadataSchema)
         })
         .transpose()?;
     if (minimum.is_some() || maximum.is_some()) && !matches!(value_type, "number" | "integer") {
@@ -663,7 +660,7 @@ fn metadata_value_satisfies_schema(schema: &Value, value: &Value, membership: bo
             length >= minimum && length <= maximum
         }
         "number" | "integer" => {
-            let Some(number) = value.as_f64() else {
+            let Some(number) = exact_metadata_number(value) else {
                 return false;
             };
             if value_type == "integer" && number.fract() != 0.0 {
@@ -671,17 +668,28 @@ fn metadata_value_satisfies_schema(schema: &Value, value: &Value, membership: bo
             }
             schema
                 .get("minimum")
-                .and_then(Value::as_f64)
+                .and_then(exact_metadata_number)
                 .is_none_or(|minimum| number >= minimum)
                 && schema
                     .get("maximum")
-                    .and_then(Value::as_f64)
+                    .and_then(exact_metadata_number)
                     .is_none_or(|maximum| number <= maximum)
         }
         "boolean" => value.is_boolean(),
         "null" => value.is_null(),
         _ => false,
     }
+}
+
+fn exact_metadata_number(value: &Value) -> Option<f64> {
+    if let Some(number) = value.as_i64() {
+        return (number.unsigned_abs() <= MAXIMUM_EXACT_JSON_INTEGER).then_some(number as f64);
+    }
+    if let Some(number) = value.as_u64() {
+        return (number <= MAXIMUM_EXACT_JSON_INTEGER).then_some(number as f64);
+    }
+    let number = value.as_f64()?;
+    (number.is_finite() && number.abs() <= MAXIMUM_EXACT_JSON_INTEGER as f64).then_some(number)
 }
 
 fn validate_metadata_value(value: &Value, depth: usize) -> Result<(), ExtensionPackageError> {
@@ -1213,6 +1221,15 @@ mod tests {
                 Ok(()),
             ),
             (json!({ "type": "integer", "const": 1 }), Ok(())),
+            (
+                json!({
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 9007199254740991_u64,
+                    "default": 9007199254740993_u64
+                }),
+                Err(ExtensionPackageError::InvalidMetadataSchema),
+            ),
         ];
 
         for (property, expected) in schemas {

@@ -124,7 +124,7 @@ view.extensionMetadata[extension_id]
 
 - 扩展包必须提供受限 JSON Schema，使用 `additionalProperties: false`。
 - 元数据只允许 JSON 标量、数组和对象，不允许二进制。
-- 字符串和数组必须声明上限；数字必须同时声明最小值和最大值，或使用有限 `enum` / `const`。Schema 中的 `default` 必须满足类型、枚举、长度、数量、必填字段和数值范围等全部已声明约束。
+- 字符串和数组必须声明上限；数字必须同时声明最小值和最大值，或使用有限 `enum` / `const`。为保证 Rust、Wasm 和 JavaScript 对签名 Schema 得到相同结果，数值的绝对值不得超过 JSON/JavaScript 可精确表示的最大整数 `2^53-1`。Schema 中的 `default` 必须满足类型、枚举、长度、数量、必填字段和数值范围等全部已声明约束。
 - 单节点单扩展记录最多 16 KiB。
 - 单扩展工作区级记录最多 64 KiB。
 - 单个扩展在一个工作区内最多 4 MiB。
@@ -182,7 +182,7 @@ checksums.json
 signature.ed25519
 ```
 
-`manifest.json` 至少包含：包格式版本、反向域名扩展 ID、语义版本、扩展 API 主次版本、入口、独立递增且大于零的元数据 Schema 版本、能力和贡献项。扩展 ID 创建后不可更改。清单中的处理器和动作只填写包内局部 ID，例如 `format-json`；宿主验证后统一生成 `dev.example.json-tools.format-json` 形式的完整 ID，扩展不能自行选择或冒用另一个命名空间。WIT 调用中的 `processor-id` 和 `action-id` 始终使用局部 ID；持久化选择项和宿主注册表只使用完整 ID。宿主用元数据 Schema 版本决定是否调用 `migrate-metadata` 以及迁移成功后写入哪个目标版本，不能从扩展包语义版本猜测。
+`manifest.json` 至少包含：包格式版本、反向域名扩展 ID、语义版本、扩展 API 主次版本、入口、独立递增且大于零的元数据 Schema 版本、能力和贡献项。扩展 ID 创建后不可更改。清单中的处理器和动作只填写不含点号的包内单段局部 ID，例如 `format-json`；宿主验证后统一生成 `dev.example.json-tools.format-json` 形式的完整 ID。由于局部 ID 只有一段，完整 ID 的最后一段总能无歧义地还原为局部 ID，其余部分总能还原为扩展 ID，不会发生注册表碰撞。扩展不能自行选择或冒用另一个命名空间。WIT 调用中的 `processor-id` 和 `action-id` 始终使用局部 ID；持久化选择项和宿主注册表只使用完整 ID。宿主用元数据 Schema 版本决定是否调用 `migrate-metadata` 以及迁移成功后写入哪个目标版本，不能从扩展包语义版本猜测。
 
 第一版限制：扩展包最多 32 MiB，Wasm 组件最多 16 MiB，清单最多 256 KiB。`checksums.json` 按路径排序记录所有受保护文件的 SHA-256；签名覆盖清单的精确字节。首次安装显示发布者 Ed25519 公钥指纹、包哈希和能力，用户明确选择信任；更新必须使用同一发布者密钥。开发者模式可以安装未签名包，但每次安装或更新都显示不可跳过的警告，不提供后台自动更新或扩展市场。
 
