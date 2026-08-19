@@ -1208,15 +1208,12 @@ pub async fn change_workspace_password(
     .await
     .map_err(|error| error.to_string())??;
     let (write_status, system_unlock_enabled, idle_timeout_minutes) = changed;
-    if write_status == VaultMetadataWriteStatus::RecoveryRequired {
+    if let Some(result) = password_change_recovery_result(write_status) {
         lock_workspace_runtime_with_terminal_event(
             &app,
             "workspace_password_change_recovery_required",
         );
-        return Ok(WorkspaceSecurityTransactionResult {
-            status: WorkspaceSecurityTransactionStatus::RecoveryRequired,
-            security_status: None,
-        });
+        return Ok(result);
     }
     let session_current = ensure_workspace_access(&app, &state, Some(permit)).is_ok();
     let locked = !session_current;
@@ -2493,11 +2490,35 @@ enum VaultMetadataWriteStatus {
     RecoveryRequired,
 }
 
+fn password_change_recovery_result(
+    write_status: VaultMetadataWriteStatus,
+) -> Option<WorkspaceSecurityTransactionResult> {
+    match write_status {
+        VaultMetadataWriteStatus::RecoveryRequired => Some(WorkspaceSecurityTransactionResult {
+            status: WorkspaceSecurityTransactionStatus::RecoveryRequired,
+            security_status: None,
+        }),
+        VaultMetadataWriteStatus::Committed => None,
+    }
+}
+
 fn write_vault_metadata_commit_aware(
     store: &WorkspaceFileStore,
     serialized: &[u8],
 ) -> Result<VaultMetadataWriteStatus, String> {
-    match write_atomically(&store.vault_path(), serialized) {
+    write_vault_metadata_commit_aware_with_parent_sync(store, serialized, sync_parent_directory)
+}
+
+fn write_vault_metadata_commit_aware_with_parent_sync(
+    store: &WorkspaceFileStore,
+    serialized: &[u8],
+    confirm_parent_durability: impl FnOnce(&Path) -> io::Result<()>,
+) -> Result<VaultMetadataWriteStatus, String> {
+    match write_atomically_with_parent_sync(
+        &store.vault_path(),
+        serialized,
+        confirm_parent_durability,
+    ) {
         Ok(()) => Ok(VaultMetadataWriteStatus::Committed),
         Err(write_error) => match fs::read(store.vault_path()) {
             Ok(current) if current == serialized => {
@@ -3807,6 +3828,14 @@ fn workspace_storage_from_export(contents: &str) -> io::Result<String> {
 }
 
 pub(crate) fn write_atomically(target: &Path, contents: &[u8]) -> io::Result<()> {
+    write_atomically_with_parent_sync(target, contents, sync_parent_directory)
+}
+
+fn write_atomically_with_parent_sync(
+    target: &Path,
+    contents: &[u8],
+    confirm_parent_durability: impl FnOnce(&Path) -> io::Result<()>,
+) -> io::Result<()> {
     let parent = target.parent().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -3835,7 +3864,7 @@ pub(crate) fn write_atomically(target: &Path, contents: &[u8]) -> io::Result<()>
         file.sync_all()?;
         drop(file);
         replace_file(&temporary, target)?;
-        sync_parent_directory(parent)
+        confirm_parent_durability(parent)
     })();
 
     if write_result.is_err() {
@@ -5637,6 +5666,42 @@ mod tests {
             unwrap_data_key_with_system(&changed, &provider).unwrap(),
             data_key
         );
+    }
+
+    #[test]
+    fn password_change_requires_recovery_after_vault_replace_sync_failure() {
+        let directory = test_directory();
+        let store = WorkspaceFileStore::new(directory.clone());
+        fs::create_dir_all(&directory).unwrap();
+        let data_key = random_array::<DATA_KEY_BYTES>().unwrap();
+        let metadata =
+            create_vault_metadata("replacement master password", &data_key, Vec::new()).unwrap();
+        let serialized = serde_json::to_vec(&metadata).unwrap();
+
+        let write_status =
+            write_vault_metadata_commit_aware_with_parent_sync(&store, &serialized, |_| {
+                Err(io::Error::other("injected parent-directory sync failure"))
+            })
+            .unwrap();
+
+        assert_eq!(write_status, VaultMetadataWriteStatus::RecoveryRequired);
+        let result = password_change_recovery_result(write_status).unwrap();
+        assert_eq!(
+            result.status,
+            WorkspaceSecurityTransactionStatus::RecoveryRequired
+        );
+        assert!(result.security_status.is_none());
+        assert_eq!(fs::read(store.vault_path()).unwrap(), serialized);
+        assert_eq!(
+            unwrap_data_key(
+                &store.read_vault_metadata().unwrap().unwrap(),
+                "replacement master password",
+            )
+            .unwrap(),
+            data_key
+        );
+
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
