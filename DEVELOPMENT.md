@@ -264,6 +264,8 @@ Cloudflare 不是桌面端的固定依赖。`apps/cloudflare-worker` 通过供�
 
 ## 修改约定
 
+日常修改使用短期功能分支和 Pull Request，不直接推送 `main`。分支、Codex 普通 Code Review、独立 Security Review、必需 CI 和合并方式见 [CONTRIBUTING.md](CONTRIBUTING.md)；普通审查规则见 [AGENTS.md](AGENTS.md)，安全审查的唯一完整规则来源仍是 [SECURITY.md](SECURITY.md)。
+
 - 先搜索同类实现，保持现有模式一致。
 - UI 文案必须同时进入 `apps/desktop/src/locales.ts` 的中文和英文资源，不能在组件中直接硬编码。
 - 画布坐标、层级、缩放和筛选状态不能写入节点领域模型。
