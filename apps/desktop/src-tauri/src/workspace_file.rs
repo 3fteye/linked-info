@@ -1057,7 +1057,7 @@ pub async fn unlock_workspace(
             .read_vault_metadata()?
             .ok_or_else(|| "workspace_vault_not_configured".to_owned())?;
         let data_key = unwrap_data_key(&metadata, &password)?;
-        verify_encrypted_store(&store, &data_key)?;
+        verify_encrypted_store(&store, &metadata, &data_key)?;
         let system_unlock_enabled =
             system_unlock_enabled(Some(&metadata), provider_for_unlock.as_ref());
         Ok::<([u8; DATA_KEY_BYTES], bool, Option<u32>), String>((
@@ -1113,7 +1113,7 @@ pub async fn unlock_workspace_with_system(
             .read_vault_metadata()?
             .ok_or_else(|| "workspace_vault_not_configured".to_owned())?;
         let data_key = unwrap_data_key_with_system(&metadata, provider_for_unlock.as_ref())?;
-        verify_encrypted_store(&store, &data_key)?;
+        verify_encrypted_store(&store, &metadata, &data_key)?;
         Ok::<([u8; DATA_KEY_BYTES], Option<u32>), String>((data_key, metadata.idle_timeout_minutes))
     })
     .await
@@ -2686,12 +2686,17 @@ fn decrypt_workspace_file(
 
 fn verify_encrypted_store(
     store: &WorkspaceFileStore,
+    metadata: &VaultMetadata,
     data_key: &[u8; DATA_KEY_BYTES],
 ) -> Result<(), String> {
     for slot in [WorkspaceFileSlot::Primary, WorkspaceFileSlot::Recovery] {
-        if let Some(contents) = store.read(slot, Some(data_key))? {
-            validate_storage_envelope(&contents)
-                .map_err(|error| format!("workspace_vault_invalid_decrypted_workspace:{error}"))?;
+        match store.read(slot, Some(data_key))? {
+            Some(contents) => validate_storage_envelope(&contents)
+                .map_err(|error| format!("workspace_vault_invalid_decrypted_workspace:{error}"))?,
+            None if metadata.migrated_slots.contains(&slot) => {
+                return Err("workspace_vault_declared_workspace_missing".to_owned());
+            }
+            None => {}
         }
     }
     Ok(())
@@ -2747,9 +2752,10 @@ fn classify_prepared_restore_install(
         Err(error) => error,
     };
     match store.read_vault_metadata() {
-        Ok(Some(_)) => {
+        Ok(Some(metadata)) => {
             return Ok(classify_committed_restore_store(
                 store,
+                &metadata,
                 prepared_data_key,
                 || sync_parent_directory(&store.base_directory),
             ));
@@ -2768,10 +2774,11 @@ fn classify_prepared_restore_install(
 
 fn classify_committed_restore_store(
     store: &WorkspaceFileStore,
+    metadata: &VaultMetadata,
     data_key: &[u8; DATA_KEY_BYTES],
     confirm_durability: impl FnOnce() -> io::Result<()>,
 ) -> PreparedRestoreInstallOutcome {
-    if verify_encrypted_store(store, data_key).is_ok() && confirm_durability().is_ok() {
+    if verify_encrypted_store(store, metadata, data_key).is_ok() && confirm_durability().is_ok() {
         PreparedRestoreInstallOutcome::CommittedLocked
     } else {
         PreparedRestoreInstallOutcome::RecoveryRequired
@@ -2833,7 +2840,7 @@ fn install_prepared_workspace_restore(
     write_atomically(&store.pending_vault_path(), &serialized)
         .map_err(|error| error.to_string())?;
     finish_pending_migration(store, &metadata)?;
-    verify_encrypted_store(store, &prepared.data_key)?;
+    verify_encrypted_store(store, &metadata, &prepared.data_key)?;
     Ok(*prepared.data_key)
 }
 
@@ -3237,7 +3244,7 @@ fn prepare_data_key_rotation(
     let previous_metadata = store
         .read_vault_metadata()?
         .ok_or_else(|| "workspace_vault_not_configured".to_owned())?;
-    verify_encrypted_store(store, previous_data_key)?;
+    verify_encrypted_store(store, &previous_metadata, previous_data_key)?;
 
     let mut slots = Vec::new();
     for slot in [WorkspaceFileSlot::Primary, WorkspaceFileSlot::Recovery] {
@@ -5204,6 +5211,7 @@ mod tests {
             .write_plaintext(WorkspaceFileSlot::Primary, &workspace("committed"))
             .unwrap();
         let data_key = migrate_plaintext_store(&store, "correct horse battery").unwrap();
+        let metadata = store.read_vault_metadata().unwrap().unwrap();
 
         assert_eq!(
             classify_prepared_restore_install(
@@ -5215,7 +5223,7 @@ mod tests {
             PreparedRestoreInstallOutcome::CommittedLocked
         );
         assert_eq!(
-            classify_committed_restore_store(&store, &data_key, || {
+            classify_committed_restore_store(&store, &metadata, &data_key, || {
                 Err(io::Error::other("injected directory sync failure"))
             }),
             PreparedRestoreInstallOutcome::RecoveryRequired
@@ -5260,6 +5268,37 @@ mod tests {
         write_atomically(&store.vault_path(), &serde_json::to_vec(&metadata).unwrap()).unwrap();
         write_atomically(&store.path(WorkspaceFileSlot::Primary), b"damaged-primary").unwrap();
 
+        assert_eq!(
+            classify_prepared_restore_install(
+                &store,
+                &data_key,
+                Err("verification failed".to_owned()),
+            )
+            .unwrap(),
+            PreparedRestoreInstallOutcome::RecoveryRequired
+        );
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn restore_failure_with_a_missing_declared_primary_requires_recovery() {
+        let directory = test_directory();
+        let store = WorkspaceFileStore::new(directory.clone());
+        fs::create_dir_all(&directory).unwrap();
+        let data_key = random_array::<DATA_KEY_BYTES>().unwrap();
+        let metadata = create_vault_metadata(
+            "correct horse battery",
+            &data_key,
+            vec![WorkspaceFileSlot::Primary],
+        )
+        .unwrap();
+        write_atomically(&store.vault_path(), &serde_json::to_vec(&metadata).unwrap()).unwrap();
+
+        assert_eq!(
+            verify_encrypted_store(&store, &metadata, &data_key).unwrap_err(),
+            "workspace_vault_declared_workspace_missing"
+        );
         assert_eq!(
             classify_prepared_restore_install(
                 &store,
