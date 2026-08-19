@@ -292,24 +292,51 @@ test("TOTP clock updates keep the rendered line geometry stable", async ({ page 
 
 test("low-zoom TOTP updates keep every connected path stable", async ({ page }) => {
   await page.addInitScript(() => {
-    const secondTimerDelays: number[] = [];
+    const activeSecondTimers = new Set<number>();
+    const secondTimerStats = {
+      maximumConcurrent: 0,
+      scheduled: 0,
+    };
     const nativeSetTimeout = window.setTimeout.bind(window);
+    const nativeClearTimeout = window.clearTimeout.bind(window);
     window.setTimeout = ((
       handler: TimerHandler,
       timeout?: number,
       ...arguments_: unknown[]
     ) => {
-      if (
+      const tracksSecondClock =
         timeout !== undefined &&
         timeout >= 50 &&
         timeout <= 1_050 &&
-        (new Error().stack ?? "").includes("/totpContent.tsx")
-      ) {
-        secondTimerDelays.push(timeout);
+        (new Error().stack ?? "").includes("/totpContent.tsx");
+      if (!tracksSecondClock || typeof handler !== "function") {
+        return nativeSetTimeout(handler, timeout, ...arguments_);
       }
-      return nativeSetTimeout(handler, timeout, ...arguments_);
+
+      let timerId = 0;
+      timerId = nativeSetTimeout(
+        (...callbackArguments: unknown[]) => {
+          activeSecondTimers.delete(timerId);
+          handler(...callbackArguments);
+        },
+        timeout,
+        ...arguments_,
+      );
+      activeSecondTimers.add(timerId);
+      secondTimerStats.scheduled += 1;
+      secondTimerStats.maximumConcurrent = Math.max(
+        secondTimerStats.maximumConcurrent,
+        activeSecondTimers.size,
+      );
+      return timerId;
     }) as typeof window.setTimeout;
-    Reflect.set(window, "__linkedInfoSecondTimerDelays", secondTimerDelays);
+    window.clearTimeout = ((timerId?: number) => {
+      if (timerId !== undefined) {
+        activeSecondTimers.delete(timerId);
+      }
+      nativeClearTimeout(timerId);
+    }) as typeof window.clearTimeout;
+    Reflect.set(window, "__linkedInfoSecondTimerStats", secondTimerStats);
     const startedAt = performance.now();
     Date.now = () => 298_000 + (performance.now() - startedAt);
   });
@@ -339,10 +366,15 @@ test("low-zoom TOTP updates keep every connected path stable", async ({ page }) 
   );
   await expect(page.locator(".totp-content-line")).toHaveCount(15);
   await expect(page.locator(".graph-reference-path").first()).toHaveAttribute("d", /^M/u);
-  const secondTimerCount = await page.evaluate(() =>
-    (Reflect.get(window, "__linkedInfoSecondTimerDelays") as number[]).length,
+  const secondTimerStats = await page.evaluate(
+    () =>
+      Reflect.get(window, "__linkedInfoSecondTimerStats") as {
+        maximumConcurrent: number;
+        scheduled: number;
+      },
   );
-  expect(secondTimerCount).toBeLessThanOrEqual(2);
+  expect(secondTimerStats.scheduled).toBeGreaterThan(0);
+  expect(secondTimerStats.maximumConcurrent).toBeLessThanOrEqual(1);
 
   const samples = await page.evaluate(async () => {
     const geometry: Array<{
