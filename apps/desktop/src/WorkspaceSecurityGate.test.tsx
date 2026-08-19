@@ -67,4 +67,27 @@ describe("WorkspaceSecurityGate", () => {
     expect(container.querySelector('[data-testid="secret-content"]')).toBeNull();
     expect(container.querySelector(".security-gate")).not.toBeNull();
   });
+
+  it("keeps the recovery-required boundary above the unmounted App", async () => {
+    const listenerRef = { current: null as ((reason: string) => void) | null };
+    const workspaceSecurity = security(listenerRef);
+    await act(async () => {
+      root.render(
+        <WorkspaceSecurityGate security={workspaceSecurity}>
+          {() => <div data-testid="secret-content">secret</div>}
+        </WorkspaceSecurityGate>,
+      );
+    });
+
+    await act(async () => {
+      listenerRef.current?.("workspace_password_change_recovery_required");
+      await Promise.resolve();
+    });
+
+    expect(container.querySelector('[data-testid="secret-content"]')).toBeNull();
+    expect(
+      container.querySelector('[data-testid="workspace-security-recovery-required"]'),
+    ).not.toBeNull();
+    expect(container.querySelector("#workspace-unlock-password")).toBeNull();
+  });
 });
