@@ -39,6 +39,10 @@ import { useTranslation } from "react-i18next";
 import GraphCanvas from "./GraphCanvas";
 import CanvasOperationGuide from "./CanvasOperationGuide";
 import { canvasOperationIds } from "./canvasOperations";
+import {
+  loadCanvasAutoAvoidOverlaps,
+  saveCanvasAutoAvoidOverlaps,
+} from "./canvasPreferences";
 import DocumentImportDialog from "./DocumentImportDialog";
 import {
   buildDocumentImportWorkspace,
@@ -406,6 +410,11 @@ function App({
   const [searchTerm, setSearchTerm] = useState("");
   const [searchScope, setSearchScope] = useState<NodeSearchScope>("name");
   const [unmatchedNodeOpacity, setUnmatchedNodeOpacity] = useState(20);
+  const [autoAvoidCanvasOverlaps, setAutoAvoidCanvasOverlaps] = useState(() =>
+    loadCanvasAutoAvoidOverlaps(
+      typeof localStorage === "undefined" ? null : localStorage,
+    ),
+  );
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [unnamedOnly, setUnnamedOnly] = useState(false);
   const [referenceFilterNodeIds, setReferenceFilterNodeIds] = useState<string[]>([]);
@@ -608,6 +617,13 @@ function App({
   useEffect(() => {
     editingNodeIdRef.current = editingNodeId;
   }, [editingNodeId]);
+
+  useEffect(() => {
+    saveCanvasAutoAvoidOverlaps(
+      typeof localStorage === "undefined" ? null : localStorage,
+      autoAvoidCanvasOverlaps,
+    );
+  }, [autoAvoidCanvasOverlaps]);
 
   useEffect(() => {
     return () => {
@@ -4328,6 +4344,26 @@ function App({
                   </h2>
                   <p>{t("settings.operationGuideDescription")}</p>
                 </header>
+                <div className="setting-row">
+                  <div className="setting-label">
+                    <Network size={18} />
+                    <div className="setting-label-copy">
+                      <span>{t("canvasLayout.autoAvoidTitle")}</span>
+                      <small>{t("canvasLayout.autoAvoidDescription")}</small>
+                    </div>
+                  </div>
+                  <label className="switch-setting">
+                    <input
+                      checked={autoAvoidCanvasOverlaps}
+                      data-testid="auto-avoid-canvas-overlaps"
+                      onChange={(event) =>
+                        setAutoAvoidCanvasOverlaps(event.target.checked)
+                      }
+                      type="checkbox"
+                    />
+                    <span>{t("canvasLayout.autoAvoidEnable")}</span>
+                  </label>
+                </div>
                 <div className="setting-row operation-guide-setting-row">
                   <div className="setting-label">
                     <Keyboard size={18} />
@@ -5618,6 +5654,7 @@ function App({
           ) : activeView === "canvas" ? (
             <GraphCanvas
               analyzingNodeId={analyzingNodeId}
+              autoAvoidOverlaps={autoAvoidCanvasOverlaps}
               canRedo={historyAvailability.canRedo}
               canUndo={historyAvailability.canUndo}
               editingNodeId={editingNodeId}
@@ -5676,6 +5713,26 @@ function App({
                 noMatches: t("empty.search"),
                 filterByNode: t("filters.filterByNode"),
                 fitNodeContent: t("nodeSize.fit"),
+                arrangeNodes: (count) =>
+                  t("canvasLayout.arrangeAction", { count }),
+                arrangementApply: t("canvasLayout.apply"),
+                arrangementDescription: (count) =>
+                  t("canvasLayout.description", { count }),
+                arrangementFailed: t("canvasLayout.failed"),
+                arrangementMode: t("canvasLayout.mode"),
+                arrangementModes: {
+                  auto: t("canvasLayout.modes.auto"),
+                  grid: t("canvasLayout.modes.grid"),
+                  overlap: t("canvasLayout.modes.overlap"),
+                  relationship: t("canvasLayout.modes.relationship"),
+                },
+                arrangementSize: t("canvasLayout.size"),
+                arrangementSizes: {
+                  "equal-size": t("canvasLayout.sizes.equal-size"),
+                  "equal-width": t("canvasLayout.sizes.equal-width"),
+                  preserve: t("canvasLayout.sizes.preserve"),
+                },
+                arrangementTitle: t("canvasLayout.title"),
                 name: t("editor.name"),
                 nameConflict: t("validation.nameUnique"),
                 namePlaceholder: t("editor.namePlaceholder"),

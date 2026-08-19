@@ -3144,27 +3144,21 @@ fn validate_workspace_snapshot(
             .ok_or_else(|| invalid_workspace_data("workspace layout x must be finite"))?;
         finite_json_number(item.get("y"))
             .ok_or_else(|| invalid_workspace_data("workspace layout y must be finite"))?;
-        match (item.get("width"), item.get("height")) {
-            (None, None) => {}
-            (Some(width), Some(height)) => {
-                let width = finite_json_number(Some(width)).ok_or_else(|| {
-                    invalid_workspace_data("workspace layout width must be finite")
-                })?;
-                let height = finite_json_number(Some(height)).ok_or_else(|| {
-                    invalid_workspace_data("workspace layout height must be finite")
-                })?;
-                if !(MINIMUM_MANUAL_NODE_WIDTH..=MAXIMUM_MANUAL_NODE_DIMENSION).contains(&width)
-                    || !(MINIMUM_MANUAL_NODE_HEIGHT..=MAXIMUM_MANUAL_NODE_DIMENSION)
-                        .contains(&height)
-                {
-                    return Err(invalid_workspace_data(
-                        "workspace layout dimensions are out of range",
-                    ));
-                }
-            }
-            _ => {
+        if let Some(width) = item.get("width") {
+            let width = finite_json_number(Some(width))
+                .ok_or_else(|| invalid_workspace_data("workspace layout width must be finite"))?;
+            if !(MINIMUM_MANUAL_NODE_WIDTH..=MAXIMUM_MANUAL_NODE_DIMENSION).contains(&width) {
                 return Err(invalid_workspace_data(
-                    "workspace layout width and height must be stored together",
+                    "workspace layout width is out of range",
+                ));
+            }
+        }
+        if let Some(height) = item.get("height") {
+            let height = finite_json_number(Some(height))
+                .ok_or_else(|| invalid_workspace_data("workspace layout height must be finite"))?;
+            if !(MINIMUM_MANUAL_NODE_HEIGHT..=MAXIMUM_MANUAL_NODE_DIMENSION).contains(&height) {
+                return Err(invalid_workspace_data(
+                    "workspace layout height is out of range",
                 ));
             }
         }
@@ -3518,7 +3512,12 @@ mod tests {
         let mut partial_dimensions: serde_json::Value =
             serde_json::from_str(&workspace("OpenAI")).unwrap();
         partial_dimensions["layout"][0]["width"] = serde_json::json!(480);
-        assert!(validate_storage_envelope(&partial_dimensions.to_string()).is_err());
+        assert!(validate_storage_envelope(&partial_dimensions.to_string()).is_ok());
+
+        let mut unsafe_dimensions: serde_json::Value =
+            serde_json::from_str(&workspace("OpenAI")).unwrap();
+        unsafe_dimensions["layout"][0]["height"] = serde_json::json!(91);
+        assert!(validate_storage_envelope(&unsafe_dimensions.to_string()).is_err());
 
         let mut manual_dimensions: serde_json::Value =
             serde_json::from_str(&workspace("OpenAI")).unwrap();

@@ -54,7 +54,9 @@ function cardProps(overrides: Record<string, unknown> = {}): NodeProps<any> {
       markerPayloadInvalidLabel: (markerLabel: string) =>
         `Invalid ${markerLabel} payload`,
       markerSelectionConflictLabel: "Selection crosses marker boundaries",
+      manualHeight: false,
       manualSize: false,
+      manualWidth: false,
       removeMarkerLabel: "Remove marker",
       saveMarkerNoteLabel: "Save description",
       fitNodeContentLabel: "Fit content",

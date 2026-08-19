@@ -69,7 +69,8 @@ interface PreviewNodeData extends Record<string, unknown> {
   content: string | null;
   status: PreviewNodeStatus;
   badges: string[];
-  manualSize: boolean;
+  manualHeight: boolean;
+  manualWidth: boolean;
   unnamedLabel: string;
   noContentLabel: string;
 }
@@ -89,7 +90,8 @@ function PreviewNodeCard({ data }: NodeProps<RestoreFlowNode>) {
   return (
     <article
       className="restore-preview-node"
-      data-manual-size={data.manualSize}
+      data-manual-height={data.manualHeight}
+      data-manual-width={data.manualWidth}
       data-status={data.status}
     >
       <Handle
@@ -147,16 +149,20 @@ function makeNode(
       content: node.content,
       status,
       badges,
-      manualSize: layout.width !== undefined && layout.height !== undefined,
+      manualHeight: layout.height !== undefined,
+      manualWidth: layout.width !== undefined,
       unnamedLabel: labels.unnamed,
       noContentLabel: labels.noContent,
     },
     draggable: false,
     selectable: false,
     style:
-      layout.width === undefined || layout.height === undefined
+      layout.width === undefined && layout.height === undefined
         ? undefined
-        : { height: layout.height, width: layout.width },
+        : {
+            ...(layout.height === undefined ? {} : { height: layout.height }),
+            ...(layout.width === undefined ? {} : { width: layout.width }),
+          },
     zIndex,
   };
 }

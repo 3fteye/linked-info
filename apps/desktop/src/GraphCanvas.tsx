@@ -27,6 +27,7 @@ import {
   Filter,
   GripVertical,
   Keyboard,
+  LayoutGrid,
   Link2,
   Maximize2,
   Pencil,
@@ -63,8 +64,17 @@ import {
   minimumManualNodeWidth,
   normalizeNodeName,
   updateNodeLayoutDimensions,
+  updateNodeLayoutSizeOverrides,
   updateNodeLayoutPositions,
 } from "./workspaceStore";
+import {
+  avoidCanvasNodeOverlaps,
+  type CanvasRectangle,
+} from "./canvasOverlap";
+import type {
+  SmartArrangementMode,
+  SmartArrangementSizeMode,
+} from "./canvasAutoLayout";
 import {
   appendExistingNodeReference,
   appendNodeReference,
@@ -125,7 +135,9 @@ interface InformationNodeData extends Record<string, unknown> {
   markerNotePlaceholder: string;
   markerPayloadInvalidLabel: (markerLabel: string) => string;
   markerSelectionConflictLabel: string;
+  manualHeight: boolean;
   manualSize: boolean;
+  manualWidth: boolean;
   removeMarkerLabel: string;
   saveMarkerNoteLabel: string;
   fitNodeContentLabel: string;
@@ -244,6 +256,15 @@ interface GraphLabels {
   noMatches: string;
   filterByNode: string;
   fitNodeContent: string;
+  arrangeNodes: (count: number) => string;
+  arrangementApply: string;
+  arrangementDescription: (count: number) => string;
+  arrangementFailed: string;
+  arrangementMode: string;
+  arrangementModes: Record<SmartArrangementMode, string>;
+  arrangementSize: string;
+  arrangementSizes: Record<SmartArrangementSizeMode, string>;
+  arrangementTitle: string;
   incomingReferenceBrowserFilter: string;
   incomingReferenceBrowserNoMatches: string;
   incomingReferenceBrowserSearch: string;
@@ -281,6 +302,7 @@ interface GraphLabels {
 
 interface GraphCanvasProps {
   analyzingNodeId: string | null;
+  autoAvoidOverlaps: boolean;
   nodes: InformationNode[];
   layout: NodeLayout[];
   references: NodeReference[];
@@ -336,6 +358,14 @@ type ContextMenuState =
       nodeId: string;
       nodeIds: string[];
     };
+
+interface SmartArrangementState {
+  busy: boolean;
+  error: string | null;
+  mode: SmartArrangementMode;
+  nodeIds: string[];
+  sizeMode: SmartArrangementSizeMode;
+}
 
 interface IncomingReferenceBrowserState {
   left: number;
@@ -624,7 +654,9 @@ export function InformationNodeCard({
       className="graph-node"
       data-editing={data.editing}
       data-interactive={data.interactive}
+      data-manual-height={data.manualHeight || resizing}
       data-manual-size={data.manualSize || resizing}
+      data-manual-width={data.manualWidth || resizing}
       data-node-id={id}
       data-overflowing={contentOverflowing}
       data-selected={selected}
@@ -988,13 +1020,15 @@ const canvasSelectionAutoPanDelayMs = 160;
 const incomingReferenceBrowserRenderLimit = 100;
 const maximumFitContentNodeWidth = 900;
 const maximumFitContentNodeHeight = 1_200;
+const defaultAutomaticNodeWidth = 270;
+const defaultAutomaticNodeHeight = 92;
 
 function flowNodeWidth(node: InformationFlowNode): number {
   const styledWidth = node.style?.width;
   return (
     node.measured?.width ??
     node.width ??
-    (typeof styledWidth === "number" ? styledWidth : 270)
+    (typeof styledWidth === "number" ? styledWidth : defaultAutomaticNodeWidth)
   );
 }
 
@@ -1003,7 +1037,7 @@ function flowNodeHeight(node: InformationFlowNode): number {
   return (
     node.measured?.height ??
     node.height ??
-    (typeof styledHeight === "number" ? styledHeight : 92)
+    (typeof styledHeight === "number" ? styledHeight : defaultAutomaticNodeHeight)
   );
 }
 
@@ -1085,6 +1119,7 @@ function referencedNodeLabel(
 
 export default function GraphCanvas({
   analyzingNodeId,
+  autoAvoidOverlaps,
   contentMarkerOptions,
   contentProcessorByNodeId,
   contentProcessorOptions,
@@ -1144,6 +1179,8 @@ export default function GraphCanvas({
   const [navigationFocusNodeId, setNavigationFocusNodeId] =
     useState<string | null>(null);
   const [fitContentNodeId, setFitContentNodeId] = useState<string | null>(null);
+  const [smartArrangement, setSmartArrangement] =
+    useState<SmartArrangementState | null>(null);
   const [pendingDeletionNodeIds, setPendingDeletionNodeIds] = useState<string[]>([]);
   const [secretClipboardNotice, setSecretClipboardNotice] = useState<{
     error: boolean;
@@ -1165,6 +1202,83 @@ export default function GraphCanvas({
   const layoutRef = useRef(layout);
   layoutRef.current = layout;
   const lastFilteredNodeIdsRef = useRef(filteredNodeIds);
+  const settledNodeSizeByIdRef = useRef(
+    new Map<string, { height: number; width: number }>(),
+  );
+  const pendingCommitAvoidanceRef = useRef<{
+    before: { height: number; width: number } | null;
+    nodeId: string;
+  } | null>(null);
+  const smartArrangementAbortControllerRef = useRef<AbortController | null>(null);
+
+  useEffect(
+    () => () => {
+      smartArrangementAbortControllerRef.current?.abort();
+      smartArrangementAbortControllerRef.current = null;
+    },
+    [],
+  );
+
+  const canvasRectangles = useCallback(
+    (
+      anchorOverride?: {
+        height: number;
+        nodeId: string;
+        width: number;
+        x: number;
+        y: number;
+      },
+    ): CanvasRectangle[] =>
+      flowNodesRef.current.map((node) =>
+        anchorOverride?.nodeId === node.id
+          ? {
+              height: anchorOverride.height,
+              id: node.id,
+              width: anchorOverride.width,
+              x: anchorOverride.x,
+              y: anchorOverride.y,
+            }
+          : {
+              height: flowNodeHeight(node),
+              id: node.id,
+              width: flowNodeWidth(node),
+              x: node.position.x,
+              y: node.position.y,
+            },
+      ),
+    [],
+  );
+
+  const layoutWithAutomaticAvoidance = useCallback(
+    (
+      baseLayout: NodeLayout[],
+      nodeId: string,
+      anchorOverride?: {
+        height: number;
+        nodeId: string;
+        width: number;
+        x: number;
+        y: number;
+      },
+    ): NodeLayout[] => {
+      if (!autoAvoidOverlaps) {
+        return baseLayout;
+      }
+      const before = canvasRectangles(anchorOverride);
+      const after = avoidCanvasNodeOverlaps(before, new Set([nodeId]));
+      const moved = after.filter((node, index) => {
+        const previous = before[index];
+        return node.x !== previous.x || node.y !== previous.y;
+      });
+      return moved.length === 0
+        ? baseLayout
+        : updateNodeLayoutPositions(
+            baseLayout,
+            moved.map((node) => ({ nodeId: node.id, x: node.x, y: node.y })),
+          );
+    },
+    [autoAvoidOverlaps, canvasRectangles],
+  );
 
   const commitNodeDimensions = useCallback(
     (
@@ -1176,12 +1290,19 @@ export default function GraphCanvas({
         nodeId,
         dimensions,
       );
-      const nextLayout = moveNodeLayoutToFront(resized, nodeId);
+      const avoided =
+        dimensions === null
+          ? resized
+          : layoutWithAutomaticAvoidance(resized, nodeId, {
+              ...dimensions,
+              nodeId,
+            });
+      const nextLayout = moveNodeLayoutToFront(avoided, nodeId);
       if (nextLayout !== layoutRef.current) {
         onLayoutChange(nextLayout);
       }
     },
-    [onLayoutChange],
+    [layoutWithAutomaticAvoidance, onLayoutChange],
   );
 
   const fitNodeContent = useCallback((nodeId: string) => {
@@ -1244,6 +1365,189 @@ export default function GraphCanvas({
     },
     [commitNodeDimensions],
   );
+
+  const commitNodeAndScheduleAvoidance = useCallback(
+    (nodeId: string) => {
+      pendingCommitAvoidanceRef.current = autoAvoidOverlaps
+        ? {
+            before:
+              settledNodeSizeByIdRef.current.get(nodeId) ??
+              {
+                height: defaultAutomaticNodeHeight,
+                width: defaultAutomaticNodeWidth,
+              },
+            nodeId,
+          }
+        : null;
+      onNodeCommit(nodeId);
+    },
+    [autoAvoidOverlaps, onNodeCommit],
+  );
+
+  useEffect(() => {
+    for (const node of flowNodes) {
+      if (node.id === editingNodeId) {
+        continue;
+      }
+      settledNodeSizeByIdRef.current.set(node.id, {
+        height: flowNodeHeight(node),
+        width: flowNodeWidth(node),
+      });
+    }
+  }, [editingNodeId, flowNodes]);
+
+  useEffect(() => {
+    const pending = pendingCommitAvoidanceRef.current;
+    if (pending === null || editingNodeId === pending.nodeId) {
+      return;
+    }
+    pendingCommitAvoidanceRef.current = null;
+    let secondFrame = 0;
+    const firstFrame = window.requestAnimationFrame(() => {
+      secondFrame = window.requestAnimationFrame(() => {
+        const nodeElement = containerRef.current?.querySelector<HTMLElement>(
+          `.graph-node[data-node-id="${pending.nodeId}"]`,
+        );
+        const flowNode = flowNodesRef.current.find(
+          (node) => node.id === pending.nodeId,
+        );
+        if (
+          nodeElement === null ||
+          nodeElement === undefined ||
+          flowNode === undefined
+        ) {
+          return;
+        }
+        const after = {
+          height: nodeElement.offsetHeight,
+          width: nodeElement.offsetWidth,
+        };
+        settledNodeSizeByIdRef.current.set(pending.nodeId, after);
+        if (
+          pending.before === null ||
+          (Math.abs(pending.before.width - after.width) < 1 &&
+            Math.abs(pending.before.height - after.height) < 1)
+        ) {
+          return;
+        }
+        const nextLayout = layoutWithAutomaticAvoidance(
+          layoutRef.current,
+          pending.nodeId,
+          {
+            ...after,
+            nodeId: pending.nodeId,
+            x: flowNode.position.x,
+            y: flowNode.position.y,
+          },
+        );
+        if (nextLayout !== layoutRef.current) {
+          onLayoutChange(nextLayout);
+        }
+      });
+    });
+    return () => {
+      window.cancelAnimationFrame(firstFrame);
+      window.cancelAnimationFrame(secondFrame);
+    };
+  }, [editingNodeId, layoutWithAutomaticAvoidance, onLayoutChange]);
+
+  const openSmartArrangement = useCallback((nodeIds: readonly string[]) => {
+    const uniqueNodeIds = Array.from(new Set(nodeIds));
+    if (uniqueNodeIds.length < 2) {
+      return;
+    }
+    setSmartArrangement({
+      busy: false,
+      error: null,
+      mode: "auto",
+      nodeIds: uniqueNodeIds,
+      sizeMode: "equal-width",
+    });
+  }, []);
+
+  const applySmartArrangement = useCallback(async () => {
+    if (smartArrangement === null || smartArrangement.busy) {
+      return;
+    }
+    setSmartArrangement((current) =>
+      current === null ? null : { ...current, busy: true, error: null },
+    );
+    const abortController = new AbortController();
+    smartArrangementAbortControllerRef.current?.abort();
+    smartArrangementAbortControllerRef.current = abortController;
+    try {
+      const selectedNodeIds = new Set(smartArrangement.nodeIds);
+      const selectedNodes = canvasRectangles().filter((node) =>
+        selectedNodeIds.has(node.id),
+      );
+      if (selectedNodes.length < 2) {
+        setSmartArrangement(null);
+        return;
+      }
+      const { arrangeCanvasNodesInWorker } = await import(
+        "./canvasAutoLayoutClient"
+      );
+      const result = await arrangeCanvasNodesInWorker(
+        {
+          mode: smartArrangement.mode,
+          nodes: selectedNodes,
+          references: references.filter(
+            (reference) =>
+              selectedNodeIds.has(reference.sourceNodeId) &&
+              selectedNodeIds.has(reference.targetNodeId),
+          ),
+          sizeMode: smartArrangement.sizeMode,
+        },
+        abortController.signal,
+      );
+      if (abortController.signal.aborted) {
+        return;
+      }
+      let nextLayout = updateNodeLayoutPositions(
+        layoutRef.current,
+        result.nodes.map((node) => ({
+          nodeId: node.id,
+          x: node.x,
+          y: node.y,
+        })),
+      );
+      if (smartArrangement.sizeMode !== "preserve") {
+        nextLayout = updateNodeLayoutSizeOverrides(
+          nextLayout,
+          result.nodes.map((node) => ({
+            nodeId: node.id,
+            width: node.width,
+            ...(smartArrangement.sizeMode === "equal-size"
+              ? { height: node.height }
+              : {}),
+          })),
+        );
+      }
+      if (nextLayout !== layoutRef.current) {
+        onLayoutChange(nextLayout);
+      }
+      setSmartArrangement(null);
+    } catch {
+      if (abortController.signal.aborted) {
+        return;
+      }
+      setSmartArrangement((current) =>
+        current === null
+          ? null
+          : { ...current, busy: false, error: labels.arrangementFailed },
+      );
+    } finally {
+      if (smartArrangementAbortControllerRef.current === abortController) {
+        smartArrangementAbortControllerRef.current = null;
+      }
+    }
+  }, [
+    canvasRectangles,
+    labels.arrangementFailed,
+    onLayoutChange,
+    references,
+    smartArrangement,
+  ]);
 
   const frameCanvasNodes = useCallback(
     (nodesToFrame: readonly InformationFlowNode[], maximumZoom: number) => {
@@ -1813,11 +2117,12 @@ export default function GraphCanvas({
         const referencedNodes = referencedNodesBySource.get(node.id) ?? [];
         const incomingNodes = incomingNodesByTarget.get(node.id) ?? [];
         const interactive = !filteredOutNodeIdSet.has(node.id);
-        const manualSize =
-          savedLayout?.width !== undefined && savedLayout.height !== undefined;
+        const manualWidth = savedLayout?.width !== undefined;
+        const manualHeight = savedLayout?.height !== undefined;
+        const manualSize = manualWidth || manualHeight;
         const contentFullyRendered =
           editingNodeId === node.id ||
-          manualSize ||
+          manualHeight ||
           fitContentNodeId === node.id;
         const renderedContent = contentFullyRendered
           ? node.content
@@ -1836,9 +2141,8 @@ export default function GraphCanvas({
           selectable: interactive ? undefined : false,
           selected: interactive && (currentNode?.selected ?? false),
           style: {
-            ...(manualSize
-              ? { height: savedLayout.height, width: savedLayout.width }
-              : {}),
+            ...(manualHeight ? { height: savedLayout.height } : {}),
+            ...(manualWidth ? { width: savedLayout.width } : {}),
             ...(!interactive
               ? {
                 opacity: clampedUnmatchedNodeOpacity / 100,
@@ -1863,7 +2167,9 @@ export default function GraphCanvas({
             markerNotePlaceholder: labels.markerNotePlaceholder,
             markerPayloadInvalidLabel: labels.markerPayloadInvalid,
             markerSelectionConflictLabel: labels.markerSelectionConflict,
+            manualHeight,
             manualSize,
+            manualWidth,
             removeMarkerLabel: labels.removeMarker,
             saveMarkerNoteLabel: labels.saveMarkerNote,
             fitNodeContentLabel: labels.fitNodeContent,
@@ -1915,7 +2221,7 @@ export default function GraphCanvas({
             removeNodeFilterLabel: labels.removeNodeFilter,
             sourceLabel: labels.sourceHandle,
             targetLabel: labels.targetHandle,
-            onCommit: onNodeCommit,
+            onCommit: commitNodeAndScheduleAvoidance,
             onBrowseIncomingReferences: openIncomingReferenceBrowser,
             onContentChange: onNodeContentChange,
             onContentProcessorChange: onNodeContentProcessorChange,
@@ -1936,6 +2242,7 @@ export default function GraphCanvas({
     contentProcessorOptions,
     copyTextAsSecret,
     commitNodeDimensions,
+    commitNodeAndScheduleAvoidance,
     canvasReferencePresentation,
     editingNodeId,
     fitContentNodeId,
@@ -1948,7 +2255,6 @@ export default function GraphCanvas({
     layoutByNode,
     nameConflictNodeIds,
     nodes,
-    onNodeCommit,
     onNodeContentChange,
     onNodeContentProcessorChange,
     onCopySecret,
@@ -2507,7 +2813,7 @@ export default function GraphCanvas({
       contextMenuSelectionRef.current = [];
       setContextMenu({
         kind: "node",
-        ...positionContextMenu(event.clientX, event.clientY, 250),
+        ...positionContextMenu(event.clientX, event.clientY, 290),
         nodeId: node.id,
         nodeIds:
           selectedNodeIds.length > 1 ? selectedNodeIds : [node.id],
@@ -3401,6 +3707,20 @@ export default function GraphCanvas({
                     <span>{labels.copySecret}</span>
                   </button>
                 )}
+              {contextMenu.nodeIds.length > 1 && (
+                <button
+                  data-node-count={contextMenu.nodeIds.length}
+                  data-testid="arrange-nodes-context-action"
+                  onClick={() => {
+                    openSmartArrangement(contextMenu.nodeIds);
+                    setContextMenu(null);
+                  }}
+                  type="button"
+                >
+                  <LayoutGrid size={16} />
+                  <span>{labels.arrangeNodes(contextMenu.nodeIds.length)}</span>
+                </button>
+              )}
               <button
                 data-node-count={contextMenu.nodeIds.length}
                 data-testid="smart-reference-context-action"
@@ -3442,6 +3762,117 @@ export default function GraphCanvas({
           role={secretClipboardNotice.error ? "alert" : "status"}
         >
           {secretClipboardNotice.message}
+        </div>
+      )}
+
+      {smartArrangement !== null && (
+        <div className="modal-backdrop" role="presentation">
+          <section
+            aria-labelledby="smart-arrangement-dialog-title"
+            aria-modal="true"
+            className="confirmation-dialog smart-arrangement-dialog"
+            data-testid="smart-arrangement-dialog"
+            onKeyDown={(event) => {
+              if (event.key === "Escape" && !smartArrangement.busy) {
+                event.preventDefault();
+                setSmartArrangement(null);
+              }
+            }}
+            role="dialog"
+          >
+            <h2 id="smart-arrangement-dialog-title">
+              {labels.arrangementTitle}
+            </h2>
+            <p>{labels.arrangementDescription(smartArrangement.nodeIds.length)}</p>
+            <div className="smart-arrangement-options">
+              <label>
+                <span>{labels.arrangementMode}</span>
+                <select
+                  autoFocus
+                  disabled={smartArrangement.busy}
+                  onChange={(event) =>
+                    setSmartArrangement((current) =>
+                      current === null
+                        ? null
+                        : {
+                            ...current,
+                            error: null,
+                            mode: event.target.value as SmartArrangementMode,
+                          },
+                    )
+                  }
+                  value={smartArrangement.mode}
+                >
+                  {(
+                    [
+                      "auto",
+                      "overlap",
+                      "relationship",
+                      "grid",
+                    ] as SmartArrangementMode[]
+                  ).map((mode) => (
+                    <option key={mode} value={mode}>
+                      {labels.arrangementModes[mode]}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                <span>{labels.arrangementSize}</span>
+                <select
+                  disabled={smartArrangement.busy}
+                  onChange={(event) =>
+                    setSmartArrangement((current) =>
+                      current === null
+                        ? null
+                        : {
+                            ...current,
+                            error: null,
+                            sizeMode: event.target
+                              .value as SmartArrangementSizeMode,
+                          },
+                    )
+                  }
+                  value={smartArrangement.sizeMode}
+                >
+                  {(
+                    [
+                      "preserve",
+                      "equal-width",
+                      "equal-size",
+                    ] as SmartArrangementSizeMode[]
+                  ).map((sizeMode) => (
+                    <option key={sizeMode} value={sizeMode}>
+                      {labels.arrangementSizes[sizeMode]}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            {smartArrangement.error !== null && (
+              <p className="dialog-error" role="alert">
+                {smartArrangement.error}
+              </p>
+            )}
+            <div className="confirmation-dialog-actions">
+              <button
+                className="secondary-button"
+                disabled={smartArrangement.busy}
+                onClick={() => setSmartArrangement(null)}
+                type="button"
+              >
+                {labels.cancel}
+              </button>
+              <button
+                className="primary-button"
+                disabled={smartArrangement.busy}
+                onClick={() => void applySmartArrangement()}
+                type="button"
+              >
+                {labels.arrangementApply}
+              </button>
+            </div>
+          </section>
         </div>
       )}
 

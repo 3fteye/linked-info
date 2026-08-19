@@ -6,6 +6,7 @@ export const canvasOperationIds = [
   "selectAll",
   "edit",
   "resize",
+  "arrange",
   "search",
   "history",
   "contextMenu",

@@ -2,8 +2,10 @@ import { expect, test, type Page } from "@playwright/test";
 
 interface SyntheticNode {
   content?: string;
+  height?: number;
   id: string;
   name: string;
+  width?: number;
   x: number;
   y: number;
 }
@@ -61,6 +63,8 @@ async function openSyntheticWorkspace(
             nodeId: node.id,
             x: node.x,
             y: node.y,
+            ...(node.width === undefined ? {} : { width: node.width }),
+            ...(node.height === undefined ? {} : { height: node.height }),
           })),
           references: syntheticReferences,
           viewport: syntheticViewport,
@@ -563,7 +567,7 @@ test("canvas shortcut help exposes the complete interaction baseline", async ({ 
   await toggle.click();
   await expect(toggle).toHaveAttribute("aria-expanded", "true");
   await expect(popover).toBeVisible();
-  await expect(popover.locator("dt")).toHaveCount(12);
+  await expect(popover.locator("dt")).toHaveCount(13);
   const canvasBounds = await page.getByTestId("graph-canvas").boundingBox();
   const popoverBounds = await popover.boundingBox();
   expect(canvasBounds).not.toBeNull();
@@ -931,7 +935,7 @@ test("settings operation guide demonstrates every shared canvas control", async 
   const stage = page.getByTestId("canvas-operation-stage");
   await expect(page.getByTestId("operation-guide-heading")).toBeVisible();
   await expect(guide).toBeVisible();
-  await expect(guide.locator(".canvas-operation-picker-item")).toHaveCount(12);
+  await expect(guide.locator(".canvas-operation-picker-item")).toHaveCount(13);
 
   const animatedTargets: Record<string, string> = {
     pan: ".canvas-operation-scene",
@@ -941,6 +945,7 @@ test("settings operation guide demonstrates every shared canvas control", async 
     selectAll: ".canvas-operation-node-a",
     edit: ".canvas-operation-editor",
     resize: ".canvas-operation-node-a",
+    arrange: ".canvas-operation-node-b",
     search: ".canvas-operation-search",
     history: ".canvas-operation-node-c",
     contextMenu: ".canvas-operation-context-menu",
@@ -980,7 +985,7 @@ test("settings operation guide demonstrates every shared canvas control", async 
   await expect(page.getByTestId("operation-guide-heading")).toHaveText(
     "Operation guide",
   );
-  await expect(guide.locator(".canvas-operation-picker-item")).toHaveCount(12);
+  await expect(guide.locator(".canvas-operation-picker-item")).toHaveCount(13);
 });
 
 test("settings operation guide honors reduced motion", async ({ page }) => {
@@ -1253,6 +1258,145 @@ test("automatic, fitted and manually resized node dimensions persist and reset",
     })
     .toBe(true);
   await expect(target.locator(".graph-node-fit-button")).toBeVisible();
+});
+
+test("finishing an automatic size change pushes only overlapping neighbors", async ({
+  page,
+}) => {
+  const growingNode: SyntheticNode = {
+    content: "short",
+    id: syntheticId(1),
+    name: "Growing node",
+    x: 100,
+    y: 100,
+  };
+  const neighbor: SyntheticNode = {
+    id: syntheticId(2),
+    name: "Spatial neighbor",
+    x: 100,
+    y: 230,
+  };
+  const unrelated: SyntheticNode = {
+    id: syntheticId(3),
+    name: "Unrelated node",
+    x: 1_200,
+    y: 100,
+  };
+  await openSyntheticWorkspace(page, [growingNode, neighbor, unrelated]);
+  await node(page, growingNode.id).dblclick({ position: { x: 80, y: 24 } });
+  const editor = page.locator('[data-node-id][data-editing="true"]');
+  await editor.locator("textarea").fill(
+    Array.from(
+      { length: 14 },
+      (_, index) => `Synthetic line ${index + 1} expands automatic height`,
+    ).join("\n"),
+  );
+  await editor.locator("textarea").press("Escape");
+
+  await expect
+    .poll(async () => {
+      const stored = await storedWorkspace(page);
+      return stored?.layout?.find(
+        (item: { nodeId: string }) => item.nodeId === neighbor.id,
+      );
+    })
+    .not.toMatchObject({ x: neighbor.x, y: neighbor.y });
+  const changed = await storedWorkspace(page);
+  expect(
+    changed.layout.find(
+      (item: { nodeId: string }) => item.nodeId === growingNode.id,
+    ),
+  ).toMatchObject({ x: growingNode.x, y: growingNode.y });
+  expect(
+    changed.layout.find(
+      (item: { nodeId: string }) => item.nodeId === unrelated.id,
+    ),
+  ).toMatchObject({ x: unrelated.x, y: unrelated.y });
+});
+
+test("smart arrangement normalizes width and saves one undoable layout step", async ({
+  page,
+}) => {
+  const arrangedNodes = gridNodes(3, 1).map((item, index) => ({
+    ...item,
+    content: `Synthetic arrangement content ${"x".repeat(index === 2 ? 2_000 : index * 30)}`,
+  }));
+  const originalLayout = arrangedNodes.map(({ id, x, y }) => ({ nodeId: id, x, y }));
+  await openSyntheticWorkspace(page, arrangedNodes, [
+    { sourceNodeId: arrangedNodes[0].id, targetNodeId: arrangedNodes[1].id },
+    { sourceNodeId: arrangedNodes[1].id, targetNodeId: arrangedNodes[2].id },
+  ]);
+  await page.keyboard.press("Control+a");
+  await node(page, arrangedNodes[1].id).click({
+    button: "right",
+    position: { x: 24, y: 24 },
+  });
+  await page.getByTestId("arrange-nodes-context-action").click();
+  const dialog = page.getByTestId("smart-arrangement-dialog");
+  await expect(dialog).toBeVisible();
+  await expect(dialog.locator("select").nth(0)).toHaveValue("auto");
+  await expect(dialog.locator("select").nth(1)).toHaveValue("equal-width");
+  await dialog.getByRole("button", { name: "Apply arrangement" }).click();
+
+  await expect
+    .poll(async () => {
+      const stored = await storedWorkspace(page);
+      return stored?.layout?.every(
+        (item: { height?: number; width?: number }) =>
+          typeof item.width === "number" && item.height === undefined,
+      );
+    })
+    .toBe(true);
+  const arranged = await storedWorkspace(page);
+  const widths = new Set(
+    arranged.layout.map((item: { width: number }) => item.width),
+  );
+  expect(widths.size).toBe(1);
+  await expect(
+    node(page, arrangedNodes[2].id).locator(".graph-node-fit-button"),
+  ).toBeVisible();
+  const xByNodeId = new Map(
+    arranged.layout.map((item: { nodeId: string; x: number }) => [item.nodeId, item.x]),
+  );
+  expect(xByNodeId.get(arrangedNodes[0].id)).toBeLessThan(
+    xByNodeId.get(arrangedNodes[1].id),
+  );
+  expect(xByNodeId.get(arrangedNodes[1].id)).toBeLessThan(
+    xByNodeId.get(arrangedNodes[2].id),
+  );
+
+  await page.keyboard.press("Control+z");
+  await expect
+    .poll(async () => {
+      const stored = await storedWorkspace(page);
+      return originalLayout.every((original) => {
+        const restored = stored?.layout?.find(
+          (item: { nodeId: string }) => item.nodeId === original.nodeId,
+        );
+        return (
+          restored?.x === original.x &&
+          restored?.y === original.y &&
+          restored.width === undefined &&
+          restored.height === undefined
+        );
+      });
+    })
+    .toBe(true);
+});
+
+test("automatic overlap avoidance preference persists on this device", async ({
+  page,
+}) => {
+  await openSyntheticWorkspace(page, gridNodes(1, 1));
+  await page.getByTestId("settings-navigation").click();
+  await page.getByTestId("settings-tab-operations").click();
+  const preference = page.getByTestId("auto-avoid-canvas-overlaps");
+  await expect(preference).toBeChecked();
+  await preference.uncheck();
+  await page.reload();
+  await page.getByTestId("settings-navigation").click();
+  await page.getByTestId("settings-tab-operations").click();
+  await expect(page.getByTestId("auto-avoid-canvas-overlaps")).not.toBeChecked();
 });
 
 test("Shift-click keeps an explicit boundary around multiple selected nodes", async ({

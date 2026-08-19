@@ -50,8 +50,8 @@
       }
     },
     {
-      "name": "partial-node-dimensions",
-      "valid": false,
+      "name": "independent-node-width",
+      "valid": true,
       "storage": {
         "version": 2,
         "nodes": [

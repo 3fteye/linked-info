@@ -5,6 +5,7 @@ import {
   parseWorkspaceSnapshot,
   persistedNodeNameFromDraft,
   updateNodeLayoutDimensions,
+  updateNodeLayoutSizeOverrides,
   updateNodeLayoutPositions,
   type WorkspaceSnapshot,
 } from "./workspaceData";
@@ -68,7 +69,7 @@ describe("parseWorkspaceSnapshot", () => {
     expect(parseWorkspaceSnapshot(duplicate)).toBeNull();
   });
 
-  it("accepts complete manual dimensions and rejects partial or unsafe sizes", () => {
+  it("accepts independent manual dimensions and rejects unsafe sizes", () => {
     const manual = validWorkspace();
     manual.layout[0] = {
       ...manual.layout[0],
@@ -81,7 +82,7 @@ describe("parseWorkspaceSnapshot", () => {
       layout: Array<Record<string, unknown>>;
     };
     partial.layout[0].width = 480;
-    expect(parseWorkspaceSnapshot(partial)).toBeNull();
+    expect(parseWorkspaceSnapshot(partial)?.layout[0]).toEqual(partial.layout[0]);
 
     const unsafe = validWorkspace();
     unsafe.layout[0] = { ...unsafe.layout[0], height: 91, width: 480 };
@@ -203,5 +204,31 @@ describe("updateNodeLayoutDimensions", () => {
       x: 10,
       y: 20,
     });
+  });
+});
+
+describe("updateNodeLayoutSizeOverrides", () => {
+  it("can normalize width without disabling automatic height", () => {
+    const layout = validWorkspace().layout;
+    const next = updateNodeLayoutSizeOverrides(layout, [
+      { nodeId: accountId, width: 360 },
+      { nodeId: serviceId, width: 360 },
+    ]);
+
+    expect(next).toEqual([
+      { nodeId: accountId, x: 10, y: 20, width: 360 },
+      { nodeId: serviceId, x: 30, y: 40, width: 360 },
+    ]);
+  });
+
+  it("preserves an untouched axis and can clear one override", () => {
+    const layout = validWorkspace().layout;
+    layout[0] = { ...layout[0], height: 420, width: 560 };
+
+    expect(
+      updateNodeLayoutSizeOverrides(layout, [
+        { nodeId: accountId, width: null },
+      ])[0],
+    ).toEqual({ nodeId: accountId, x: 10, y: 20, height: 420 });
   });
 });

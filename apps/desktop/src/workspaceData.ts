@@ -179,6 +179,59 @@ export function updateNodeLayoutDimensions(
   return updated;
 }
 
+export interface NodeLayoutSizeOverrideUpdate {
+  height?: number | null;
+  nodeId: string;
+  width?: number | null;
+}
+
+export function updateNodeLayoutSizeOverrides(
+  layout: NodeLayout[],
+  updates: readonly NodeLayoutSizeOverrideUpdate[],
+): NodeLayout[] {
+  if (updates.length === 0) {
+    return layout;
+  }
+  const updateByNodeId = new Map(updates.map((update) => [update.nodeId, update]));
+  let changed = false;
+  const next = layout.map((item) => {
+    const update = updateByNodeId.get(item.nodeId);
+    if (update === undefined) {
+      return item;
+    }
+    const width =
+      update.width === undefined
+        ? item.width
+        : update.width === null
+          ? undefined
+          : Math.min(
+              maximumManualNodeDimension,
+              Math.max(minimumManualNodeWidth, update.width),
+            );
+    const height =
+      update.height === undefined
+        ? item.height
+        : update.height === null
+          ? undefined
+          : Math.min(
+              maximumManualNodeDimension,
+              Math.max(minimumManualNodeHeight, update.height),
+            );
+    if (width === item.width && height === item.height) {
+      return item;
+    }
+    changed = true;
+    return {
+      nodeId: item.nodeId,
+      x: item.x,
+      y: item.y,
+      ...(width === undefined ? {} : { width }),
+      ...(height === undefined ? {} : { height }),
+    };
+  });
+  return changed ? next : layout;
+}
+
 function parseWorkspaceSnapshotValue(
   value: unknown,
   allowMissingView: boolean,
@@ -259,33 +312,36 @@ function parseWorkspaceSnapshotValue(
     ) {
       return null;
     }
-    const hasWidth = candidate.width !== undefined;
-    const hasHeight = candidate.height !== undefined;
-    if (hasWidth !== hasHeight) {
-      return null;
-    }
     let width: number | undefined;
     let height: number | undefined;
-    if (hasWidth && hasHeight) {
+    if (candidate.width !== undefined) {
       if (
         !isFiniteNumber(candidate.width) ||
-        !isFiniteNumber(candidate.height) ||
         candidate.width < minimumManualNodeWidth ||
-        candidate.height < minimumManualNodeHeight ||
-        candidate.width > maximumManualNodeDimension ||
-        candidate.height > maximumManualNodeDimension
+        candidate.width > maximumManualNodeDimension
       ) {
         return null;
       }
       width = candidate.width;
+    }
+    if (candidate.height !== undefined) {
+      if (
+        !isFiniteNumber(candidate.height) ||
+        candidate.height < minimumManualNodeHeight ||
+        candidate.height > maximumManualNodeDimension
+      ) {
+        return null;
+      }
       height = candidate.height;
     }
     layoutNodeIds.add(nodeId);
-    layout.push(
-      width === undefined || height === undefined
-        ? { nodeId, x: candidate.x, y: candidate.y }
-        : { nodeId, x: candidate.x, y: candidate.y, width, height },
-    );
+    layout.push({
+      nodeId,
+      x: candidate.x,
+      y: candidate.y,
+      ...(width === undefined ? {} : { width }),
+      ...(height === undefined ? {} : { height }),
+    });
   }
 
   const references: NodeReference[] = [];
