@@ -1936,6 +1936,7 @@ pub async fn commit_workspace_restore(
     let store = workspace_store(&app).map_err(|error| error.to_string())?;
     let store_for_install = store.clone();
     let operation_lock = Arc::clone(&state.operation_lock);
+    let prepared_data_key = *prepared.data_key;
     let install_task = tauri::async_runtime::spawn_blocking(move || {
         let _guard = operation_lock
             .lock()
@@ -1957,7 +1958,7 @@ pub async fn commit_workspace_restore(
         Err(error) => Err(error.to_string()),
     };
     let provider_available = system_unlock_state.provider().available();
-    let outcome = classify_prepared_restore_install(&store, install_result)?;
+    let outcome = classify_prepared_restore_install(&store, &prepared_data_key, install_result)?;
     let locked_result = || WorkspaceSecurityTransactionResult {
         status: WorkspaceSecurityTransactionStatus::CommittedLocked,
         security_status: Some(WorkspaceSecurityStatus {
@@ -2710,6 +2711,7 @@ enum PreparedRestoreInstallOutcome {
 
 fn classify_prepared_restore_install(
     store: &WorkspaceFileStore,
+    prepared_data_key: &[u8; DATA_KEY_BYTES],
     result: Result<[u8; DATA_KEY_BYTES], String>,
 ) -> Result<PreparedRestoreInstallOutcome, String> {
     let error = match result {
@@ -2717,7 +2719,15 @@ fn classify_prepared_restore_install(
         Err(error) => error,
     };
     match store.read_vault_metadata() {
-        Ok(Some(_)) => return Ok(PreparedRestoreInstallOutcome::CommittedLocked),
+        Ok(Some(_)) => {
+            return Ok(
+                if verify_encrypted_store(store, prepared_data_key).is_ok() {
+                    PreparedRestoreInstallOutcome::CommittedLocked
+                } else {
+                    PreparedRestoreInstallOutcome::RecoveryRequired
+                },
+            );
+        }
         Ok(None) => {}
         Err(_) => return Ok(PreparedRestoreInstallOutcome::RecoveryRequired),
     }
@@ -5085,14 +5095,18 @@ mod tests {
     fn restore_failure_after_vault_commit_is_not_reported_as_precommit_error() {
         let directory = test_directory();
         let store = WorkspaceFileStore::new(directory.clone());
-        fs::create_dir_all(&directory).unwrap();
-        let data_key = random_array::<DATA_KEY_BYTES>().unwrap();
-        let metadata =
-            create_vault_metadata("correct horse battery", &data_key, Vec::new()).unwrap();
-        write_atomically(&store.vault_path(), &serde_json::to_vec(&metadata).unwrap()).unwrap();
+        store
+            .write_plaintext(WorkspaceFileSlot::Primary, &workspace("committed"))
+            .unwrap();
+        let data_key = migrate_plaintext_store(&store, "correct horse battery").unwrap();
 
         assert_eq!(
-            classify_prepared_restore_install(&store, Err("followup failed".to_owned())).unwrap(),
+            classify_prepared_restore_install(
+                &store,
+                &data_key,
+                Err("followup failed".to_owned()),
+            )
+            .unwrap(),
             PreparedRestoreInstallOutcome::CommittedLocked
         );
 
@@ -5105,9 +5119,43 @@ mod tests {
         let store = WorkspaceFileStore::new(directory.clone());
         fs::create_dir_all(&directory).unwrap();
         write_atomically(&store.vault_path(), b"invalid-vault").unwrap();
+        let data_key = random_array::<DATA_KEY_BYTES>().unwrap();
 
         assert_eq!(
-            classify_prepared_restore_install(&store, Err("followup failed".to_owned())).unwrap(),
+            classify_prepared_restore_install(
+                &store,
+                &data_key,
+                Err("followup failed".to_owned()),
+            )
+            .unwrap(),
+            PreparedRestoreInstallOutcome::RecoveryRequired
+        );
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn restore_failure_with_an_unverified_committed_store_requires_recovery() {
+        let directory = test_directory();
+        let store = WorkspaceFileStore::new(directory.clone());
+        fs::create_dir_all(&directory).unwrap();
+        let data_key = random_array::<DATA_KEY_BYTES>().unwrap();
+        let metadata = create_vault_metadata(
+            "correct horse battery",
+            &data_key,
+            vec![WorkspaceFileSlot::Primary],
+        )
+        .unwrap();
+        write_atomically(&store.vault_path(), &serde_json::to_vec(&metadata).unwrap()).unwrap();
+        write_atomically(&store.path(WorkspaceFileSlot::Primary), b"damaged-primary").unwrap();
+
+        assert_eq!(
+            classify_prepared_restore_install(
+                &store,
+                &data_key,
+                Err("verification failed".to_owned()),
+            )
+            .unwrap(),
             PreparedRestoreInstallOutcome::RecoveryRequired
         );
 
@@ -5120,10 +5168,15 @@ mod tests {
         let store = WorkspaceFileStore::new(directory.clone());
         fs::create_dir_all(&directory).unwrap();
         write_atomically(&store.pending_vault_path(), b"pending-vault").unwrap();
+        let data_key = random_array::<DATA_KEY_BYTES>().unwrap();
 
         assert_eq!(
-            classify_prepared_restore_install(&store, Err("replacement failed".to_owned()))
-                .unwrap(),
+            classify_prepared_restore_install(
+                &store,
+                &data_key,
+                Err("replacement failed".to_owned()),
+            )
+            .unwrap(),
             PreparedRestoreInstallOutcome::RecoveryRequired
         );
 
@@ -5134,9 +5187,11 @@ mod tests {
     fn restore_failure_before_any_durable_intent_remains_an_error() {
         let directory = test_directory();
         let store = WorkspaceFileStore::new(directory.clone());
+        let data_key = random_array::<DATA_KEY_BYTES>().unwrap();
 
         assert_eq!(
-            classify_prepared_restore_install(&store, Err("not committed".to_owned())).unwrap_err(),
+            classify_prepared_restore_install(&store, &data_key, Err("not committed".to_owned()),)
+                .unwrap_err(),
             "not committed"
         );
     }
