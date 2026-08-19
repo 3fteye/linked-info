@@ -60,6 +60,11 @@ import {
   NodeContentHost,
   contentProcessorRegistry,
 } from "./contentProcessor";
+import {
+  codePreviewLanguageFromProcessorId,
+  codePreviewLanguages,
+  type CodePreviewLanguage,
+} from "./codePreviewLanguages";
 import { contentMarkerRegistry } from "./contentMarker";
 import { NodeSearchIndex, type NodeSearchScope } from "./nodeSearch";
 import { supportedLanguages, type SupportedLanguage } from "./locales";
@@ -1312,15 +1317,20 @@ function App({
 
   const contentProcessorOptions = useMemo(
     () =>
-      contentProcessorRegistry.list().map((processor) => ({
-        id: processor.id,
-        label:
-          processor.id === "text"
-            ? t("editor.contentProcessors.text")
-            : processor.id === "markdown"
-              ? t("editor.contentProcessors.markdown")
-              : processor.id,
-      })),
+      contentProcessorRegistry.list().map((processor) => {
+        const codeLanguage = codePreviewLanguageFromProcessorId(processor.id);
+        return {
+          id: processor.id,
+          label:
+            processor.id === "text"
+              ? t("editor.contentProcessors.text")
+              : processor.id === "markdown"
+                ? t("editor.contentProcessors.markdown")
+                : codeLanguage === null
+                  ? processor.id
+                  : t(`editor.codeLanguages.${codeLanguage}`),
+        };
+      }),
     [t],
   );
 
@@ -1342,6 +1352,15 @@ function App({
 
   const contentEnhancementLabels = useMemo(
     () => ({
+      code: {
+        copy: t("codePreview.copy"),
+        languages: Object.fromEntries(
+          codePreviewLanguages.map((language) => [
+            language,
+            t(`editor.codeLanguages.${language}`),
+          ]),
+        ) as Record<CodePreviewLanguage, string>,
+      },
       secret: {
         copy: t("secret.copy"),
         hide: t("secret.hide"),
@@ -5767,11 +5786,15 @@ function App({
                     ? t("actions.confirmDeleteNode")
                     : t("actions.confirmDeleteNodes"),
                 createNode: t("actions.newNode"),
+                codeCopy: contentEnhancementLabels.code.copy,
+                codeLanguages: contentEnhancementLabels.code.languages,
                 content: t("editor.content"),
                 contentPlaceholder: t("editor.contentPlaceholder"),
                 contentProcessor: t("editor.contentProcessor"),
                 unsupportedContentProcessor: (processorId) =>
                   t("editor.contentProcessorUnsupported", { processorId }),
+                copyCodeFailed: t("codePreview.copyFailed"),
+                copyCodeSuccess: t("codePreview.copied"),
                 copySecret: t("secretClipboard.copy"),
                 copySecretFailed: t("secretClipboard.failed"),
                 copySecretSuccess: t("secretClipboard.copied", {

@@ -1,11 +1,25 @@
 // @vitest-environment happy-dom
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { contentEnhancerRegistry } from "./contentEnhancer";
 import { NodeContentHost } from "./contentProcessor";
 
 const enhancementLabels = {
+  code: {
+    copy: "Copy source",
+    languages: {
+      powershell: "PowerShell",
+      bash: "Bash",
+      python: "Python",
+      javascript: "JavaScript",
+      typescript: "TypeScript",
+      rust: "Rust",
+      json: "JSON",
+      yaml: "YAML",
+      sql: "SQL",
+    },
+  },
   secret: {
     copy: "Copy secret",
     hide: "Hide",
@@ -74,6 +88,67 @@ describe("NodeContentHost", () => {
     expect(container.querySelector(".markdown-image-placeholder")?.textContent).toBe(
       "[remote image]",
     );
+  });
+
+  it("renders an explicitly selected code language with line numbers and source copy", async () => {
+    const source = "const answer: number = 42;\nconsole.log(answer);";
+    const onCopyText = vi.fn();
+    await import("./codePreview");
+    await act(async () => {
+      root.render(
+        <NodeContentHost
+          content={source}
+          enhancementLabels={enhancementLabels}
+          onCopyText={onCopyText}
+          processorId="code.typescript"
+          variant="canvas"
+        />,
+      );
+    });
+
+    expect(container.querySelector(".code-preview")?.getAttribute("data-language")).toBe(
+      "typescript",
+    );
+    expect(container.querySelectorAll(".code-preview-line")).toHaveLength(2);
+    expect(container.querySelector(".token.keyword")?.textContent).toBe("const");
+    expect(container.textContent).toContain("TypeScript");
+
+    act(() =>
+      container
+        .querySelector<HTMLButtonElement>(".code-preview-copy")
+        ?.click(),
+    );
+    expect(onCopyText).toHaveBeenCalledWith(source);
+  });
+
+  it("masks marked secrets before highlighting and routes source copy through the secret boundary", async () => {
+    const source =
+      'const apiKey = "[[li:secret note="API Key"]]synthetic-secret[[/li]]";';
+    const onCopySecret = vi.fn();
+    const onCopyText = vi.fn();
+    await import("./codePreview");
+    await act(async () => {
+      root.render(
+        <NodeContentHost
+          content={source}
+          enhancementLabels={enhancementLabels}
+          onCopySecret={onCopySecret}
+          onCopyText={onCopyText}
+          processorId="code.javascript"
+          variant="canvas"
+        />,
+      );
+    });
+
+    expect(container.textContent).toContain("API Key");
+    expect(container.textContent).not.toContain("synthetic-secret");
+    act(() =>
+      container
+        .querySelector<HTMLButtonElement>(".code-preview-copy")
+        ?.click(),
+    );
+    expect(onCopySecret).toHaveBeenCalledWith(source);
+    expect(onCopyText).not.toHaveBeenCalled();
   });
 
   it("keeps list rows compact and falls back safely for unavailable processors", () => {

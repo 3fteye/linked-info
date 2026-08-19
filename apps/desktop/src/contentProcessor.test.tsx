@@ -7,6 +7,10 @@ import {
   maximumCanvasContentPreviewCharacters,
   textContentProcessor,
 } from "./contentProcessor";
+import {
+  codeContentProcessorId,
+  codePreviewLanguages,
+} from "./codePreviewLanguages";
 
 describe("content processor registry", () => {
   it("uses plain text by default", () => {
@@ -24,8 +28,10 @@ describe("content processor registry", () => {
     expect(contentProcessorRegistry.list().map((processor) => processor.id)).toEqual([
       "text",
       "markdown",
+      ...codePreviewLanguages.map(codeContentProcessorId),
     ]);
     expect(contentProcessorRegistry.has("markdown")).toBe(true);
+    expect(contentProcessorRegistry.has("code.typescript")).toBe(true);
     expect(markdownContentProcessor.present("# Heading")).toEqual({
       kind: "markdown",
       source: "# Heading",

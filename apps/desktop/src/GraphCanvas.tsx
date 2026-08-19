@@ -88,6 +88,7 @@ import {
   canvasContentPreview,
   type ContentEnhancementLabels,
 } from "./contentProcessor";
+import type { CodePreviewLanguage } from "./codePreviewLanguages";
 import { TotpSecondClockProvider } from "./totpContent";
 import type { CanvasOperationItem } from "./canvasOperations";
 import {
@@ -170,6 +171,7 @@ interface InformationNodeData extends Record<string, unknown> {
   onContentChange: (nodeId: string, content: string) => void;
   onContentProcessorChange: (nodeId: string, processorId: string) => void;
   onCopyDerivedSecret: ((value: string) => Promise<void>) | null;
+  onCopyText: (value: string) => Promise<void>;
   onNameChange: (nodeId: string, name: string) => boolean;
   onFitNodeContent: (nodeId: string) => void;
   onResizeEnd: (
@@ -229,8 +231,12 @@ interface GraphLabels {
   content: string;
   contentPlaceholder: string;
   contentProcessor: string;
+  codeCopy: string;
+  codeLanguages: Record<CodePreviewLanguage, string>;
   unsupportedContentProcessor: (processorId: string) => string;
   copySecret: string;
+  copyCodeFailed: string;
+  copyCodeSuccess: string;
   copySecretFailed: string;
   copySecretSuccess: string;
   editMarker: (markerLabel: string) => string;
@@ -947,6 +953,7 @@ export function InformationNodeCard({
           enhancementLabels={data.enhancementLabels}
           hideWhenEmpty
           onCopySecret={data.onCopyDerivedSecret ?? undefined}
+          onCopyText={data.onCopyText}
           processorId={data.contentProcessorId}
           variant="canvas"
         />
@@ -1656,6 +1663,25 @@ export default function GraphCanvas({
     }, 6_000);
   }, [labels.copySecretFailed, labels.copySecretSuccess, onCopySecret]);
 
+  const copyText = useCallback(async (text: string) => {
+    if (text.length === 0) {
+      return;
+    }
+    if (secretClipboardNoticeTimerRef.current !== null) {
+      window.clearTimeout(secretClipboardNoticeTimerRef.current);
+    }
+    try {
+      await navigator.clipboard.writeText(text);
+      setSecretClipboardNotice({ error: false, message: labels.copyCodeSuccess });
+    } catch {
+      setSecretClipboardNotice({ error: true, message: labels.copyCodeFailed });
+    }
+    secretClipboardNoticeTimerRef.current = window.setTimeout(() => {
+      setSecretClipboardNotice(null);
+      secretClipboardNoticeTimerRef.current = null;
+    }, 6_000);
+  }, [labels.copyCodeFailed, labels.copyCodeSuccess]);
+
   const copyNodeContentAsSecret = async (nodeId: string) => {
     const content = nodes.find((node) => node.id === nodeId)?.content;
     if (content === null || content === undefined || content.length === 0) {
@@ -2177,6 +2203,10 @@ export default function GraphCanvas({
             contentLabel: labels.content,
             contentPlaceholder: labels.contentPlaceholder,
             enhancementLabels: {
+              code: {
+                copy: labels.codeCopy,
+                languages: labels.codeLanguages,
+              },
               secret: {
                 copy: labels.secretCopy,
                 hide: labels.secretHide,
@@ -2227,6 +2257,7 @@ export default function GraphCanvas({
             onContentProcessorChange: onNodeContentProcessorChange,
             onCopyDerivedSecret:
               onCopySecret === null ? null : copyTextAsSecret,
+            onCopyText: copyText,
             onNameChange: onNodeNameChange,
             onFitNodeContent: fitNodeContent,
             onResizeEnd: commitNodeDimensions,
@@ -2240,6 +2271,7 @@ export default function GraphCanvas({
     contentMarkerOptions,
     contentProcessorByNodeId,
     contentProcessorOptions,
+    copyText,
     copyTextAsSecret,
     commitNodeDimensions,
     commitNodeAndScheduleAvoidance,

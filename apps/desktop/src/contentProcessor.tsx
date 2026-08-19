@@ -1,5 +1,10 @@
-import { Fragment, type ReactNode } from "react";
+import { Fragment, lazy, Suspense, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
+import {
+  codeContentProcessorId,
+  codePreviewLanguages,
+  type CodePreviewLanguage,
+} from "./codePreviewLanguages";
 import {
   contentEnhancerRegistry,
   type EnhancedContentSegment,
@@ -16,9 +21,15 @@ import {
 } from "./totpContent";
 import type { SecretContentLabels } from "./secretContent";
 
+const LazyCodePreview = lazy(async () => {
+  const module = await import("./codePreview");
+  return { default: module.CodePreview };
+});
+
 export type ContentPresentation =
   | { kind: "text"; text: string | null }
-  | { kind: "markdown"; source: string | null };
+  | { kind: "markdown"; source: string | null }
+  | { kind: "code"; language: CodePreviewLanguage; source: string | null };
 
 export interface ContentProcessor {
   readonly id: string;
@@ -84,14 +95,28 @@ export const markdownContentProcessor: ContentProcessor = {
   },
 };
 
+export const codeContentProcessors: readonly ContentProcessor[] =
+  codePreviewLanguages.map((language) => ({
+    id: codeContentProcessorId(language),
+    version: 1,
+    present(content: string | null): ContentPresentation {
+      return { kind: "code", language, source: content };
+    },
+  }));
+
 export const contentProcessorRegistry = new ContentProcessorRegistry([
   textContentProcessor,
   markdownContentProcessor,
+  ...codeContentProcessors,
 ]);
 
 export const maximumCanvasContentPreviewCharacters = 600;
 
 export interface ContentEnhancementLabels {
+  code: {
+    copy: string;
+    languages: Record<CodePreviewLanguage, string>;
+  };
   secret: SecretContentLabels;
   totp: TotpContentLabels;
 }
@@ -127,6 +152,7 @@ interface NodeContentHostProps {
   enhancementLabels: ContentEnhancementLabels;
   hideWhenEmpty?: boolean;
   onCopySecret?: (value: string) => void;
+  onCopyText?: (value: string) => void;
   processorId: string | null;
   variant: "canvas" | "list";
 }
@@ -169,6 +195,17 @@ function listContent(
     .join("");
 }
 
+function containsSensitiveContent(
+  segments: readonly EnhancedContentSegment[],
+): boolean {
+  return segments.some(
+    (segment) =>
+      segment.kind === "totp" ||
+      (segment.kind === "marker" &&
+        segment.marker.definition?.excludeFromSemanticAnalysis === true),
+  );
+}
+
 export function NodeContentHost({
   canvasPreviewEnabled = true,
   className,
@@ -177,13 +214,13 @@ export function NodeContentHost({
   enhancementLabels,
   hideWhenEmpty = false,
   onCopySecret,
+  onCopyText,
   processorId,
   variant,
 }: NodeContentHostProps) {
   const resolved = contentProcessorRegistry.resolve(processorId);
   const presentation = resolved.processor.present(content);
-  const source =
-    presentation.kind === "text" ? presentation.text : presentation.source;
+  const source = presentation.kind === "text" ? presentation.text : presentation.source;
   const presentedText =
     variant === "canvas" && canvasPreviewEnabled
       ? canvasContentPreview(source)
@@ -205,6 +242,7 @@ export function NodeContentHost({
       className,
       "node-content-host",
       presentation.kind === "markdown" ? "node-content-markdown" : null,
+      presentation.kind === "code" ? "node-content-code" : null,
       hasEnhancements ? "node-content-enhanced" : null,
     ]
       .filter(Boolean)
@@ -218,6 +256,39 @@ export function NodeContentHost({
       <span {...sharedProps}>
         {hasEnhancements ? listContent(enhancedSegments, enhancementLabels) : rendered}
       </span>
+    );
+  }
+  if (presentation.kind === "code" && presentedText) {
+    const codeSource = listContent(enhancedSegments, enhancementLabels);
+    const completeSegments =
+      source === presentedText
+        ? enhancedSegments
+        : contentEnhancerRegistry.segment(source ?? "", false);
+    const copyHandler = containsSensitiveContent(completeSegments)
+      ? onCopySecret
+      : onCopyText;
+    return (
+      <div {...sharedProps}>
+        <Suspense
+          fallback={
+            <pre className="code-preview-fallback">
+              <code>{codeSource}</code>
+            </pre>
+          }
+        >
+          <LazyCodePreview
+            labels={{ copy: enhancementLabels.code.copy }}
+            language={presentation.language}
+            languageLabel={enhancementLabels.code.languages[presentation.language]}
+            onCopy={
+              copyHandler === undefined || source === null
+                ? undefined
+                : () => copyHandler(source)
+            }
+            source={codeSource}
+          />
+        </Suspense>
+      </div>
     );
   }
   if (hasEnhancements) {
