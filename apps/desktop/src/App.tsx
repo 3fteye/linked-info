@@ -405,6 +405,7 @@ function App({
   const workspaceReplacementHistoryBoundaryRef =
     useRef<WorkspaceReplacementHistoryBoundary>(null);
   const workspaceReplacementHistoryBusyRef = useRef(false);
+  const workspaceMutationBlockedRef = useRef(false);
   const [historyAvailability, setHistoryAvailability] = useState({
     canUndo: false,
     canRedo: false,
@@ -2497,6 +2498,9 @@ function App({
     options: WorkspaceUpdateOptions = {},
   ): WorkspaceSnapshot {
     const current = workspaceRef.current;
+    if (workspaceMutationBlockedRef.current) {
+      return current;
+    }
     const next = updater(current);
     if (next === current) {
       return current;
@@ -3702,8 +3706,11 @@ function App({
       return;
     }
     workspaceReplacementHistoryBusyRef.current = true;
+    workspaceMutationBlockedRef.current = true;
+    skipUnmountFlushRef.current = true;
     workspaceReplacementHistoryBoundaryRef.current = null;
     syncHistoryAvailability();
+    setPersistenceReady(false);
     try {
       const result = await persistence.swapWithRecovery();
       if (result.status === "reloadRequired") {
@@ -3734,6 +3741,9 @@ function App({
       setRecoveryStorageProblem(null);
       setActiveView("canvas");
       setWorkspaceReplacementHistoryBoundary(direction === "undo" ? "redo" : "undo");
+      workspaceMutationBlockedRef.current = false;
+      skipUnmountFlushRef.current = false;
+      setPersistenceReady(true);
       showAppNotice(
         direction === "undo"
           ? t("backup.replacementUndoSuccess")
@@ -3748,6 +3758,9 @@ function App({
         },
       );
     } catch {
+      workspaceMutationBlockedRef.current = false;
+      skipUnmountFlushRef.current = false;
+      setPersistenceReady(true);
       workspaceReplacementHistoryBoundaryRef.current = direction;
       setBackupStatus(t("backup.replacementUndoFailed"));
     } finally {
