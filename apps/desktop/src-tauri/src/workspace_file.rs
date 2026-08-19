@@ -2748,13 +2748,11 @@ fn classify_prepared_restore_install(
     };
     match store.read_vault_metadata() {
         Ok(Some(_)) => {
-            return Ok(
-                if verify_encrypted_store(store, prepared_data_key).is_ok() {
-                    PreparedRestoreInstallOutcome::CommittedLocked
-                } else {
-                    PreparedRestoreInstallOutcome::RecoveryRequired
-                },
-            );
+            return Ok(classify_committed_restore_store(
+                store,
+                prepared_data_key,
+                || sync_parent_directory(&store.base_directory),
+            ));
         }
         Ok(None) => {}
         Err(_) => return Ok(PreparedRestoreInstallOutcome::RecoveryRequired),
@@ -2765,6 +2763,18 @@ fn classify_prepared_restore_install(
             Ok(PreparedRestoreInstallOutcome::RecoveryRequired)
         }
         Err(_) => Err(error),
+    }
+}
+
+fn classify_committed_restore_store(
+    store: &WorkspaceFileStore,
+    data_key: &[u8; DATA_KEY_BYTES],
+    confirm_durability: impl FnOnce() -> io::Result<()>,
+) -> PreparedRestoreInstallOutcome {
+    if verify_encrypted_store(store, data_key).is_ok() && confirm_durability().is_ok() {
+        PreparedRestoreInstallOutcome::CommittedLocked
+    } else {
+        PreparedRestoreInstallOutcome::RecoveryRequired
     }
 }
 
@@ -5203,6 +5213,12 @@ mod tests {
             )
             .unwrap(),
             PreparedRestoreInstallOutcome::CommittedLocked
+        );
+        assert_eq!(
+            classify_committed_restore_store(&store, &data_key, || {
+                Err(io::Error::other("injected directory sync failure"))
+            }),
+            PreparedRestoreInstallOutcome::RecoveryRequired
         );
 
         fs::remove_dir_all(directory).unwrap();
