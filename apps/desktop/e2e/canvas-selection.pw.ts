@@ -420,10 +420,13 @@ test("low-zoom TOTP updates keep every connected path stable", async ({ page }) 
 test("an explicit code language highlights safely and survives reload", async ({
   page,
 }) => {
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"], {
+    origin: "http://127.0.0.1:1422",
+  });
   const codeNode = {
     content: [
       "const answer: number = 42;",
-      `const token = '[[li:secret note="API Key"]]synthetic-secret[[/li]]';`,
+      `const padding = "${"x".repeat(700)}";`,
     ].join("\n"),
     id: syntheticId(1),
     name: "TypeScript example",
@@ -440,8 +443,15 @@ test("an explicit code language highlights safely and survives reload", async ({
   await expect(preview).toHaveAttribute("data-language", "typescript");
   await expect(preview.locator(".code-preview-line")).toHaveCount(2);
   await expect(preview.locator(".token.keyword").first()).toHaveText("const");
-  await expect(preview).toContainText("API Key");
-  await expect(preview).not.toContainText("synthetic-secret");
+  await preview.locator(".code-preview-copy").click();
+  await expect
+    .poll(async () =>
+      (await page.evaluate(() => navigator.clipboard.readText())).replace(
+        /\r\n/gu,
+        "\n",
+      ),
+    )
+    .toBe(codeNode.content);
   await expect.poll(() => storedWorkspace(page)).toMatchObject({
     nodes: [{ content: codeNode.content, id: codeNode.id }],
     view: {
@@ -454,7 +464,6 @@ test("an explicit code language highlights safely and survives reload", async ({
     "data-language",
     "typescript",
   );
-  await expect(node(page, codeNode.id)).not.toContainText("synthetic-secret");
 });
 
 test("existing content markers can be changed or removed without nesting", async ({

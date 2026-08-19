@@ -151,8 +151,9 @@ interface NodeContentHostProps {
   emptyContent?: ReactNode;
   enhancementLabels: ContentEnhancementLabels;
   hideWhenEmpty?: boolean;
+  codeSourceContainsSensitive?: boolean;
+  onCopyCodeSource?: (containsSensitive: boolean) => void;
   onCopySecret?: (value: string) => void;
-  onCopyText?: (value: string) => void;
   processorId: string | null;
   variant: "canvas" | "list";
 }
@@ -195,7 +196,7 @@ function listContent(
     .join("");
 }
 
-function containsSensitiveContent(
+function containsSensitiveSegments(
   segments: readonly EnhancedContentSegment[],
 ): boolean {
   return segments.some(
@@ -206,15 +207,23 @@ function containsSensitiveContent(
   );
 }
 
+export function contentContainsSensitive(content: string | null): boolean {
+  return (
+    content !== null &&
+    containsSensitiveSegments(contentEnhancerRegistry.segment(content, false))
+  );
+}
+
 export function NodeContentHost({
   canvasPreviewEnabled = true,
   className,
   content,
+  codeSourceContainsSensitive,
   emptyContent = null,
   enhancementLabels,
   hideWhenEmpty = false,
+  onCopyCodeSource,
   onCopySecret,
-  onCopyText,
   processorId,
   variant,
 }: NodeContentHostProps) {
@@ -260,13 +269,8 @@ export function NodeContentHost({
   }
   if (presentation.kind === "code" && presentedText) {
     const codeSource = listContent(enhancedSegments, enhancementLabels);
-    const completeSegments =
-      source === presentedText
-        ? enhancedSegments
-        : contentEnhancerRegistry.segment(source ?? "", false);
-    const copyHandler = containsSensitiveContent(completeSegments)
-      ? onCopySecret
-      : onCopyText;
+    const containsSensitive =
+      codeSourceContainsSensitive ?? contentContainsSensitive(source);
     return (
       <div {...sharedProps}>
         <Suspense
@@ -281,9 +285,9 @@ export function NodeContentHost({
             language={presentation.language}
             languageLabel={enhancementLabels.code.languages[presentation.language]}
             onCopy={
-              copyHandler === undefined || source === null
+              onCopyCodeSource === undefined
                 ? undefined
-                : () => copyHandler(source)
+                : () => onCopyCodeSource(containsSensitive)
             }
             source={codeSource}
           />

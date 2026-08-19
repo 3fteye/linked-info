@@ -92,14 +92,14 @@ describe("NodeContentHost", () => {
 
   it("renders an explicitly selected code language with line numbers and source copy", async () => {
     const source = "const answer: number = 42;\nconsole.log(answer);";
-    const onCopyText = vi.fn();
+    const onCopyCodeSource = vi.fn();
     await import("./codePreview");
     await act(async () => {
       root.render(
         <NodeContentHost
           content={source}
           enhancementLabels={enhancementLabels}
-          onCopyText={onCopyText}
+          onCopyCodeSource={onCopyCodeSource}
           processorId="code.typescript"
           variant="canvas"
         />,
@@ -118,22 +118,21 @@ describe("NodeContentHost", () => {
         .querySelector<HTMLButtonElement>(".code-preview-copy")
         ?.click(),
     );
-    expect(onCopyText).toHaveBeenCalledWith(source);
+    expect(onCopyCodeSource).toHaveBeenCalledWith(false);
   });
 
   it("masks marked secrets before highlighting and routes source copy through the secret boundary", async () => {
     const source =
       'const apiKey = "[[li:secret note="API Key"]]synthetic-secret[[/li]]";';
-    const onCopySecret = vi.fn();
-    const onCopyText = vi.fn();
+    const onCopyCodeSource = vi.fn();
     await import("./codePreview");
     await act(async () => {
       root.render(
         <NodeContentHost
+          codeSourceContainsSensitive
           content={source}
           enhancementLabels={enhancementLabels}
-          onCopySecret={onCopySecret}
-          onCopyText={onCopyText}
+          onCopyCodeSource={onCopyCodeSource}
           processorId="code.javascript"
           variant="canvas"
         />,
@@ -147,8 +146,7 @@ describe("NodeContentHost", () => {
         .querySelector<HTMLButtonElement>(".code-preview-copy")
         ?.click(),
     );
-    expect(onCopySecret).toHaveBeenCalledWith(source);
-    expect(onCopyText).not.toHaveBeenCalled();
+    expect(onCopyCodeSource).toHaveBeenCalledWith(true);
   });
 
   it("keeps list rows compact and falls back safely for unavailable processors", () => {

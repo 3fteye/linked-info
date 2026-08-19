@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   ContentProcessorRegistry,
   canvasContentPreview,
+  contentContainsSensitive,
   contentProcessorRegistry,
   markdownContentProcessor,
   maximumCanvasContentPreviewCharacters,
@@ -70,5 +71,12 @@ describe("content processor registry", () => {
     expect(preview).toBe(`${prefix}…`);
     expect(preview).not.toContain("synthetic-secret");
     expect(content).toContain(payload);
+  });
+
+  it("classifies sensitive content beyond the bounded canvas preview", () => {
+    const content = `${"x".repeat(maximumCanvasContentPreviewCharacters + 100)}[[li:secret]]synthetic-secret[[/li]]`;
+
+    expect(canvasContentPreview(content)).not.toContain("synthetic-secret");
+    expect(contentContainsSensitive(content)).toBe(true);
   });
 });

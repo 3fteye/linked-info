@@ -38,6 +38,7 @@ function cardProps(overrides: Record<string, unknown> = {}): NodeProps<any> {
       contentFullyRendered: true,
       contentTruncated: false,
       contentProcessorId: null,
+      codeSourceContainsSensitive: false,
       contentProcessorLabel: "Content format",
       contentProcessorOptions: [
         { id: "text", label: "Plain text" },
@@ -116,8 +117,8 @@ function cardProps(overrides: Record<string, unknown> = {}): NodeProps<any> {
       onCommit: vi.fn(),
       onContentChange: vi.fn(),
       onContentProcessorChange: vi.fn(),
+      onCopyCodeSource: vi.fn(),
       onCopyDerivedSecret: null,
-      onCopyText: vi.fn(),
       onFitNodeContent: vi.fn(),
       onNameChange: vi.fn(() => true),
       onResizeEnd: vi.fn(),
