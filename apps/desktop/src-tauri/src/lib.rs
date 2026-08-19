@@ -134,6 +134,7 @@ pub fn run() {
             workspace_file::record_workspace_activity,
             workspace_file::rotate_workspace_data_key,
             workspace_file::set_workspace_idle_timeout,
+            workspace_file::swap_workspace_recovery_files,
             workspace_file::unlock_workspace,
             workspace_file::unlock_workspace_with_system,
             workspace_file::write_workspace_file
