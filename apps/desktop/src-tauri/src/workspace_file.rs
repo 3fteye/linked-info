@@ -1936,7 +1936,7 @@ pub async fn commit_workspace_restore(
     let store = workspace_store(&app).map_err(|error| error.to_string())?;
     let store_for_install = store.clone();
     let operation_lock = Arc::clone(&state.operation_lock);
-    let install_result = tauri::async_runtime::spawn_blocking(move || {
+    let install_task = tauri::async_runtime::spawn_blocking(move || {
         let _guard = operation_lock
             .lock()
             .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
@@ -1948,9 +1948,14 @@ pub async fn commit_workspace_restore(
             &store_for_install,
             prepared,
         ))
-    })
-    .await
-    .map_err(|error| error.to_string())??;
+    });
+    let install_result = match install_task.await {
+        Ok(result) => result?,
+        // A panic/cancellation can occur after the filesystem commit point.
+        // Classify the on-disk state instead of blindly reporting pre-commit
+        // failure to React.
+        Err(error) => Err(error.to_string()),
+    };
     let provider_available = system_unlock_state.provider().available();
     let outcome = classify_prepared_restore_install(&store, install_result)?;
     let locked_result = || WorkspaceSecurityTransactionResult {
@@ -2711,15 +2716,10 @@ fn classify_prepared_restore_install(
         Ok(data_key) => return Ok(PreparedRestoreInstallOutcome::Committed(data_key)),
         Err(error) => error,
     };
-    match fs::metadata(store.vault_path()) {
-        Ok(metadata) if metadata.is_file() => {
-            return Ok(PreparedRestoreInstallOutcome::CommittedLocked);
-        }
-        Ok(_) => return Ok(PreparedRestoreInstallOutcome::RecoveryRequired),
-        Err(metadata_error) if metadata_error.kind() != io::ErrorKind::NotFound => {
-            return Ok(PreparedRestoreInstallOutcome::RecoveryRequired);
-        }
-        Err(_) => {}
+    match store.read_vault_metadata() {
+        Ok(Some(_)) => return Ok(PreparedRestoreInstallOutcome::CommittedLocked),
+        Ok(None) => {}
+        Err(_) => return Ok(PreparedRestoreInstallOutcome::RecoveryRequired),
     }
     match fs::metadata(store.pending_vault_path()) {
         Ok(_) => Ok(PreparedRestoreInstallOutcome::RecoveryRequired),
@@ -5086,11 +5086,29 @@ mod tests {
         let directory = test_directory();
         let store = WorkspaceFileStore::new(directory.clone());
         fs::create_dir_all(&directory).unwrap();
-        write_atomically(&store.vault_path(), b"committed-vault").unwrap();
+        let data_key = random_array::<DATA_KEY_BYTES>().unwrap();
+        let metadata =
+            create_vault_metadata("correct horse battery", &data_key, Vec::new()).unwrap();
+        write_atomically(&store.vault_path(), &serde_json::to_vec(&metadata).unwrap()).unwrap();
 
         assert_eq!(
             classify_prepared_restore_install(&store, Err("followup failed".to_owned())).unwrap(),
             PreparedRestoreInstallOutcome::CommittedLocked
+        );
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn restore_failure_with_an_invalid_vault_requires_recovery() {
+        let directory = test_directory();
+        let store = WorkspaceFileStore::new(directory.clone());
+        fs::create_dir_all(&directory).unwrap();
+        write_atomically(&store.vault_path(), b"invalid-vault").unwrap();
+
+        assert_eq!(
+            classify_prepared_restore_install(&store, Err("followup failed".to_owned())).unwrap(),
+            PreparedRestoreInstallOutcome::RecoveryRequired
         );
 
         fs::remove_dir_all(directory).unwrap();
