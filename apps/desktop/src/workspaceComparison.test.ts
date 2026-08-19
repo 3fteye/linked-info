@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { WorkspaceSnapshot } from "./workspaceData";
-import { compareWorkspaces } from "./workspaceComparison";
+import {
+  compareWorkspaces,
+  createWorkspaceViewMetadataComparison,
+} from "./workspaceComparison";
 
 const firstId = "11111111-1111-4111-8111-111111111111";
 const secondId = "22222222-2222-4222-8222-222222222222";
@@ -130,6 +133,44 @@ describe("workspace replacement comparison", () => {
       modifiedNodes: 1,
       viewMetadataChanged: true,
       identical: false,
+    });
+  });
+
+  it("indexes extension namespaces once for repeated per-node comparisons", () => {
+    const current = workspace();
+    const replacement = workspace();
+    const metadata = {
+      "dev.example.preview": {
+        schemaVersion: 1,
+        workspace: {},
+        byNodeId: { [firstId]: { collapsed: true } },
+      },
+    };
+    let currentScans = 0;
+    let replacementScans = 0;
+    current.view.extensionMetadata = new Proxy(structuredClone(metadata), {
+      ownKeys(target) {
+        currentScans += 1;
+        return Reflect.ownKeys(target);
+      },
+    });
+    replacement.view.extensionMetadata = new Proxy(structuredClone(metadata), {
+      ownKeys(target) {
+        replacementScans += 1;
+        return Reflect.ownKeys(target);
+      },
+    });
+
+    const comparison = createWorkspaceViewMetadataComparison(
+      current,
+      replacement,
+    );
+    expect(comparison.nodeEqual(firstId)).toBe(true);
+    expect(comparison.nodeEqual(secondId)).toBe(true);
+    expect(comparison.nodeEqual(firstId)).toBe(true);
+    expect({ currentScans, replacementScans }).toEqual({
+      currentScans: 1,
+      replacementScans: 1,
     });
   });
 
