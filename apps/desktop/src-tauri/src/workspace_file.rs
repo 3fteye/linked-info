@@ -2805,11 +2805,17 @@ fn classify_recovery_swap_prepare_failure(
     store: &WorkspaceFileStore,
     error: String,
 ) -> Result<WorkspaceRecoverySwapPreparation, String> {
-    if store.recovery_swap_manifest_path().is_file() {
-        return Ok(WorkspaceRecoverySwapPreparation::RecoveryRequired);
+    match fs::metadata(store.recovery_swap_manifest_path()) {
+        Ok(_) => return Ok(WorkspaceRecoverySwapPreparation::RecoveryRequired),
+        Err(metadata_error) if metadata_error.kind() != io::ErrorKind::NotFound => {
+            return Ok(WorkspaceRecoverySwapPreparation::RecoveryRequired);
+        }
+        Err(_) => {}
     }
-    let _ = remove_workspace_subdirectory(&store.base_directory, &store.recovery_swap_directory());
-    Err(error)
+    match remove_workspace_subdirectory(&store.base_directory, &store.recovery_swap_directory()) {
+        Ok(()) => Err(error),
+        Err(_) => Ok(WorkspaceRecoverySwapPreparation::RecoveryRequired),
+    }
 }
 
 fn recover_pending_encryption_migration(store: &WorkspaceFileStore) -> Result<(), String> {
@@ -4164,6 +4170,21 @@ mod tests {
             store.read_plaintext(WorkspaceFileSlot::Recovery).unwrap(),
             Some(normalize_storage_envelope(&primary).unwrap())
         );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn recovery_swap_quarantines_an_unknown_manifest_object() {
+        let directory = test_directory();
+        let store = WorkspaceFileStore::new(directory.clone());
+        fs::create_dir_all(store.recovery_swap_manifest_path()).unwrap();
+
+        assert_eq!(
+            classify_recovery_swap_prepare_failure(&store, "directory sync failed".to_owned())
+                .unwrap(),
+            WorkspaceRecoverySwapPreparation::RecoveryRequired
+        );
+        assert!(store.recovery_swap_directory().exists());
         fs::remove_dir_all(directory).unwrap();
     }
 

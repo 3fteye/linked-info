@@ -76,7 +76,15 @@ export function createTauriWorkspacePersistence(
   async function loadSlot(slot: WorkspaceStorageSlot): Promise<WorkspaceLoadResult> {
     const contents = await bridge.read(slot);
     if (contents !== null) {
-      return parseStoredWorkspaceText(contents);
+      const loaded = parseStoredWorkspaceText(contents);
+      if (slot === "primary" && loaded.status === "ready" && writesQuarantined) {
+        // A successful Rust primary read first completes any pending recovery
+        // transaction. A remounted App can persist again only after that
+        // authoritative read has succeeded.
+        writeGeneration += 1;
+        writesQuarantined = false;
+      }
+      return loaded;
     }
 
     const legacyWorkspace = legacy.load(slot);

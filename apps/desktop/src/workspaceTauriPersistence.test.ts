@@ -286,6 +286,12 @@ describe("createTauriWorkspacePersistence", () => {
       status: "ready",
       workspace: recovery,
     });
+    const afterRecoveryRead = validWorkspace("Writable after recovered primary read");
+    await persistence.save(afterRecoveryRead);
+    expect(await persistence.load()).toEqual({
+      status: "ready",
+      workspace: afterRecoveryRead,
+    });
   });
 
   it("drops stale saves queued while Rust owns the recovery transaction", async () => {
