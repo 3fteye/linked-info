@@ -618,18 +618,23 @@ fn validate_signature(
         None => None,
     };
     let publisher_fingerprint = public_key.as_ref().map(|key| sha256_hex(key));
+    let verifying_key = public_key
+        .map(|key| {
+            let verifying_key = VerifyingKey::from_bytes(&key)
+                .map_err(|_| ExtensionPackageError::InvalidPublisherKey)?;
+            if verifying_key.is_weak() {
+                return Err(ExtensionPackageError::InvalidPublisherKey);
+            }
+            Ok(verifying_key)
+        })
+        .transpose()?;
     let Some(signature_bytes) = files.get(SIGNATURE_PATH) else {
         return match policy {
             SignaturePolicy::RequireSigned => Err(ExtensionPackageError::MissingSignature),
             SignaturePolicy::AllowUnsignedDevelopment => Ok((false, publisher_fingerprint)),
         };
     };
-    let public_key = public_key.ok_or(ExtensionPackageError::InvalidPublisherKey)?;
-    let verifying_key = VerifyingKey::from_bytes(&public_key)
-        .map_err(|_| ExtensionPackageError::InvalidPublisherKey)?;
-    if verifying_key.is_weak() {
-        return Err(ExtensionPackageError::InvalidPublisherKey);
-    }
+    let verifying_key = verifying_key.ok_or(ExtensionPackageError::InvalidPublisherKey)?;
     let signature_bytes: [u8; 64] = signature_bytes
         .as_slice()
         .try_into()
@@ -824,6 +829,24 @@ mod tests {
         );
         assert!(
             validate_extension_package(&package, SignaturePolicy::AllowUnsignedDevelopment).is_ok()
+        );
+    }
+
+    #[test]
+    fn unsigned_development_packages_still_reject_weak_publisher_keys() {
+        let mut files = protected_files(None);
+        let mut invalid_manifest = manifest(None);
+        invalid_manifest.publisher.public_key = Some("00".repeat(32));
+        files.insert(
+            MANIFEST_PATH.to_owned(),
+            serde_json::to_vec(&invalid_manifest).unwrap(),
+        );
+        let checksums = checksum_bytes(&files);
+        let package = write_package(files, checksums, None);
+
+        assert_eq!(
+            validate_extension_package(&package, SignaturePolicy::AllowUnsignedDevelopment),
+            Err(ExtensionPackageError::InvalidPublisherKey)
         );
     }
 

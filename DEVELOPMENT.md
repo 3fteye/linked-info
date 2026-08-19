@@ -23,6 +23,7 @@
 | `crates/domain` | 节点、引用和领域不变量 |
 | `crates/application` | 与存储实现无关的应用用例 |
 | `crates/contracts` | 供应商无关的 API DTO、错误码和 OpenAPI 契约 |
+| `crates/extension-contracts` | 版本化扩展 WIT、清单/协议类型和只验证不执行的 `.liext` 包边界 |
 | `crates/storage-port` | 存储端口接口 |
 | `crates/backup-port` | 供应商无关的密文快照与备份目标端口 |
 | `crates/storage-memory` | 测试和本地用的内存适配器 |
@@ -39,8 +40,10 @@ flowchart LR
     UI --> EA["EmbeddingAnalyzer"]
     EA --> LE["本地 FastEmbed / ONNX"]
     EA --> RE["远端嵌入接口"]
-    UI -. "后续扩展" .-> CP["ContentProcessor 边界"]
+    UI -. "当前内置扩展" .-> CP["ContentProcessor 边界"]
     CP -.-> BUILTIN["内置 Markdown 处理器 / 内容标记扩展 / 受控脚本边界"]
+    EXT[".liext 不可信包"] -. "当前仅验证" .-> EC["Extension Contracts"]
+    EC -. "尚未接入安装与执行" .-> UI
     ENC --> BT["供应商无关 BackupTarget"]
     BT --> S3["统一 S3 兼容适配器"]
     S3 --> R2["Cloudflare R2"]
