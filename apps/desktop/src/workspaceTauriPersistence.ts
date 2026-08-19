@@ -48,15 +48,22 @@ export function createTauriWorkspacePersistence(
 ): WorkspacePersistence {
   let writeTail: Promise<void> = Promise.resolve();
   let writeGeneration = 0;
+  let writesQuarantined = false;
 
   function enqueueWrite(
     slot: WorkspaceStorageSlot,
     contents: string,
   ): Promise<void> {
+    if (writesQuarantined) {
+      return Promise.reject(new Error("workspace_recovery_swap_reload_required"));
+    }
     const generation = writeGeneration;
     const write = writeTail
       .catch(() => undefined)
       .then(() => {
+        if (writesQuarantined) {
+          throw new Error("workspace_recovery_swap_reload_required");
+        }
         if (generation !== writeGeneration) {
           return;
         }
@@ -91,22 +98,24 @@ export function createTauriWorkspacePersistence(
   async function swapWithRecovery() {
     await writeTail.catch(() => undefined);
     writeGeneration += 1;
-    const swap = bridge.swap();
+    const swap = bridge.swap().then((result) => {
+      writeGeneration += 1;
+      if (result.status !== "committed") {
+        writesQuarantined = true;
+      }
+      return result;
+    });
     writeTail = swap.then(
       () => undefined,
       () => undefined,
     );
-    const result = await swap.finally(() => {
-      // Drop any stale React save that was queued while Rust owned the
-      // cross-file transaction. The committed workspace becomes the next
-      // authoritative generation.
-      writeGeneration += 1;
-    });
+    const result = await swap;
     if (result.status !== "committed") {
       return { status: "reloadRequired" } as const;
     }
     const parsed = parseStoredWorkspaceText(result.contents);
     if (parsed.status !== "ready") {
+      writesQuarantined = true;
       throw new Error("workspace_recovery_invalid");
     }
     legacy.remove("primary");

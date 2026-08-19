@@ -3707,6 +3707,9 @@ function App({
     try {
       const result = await persistence.swapWithRecovery();
       if (result.status === "reloadRequired") {
+        // The Rust transaction may already be committed. Do not let the
+        // lifecycle cleanup flush the stale React snapshot over it.
+        skipUnmountFlushRef.current = true;
         setPersistenceRecoveryRequired(true);
         setPersistenceReady(false);
         return;

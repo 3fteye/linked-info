@@ -278,6 +278,9 @@ describe("createTauriWorkspacePersistence", () => {
     });
     expect(swapCount).toBe(1);
     expect(writeCount).toBe(2);
+    await expect(persistence.save(validWorkspace("Must not write"))).rejects.toThrow(
+      "workspace_recovery_swap_reload_required",
+    );
     expect(await persistence.load()).toEqual({ status: "ready", workspace: primary });
     expect(await persistence.loadRecovery()).toEqual({
       status: "ready",
@@ -342,5 +345,46 @@ describe("createTauriWorkspacePersistence", () => {
       status: "ready",
       workspace: stalePrimary,
     });
+  });
+
+  it("preserves a save queued while a pre-commit swap attempt fails", async () => {
+    const files = new Map<WorkspaceStorageSlot, string>();
+    let signalSwapStarted: () => void = () => {};
+    const swapStarted = new Promise<void>((resolve) => {
+      signalSwapStarted = resolve;
+    });
+    let rejectSwap: (error: Error) => void = () => {};
+    const swapBlocked = new Promise<never>((_resolve, reject) => {
+      rejectSwap = reject;
+    });
+    const bridge: WorkspaceFileBridge = {
+      async read(slot) {
+        return files.get(slot) ?? null;
+      },
+      async swap() {
+        signalSwapStarted();
+        return swapBlocked;
+      },
+      async write(slot, contents) {
+        files.set(slot, contents);
+      },
+    };
+    const persistence = createTauriWorkspacePersistence(
+      bridge,
+      new MemoryLegacySource(),
+    );
+    const primary = validWorkspace("Before failed swap");
+    const edited = validWorkspace("Edit during failed swap");
+    await persistence.preserveForRecovery(validWorkspace("Recovery"));
+    await persistence.save(primary);
+
+    const swapping = persistence.swapWithRecovery();
+    await swapStarted;
+    const queuedSave = persistence.save(edited);
+    rejectSwap(new Error("swap failed before commit"));
+
+    await expect(swapping).rejects.toThrow("swap failed before commit");
+    await queuedSave;
+    expect(await persistence.load()).toEqual({ status: "ready", workspace: edited });
   });
 });
