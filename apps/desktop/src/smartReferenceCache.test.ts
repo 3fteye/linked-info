@@ -25,7 +25,7 @@ function workspace(): WorkspaceSnapshot {
     ],
     references: [],
     viewport: null,
-    view: { contentProcessorByNodeId: {} },
+    view: { contentProcessorByNodeId: {}, extensionMetadata: {} },
   };
 }
 

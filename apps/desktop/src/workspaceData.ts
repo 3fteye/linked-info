@@ -29,6 +29,26 @@ export interface CanvasViewport {
 
 export interface WorkspaceViewMetadata {
   contentProcessorByNodeId: Record<string, string>;
+  extensionMetadata: Record<string, WorkspaceExtensionMetadata>;
+}
+
+export type ExtensionMetadataJsonValue =
+  | null
+  | boolean
+  | number
+  | string
+  | ExtensionMetadataJsonValue[]
+  | { [key: string]: ExtensionMetadataJsonValue };
+
+export type ExtensionMetadataPayload = Record<
+  string,
+  ExtensionMetadataJsonValue
+>;
+
+export interface WorkspaceExtensionMetadata {
+  schemaVersion: number;
+  workspace: ExtensionMetadataPayload;
+  byNodeId: Record<string, ExtensionMetadataPayload>;
 }
 
 export interface WorkspaceSnapshot {
@@ -42,6 +62,21 @@ export interface WorkspaceSnapshot {
 const uuidPattern =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const contentProcessorIdPattern = /^[a-z0-9][a-z0-9._-]{0,127}$/;
+const extensionIdPattern =
+  /^[a-z](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z](?:[a-z0-9-]*[a-z0-9])?){2,}$/;
+const extensionMetadataPropertyPattern = /^[A-Za-z0-9_-]{1,64}$/;
+const maximumExtensionCount = 256;
+const maximumExtensionMetadataDepth = 16;
+const maximumExtensionMetadataObjectProperties = 128;
+const maximumExtensionMetadataArrayItems = 1_024;
+const maximumExtensionMetadataStringCharacters = 4_096;
+const maximumNodeExtensionMetadataBytes = 16 * 1024;
+const maximumWorkspaceExtensionMetadataBytes = 64 * 1024;
+const maximumSingleExtensionMetadataBytes = 4 * 1024 * 1024;
+const maximumTotalExtensionMetadataBytes = 16 * 1024 * 1024;
+const extensionMetadataUtf8Encoder = new TextEncoder();
+const invalidExtensionMetadataValue = Symbol("invalidExtensionMetadataValue");
+type WorkspaceSnapshotVersion = 1 | 2 | 3;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -57,13 +92,170 @@ function canonicalNodeId(value: unknown): string | null {
     : null;
 }
 
+function utf8JsonSize(value: unknown): number {
+  return extensionMetadataUtf8Encoder.encode(JSON.stringify(value)).byteLength;
+}
+
+function hasValidExtensionMetadataString(value: string): boolean {
+  let characterCount = 0;
+  for (const scalar of value) {
+    const codePoint = scalar.codePointAt(0);
+    characterCount += 1;
+    if (
+      codePoint === undefined ||
+      (codePoint >= 0xd800 && codePoint <= 0xdfff) ||
+      characterCount > maximumExtensionMetadataStringCharacters
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function parseExtensionMetadataJsonValue(
+  value: unknown,
+  depth: number,
+): ExtensionMetadataJsonValue | typeof invalidExtensionMetadataValue {
+  if (depth > maximumExtensionMetadataDepth) {
+    return invalidExtensionMetadataValue;
+  }
+  if (value === null || typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "number") {
+    return Number.isFinite(value) && Math.abs(value) <= Number.MAX_SAFE_INTEGER
+      ? value
+      : invalidExtensionMetadataValue;
+  }
+  if (typeof value === "string") {
+    return hasValidExtensionMetadataString(value)
+      ? value
+      : invalidExtensionMetadataValue;
+  }
+  if (Array.isArray(value)) {
+    if (value.length > maximumExtensionMetadataArrayItems) {
+      return invalidExtensionMetadataValue;
+    }
+    const parsed: ExtensionMetadataJsonValue[] = [];
+    for (const item of value) {
+      const result = parseExtensionMetadataJsonValue(item, depth + 1);
+      if (result === invalidExtensionMetadataValue) {
+        return result;
+      }
+      parsed.push(result);
+    }
+    return parsed;
+  }
+  if (!isRecord(value)) {
+    return invalidExtensionMetadataValue;
+  }
+  const entries = Object.entries(value);
+  if (entries.length > maximumExtensionMetadataObjectProperties) {
+    return invalidExtensionMetadataValue;
+  }
+  const parsed: Array<[string, ExtensionMetadataJsonValue]> = [];
+  for (const [key, item] of entries) {
+    if (!extensionMetadataPropertyPattern.test(key)) {
+      return invalidExtensionMetadataValue;
+    }
+    const result = parseExtensionMetadataJsonValue(item, depth + 1);
+    if (result === invalidExtensionMetadataValue) {
+      return result;
+    }
+    parsed.push([key, result]);
+  }
+  return Object.fromEntries(parsed);
+}
+
+function parseExtensionMetadataPayload(
+  value: unknown,
+): ExtensionMetadataPayload | null {
+  if (!isRecord(value) || Array.isArray(value)) {
+    return null;
+  }
+  const parsed = parseExtensionMetadataJsonValue(value, 1);
+  return parsed === invalidExtensionMetadataValue || Array.isArray(parsed)
+    ? null
+    : (parsed as ExtensionMetadataPayload);
+}
+
+function parseWorkspaceExtensionMetadata(
+  value: unknown,
+  nodeIds: ReadonlySet<string>,
+): Record<string, WorkspaceExtensionMetadata> | null {
+  if (!isRecord(value) || Array.isArray(value)) {
+    return null;
+  }
+  const extensionEntries = Object.entries(value);
+  if (extensionEntries.length > maximumExtensionCount) {
+    return null;
+  }
+  const parsedExtensions: Array<[string, WorkspaceExtensionMetadata]> = [];
+  for (const [extensionId, candidate] of extensionEntries) {
+    if (
+      extensionId.length > 128 ||
+      !extensionIdPattern.test(extensionId) ||
+      !isRecord(candidate) ||
+      Array.isArray(candidate) ||
+      Object.keys(candidate).length !== 3 ||
+      !Object.prototype.hasOwnProperty.call(candidate, "schemaVersion") ||
+      !Object.prototype.hasOwnProperty.call(candidate, "workspace") ||
+      !Object.prototype.hasOwnProperty.call(candidate, "byNodeId") ||
+      !Number.isInteger(candidate.schemaVersion) ||
+      (candidate.schemaVersion as number) <= 0 ||
+      (candidate.schemaVersion as number) > 0xffff_ffff
+    ) {
+      return null;
+    }
+    const workspace = parseExtensionMetadataPayload(candidate.workspace);
+    if (
+      workspace === null ||
+      utf8JsonSize(workspace) > maximumWorkspaceExtensionMetadataBytes ||
+      !isRecord(candidate.byNodeId) ||
+      Array.isArray(candidate.byNodeId)
+    ) {
+      return null;
+    }
+    const byNodeIdEntries: Array<[string, ExtensionMetadataPayload]> = [];
+    const seenNodeIds = new Set<string>();
+    for (const [rawNodeId, rawPayload] of Object.entries(candidate.byNodeId)) {
+      const nodeId = canonicalNodeId(rawNodeId);
+      const payload = parseExtensionMetadataPayload(rawPayload);
+      if (
+        nodeId === null ||
+        !nodeIds.has(nodeId) ||
+        seenNodeIds.has(nodeId) ||
+        payload === null ||
+        utf8JsonSize(payload) > maximumNodeExtensionMetadataBytes
+      ) {
+        return null;
+      }
+      seenNodeIds.add(nodeId);
+      byNodeIdEntries.push([nodeId, payload]);
+    }
+    const extension: WorkspaceExtensionMetadata = {
+      schemaVersion: candidate.schemaVersion as number,
+      workspace,
+      byNodeId: Object.fromEntries(byNodeIdEntries),
+    };
+    if (utf8JsonSize(extension) > maximumSingleExtensionMetadataBytes) {
+      return null;
+    }
+    parsedExtensions.push([extensionId, extension]);
+  }
+  const parsed = Object.fromEntries(parsedExtensions);
+  return utf8JsonSize(parsed) <= maximumTotalExtensionMetadataBytes
+    ? parsed
+    : null;
+}
+
 export function emptyWorkspace(): WorkspaceSnapshot {
   return {
     nodes: [],
     layout: [],
     references: [],
     viewport: null,
-    view: { contentProcessorByNodeId: {} },
+    view: { contentProcessorByNodeId: {}, extensionMetadata: {} },
   };
 }
 
@@ -234,7 +426,7 @@ export function updateNodeLayoutSizeOverrides(
 
 function parseWorkspaceSnapshotValue(
   value: unknown,
-  allowMissingView: boolean,
+  version: WorkspaceSnapshotVersion,
 ): WorkspaceSnapshot | null {
   if (
     !isRecord(value) ||
@@ -369,10 +561,16 @@ function parseWorkspaceSnapshotValue(
   }
 
   let contentProcessorByNodeId: Record<string, string> = {};
-  if (!allowMissingView && value.view !== undefined) {
+  let extensionMetadata: Record<string, WorkspaceExtensionMetadata> = {};
+  if (version !== 1 && value.view !== undefined) {
     if (
       !isRecord(value.view) ||
-      !isRecord(value.view.contentProcessorByNodeId)
+      Array.isArray(value.view) ||
+      !isRecord(value.view.contentProcessorByNodeId) ||
+      Array.isArray(value.view.contentProcessorByNodeId) ||
+      Object.keys(value.view).length !== (version === 2 ? 1 : 2) ||
+      (version === 2 &&
+        Object.prototype.hasOwnProperty.call(value.view, "extensionMetadata"))
     ) {
       return null;
     }
@@ -393,7 +591,17 @@ function parseWorkspaceSnapshotValue(
       }
       contentProcessorByNodeId[nodeId] = processorId;
     }
-  } else if (!allowMissingView) {
+    if (version === 3) {
+      const parsedExtensionMetadata = parseWorkspaceExtensionMetadata(
+        value.view.extensionMetadata,
+        nodeIds,
+      );
+      if (parsedExtensionMetadata === null) {
+        return null;
+      }
+      extensionMetadata = parsedExtensionMetadata;
+    }
+  } else if (version !== 1) {
     return null;
   }
 
@@ -402,18 +610,24 @@ function parseWorkspaceSnapshotValue(
     layout,
     references,
     viewport,
-    view: { contentProcessorByNodeId },
+    view: { contentProcessorByNodeId, extensionMetadata },
   };
 }
 
 export function parseWorkspaceSnapshot(value: unknown): WorkspaceSnapshot | null {
-  return parseWorkspaceSnapshotValue(value, false);
+  return parseWorkspaceSnapshotValue(value, 3);
 }
 
 export function migrateWorkspaceSnapshotV1(
   value: unknown,
 ): WorkspaceSnapshot | null {
-  return parseWorkspaceSnapshotValue(value, true);
+  return parseWorkspaceSnapshotValue(value, 1);
+}
+
+export function migrateWorkspaceSnapshotV2(
+  value: unknown,
+): WorkspaceSnapshot | null {
+  return parseWorkspaceSnapshotValue(value, 2);
 }
 
 export function removeNodesFromWorkspaceView(
@@ -423,8 +637,29 @@ export function removeNodesFromWorkspaceView(
   const entries = Object.entries(view.contentProcessorByNodeId).filter(
     ([nodeId]) => !deletedNodeIds.has(nodeId),
   );
-  if (entries.length === Object.keys(view.contentProcessorByNodeId).length) {
+  let extensionMetadataChanged = false;
+  const extensionMetadata = Object.fromEntries(
+    Object.entries(view.extensionMetadata).map(([extensionId, metadata]) => {
+      const byNodeId = Object.fromEntries(
+        Object.entries(metadata.byNodeId).filter(
+          ([nodeId]) => !deletedNodeIds.has(nodeId),
+        ),
+      );
+      if (Object.keys(byNodeId).length !== Object.keys(metadata.byNodeId).length) {
+        extensionMetadataChanged = true;
+        return [extensionId, { ...metadata, byNodeId }];
+      }
+      return [extensionId, metadata];
+    }),
+  );
+  if (
+    entries.length === Object.keys(view.contentProcessorByNodeId).length &&
+    !extensionMetadataChanged
+  ) {
     return view;
   }
-  return { contentProcessorByNodeId: Object.fromEntries(entries) };
+  return {
+    contentProcessorByNodeId: Object.fromEntries(entries),
+    extensionMetadata,
+  };
 }

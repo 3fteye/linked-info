@@ -71,14 +71,14 @@ function workspace(nodeId: string, name: string): WorkspaceSnapshot {
     references: [],
     layout: [{ nodeId, x: 0, y: 0 }],
     viewport: null,
-    view: { contentProcessorByNodeId: {} },
+    view: { contentProcessorByNodeId: {}, extensionMetadata: {} },
   };
 }
 
 function workspaceExport(snapshot: WorkspaceSnapshot): string {
   return JSON.stringify({
     format: "linked-info-workspace",
-    version: 2,
+    version: 3,
     exportedAt: "2026-08-19T00:00:00.000Z",
     workspace: snapshot,
   });

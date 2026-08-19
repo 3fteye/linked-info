@@ -20,7 +20,11 @@ import type {
   NodeReference,
   WorkspaceSnapshot,
 } from "./workspaceData";
-import { compareWorkspaces } from "./workspaceComparison";
+import {
+  compareWorkspaces,
+  createWorkspaceViewMetadataComparison,
+  type WorkspaceViewMetadataComparison,
+} from "./workspaceComparison";
 import "@xyflow/react/dist/style.css";
 
 type PreviewMode = "before" | "after" | "overlay";
@@ -194,6 +198,7 @@ function makeReferenceEdge(
 function nodeDifferences(
   current: WorkspaceSnapshot,
   replacement: WorkspaceSnapshot,
+  viewComparison: WorkspaceViewMetadataComparison,
 ): Map<string, NodeDifference> {
   const currentNodes = new Map(current.nodes.map((node) => [node.id, node]));
   const replacementNodes = new Map(replacement.nodes.map((node) => [node.id, node]));
@@ -228,8 +233,7 @@ function nodeDifferences(
         after !== undefined &&
         (before.name !== after.name ||
           before.content !== after.content ||
-          current.view.contentProcessorByNodeId[nodeId] !==
-            replacement.view.contentProcessorByNodeId[nodeId]),
+          !viewComparison.nodeEqual(nodeId)),
       moved:
         beforeLayout !== undefined &&
         afterLayout !== undefined &&
@@ -276,9 +280,13 @@ export default function WorkspaceRestorePreview({
   onConfirm,
 }: WorkspaceRestorePreviewProps) {
   const [mode, setMode] = useState<PreviewMode>("overlay");
-  const differences = useMemo(
-    () => nodeDifferences(current, replacement),
+  const viewComparison = useMemo(
+    () => createWorkspaceViewMetadataComparison(current, replacement),
     [current, replacement],
+  );
+  const differences = useMemo(
+    () => nodeDifferences(current, replacement, viewComparison),
+    [current, replacement, viewComparison],
   );
   const currentNodes = useMemo(
     () => new Map(current.nodes.map((node) => [node.id, node])),
@@ -448,8 +456,8 @@ export default function WorkspaceRestorePreview({
   ]);
 
   const identical = useMemo(
-    () => compareWorkspaces(current, replacement).identical,
-    [current, replacement],
+    () => compareWorkspaces(current, replacement, viewComparison).identical,
+    [current, replacement, viewComparison],
   );
 
   return (

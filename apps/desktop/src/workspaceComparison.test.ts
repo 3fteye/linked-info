@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { WorkspaceSnapshot } from "./workspaceData";
-import { compareWorkspaces } from "./workspaceComparison";
+import {
+  compareWorkspaces,
+  createWorkspaceViewMetadataComparison,
+} from "./workspaceComparison";
 
 const firstId = "11111111-1111-4111-8111-111111111111";
 const secondId = "22222222-2222-4222-8222-222222222222";
@@ -18,7 +21,7 @@ function workspace(): WorkspaceSnapshot {
       { nodeId: secondId, x: 30, y: 40 },
     ],
     viewport: { x: 0, y: 0, zoom: 1 },
-    view: { contentProcessorByNodeId: {} },
+    view: { contentProcessorByNodeId: {}, extensionMetadata: {} },
   };
 }
 
@@ -117,6 +120,76 @@ describe("workspace replacement comparison", () => {
     });
   });
 
+  it("attributes node extension metadata changes to that node", () => {
+    const current = workspace();
+    const replacement = workspace();
+    replacement.view.extensionMetadata["dev.example.preview"] = {
+      schemaVersion: 1,
+      workspace: {},
+      byNodeId: { [firstId]: { collapsed: true } },
+    };
+
+    expect(compareWorkspaces(current, replacement)).toMatchObject({
+      modifiedNodes: 1,
+      viewMetadataChanged: true,
+      identical: false,
+    });
+  });
+
+  it("indexes extension namespaces once for repeated per-node comparisons", () => {
+    const current = workspace();
+    const replacement = workspace();
+    const metadata = {
+      "dev.example.preview": {
+        schemaVersion: 1,
+        workspace: {},
+        byNodeId: { [firstId]: { collapsed: true } },
+      },
+    };
+    let currentScans = 0;
+    let replacementScans = 0;
+    current.view.extensionMetadata = new Proxy(structuredClone(metadata), {
+      ownKeys(target) {
+        currentScans += 1;
+        return Reflect.ownKeys(target);
+      },
+    });
+    replacement.view.extensionMetadata = new Proxy(structuredClone(metadata), {
+      ownKeys(target) {
+        replacementScans += 1;
+        return Reflect.ownKeys(target);
+      },
+    });
+
+    const comparison = createWorkspaceViewMetadataComparison(
+      current,
+      replacement,
+    );
+    expect(comparison.nodeEqual(firstId)).toBe(true);
+    expect(comparison.nodeEqual(secondId)).toBe(true);
+    expect(comparison.nodeEqual(firstId)).toBe(true);
+    expect({ currentScans, replacementScans }).toEqual({
+      currentScans: 1,
+      replacementScans: 1,
+    });
+  });
+
+  it("reports workspace-level extension metadata without modifying a node", () => {
+    const current = workspace();
+    const replacement = workspace();
+    replacement.view.extensionMetadata["dev.example.preview"] = {
+      schemaVersion: 1,
+      workspace: { theme: "dark" },
+      byNodeId: {},
+    };
+
+    expect(compareWorkspaces(current, replacement)).toMatchObject({
+      modifiedNodes: 0,
+      viewMetadataChanged: true,
+      identical: false,
+    });
+  });
+
   it("ignores JSON key insertion order when comparing view metadata", () => {
     const current = workspace();
     const replacement = workspace();
@@ -127,6 +200,20 @@ describe("workspace replacement comparison", () => {
     replacement.view.contentProcessorByNodeId = {
       [secondId]: "plugin.second",
       [firstId]: "plugin.first",
+    };
+    current.view.extensionMetadata = {
+      "dev.example.preview": {
+        schemaVersion: 1,
+        workspace: { first: 1, second: 2 },
+        byNodeId: {},
+      },
+    };
+    replacement.view.extensionMetadata = {
+      "dev.example.preview": {
+        schemaVersion: 1,
+        workspace: { second: 2, first: 1 },
+        byNodeId: {},
+      },
     };
 
     expect(compareWorkspaces(current, replacement)).toMatchObject({

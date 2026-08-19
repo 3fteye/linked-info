@@ -10,7 +10,7 @@ function validWorkspace(): WorkspaceSnapshot {
     layout: [{ nodeId, x: 10, y: 20 }],
     references: [],
     viewport: { x: 120, y: -80, zoom: 1.4 },
-    view: { contentProcessorByNodeId: {} },
+    view: { contentProcessorByNodeId: {}, extensionMetadata: {} },
   };
 }
 
@@ -38,7 +38,7 @@ describe("workspace backup", () => {
       parseWorkspaceExport(
         JSON.stringify({
           format: "linked-info-workspace",
-          version: 3,
+          version: 4,
           exportedAt: new Date().toISOString(),
           workspace: validWorkspace(),
         }),
@@ -74,6 +74,21 @@ describe("workspace backup", () => {
         version: 1,
         exportedAt: new Date().toISOString(),
         workspace: versionOne,
+      }),
+    );
+
+    expect(result).toMatchObject({ ok: true, workspace });
+  });
+
+  it("imports version 2 exports without inventing extension data", () => {
+    const workspace = validWorkspace();
+    const { extensionMetadata: _metadata, ...versionTwoView } = workspace.view;
+    const result = parseWorkspaceExport(
+      JSON.stringify({
+        format: "linked-info-workspace",
+        version: 2,
+        exportedAt: new Date().toISOString(),
+        workspace: { ...workspace, view: versionTwoView },
       }),
     );
 
