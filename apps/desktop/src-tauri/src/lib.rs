@@ -1,4 +1,5 @@
 mod embedding;
+mod extension_manager;
 mod extension_runtime;
 mod extension_runtime_content;
 mod file_transfer;
@@ -51,6 +52,7 @@ pub fn run() {
     builder
         .manage(embedding::EmbeddingState::default())
         .manage(extension_runtime::ExtensionRuntimeState::default())
+        .manage(extension_manager::ExtensionManagerState::default())
         .manage(llm::LlmState::default())
         .manage(offsite_backup::OffsiteBackupState::default())
         .manage(secret_clipboard::SecretClipboardState::default())
@@ -86,6 +88,11 @@ pub fn run() {
             file_transfer::import_document_draft,
             file_transfer::import_workspace_transfer,
             file_transfer::import_text_document,
+            extension_manager::choose_extension_install,
+            extension_manager::commit_extension_install,
+            extension_manager::inspect_installed_extensions,
+            extension_manager::set_extension_enabled,
+            extension_manager::uninstall_extension,
             llm::cancel_local_llm_download,
             llm::extract_local_document_import,
             llm::inspect_local_llm_models,

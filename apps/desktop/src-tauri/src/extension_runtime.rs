@@ -384,6 +384,17 @@ impl ExtensionRuntimeState {
         }
     }
 
+    pub fn stop(&self, extension_id: &str) {
+        let host = self
+            .hosts
+            .lock()
+            .ok()
+            .and_then(|mut hosts| hosts.remove(extension_id));
+        if let Some(host) = host {
+            host.terminate();
+        }
+    }
+
     pub fn shutdown(&self) {
         let generation = self.generation.load(Ordering::Acquire).saturating_add(1);
         self.revoke_all(generation);

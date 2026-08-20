@@ -2289,6 +2289,94 @@ h1 {
   display: none;
 }
 
+.extension-manager,
+.extension-manager-list,
+.extension-install-dialog fieldset {
+  display: grid;
+  gap: 12px;
+}
+
+.extension-manager-actions,
+.extension-manager-item-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.extension-manager-actions button,
+.extension-manager-item-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.extension-manager-boundary,
+.extension-manager-empty,
+.extension-manager-error,
+.extension-manager-warning {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 7px;
+  color: #5c665f;
+  background: #f4f7f5;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.extension-manager-error,
+.extension-manager-warning {
+  color: #8d3d35;
+  background: #fff0ee;
+}
+
+.extension-manager-list > article {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 13px 14px;
+  gap: 16px;
+  border: 1px solid #d8dfda;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.extension-manager-list > article > div:first-child {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.extension-manager-list span,
+.extension-manager-list small {
+  color: #667169;
+  font-size: 11px;
+}
+
+.extension-install-dialog {
+  width: min(620px, 100%);
+}
+
+.extension-install-dialog > code {
+  overflow-wrap: anywhere;
+  font-size: 10px;
+}
+
+.extension-install-dialog fieldset {
+  margin: 12px 0 0;
+  padding: 12px;
+  border: 1px solid #d6ded8;
+  border-radius: 8px;
+}
+
+.extension-install-dialog fieldset label {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .settings-group-heading {
   width: min(920px, 100%);
   margin-top: 18px;

@@ -26,6 +26,7 @@ import {
   Network,
   Pencil,
   Plus,
+  Puzzle,
   RefreshCw,
   Search,
   Settings,
@@ -44,6 +45,7 @@ import {
   saveCanvasAutoAvoidOverlaps,
 } from "./canvasPreferences";
 import DocumentImportDialog from "./DocumentImportDialog";
+import ExtensionSettings from "./ExtensionSettings";
 import {
   buildDocumentImportWorkspace,
   mergeDocumentImportCandidates,
@@ -205,6 +207,7 @@ type SettingsTabId =
   | "general"
   | "operations"
   | "smartReference"
+  | "extensions"
   | "dataSecurity";
 
 interface PendingWorkspaceReplacement {
@@ -4356,6 +4359,11 @@ function App({
       label: t("settings.tabs.smartReference"),
     },
     {
+      id: "extensions" as const,
+      icon: Puzzle,
+      label: t("settings.tabs.extensions"),
+    },
+    {
       id: "dataSecurity" as const,
       icon: ShieldCheck,
       label: t("settings.tabs.dataSecurity"),
@@ -5259,6 +5267,15 @@ function App({
                   )}
                 </div>
               </div>
+              </section>
+              <section
+                aria-labelledby="settings-tab-extensions"
+                className="settings-tab-panel"
+                hidden={activeSettingsTab !== "extensions"}
+                id="settings-panel-extensions"
+                role="tabpanel"
+              >
+                {activeSettingsTab === "extensions" && <ExtensionSettings />}
               </section>
               <section
                 aria-labelledby="settings-tab-dataSecurity"
