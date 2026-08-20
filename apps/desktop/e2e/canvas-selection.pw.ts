@@ -1082,40 +1082,46 @@ test("outgoing reference remove circles delete one undoable reference", async ({
     ]);
 });
 
-test("removing a reference commits an active edit as a separate undo step", async ({
+test("removing a reference commits the canvas active edit as a separate undo step", async ({
   page,
 }) => {
-  const source = {
+  const editingNode = {
     content: "Original content",
     id: syntheticId(34),
-    name: "Editable source",
+    name: "Editing node",
     x: 100,
     y: 100,
   };
-  const target = {
+  const referenceSource = {
     id: syntheticId(35),
-    name: "Reference target",
+    name: "Reference source",
     x: 520,
     y: 100,
   };
-  await openSyntheticWorkspace(page, [source, target], [
-    { sourceNodeId: source.id, targetNodeId: target.id },
+  const target = {
+    id: syntheticId(36),
+    name: "Reference target",
+    x: 900,
+    y: 100,
+  };
+  await openSyntheticWorkspace(page, [editingNode, referenceSource, target], [
+    { sourceNodeId: referenceSource.id, targetNodeId: target.id },
   ]);
 
-  const sourceNode = node(page, source.id);
-  await sourceNode.dblclick({ position: { x: 80, y: 24 } });
-  await sourceNode.locator("textarea").fill("Edited content");
-  await sourceNode
+  const editingNodeCard = node(page, editingNode.id);
+  await editingNodeCard.dblclick({ position: { x: 80, y: 24 } });
+  await editingNodeCard.locator("textarea").fill("Edited content");
+  await node(page, referenceSource.id)
     .getByRole("button", { name: "Remove reference: Reference target" })
     .click();
 
-  await expect(sourceNode).toHaveAttribute("data-editing", "false");
+  await expect(editingNodeCard).toHaveAttribute("data-editing", "false");
   await expect
     .poll(async () => {
       const stored = await storedWorkspace(page);
       return {
         content: stored?.nodes?.find(
-          (candidate: { id?: string }) => candidate.id === source.id,
+          (candidate: { id?: string }) => candidate.id === editingNode.id,
         )?.content,
         references: stored?.references,
       };
@@ -1128,14 +1134,16 @@ test("removing a reference commits an active edit as a separate undo step", asyn
       const stored = await storedWorkspace(page);
       return {
         content: stored?.nodes?.find(
-          (candidate: { id?: string }) => candidate.id === source.id,
+          (candidate: { id?: string }) => candidate.id === editingNode.id,
         )?.content,
         references: stored?.references,
       };
     })
     .toEqual({
       content: "Edited content",
-      references: [{ sourceNodeId: source.id, targetNodeId: target.id }],
+      references: [
+        { sourceNodeId: referenceSource.id, targetNodeId: target.id },
+      ],
     });
 
   await page.keyboard.press("Control+z");
@@ -1143,7 +1151,7 @@ test("removing a reference commits an active edit as a separate undo step", asyn
     .poll(async () => {
       const stored = await storedWorkspace(page);
       return stored?.nodes?.find(
-        (candidate: { id?: string }) => candidate.id === source.id,
+        (candidate: { id?: string }) => candidate.id === editingNode.id,
       )?.content;
     })
     .toBe("Original content");
@@ -1726,7 +1734,25 @@ test("the low-glare starry theme is selectable and persists on this device", asy
     "starry-dark",
   );
 
+  await page.getByRole("button", { name: "Import document" }).click();
+  const importDialog = page.locator(".document-import-dialog");
+  await expect(importDialog).toHaveCSS("background-color", "rgb(16, 25, 43)");
+  await expect(importDialog.locator("input").first()).toHaveCSS(
+    "background-color",
+    "rgb(11, 18, 33)",
+  );
+  await importDialog.getByRole("button", { name: "Close" }).click();
+
   await page.getByTestId("settings-navigation").click();
+  const settingsTabs = page.locator(".settings-tab-list .settings-tab");
+  await expect(settingsTabs).toHaveCount(4);
+  await expect
+    .poll(() =>
+      page.locator(".settings-tab-list").evaluate((element) =>
+        getComputedStyle(element).gridTemplateColumns.split(" ").length,
+      ),
+    )
+    .toBe(4);
   const starry = page.getByTestId("appearance-theme-starry-dark");
   const mint = page.getByTestId("appearance-theme-mint-light");
   await expect(starry).toHaveAttribute("aria-pressed", "true");
@@ -1742,6 +1768,7 @@ test("the low-glare starry theme is selectable and persists on this device", asy
     "true",
   );
 });
+
 test("Shift marquee remains narrow while auto-panning and never selects the full graph", async ({
   page,
 }) => {

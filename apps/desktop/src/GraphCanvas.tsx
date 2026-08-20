@@ -1047,9 +1047,6 @@ export function InformationNodeCard({
                   className="graph-node-reference-remove"
                   onClick={(event) => {
                     event.stopPropagation();
-                    if (data.editing) {
-                      data.onCommit(id);
-                    }
                     data.onRemoveReference(id, target.id);
                   }}
                   onPointerDown={(event) => event.stopPropagation()}
@@ -1285,22 +1282,6 @@ export default function GraphCanvas({
   const [referenceSearch, setReferenceSearch] =
     useState<ReferenceSearchState | null>(null);
   const [selectedReferenceId, setSelectedReferenceId] = useState<string | null>(null);
-  const removeReference = useCallback(
-    (sourceNodeId: string, targetNodeId: string) => {
-      const next = referencesRef.current.filter(
-        (reference) =>
-          reference.sourceNodeId !== sourceNodeId ||
-          reference.targetNodeId !== targetNodeId,
-      );
-      if (next.length === referencesRef.current.length) {
-        return;
-      }
-      referencesRef.current = next;
-      setSelectedReferenceId(null);
-      onReferencesChange(next);
-    },
-    [onReferencesChange],
-  );
   const [draggingNodeIds, setDraggingNodeIds] = useState<string[]>([]);
   const [canvasSelection, setCanvasSelection] =
     useState<CanvasSelectionRectangle | null>(null);
@@ -1493,6 +1474,26 @@ export default function GraphCanvas({
       onNodeCommit(nodeId);
     },
     [autoAvoidOverlaps, onNodeCommit],
+  );
+
+  const removeReference = useCallback(
+    (sourceNodeId: string, targetNodeId: string) => {
+      if (editingNodeId !== null) {
+        commitNodeAndScheduleAvoidance(editingNodeId);
+      }
+      const next = referencesRef.current.filter(
+        (reference) =>
+          reference.sourceNodeId !== sourceNodeId ||
+          reference.targetNodeId !== targetNodeId,
+      );
+      if (next.length === referencesRef.current.length) {
+        return;
+      }
+      referencesRef.current = next;
+      setSelectedReferenceId(null);
+      onReferencesChange(next);
+    },
+    [commitNodeAndScheduleAvoidance, editingNodeId, onReferencesChange],
   );
 
   useEffect(() => {

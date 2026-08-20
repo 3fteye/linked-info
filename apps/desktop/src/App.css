@@ -2215,7 +2215,7 @@ h1 {
   z-index: 8;
   top: 0;
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   width: min(920px, 100%);
   padding: 4px;
   gap: 4px;
@@ -5005,6 +5005,9 @@ h1 {
 
 :root[data-theme="starry-dark"] :where(
   .confirmation-dialog,
+  .document-import-dialog,
+  .smart-reference-dialog,
+  .smart-reference-queue,
   .storage-problem-card,
   .restore-preview-panel.react-flow__panel
 ) {
@@ -5012,6 +5015,72 @@ h1 {
   color: #dce6f5;
   background: #10192b;
   box-shadow: 0 16px 42px rgb(0 2 10 / 56%);
+}
+
+:root[data-theme="starry-dark"] :where(
+  .document-import-input input,
+  .document-import-input textarea,
+  .document-import-candidates input,
+  .document-import-candidates textarea
+) {
+  border-color: #34445f;
+  color: #dce6f5;
+  background: #0b1221;
+}
+
+:root[data-theme="starry-dark"] .document-import-candidates article {
+  border-color: #2d3b55;
+  background: #111a2d;
+}
+
+:root[data-theme="starry-dark"] :where(
+  .document-import-input label > span,
+  .document-import-candidates label > span,
+  .smart-reference-result-section h3,
+  .smart-reference-candidate strong
+) {
+  color: #d5e0f1;
+}
+
+:root[data-theme="starry-dark"] :where(
+  .document-import-heading p,
+  .document-import-draft header p,
+  .document-import-candidates small,
+  .document-import-progress,
+  .document-import-empty,
+  .smart-reference-result-section > p,
+  .smart-reference-candidate span,
+  .smart-reference-dialog > footer small,
+  .smart-reference-queue span,
+  .smart-reference-queue small
+) {
+  color: #91a0b6;
+}
+
+:root[data-theme="starry-dark"] .document-import-loaded-status {
+  border-color: #45618b;
+  color: #cfe0ff;
+  background: #14233c;
+}
+
+:root[data-theme="starry-dark"] :where(
+  .smart-reference-results,
+  .smart-reference-candidate,
+  .smart-reference-section-empty,
+  .smart-reference-queue > header,
+  .smart-reference-queue-item
+) {
+  border-color: #293750;
+}
+
+:root[data-theme="starry-dark"] .smart-reference-queue button {
+  border-color: #34445f;
+  color: #cbd8eb;
+  background: #162139;
+}
+
+:root[data-theme="starry-dark"] .smart-reference-queue-item[data-status="running"] {
+  background: #14243a;
 }
 
 :root[data-theme="starry-dark"] :where(
