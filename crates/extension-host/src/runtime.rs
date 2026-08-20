@@ -454,10 +454,13 @@ mod tests {
         );
         let package = package_with_component(component_from_wit(&wit, |module| module));
 
-        assert!(matches!(
-            ExtensionRuntime::new(package, 1, RuntimeLimits::default()),
-            Err(ExtensionRuntimeError::ComponentRuntimeImportForbidden)
-        ));
+        let Err(error) = ExtensionRuntime::new(package, 1, RuntimeLimits::default()) else {
+            panic!("a component with a host import must be rejected");
+        };
+        assert_eq!(
+            error.code(),
+            linked_info_extension_host_protocol::ExtensionHostErrorCode::ComponentInvalid
+        );
     }
 
     #[test]
