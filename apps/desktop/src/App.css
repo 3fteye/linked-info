@@ -5172,3 +5172,75 @@ h1 {
   color: #dce6f5;
   background: #10182a;
 }
+
+:root[data-theme="starry-dark"] :where(
+  .totp-content-line,
+  .secret-content
+) {
+  border-color: #34445f;
+  color: #cbd8eb;
+  background: #111a2d;
+}
+
+:root[data-theme="starry-dark"] :where(
+  .totp-content-label,
+  .secret-content-label,
+  .content-marker-note
+) {
+  color: #9fb2d0;
+}
+
+:root[data-theme="starry-dark"] :where(
+  .totp-content-code,
+  .secret-content-value
+) {
+  color: #d7e2ff;
+}
+
+:root[data-theme="starry-dark"] .totp-content-remaining {
+  color: #91a0b6;
+}
+
+:root[data-theme="starry-dark"] :where(
+  .totp-content-copy,
+  .secret-content-action
+) {
+  border-color: #50617d;
+  color: #cbd8eb;
+  background: #18243b;
+}
+
+:root[data-theme="starry-dark"] :where(
+  .totp-content-copy,
+  .secret-content-action
+):hover {
+  border-color: #7896e4;
+  background: #223251;
+}
+
+:root[data-theme="starry-dark"] .totp-content-copy:disabled {
+  border-color: #34445f;
+  color: #74839a;
+  background: #0d1526;
+}
+
+:root[data-theme="starry-dark"] :where(
+  .security-unlock-form label,
+  .security-dialog-form label
+) {
+  color: #c9d5e7;
+}
+
+:root[data-theme="starry-dark"] .security-system-unlock > small,
+:root[data-theme="starry-dark"] .security-unlock-divider {
+  color: #9aa9bd;
+}
+
+:root[data-theme="starry-dark"] .security-unlock-divider::before,
+:root[data-theme="starry-dark"] .security-unlock-divider::after {
+  background: #34445f;
+}
+
+:root[data-theme="starry-dark"] .security-error {
+  color: #ffaaa5 !important;
+}

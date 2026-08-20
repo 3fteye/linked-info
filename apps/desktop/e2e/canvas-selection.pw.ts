@@ -1206,6 +1206,49 @@ test("removing a reference commits the canvas active edit as a separate undo ste
     .toBe("Original content");
 });
 
+test("an invalid editor draft blocks reference removal without losing the draft", async ({
+  page,
+}) => {
+  const editingNode = {
+    id: syntheticId(38),
+    name: "Editable node",
+    x: 100,
+    y: 100,
+  };
+  const referenceSource = {
+    id: syntheticId(39),
+    name: "Existing name",
+    x: 520,
+    y: 100,
+  };
+  const target = {
+    id: syntheticId(40),
+    name: "Reference target",
+    x: 900,
+    y: 100,
+  };
+  await openSyntheticWorkspace(page, [editingNode, referenceSource, target], [
+    { sourceNodeId: referenceSource.id, targetNodeId: target.id },
+  ]);
+
+  const editor = node(page, editingNode.id);
+  await editor.dblclick({ position: { x: 80, y: 24 } });
+  await editor.locator("input").fill(referenceSource.name);
+  await expect(editor.getByRole("alert")).toHaveText("This name already exists");
+
+  const remove = node(page, referenceSource.id).getByRole("button", {
+    name: "Remove reference: Reference target",
+  });
+  await expect(remove).toBeDisabled();
+  await expect
+    .poll(async () => (await storedWorkspace(page))?.references)
+    .toEqual([
+      { sourceNodeId: referenceSource.id, targetNodeId: target.id },
+    ]);
+  await expect(editor).toHaveAttribute("data-editing", "true");
+  await expect(editor.locator("input")).toHaveValue(referenceSource.name);
+});
+
 test("canvas select all, delete, undo, redo and context menu share one keyboard model", async ({
   page,
 }) => {
@@ -1776,11 +1819,22 @@ test("multi-selected nodes enter the smart-reference queue as one batch", async 
 test("the low-glare starry theme is selectable and persists on this device", async ({
   page,
 }) => {
-  await openSyntheticWorkspace(page, gridNodes(1, 1));
+  const themedNodes = gridNodes(1, 1);
+  themedNodes[0].content =
+    "[[li:totp]]JBSWY3DPEHPK3PXP[[/li]] [[li:secret]]synthetic-secret[[/li]]";
+  await openSyntheticWorkspace(page, themedNodes);
   await expect(page.locator("html")).toHaveAttribute("data-theme", "starry-dark");
   await expect(page.getByTestId("graph-canvas")).toHaveAttribute(
     "data-theme",
     "starry-dark",
+  );
+  await expect(page.locator(".totp-content-line")).toHaveCSS(
+    "background-color",
+    "rgb(17, 26, 45)",
+  );
+  await expect(page.locator(".secret-content")).toHaveCSS(
+    "background-color",
+    "rgb(17, 26, 45)",
   );
 
   await page.getByRole("button", { name: "Import document" }).click();
@@ -1824,6 +1878,32 @@ test("the low-glare starry theme is selectable and persists on this device", asy
       return backgroundColor;
     }),
   ).toBe("rgb(11, 18, 33)");
+  expect(
+    await page.evaluate(() => {
+      const gate = document.createElement("div");
+      gate.className = "security-gate";
+      gate.innerHTML = `
+        <form class="security-unlock-form"><label>Master password</label></form>
+        <p class="security-error">Unlock failed</p>
+        <div class="security-unlock-divider">or</div>
+        <div class="security-system-unlock"><small>System unlock help</small></div>
+      `;
+      document.body.append(gate);
+      const colors = {
+        error: getComputedStyle(gate.querySelector(".security-error")!).color,
+        helper: getComputedStyle(
+          gate.querySelector(".security-system-unlock small")!,
+        ).color,
+        label: getComputedStyle(gate.querySelector("label")!).color,
+      };
+      gate.remove();
+      return colors;
+    }),
+  ).toEqual({
+    error: "rgb(255, 170, 165)",
+    helper: "rgb(154, 169, 189)",
+    label: "rgb(201, 213, 231)",
+  });
 
   await page.getByTestId("settings-tab-general").click();
   const starry = page.getByTestId("appearance-theme-starry-dark");

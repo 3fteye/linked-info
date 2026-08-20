@@ -176,6 +176,7 @@ interface InformationNodeData extends Record<string, unknown> {
   filterByNodeLabel: string;
   removeNodeFilterLabel: string;
   removeReferenceLabel: (name: string) => string;
+  referenceRemovalBlocked: boolean;
   sourceLabel: string;
   targetLabel: string;
   onCommit: (nodeId: string) => void;
@@ -192,6 +193,7 @@ interface InformationNodeData extends Record<string, unknown> {
     nodeMetadata: ExtensionMetadataPayload | null,
     workspaceMetadata: ExtensionMetadataPayload | null,
   ) => void;
+  onEditorCommitBlockedChange: (nodeId: string, blocked: boolean) => void;
   onRemoveReference: (sourceNodeId: string, targetNodeId: string) => void;
   onCopyCodeSource: ((containsSensitive: boolean) => Promise<void>) | null;
   onCopyDerivedSecret: ((value: string) => Promise<void>) | null;
@@ -446,6 +448,23 @@ export function InformationNodeCard({
   const [bodyOverflowing, setBodyOverflowing] = useState(false);
   const [resizing, setResizing] = useState(false);
   const wasEditingRef = useRef(data.editing);
+
+  useEffect(() => {
+    const blocked =
+      data.editing && (data.nameConflict || draft.nameConflict);
+    data.onEditorCommitBlockedChange(id, blocked);
+    return () => {
+      if (blocked) {
+        data.onEditorCommitBlockedChange(id, false);
+      }
+    };
+  }, [
+    data.editing,
+    data.nameConflict,
+    data.onEditorCommitBlockedChange,
+    draft.nameConflict,
+    id,
+  ]);
 
   useEffect(() => {
     if (data.editing) {
@@ -1045,6 +1064,7 @@ export function InformationNodeCard({
                 <button
                   aria-label={data.removeReferenceLabel(target.label)}
                   className="graph-node-reference-remove"
+                  disabled={data.referenceRemovalBlocked}
                   onClick={(event) => {
                     event.stopPropagation();
                     data.onRemoveReference(id, target.id);
@@ -1288,6 +1308,21 @@ export default function GraphCanvas({
   const [referenceSearch, setReferenceSearch] =
     useState<ReferenceSearchState | null>(null);
   const [selectedReferenceId, setSelectedReferenceId] = useState<string | null>(null);
+  const [editorCommitBlockedNodeId, setEditorCommitBlockedNodeId] = useState<
+    string | null
+  >(null);
+  const editorCommitBlockedNodeIdRef = useRef<string | null>(null);
+  const updateEditorCommitBlocked = useCallback(
+    (nodeId: string, blocked: boolean) => {
+      editorCommitBlockedNodeIdRef.current = blocked
+        ? nodeId
+        : editorCommitBlockedNodeIdRef.current === nodeId
+          ? null
+          : editorCommitBlockedNodeIdRef.current;
+      setEditorCommitBlockedNodeId(editorCommitBlockedNodeIdRef.current);
+    },
+    [],
+  );
   const [draggingNodeIds, setDraggingNodeIds] = useState<string[]>([]);
   const [canvasSelection, setCanvasSelection] =
     useState<CanvasSelectionRectangle | null>(null);
@@ -1558,6 +1593,9 @@ export default function GraphCanvas({
 
   const removeReference = useCallback(
     (sourceNodeId: string, targetNodeId: string) => {
+      if (editorCommitBlockedNodeIdRef.current !== null) {
+        return;
+      }
       if (editingNodeId !== null) {
         if (
           commitNodeAndScheduleAvoidance(editingNodeId, () =>
@@ -2430,6 +2468,7 @@ export default function GraphCanvas({
             filterByNodeLabel: labels.filterByNode,
             removeNodeFilterLabel: labels.removeNodeFilter,
             removeReferenceLabel: labels.removeReference,
+            referenceRemovalBlocked: editorCommitBlockedNodeId !== null,
             sourceLabel: labels.sourceHandle,
             targetLabel: labels.targetHandle,
             onCommit: commitNodeAndScheduleAvoidance,
@@ -2437,6 +2476,7 @@ export default function GraphCanvas({
             onContentChange: onNodeContentChange,
             onContentProcessorChange: onNodeContentProcessorChange,
             onExtensionMetadataChange: onNodeExtensionMetadataChange,
+            onEditorCommitBlockedChange: updateEditorCommitBlocked,
             onRemoveReference: removeReference,
             onCopyCodeSource:
               codeSourceContainsSensitive && onCopySecret === null
@@ -2463,6 +2503,7 @@ export default function GraphCanvas({
     commitNodeAndScheduleAvoidance,
     canvasReferencePresentation,
     editingNodeId,
+    editorCommitBlockedNodeId,
     extensionMetadata,
     fitContentNodeId,
     clampedUnmatchedNodeOpacity,
@@ -2487,6 +2528,7 @@ export default function GraphCanvas({
     setFlowNodes,
     sensitiveCodeContentByNodeId,
     stackOrderByNode,
+    updateEditorCommitBlocked,
   ]);
 
   useEffect(() => {
