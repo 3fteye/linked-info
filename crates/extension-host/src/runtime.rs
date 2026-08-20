@@ -12,7 +12,6 @@ use linked_info_extension_contracts::{
     ExtensionActionRequestV1, ExtensionActionResultV1, ExtensionMetadataMigrationRequestV1,
     ExtensionPresentationV1, ExtensionRenderRequestV1, ValidatedExtensionPackage,
 };
-use wasmtime::component::types::ComponentItem;
 use wasmtime::component::{Component, ComponentExportIndex, Linker, Val};
 use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder, Trap};
 
@@ -91,11 +90,7 @@ impl ExtensionRuntime {
         let engine = Engine::new(&config).map_err(|_| ExtensionRuntimeError::Internal)?;
         let component = Component::new(&engine, &package.component)
             .map_err(|_| ExtensionRuntimeError::ComponentCompileInvalid)?;
-        if component
-            .component_type()
-            .imports(&engine)
-            .any(|(_, item)| !matches!(item.ty, ComponentItem::Type(_)))
-        {
+        if component.component_type().imports(&engine).next().is_some() {
             return Err(ExtensionRuntimeError::ComponentRuntimeImportForbidden);
         }
         let guest = GUEST_EXPORT_NAMES

@@ -1,6 +1,6 @@
 package linked-info:extension@1.0.0;
 
-interface types {
+interface guest {
   type node-handle = u64;
 
   record node-snapshot {
@@ -146,11 +146,6 @@ interface types {
     to-version: u32,
     metadata-json: string,
   }
-}
-
-interface guest {
-  use types.{action-request, action-result, metadata-migration-request, presentation, render-request};
-
   render: func(request: render-request) -> result<presentation, string>;
   invoke: func(request: action-request) -> result<action-result, string>;
   migrate-metadata: func(request: metadata-migration-request) -> result<string, string>;
