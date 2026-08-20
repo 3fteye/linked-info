@@ -13,6 +13,8 @@ const jsonInspectorLocalizationKeys = new Set([
   "indent.two",
   "indent.four",
   "action.set-indent",
+  "action.format-json",
+  "proposal.format-json.title",
 ]);
 
 function parseJsonInspectorMetadata(value: unknown): ExtensionMetadataPayload | null {
@@ -62,9 +64,13 @@ export const builtInJsonInspectorExtension: BuiltInNodeExtension = {
       "node.read.content",
       "metadata.node.read",
       "metadata.node.write",
+      "workspace.propose",
     ],
     processors: [{ id: "inspect", labelKey: "processor.label" }],
-    actions: [{ id: "set-indent", labelKey: "action.set-indent" }],
+    actions: [
+      { id: "set-indent", labelKey: "action.set-indent" },
+      { id: "format-json", labelKey: "action.format-json" },
+    ],
     localizationKeys: jsonInspectorLocalizationKeys,
   },
   render(request) {
@@ -74,8 +80,10 @@ export const builtInJsonInspectorExtension: BuiltInNodeExtension = {
     const indentSize = jsonInspectorIndent(request.nodeMetadataJson);
     const source = request.node.content ?? "";
     let formatted = source;
+    let validJson = false;
     try {
       formatted = JSON.stringify(JSON.parse(source) as unknown, null, indentSize);
+      validJson = true;
     } catch {
       // Invalid or incomplete JSON remains visible as safe plain code.
     }
@@ -92,10 +100,38 @@ export const builtInJsonInspectorExtension: BuiltInNodeExtension = {
             { value: "4", labelKey: "indent.four" },
           ],
         },
+        ...(validJson ? [{ type: "button" as const, actionId: "format-json" }] : []),
       ],
     };
   },
   invoke(request) {
+    if (request.actionId === "format-json") {
+      const source = request.nodes[0]?.content;
+      if (request.nodes.length !== 1 || source === null || source === undefined) {
+        throw new Error("invalid JSON inspector action");
+      }
+      const formatted = JSON.stringify(
+        JSON.parse(source) as unknown,
+        null,
+        jsonInspectorIndent(request.nodeMetadataJson),
+      );
+      return {
+        presentation: null,
+        nodeMetadataJson: null,
+        workspaceMetadataJson: null,
+        proposal: {
+          baseRevision: request.baseRevision,
+          titleKey: "proposal.format-json.title",
+          operations: [
+            {
+              type: "update-current-node",
+              name: { operation: "unchanged" },
+              content: { operation: "set", value: formatted },
+            },
+          ],
+        },
+      };
+    }
     if (
       request.actionId !== "set-indent" ||
       (request.inputValue !== "2" && request.inputValue !== "4")

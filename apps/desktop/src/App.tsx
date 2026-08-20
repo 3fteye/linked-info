@@ -62,6 +62,11 @@ import {
   contentProcessorRegistry,
 } from "./contentProcessor";
 import { builtInJsonInspectorProcessorId } from "./builtinJsonInspector";
+import type { BuiltInExtensionActionHostResult } from "./builtinExtensionHost";
+import {
+  ExtensionChangeProposalError,
+  prepareExtensionChangeProposal,
+} from "./extensionChangeProposal";
 import {
   codePreviewLanguageFromProcessorId,
   codePreviewLanguages,
@@ -211,6 +216,14 @@ interface PendingWorkspaceReplacement {
 
 interface PendingEncryptedWorkspaceImport extends ImportedWorkspaceFile {
   bootstrapRestore: boolean;
+}
+
+interface PendingExtensionProposal {
+  createdNodeIds: string[];
+  currentNodeId: string;
+  result: BuiltInExtensionActionHostResult;
+  sourceName: string;
+  workspace: WorkspaceSnapshot;
 }
 
 type WorkspaceReplacementHistoryBoundary = "undo" | "redo" | null;
@@ -393,6 +406,9 @@ function App({
     useState<SettingsTabId>("general");
   const [workspace, setWorkspace] = useState(emptyWorkspace);
   const workspaceRef = useRef(workspace);
+  const extensionWorkspaceRevisionRef = useRef(0);
+  const workspaceSaveTimerRef = useRef<number | null>(null);
+  const pendingWorkspaceCommitRef = useRef<WorkspaceSnapshot | null>(null);
   const skipUnmountFlushRef = useRef(false);
   const workspaceReplacementGenerationRef = useRef(0);
   const documentImportCancelledRef = useRef(false);
@@ -415,6 +431,7 @@ function App({
     useRef<WorkspaceReplacementHistoryBoundary>(null);
   const workspaceReplacementHistoryBusyRef = useRef(false);
   const workspaceReplacementApplyBusyRef = useRef(false);
+  const extensionProposalApplyBusyRef = useRef(false);
   const workspaceMutationBlockedRef = useRef(false);
   const [historyAvailability, setHistoryAvailability] = useState({
     canUndo: false,
@@ -443,6 +460,8 @@ function App({
     draft: DocumentImportDraft;
     workspace: WorkspaceSnapshot;
   } | null>(null);
+  const [pendingExtensionProposal, setPendingExtensionProposal] =
+    useState<PendingExtensionProposal | null>(null);
   const [documentImportBusy, setDocumentImportBusy] = useState(false);
   const [documentImportExternalLoading, setDocumentImportExternalLoading] = useState(false);
   const [documentImportProgress, setDocumentImportProgress] = useState<{
@@ -1321,11 +1340,15 @@ function App({
 
   const builtInExtensionLabels = useMemo(
     () => ({
+      "action.format-json": t("extensions.jsonInspector.actions.formatJson"),
       "action.set-indent": t("extensions.jsonInspector.actions.setIndent"),
       "indent.four": t("extensions.jsonInspector.indent.four"),
       "indent.label": t("extensions.jsonInspector.indent.label"),
       "indent.two": t("extensions.jsonInspector.indent.two"),
       "processor.label": t("editor.contentProcessors.jsonInspector"),
+      "proposal.format-json.title": t(
+        "extensions.jsonInspector.proposals.formatJson",
+      ),
     }),
     [t],
   );
@@ -1412,6 +1435,9 @@ function App({
     const automaticOffsiteRevision = automaticOffsiteRevisionRef.current;
     const saveTimer = window.setTimeout(
       () => {
+        if (workspaceSaveTimerRef.current === saveTimer) {
+          workspaceSaveTimerRef.current = null;
+        }
         void persistence
           .save(workspace)
           .then(async () => {
@@ -1438,7 +1464,13 @@ function App({
       },
       300,
     );
-    return () => window.clearTimeout(saveTimer);
+    workspaceSaveTimerRef.current = saveTimer;
+    return () => {
+      window.clearTimeout(saveTimer);
+      if (workspaceSaveTimerRef.current === saveTimer) {
+        workspaceSaveTimerRef.current = null;
+      }
+    };
   }, [
     persistence,
     persistenceReady,
@@ -1456,7 +1488,9 @@ function App({
     let active = true;
     let unregister: (() => void) | null = null;
     const flushLocalWorkspace = async () => {
-      await persistence.save(workspaceRef.current);
+      await persistence.save(
+        pendingWorkspaceCommitRef.current ?? workspaceRef.current,
+      );
       if (!workspaceChangedInSessionRef.current || !workspaceBackupHistory.available) {
         return;
       }
@@ -2563,6 +2597,7 @@ function App({
     workspaceChangedInSessionRef.current = true;
     if (options.affectsOffsiteBackup !== false) {
       automaticOffsiteRevisionRef.current += 1;
+      extensionWorkspaceRevisionRef.current += 1;
     }
     if (options.recordHistory) {
       recordHistory(captureWorkspaceHistory(current), captureWorkspaceHistory(next));
@@ -2622,6 +2657,7 @@ function App({
     const next = restoreWorkspaceHistory(state, workspaceRef.current.viewport);
     workspaceChangedInSessionRef.current = true;
     automaticOffsiteRevisionRef.current += 1;
+    extensionWorkspaceRevisionRef.current += 1;
     workspaceRef.current = next;
     setWorkspace(next);
     setEditingNodeId(null);
@@ -2873,6 +2909,156 @@ function App({
       },
       { flushImmediately: true, recordHistory: true },
     );
+  }
+
+  function prepareExtensionActionWorkspace(
+    current: WorkspaceSnapshot,
+    nodeId: string,
+    result: BuiltInExtensionActionHostResult,
+    createdNodeIds?: readonly string[],
+  ) {
+    if (result.proposal === null) {
+      throw new ExtensionChangeProposalError("invalid-result");
+    }
+    let candidate = current;
+    if (result.nodeMetadata !== null || result.workspaceMetadata !== null) {
+      const view = updateNodeExtensionMetadata(
+        current.view,
+        current.nodes,
+        result.extensionId,
+        result.metadataSchemaVersion,
+        nodeId,
+        result.nodeMetadata,
+        result.workspaceMetadata,
+      );
+      if (view === null) {
+        throw new ExtensionChangeProposalError("invalid-result");
+      }
+      candidate = view === current.view ? current : { ...current, view };
+    }
+    let createdNodeIndex = 0;
+    const prepared = prepareExtensionChangeProposal(candidate, result.proposal, {
+      baseRevision: extensionWorkspaceRevisionRef.current,
+      currentNodeId: nodeId,
+      handleNodeIds: result.handleNodeIds,
+      ...(createdNodeIds === undefined
+        ? {}
+        : {
+            createNodeId: () => {
+              const createdNodeId = createdNodeIds[createdNodeIndex];
+              createdNodeIndex += 1;
+              if (createdNodeId === undefined) {
+                throw new ExtensionChangeProposalError("invalid-result");
+              }
+              return createdNodeId;
+            },
+          }),
+    });
+    if (
+      createdNodeIds !== undefined &&
+      prepared.createdNodeIds.length !== createdNodeIds.length
+    ) {
+      throw new ExtensionChangeProposalError("invalid-result");
+    }
+    return prepared;
+  }
+
+  function extensionProposalErrorMessage(error: unknown): string {
+    return error instanceof ExtensionChangeProposalError &&
+      error.reason === "stale-revision"
+      ? t("extensions.proposal.outdated")
+      : t("extensions.proposal.invalid");
+  }
+
+  function openExtensionProposal(
+    nodeId: string,
+    result: BuiltInExtensionActionHostResult,
+  ) {
+    try {
+      const prepared = prepareExtensionActionWorkspace(
+        workspaceRef.current,
+        nodeId,
+        result,
+      );
+      const titleKey = result.proposal?.titleKey ?? "";
+      setPendingExtensionProposal({
+        createdNodeIds: prepared.createdNodeIds,
+        currentNodeId: nodeId,
+        result,
+        sourceName: builtInExtensionLabels[
+          titleKey as keyof typeof builtInExtensionLabels
+        ] ?? titleKey,
+        workspace: prepared.workspace,
+      });
+    } catch (error) {
+      showAppNotice(extensionProposalErrorMessage(error));
+    }
+  }
+
+  function cancelExtensionProposal() {
+    if (!extensionProposalApplyBusyRef.current) {
+      setPendingExtensionProposal(null);
+    }
+  }
+
+  async function confirmExtensionProposal() {
+    const pending = pendingExtensionProposal;
+    if (pending === null || extensionProposalApplyBusyRef.current) {
+      return;
+    }
+    extensionProposalApplyBusyRef.current = true;
+    workspaceMutationBlockedRef.current = true;
+    if (workspaceSaveTimerRef.current !== null) {
+      window.clearTimeout(workspaceSaveTimerRef.current);
+      workspaceSaveTimerRef.current = null;
+    }
+    try {
+      const current = workspaceRef.current;
+      const prepared = prepareExtensionActionWorkspace(
+        current,
+        pending.currentNodeId,
+        pending.result,
+        pending.createdNodeIds,
+      );
+      pendingWorkspaceCommitRef.current = prepared.workspace;
+      await persistence.save(prepared.workspace);
+      recordHistory(
+        captureWorkspaceHistory(current),
+        captureWorkspaceHistory(prepared.workspace),
+      );
+      workspaceChangedInSessionRef.current = true;
+      automaticOffsiteRevisionRef.current += 1;
+      extensionWorkspaceRevisionRef.current += 1;
+      workspaceRef.current = prepared.workspace;
+      pendingWorkspaceCommitRef.current = null;
+      setWorkspace(prepared.workspace);
+      setPendingExtensionProposal(null);
+      setActiveView("canvas");
+      showAppNotice(t("extensions.proposal.applied"), {
+        label: t("actions.undo"),
+        run: undoWorkspace,
+      });
+    } catch (error) {
+      pendingWorkspaceCommitRef.current = null;
+      if (
+        error instanceof ExtensionChangeProposalError &&
+        error.reason === "stale-revision"
+      ) {
+        setPendingExtensionProposal(null);
+      }
+      showAppNotice(
+        error instanceof ExtensionChangeProposalError
+          ? extensionProposalErrorMessage(error)
+          : t("extensions.proposal.saveFailed"),
+      );
+      void persistence.save(workspaceRef.current).catch(() => {
+        setBackupStatus(t("storage.saveFailed"));
+      });
+    } finally {
+      pendingWorkspaceCommitRef.current = null;
+      workspaceMutationBlockedRef.current = false;
+      extensionProposalApplyBusyRef.current = false;
+    }
   }
 
   function commitNode(nodeId: string) {
@@ -3769,6 +3955,7 @@ function App({
       }
       workspaceChangedInSessionRef.current = true;
       automaticOffsiteRevisionRef.current += 1;
+      extensionWorkspaceRevisionRef.current += 1;
       workspaceReplacementGenerationRef.current += 1;
       workspaceRef.current = replacementWorkspace;
       setWorkspace(replacementWorkspace);
@@ -3850,6 +4037,7 @@ function App({
       const next = result.workspace;
       workspaceChangedInSessionRef.current = true;
       automaticOffsiteRevisionRef.current += 1;
+      extensionWorkspaceRevisionRef.current += 1;
       workspaceReplacementGenerationRef.current += 1;
       workspaceRef.current = next;
       setWorkspace(next);
@@ -3958,6 +4146,7 @@ function App({
       await persistence.save(initialWorkspace);
       workspaceChangedInSessionRef.current = true;
       workspaceReplacementGenerationRef.current += 1;
+      extensionWorkspaceRevisionRef.current += 1;
       smartReferenceQueueGenerationRef.current += 1;
       smartReferenceMemoryCacheRef.current.clear();
       workspaceRef.current = initialWorkspace;
@@ -4380,7 +4569,39 @@ function App({
         </header>
 
         <div className="workspace-content">
-          {documentImportPreview !== null ? (
+          {pendingExtensionProposal !== null ? (
+            <WorkspaceRestorePreview
+              changedOnly
+              current={workspace}
+              labels={{
+                title: t("extensions.proposal.previewTitle"),
+                source: pendingExtensionProposal.sourceName,
+                before: t("extensions.proposal.before"),
+                after: t("extensions.proposal.after"),
+                overlay: t("backup.preview.overlay"),
+                cancel: t("actions.cancel"),
+                confirm: t("extensions.proposal.apply"),
+                identical: t("extensions.proposal.identical"),
+                added: t("backup.preview.added"),
+                removed: t("backup.preview.removed"),
+                modified: t("backup.preview.modified"),
+                moved: t("backup.preview.moved"),
+                resized: t("backup.preview.resized"),
+                stacking: t("backup.preview.stacking"),
+                beforePosition: t("backup.preview.beforePosition"),
+                unnamed: t("nodes.unnamed"),
+                noContent: t("nodes.noContent"),
+                legendAdded: t("backup.preview.legendAdded"),
+                legendRemoved: t("backup.preview.legendRemoved"),
+                legendModified: t("backup.preview.legendModified"),
+                legendMoved: t("backup.preview.legendMoved"),
+                legendResized: t("backup.preview.legendResized"),
+              }}
+              onCancel={cancelExtensionProposal}
+              onConfirm={() => void confirmExtensionProposal()}
+              replacement={pendingExtensionProposal.workspace}
+            />
+          ) : documentImportPreview !== null ? (
             <WorkspaceRestorePreview
               current={workspace}
               labels={{
@@ -5959,6 +6180,7 @@ function App({
               layout={workspace.layout}
               contentProcessorByNodeId={workspace.view.contentProcessorByNodeId}
               extensionMetadata={workspace.view.extensionMetadata}
+              extensionBaseRevision={extensionWorkspaceRevisionRef.current}
               contentProcessorOptions={contentProcessorOptions}
               contentMarkerOptions={contentMarkerOptions}
               nameConflictNodeIds={nameConflictNodeIds}
@@ -5982,6 +6204,7 @@ function App({
               onNodeContentChange={updateNodeContent}
               onNodeContentProcessorChange={updateNodeContentProcessor}
               onNodeExtensionMetadataChange={applyNodeExtensionMetadata}
+              onNodeExtensionProposal={openExtensionProposal}
               onNodeBringToFront={bringNodeToFront}
               onNodeNameChange={updateNodeName}
               onReferencesChange={updateReferences}
@@ -6023,6 +6246,7 @@ function App({
                           content={node.content}
                           emptyContent={t("nodes.noContent")}
                           enhancementLabels={contentEnhancementLabels}
+                          extensionBaseRevision={extensionWorkspaceRevisionRef.current}
                           extensionMetadata={
                             storedExtensionMetadata === undefined
                               ? null
@@ -6035,6 +6259,7 @@ function App({
                                 }
                           }
                           nodeName={node.name}
+                          nodeId={node.id}
                           processorId={processorId}
                           variant="list"
                         />

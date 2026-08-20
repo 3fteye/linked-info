@@ -345,7 +345,11 @@ fn validate_proposal(
     let handles = request
         .nodes
         .iter()
-        .map(|node| node.handle)
+        .flat_map(|node| {
+            std::iter::once(node.handle)
+                .chain(node.direct_outgoing.iter().copied())
+                .chain(node.direct_incoming.iter().copied())
+        })
         .collect::<BTreeSet<_>>();
     proposal.operations.iter().all(|operation| match operation {
         ChangeOperation::CreateNode { name, content, .. } => {
@@ -361,7 +365,8 @@ fn validate_proposal(
         }
         ChangeOperation::CreateReference { source, target }
         | ChangeOperation::RemoveReference { source, target } => {
-            valid_endpoint(source, &handles, &temporary_ids)
+            source != target
+                && valid_endpoint(source, &handles, &temporary_ids)
                 && valid_endpoint(target, &handles, &temporary_ids)
         }
     })

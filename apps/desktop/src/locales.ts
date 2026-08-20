@@ -180,6 +180,7 @@ export const resources = {
       extensions: {
         jsonInspector: {
           actions: {
+            formatJson: "格式化并写回",
             setIndent: "设置缩进",
           },
           indent: {
@@ -187,6 +188,20 @@ export const resources = {
             label: "缩进",
             two: "2 个空格",
           },
+          proposals: {
+            formatJson: "将格式化后的 JSON 写回节点",
+          },
+        },
+        proposal: {
+          after: "应用后",
+          applied: "扩展建议的修改已作为一次操作保存。",
+          apply: "应用修改",
+          before: "应用前",
+          identical: "扩展提案没有产生可应用的变化。",
+          invalid: "扩展返回的修改提案无效，工作区没有改变。",
+          outdated: "预览期间工作区已经变化，旧扩展提案已丢弃。请重新执行该动作。",
+          previewTitle: "扩展修改预览",
+          saveFailed: "无法原子保存扩展修改，工作区没有改变。",
         },
       },
       validation: {
@@ -967,6 +982,7 @@ export const resources = {
       extensions: {
         jsonInspector: {
           actions: {
+            formatJson: "Format and write back",
             setIndent: "Set indentation",
           },
           indent: {
@@ -974,6 +990,20 @@ export const resources = {
             label: "Indentation",
             two: "2 spaces",
           },
+          proposals: {
+            formatJson: "Write the formatted JSON back to the node",
+          },
+        },
+        proposal: {
+          after: "After",
+          applied: "The extension changes were saved as one operation.",
+          apply: "Apply changes",
+          before: "Before",
+          identical: "The extension proposal does not produce an applicable change.",
+          invalid: "The extension returned an invalid change proposal. The workspace was not changed.",
+          outdated: "The workspace changed during preview. The stale extension proposal was discarded; run the action again.",
+          previewTitle: "Extension change preview",
+          saveFailed: "The extension change could not be saved atomically. The workspace was not changed.",
         },
       },
       validation: {

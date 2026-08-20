@@ -97,6 +97,10 @@ describe("built-in extension host", () => {
       actionId: "set-indent",
       selected: "4",
     });
+    expect(rendered.presentation.elements[2]).toEqual({
+      type: "button",
+      actionId: "format-json",
+    });
 
     expect(
       builtInExtensionHost.invokeAction(
@@ -116,6 +120,26 @@ describe("built-in extension host", () => {
         "8",
       ),
     ).toThrow("invalid JSON inspector action");
+
+    const proposal = builtInExtensionHost.invokeAction(
+      builtInJsonInspectorExtensionId,
+      "format-json",
+      {
+        content: '{"outer":{"value":1}}',
+        hostNodeId: "00000000-0000-4000-8000-000000000009",
+        name: null,
+      },
+      { node: { indentSize: 4 }, schemaVersion: 1, workspace: {} },
+      null,
+      19,
+    );
+    expect(proposal.proposal).toMatchObject({
+      baseRevision: 19,
+      titleKey: "proposal.format-json.title",
+    });
+    expect(proposal.handleNodeIds.get(1n)).toBe(
+      "00000000-0000-4000-8000-000000000009",
+    );
   });
 
   it("does not pass incompatible metadata versions and bounds passive input", () => {

@@ -94,7 +94,10 @@ import {
   contentProcessorUsesCodePresentation,
   type ContentEnhancementLabels,
 } from "./contentProcessor";
-import type { BuiltInExtensionMetadataInput } from "./builtinExtensionHost";
+import type {
+  BuiltInExtensionActionHostResult,
+  BuiltInExtensionMetadataInput,
+} from "./builtinExtensionHost";
 import {
   codePreviewLanguageFromProcessorId,
   type CodePreviewLanguage,
@@ -158,6 +161,7 @@ interface InformationNodeData extends Record<string, unknown> {
   contentLabel: string;
   contentPlaceholder: string;
   enhancementLabels: ContentEnhancementLabels;
+  extensionBaseRevision: number;
   extensionMetadata: BuiltInExtensionMetadataInput | null;
   editing: boolean;
   interactive: boolean;
@@ -189,6 +193,10 @@ interface InformationNodeData extends Record<string, unknown> {
     schemaVersion: number,
     nodeMetadata: ExtensionMetadataPayload | null,
     workspaceMetadata: ExtensionMetadataPayload | null,
+  ) => void;
+  onExtensionProposal: (
+    nodeId: string,
+    result: BuiltInExtensionActionHostResult,
   ) => void;
   onCopyCodeSource: ((containsSensitive: boolean) => Promise<void>) | null;
   onCopyDerivedSecret: ((value: string) => Promise<void>) | null;
@@ -336,6 +344,7 @@ interface GraphCanvasProps {
   references: NodeReference[];
   contentProcessorByNodeId: Readonly<Record<string, string>>;
   extensionMetadata: Readonly<Record<string, WorkspaceExtensionMetadata>>;
+  extensionBaseRevision?: number;
   contentProcessorOptions: readonly ContentProcessorOption[];
   contentMarkerOptions: readonly ContentMarkerOption[];
   viewport: CanvasViewport | null;
@@ -370,6 +379,10 @@ interface GraphCanvasProps {
     schemaVersion: number,
     nodeMetadata: ExtensionMetadataPayload | null,
     workspaceMetadata: ExtensionMetadataPayload | null,
+  ) => void;
+  onNodeExtensionProposal?: (
+    nodeId: string,
+    result: BuiltInExtensionActionHostResult,
   ) => void;
   onNodeBringToFront: (nodeId: string) => void;
   onNodeNameChange: (nodeId: string, name: string) => boolean;
@@ -985,9 +998,11 @@ export function InformationNodeCard({
           codeSourceContainsSensitive={data.codeSourceContainsSensitive}
           content={data.content}
           enhancementLabels={data.enhancementLabels}
+          extensionBaseRevision={data.extensionBaseRevision}
           extensionMetadata={data.extensionMetadata}
           hideWhenEmpty
           nodeName={data.name}
+          nodeId={id}
           onCopyCodeSource={data.onCopyCodeSource ?? undefined}
           onCopySecret={data.onCopyDerivedSecret ?? undefined}
           onExtensionMetadataChange={(
@@ -1004,6 +1019,7 @@ export function InformationNodeCard({
               workspaceMetadata,
             )
           }
+          onExtensionProposal={(result) => data.onExtensionProposal(id, result)}
           processorId={data.contentProcessorId}
           sourceTruncated={data.contentTruncated}
           variant="canvas"
@@ -1181,6 +1197,7 @@ export default function GraphCanvas({
   contentMarkerOptions,
   contentProcessorByNodeId,
   contentProcessorOptions,
+  extensionBaseRevision = 0,
   extensionMetadata,
   nodes,
   layout,
@@ -1208,6 +1225,7 @@ export default function GraphCanvas({
   onNodeContentChange,
   onNodeContentProcessorChange,
   onNodeExtensionMetadataChange,
+  onNodeExtensionProposal = () => undefined,
   onNodeBringToFront,
   onNodeNameChange,
   onReferencesChange,
@@ -2329,6 +2347,7 @@ export default function GraphCanvas({
                 remaining: labels.totpRemaining,
               },
             },
+            extensionBaseRevision,
             editing,
             extensionMetadata: nodeExtensionMetadata,
             interactive,
@@ -2364,6 +2383,7 @@ export default function GraphCanvas({
             onContentChange: onNodeContentChange,
             onContentProcessorChange: onNodeContentProcessorChange,
             onExtensionMetadataChange: onNodeExtensionMetadataChange,
+            onExtensionProposal: onNodeExtensionProposal,
             onCopyCodeSource:
               codeSourceContainsSensitive && onCopySecret === null
                 ? null
@@ -2389,6 +2409,7 @@ export default function GraphCanvas({
     commitNodeAndScheduleAvoidance,
     canvasReferencePresentation,
     editingNodeId,
+    extensionBaseRevision,
     extensionMetadata,
     fitContentNodeId,
     clampedUnmatchedNodeOpacity,
@@ -2403,6 +2424,7 @@ export default function GraphCanvas({
     onNodeContentChange,
     onNodeContentProcessorChange,
     onNodeExtensionMetadataChange,
+    onNodeExtensionProposal,
     onCopySecret,
     onNodeNameChange,
     openIncomingReferenceBrowser,

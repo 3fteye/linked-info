@@ -20,8 +20,9 @@ import {
   type TotpContentLabels,
 } from "./totpContent";
 import type { SecretContentLabels } from "./secretContent";
-import {
-  type BuiltInExtensionMetadataInput,
+import type {
+  BuiltInExtensionActionHostResult,
+  BuiltInExtensionMetadataInput,
 } from "./builtinExtensionHost";
 import { builtInExtensionHost } from "./builtinExtensions";
 import { ExtensionPresentationHost } from "./extensionPresentation";
@@ -241,6 +242,7 @@ interface NodeContentHostProps {
   content: string | null;
   emptyContent?: ReactNode;
   enhancementLabels: ContentEnhancementLabels;
+  extensionBaseRevision?: number;
   extensionMetadata?: BuiltInExtensionMetadataInput | null;
   hideWhenEmpty?: boolean;
   codeSourceContainsSensitive?: boolean;
@@ -252,6 +254,8 @@ interface NodeContentHostProps {
     nodeMetadata: ExtensionMetadataPayload | null,
     workspaceMetadata: ExtensionMetadataPayload | null,
   ) => void;
+  onExtensionProposal?: (result: BuiltInExtensionActionHostResult) => void;
+  nodeId?: string;
   nodeName?: string | null;
   processorId: string | null;
   sourceTruncated?: boolean;
@@ -321,11 +325,14 @@ export function NodeContentHost({
   codeSourceContainsSensitive,
   emptyContent = null,
   enhancementLabels,
+  extensionBaseRevision = 0,
   extensionMetadata = null,
   hideWhenEmpty = false,
   onCopyCodeSource,
   onCopySecret,
   onExtensionMetadataChange,
+  onExtensionProposal,
+  nodeId,
   nodeName = null,
   processorId,
   sourceTruncated = false,
@@ -362,7 +369,7 @@ export function NodeContentHost({
     try {
       const result = builtInExtensionHost.renderProcessor(
         resolved.processor.id,
-        { content, name: nodeName },
+        { content, hostNodeId: nodeId, name: nodeName },
         extensionMetadata,
       );
       return (
@@ -384,7 +391,9 @@ export function NodeContentHost({
               resolve: enhancementLabels.extension.resolve,
             }}
             onAction={
-              variant === "list" || onExtensionMetadataChange === undefined
+              variant === "list" ||
+              (onExtensionMetadataChange === undefined &&
+                onExtensionProposal === undefined)
                 ? undefined
                 : (actionId, inputValue) => {
                     let actionResult;
@@ -392,18 +401,21 @@ export function NodeContentHost({
                       actionResult = builtInExtensionHost.invokeAction(
                         result.extensionId,
                         actionId,
-                        { content, name: nodeName },
+                        { content, hostNodeId: nodeId, name: nodeName },
                         extensionMetadata,
                         inputValue,
+                        extensionBaseRevision,
                       );
                     } catch {
                       return;
                     }
-                    if (
+                    if (actionResult.proposal !== null) {
+                      onExtensionProposal?.(actionResult);
+                    } else if (
                       actionResult.nodeMetadata !== null ||
                       actionResult.workspaceMetadata !== null
                     ) {
-                      onExtensionMetadataChange(
+                      onExtensionMetadataChange?.(
                         actionResult.extensionId,
                         actionResult.metadataSchemaVersion,
                         actionResult.nodeMetadata,

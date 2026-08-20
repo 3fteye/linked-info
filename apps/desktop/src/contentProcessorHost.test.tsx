@@ -28,6 +28,7 @@ const enhancementLabels = {
   extension: {
     resolve: (key: string) =>
       ({
+        "action.format-json": "Format and write back",
         "indent.label": "Indentation",
         "indent.two": "2 spaces",
         "indent.four": "4 spaces",
@@ -142,14 +143,18 @@ describe("NodeContentHost", () => {
 
   it("renders the built-in JSON adapter through declarative UI and stores its action result", async () => {
     const onExtensionMetadataChange = vi.fn();
+    const onExtensionProposal = vi.fn();
     await import("./codePreview");
     await act(async () => {
       root.render(
         <NodeContentHost
           content={'{"outer":{"value":1}}'}
           enhancementLabels={enhancementLabels}
+          extensionBaseRevision={31}
           extensionMetadata={{ node: {}, schemaVersion: 1, workspace: {} }}
+          nodeId="00000000-0000-4000-8000-000000000031"
           onExtensionMetadataChange={onExtensionMetadataChange}
+          onExtensionProposal={onExtensionProposal}
           processorId={builtInJsonInspectorProcessorId}
           variant="canvas"
         />,
@@ -173,6 +178,15 @@ describe("NodeContentHost", () => {
       1,
       { indentSize: 4 },
       null,
+    );
+    const formatButton = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Format and write back",
+    );
+    act(() => formatButton?.click());
+    expect(onExtensionProposal).toHaveBeenCalledWith(
+      expect.objectContaining({
+        proposal: expect.objectContaining({ baseRevision: 31 }),
+      }),
     );
   });
 
