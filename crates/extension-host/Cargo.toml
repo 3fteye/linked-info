@@ -5,7 +5,6 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-anyhow.workspace = true
 linked-info-extension-contracts = { path = "../extension-contracts" }
 linked-info-extension-host-protocol = { path = "../extension-host-protocol" }
 serde_json.workspace = true

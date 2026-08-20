@@ -12,7 +12,7 @@ use linked_info_extension_contracts::{
     ExtensionActionRequestV1, ExtensionActionResultV1, ExtensionMetadataMigrationRequestV1,
     ExtensionPresentationV1, ExtensionRenderRequestV1, ValidatedExtensionPackage,
 };
-use wasmtime::component::{Component, ComponentExportIndex, Instance, Linker, Val};
+use wasmtime::component::{Component, ComponentExportIndex, Linker, Val};
 use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder, Trap};
 
 use crate::{
@@ -237,26 +237,17 @@ impl ExtensionRuntime {
             let instance = linker
                 .instantiate(&mut store, &self.component)
                 .map_err(|error| self.execution_error(generation, error, true))?;
-            self.call_export(&mut store, instance, export, request)
-                .map_err(|error| self.execution_error(generation, error, false))
+            let function = instance
+                .get_func(&mut store, export)
+                .ok_or(ExtensionRuntimeError::ComponentInvalid)?;
+            let mut results = [Val::Bool(false)];
+            function
+                .call(&mut store, &[request], &mut results)
+                .map_err(|error| self.execution_error(generation, error, false))?;
+            Ok(results.into_iter().next().expect("one result slot"))
         })();
         drop(watchdog);
         result
-    }
-
-    fn call_export(
-        &self,
-        store: &mut Store<HostState>,
-        instance: Instance,
-        export: &ComponentExportIndex,
-        request: Val,
-    ) -> wasmtime::Result<Val> {
-        let function = instance
-            .get_func(&mut *store, export)
-            .ok_or_else(|| anyhow::anyhow!("extension export is unavailable"))?;
-        let mut results = [Val::Bool(false)];
-        function.call(&mut *store, &[request], &mut results)?;
-        Ok(results.into_iter().next().expect("one result slot"))
     }
 
     fn execution_error(

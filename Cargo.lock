@@ -3102,6 +3102,7 @@ dependencies = [
  "keyring",
  "libc",
  "linked-info-backup-port",
+ "linked-info-extension-contracts",
  "linked-info-extension-host-protocol",
  "quick-xml",
  "reqwest 0.12.28",
@@ -3154,7 +3155,6 @@ dependencies = [
 name = "linked-info-extension-host"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "libc",
  "linked-info-extension-contracts",
  "linked-info-extension-host-protocol",
