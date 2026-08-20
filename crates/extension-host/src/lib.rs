@@ -11,6 +11,10 @@ pub enum ExtensionRuntimeError {
     GenerationRevoked,
     RequestInvalid,
     ComponentInvalid,
+    ComponentCompileInvalid,
+    ComponentRuntimeImportForbidden,
+    ComponentGuestExportMissing,
+    ComponentFunctionExportMissing,
     ComponentTrap,
     ResourceLimit,
     DeadlineExceeded,
@@ -24,7 +28,11 @@ impl ExtensionRuntimeError {
         match self {
             Self::GenerationRevoked => ExtensionHostErrorCode::GenerationRevoked,
             Self::RequestInvalid => ExtensionHostErrorCode::RequestInvalid,
-            Self::ComponentInvalid => ExtensionHostErrorCode::ComponentInvalid,
+            Self::ComponentInvalid
+            | Self::ComponentCompileInvalid
+            | Self::ComponentRuntimeImportForbidden
+            | Self::ComponentGuestExportMissing
+            | Self::ComponentFunctionExportMissing => ExtensionHostErrorCode::ComponentInvalid,
             Self::ComponentTrap => ExtensionHostErrorCode::ComponentTrap,
             Self::ResourceLimit => ExtensionHostErrorCode::ResourceLimit,
             Self::DeadlineExceeded => ExtensionHostErrorCode::DeadlineExceeded,

@@ -90,28 +90,28 @@ impl ExtensionRuntime {
             .max_wasm_stack(512 * 1024);
         let engine = Engine::new(&config).map_err(|_| ExtensionRuntimeError::Internal)?;
         let component = Component::new(&engine, &package.component)
-            .map_err(|_| ExtensionRuntimeError::ComponentInvalid)?;
+            .map_err(|_| ExtensionRuntimeError::ComponentCompileInvalid)?;
         if component
             .component_type()
             .imports(&engine)
             .any(|(_, item)| !matches!(item.ty, ComponentItem::Type(_)))
         {
-            return Err(ExtensionRuntimeError::ComponentInvalid);
+            return Err(ExtensionRuntimeError::ComponentRuntimeImportForbidden);
         }
         let guest = GUEST_EXPORT_NAMES
             .iter()
             .find_map(|name| component.get_export_index(None, *name))
-            .ok_or(ExtensionRuntimeError::ComponentInvalid)?;
+            .ok_or(ExtensionRuntimeError::ComponentGuestExportMissing)?;
         let exports = RuntimeExports {
             render: component
                 .get_export_index(Some(&guest), "render")
-                .ok_or(ExtensionRuntimeError::ComponentInvalid)?,
+                .ok_or(ExtensionRuntimeError::ComponentFunctionExportMissing)?,
             invoke: component
                 .get_export_index(Some(&guest), "invoke")
-                .ok_or(ExtensionRuntimeError::ComponentInvalid)?,
+                .ok_or(ExtensionRuntimeError::ComponentFunctionExportMissing)?,
             migrate_metadata: component
                 .get_export_index(Some(&guest), "migrate-metadata")
-                .ok_or(ExtensionRuntimeError::ComponentInvalid)?,
+                .ok_or(ExtensionRuntimeError::ComponentFunctionExportMissing)?,
         };
         Ok(Self {
             engine,
@@ -461,7 +461,7 @@ mod tests {
 
         assert!(matches!(
             ExtensionRuntime::new(package, 1, RuntimeLimits::default()),
-            Err(ExtensionRuntimeError::ComponentInvalid)
+            Err(ExtensionRuntimeError::ComponentRuntimeImportForbidden)
         ));
     }
 
