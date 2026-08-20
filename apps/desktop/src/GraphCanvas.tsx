@@ -1047,6 +1047,9 @@ export function InformationNodeCard({
                   className="graph-node-reference-remove"
                   onClick={(event) => {
                     event.stopPropagation();
+                    if (data.editing) {
+                      data.onCommit(id);
+                    }
                     data.onRemoveReference(id, target.id);
                   }}
                   onPointerDown={(event) => event.stopPropagation()}

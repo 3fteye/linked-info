@@ -1081,6 +1081,74 @@ test("outgoing reference remove circles delete one undoable reference", async ({
       { sourceNodeId: source.id, targetNodeId: secondTarget.id },
     ]);
 });
+
+test("removing a reference commits an active edit as a separate undo step", async ({
+  page,
+}) => {
+  const source = {
+    content: "Original content",
+    id: syntheticId(34),
+    name: "Editable source",
+    x: 100,
+    y: 100,
+  };
+  const target = {
+    id: syntheticId(35),
+    name: "Reference target",
+    x: 520,
+    y: 100,
+  };
+  await openSyntheticWorkspace(page, [source, target], [
+    { sourceNodeId: source.id, targetNodeId: target.id },
+  ]);
+
+  const sourceNode = node(page, source.id);
+  await sourceNode.dblclick({ position: { x: 80, y: 24 } });
+  await sourceNode.locator("textarea").fill("Edited content");
+  await sourceNode
+    .getByRole("button", { name: "Remove reference: Reference target" })
+    .click();
+
+  await expect(sourceNode).toHaveAttribute("data-editing", "false");
+  await expect
+    .poll(async () => {
+      const stored = await storedWorkspace(page);
+      return {
+        content: stored?.nodes?.find(
+          (candidate: { id?: string }) => candidate.id === source.id,
+        )?.content,
+        references: stored?.references,
+      };
+    })
+    .toEqual({ content: "Edited content", references: [] });
+
+  await page.keyboard.press("Control+z");
+  await expect
+    .poll(async () => {
+      const stored = await storedWorkspace(page);
+      return {
+        content: stored?.nodes?.find(
+          (candidate: { id?: string }) => candidate.id === source.id,
+        )?.content,
+        references: stored?.references,
+      };
+    })
+    .toEqual({
+      content: "Edited content",
+      references: [{ sourceNodeId: source.id, targetNodeId: target.id }],
+    });
+
+  await page.keyboard.press("Control+z");
+  await expect
+    .poll(async () => {
+      const stored = await storedWorkspace(page);
+      return stored?.nodes?.find(
+        (candidate: { id?: string }) => candidate.id === source.id,
+      )?.content;
+    })
+    .toBe("Original content");
+});
+
 test("canvas select all, delete, undo, redo and context menu share one keyboard model", async ({
   page,
 }) => {

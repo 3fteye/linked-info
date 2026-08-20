@@ -534,6 +534,27 @@ describe("InformationNodeCard", () => {
     expect(props.data.onToggleReferenceFilter).not.toHaveBeenCalled();
   });
 
+  it("commits an active edit before removing its outgoing reference", () => {
+    const targetId = "22222222-2222-4222-8222-222222222222";
+    const props = cardProps({
+      editing: true,
+      referencedTargets: [
+        { filterActive: false, id: targetId, label: "OpenAI" },
+      ],
+    });
+    renderCard(root, props);
+
+    const remove = container.querySelector<HTMLButtonElement>(
+      '.graph-node-reference-remove[aria-label="Remove reference: OpenAI"]',
+    )!;
+    act(() => remove.click());
+
+    expect(props.data.onCommit).toHaveBeenCalledWith(nodeId);
+    expect(props.data.onCommit.mock.invocationCallOrder[0]).toBeLessThan(
+      props.data.onRemoveReference.mock.invocationCallOrder[0],
+    );
+  });
+
   it("loads full content only when a preview node enters editing", () => {
     const fullContent = "x".repeat(10_000);
     renderCard(
