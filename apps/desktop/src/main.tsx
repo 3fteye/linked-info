@@ -49,6 +49,11 @@ import {
   memoryOnlySmartReferenceResultCache,
   tauriSmartReferenceResultCache,
 } from "./smartReferenceCache";
+import { loadAppearanceTheme } from "./appearancePreferences";
+
+document.documentElement.dataset.theme = loadAppearanceTheme(
+  typeof localStorage === "undefined" ? null : localStorage,
+);
 
 document.addEventListener(
   "contextmenu",
