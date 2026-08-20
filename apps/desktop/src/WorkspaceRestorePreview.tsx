@@ -62,6 +62,7 @@ interface RestorePreviewLabels {
 
 interface WorkspaceRestorePreviewProps {
   changedOnly?: boolean;
+  contextPadding?: number;
   current: WorkspaceSnapshot;
   replacement: WorkspaceSnapshot;
   labels: RestorePreviewLabels;
@@ -275,6 +276,7 @@ function badgesFor(
 
 export default function WorkspaceRestorePreview({
   changedOnly = false,
+  contextPadding = 0,
   current,
   replacement,
   labels,
@@ -333,13 +335,51 @@ export default function WorkspaceRestorePreview({
         nodeIds.add(reference.targetNodeId);
       }
     }
+    if (contextPadding <= 0 || nodeIds.size === 0) {
+      return nodeIds;
+    }
+    const relevantLayouts = [...current.layout, ...replacement.layout].filter(
+      (layout) => nodeIds.has(layout.nodeId),
+    );
+    if (relevantLayouts.length === 0) {
+      return nodeIds;
+    }
+    const left = Math.min(...relevantLayouts.map((layout) => layout.x)) - contextPadding;
+    const top = Math.min(...relevantLayouts.map((layout) => layout.y)) - contextPadding;
+    const right =
+      Math.max(
+        ...relevantLayouts.map(
+          (layout) => layout.x + (layout.width ?? 270),
+        ),
+      ) + contextPadding;
+    const bottom =
+      Math.max(
+        ...relevantLayouts.map(
+          (layout) => layout.y + (layout.height ?? 160),
+        ),
+      ) + contextPadding;
+    for (const layout of [...current.layout, ...replacement.layout]) {
+      const layoutRight = layout.x + (layout.width ?? 270);
+      const layoutBottom = layout.y + (layout.height ?? 160);
+      if (
+        layout.x <= right &&
+        layoutRight >= left &&
+        layout.y <= bottom &&
+        layoutBottom >= top
+      ) {
+        nodeIds.add(layout.nodeId);
+      }
+    }
     return nodeIds;
   }, [
     changedOnly,
+    contextPadding,
+    current.layout,
     current.references,
     currentReferenceKeys,
     differences,
     replacement.references,
+    replacement.layout,
     replacementReferenceKeys,
   ]);
 

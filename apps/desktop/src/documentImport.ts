@@ -65,6 +65,11 @@ export interface DocumentImportBuildResult {
   addedReferenceCount: number;
 }
 
+export interface DocumentImportPlacement {
+  x: number;
+  y: number;
+}
+
 function paragraphs(text: string): string[] {
   return text
     .replace(/\r\n?/g, "\n")
@@ -307,7 +312,11 @@ function referenceKey(sourceNodeId: string, targetNodeId: string): string {
 export function buildDocumentImportWorkspace(
   base: WorkspaceSnapshot,
   draft: DocumentImportDraft,
+  placement: DocumentImportPlacement,
 ): DocumentImportBuildResult {
+  if (!Number.isFinite(placement.x) || !Number.isFinite(placement.y)) {
+    throw new Error("documentImportInvalidPlacement");
+  }
   const selected = draft.candidates.filter((candidate) => candidate.selected);
   const sourceNodeId = draft.sourceNodeId;
   const existingNodeIds = new Set(base.nodes.map((node) => node.id));
@@ -371,18 +380,15 @@ export function buildDocumentImportWorkspace(
     })),
   ];
 
-  const maximumRight = base.layout.reduce(
-    (value, item) => Math.max(value, item.x + (item.width ?? 270)),
-    0,
-  );
-  const startX = base.layout.length === 0 ? 80 : maximumRight + 90;
+  const startX = placement.x;
+  const startY = placement.y;
   const layout = [
     ...base.layout,
-    { nodeId: sourceNodeId, x: startX, y: 80 },
+    { nodeId: sourceNodeId, x: startX, y: startY },
     ...newCandidates.map(({ candidate }, index) => ({
       nodeId: candidate.id,
       x: startX + 340 + (index % 3) * 300,
-      y: 80 + Math.floor(index / 3) * 220,
+      y: startY + Math.floor(index / 3) * 220,
     })),
   ];
 

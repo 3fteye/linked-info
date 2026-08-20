@@ -112,12 +112,16 @@ function cardProps(overrides: Record<string, unknown> = {}): NodeProps<any> {
       filterActive: false,
       filterByNodeLabel: "Filter",
       removeNodeFilterLabel: "Remove filter",
+      removeReferenceLabel: (name: string) => `Remove reference: ${name}`,
       sourceLabel: "Source",
       targetLabel: "Target",
       onBrowseIncomingReferences: vi.fn(),
       onCommit: vi.fn(),
       onContentChange: vi.fn(),
       onContentProcessorChange: vi.fn(),
+      onExtensionMetadataChange: vi.fn(),
+      onExtensionProposal: vi.fn(),
+      onRemoveReference: vi.fn(),
       onCopyCodeSource: vi.fn(),
       onCopyDerivedSecret: null,
       onFitNodeContent: vi.fn(),
@@ -511,6 +515,25 @@ describe("InformationNodeCard", () => {
       nodeId,
       expect.objectContaining({ bottom: 0, left: 0, top: 0 }),
     );
+  });
+
+  it("removes an outgoing reference directly from its node chip", () => {
+    const targetId = "22222222-2222-4222-8222-222222222222";
+    const props = cardProps({
+      editing: false,
+      referencedTargets: [
+        { filterActive: false, id: targetId, label: "OpenAI" },
+      ],
+    });
+    renderCard(root, props);
+
+    const remove = container.querySelector<HTMLButtonElement>(
+      '.graph-node-reference-remove[aria-label="Remove reference: OpenAI"]',
+    )!;
+    act(() => remove.click());
+
+    expect(props.data.onRemoveReference).toHaveBeenCalledWith(nodeId, targetId);
+    expect(props.data.onToggleReferenceFilter).not.toHaveBeenCalled();
   });
 
   it("loads full content only when a preview node enters editing", () => {

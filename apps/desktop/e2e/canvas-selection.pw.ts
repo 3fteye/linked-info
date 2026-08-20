@@ -981,7 +981,7 @@ test("double-clicking an inline reference filter leaves every node visible", asy
   await page.getByTestId("unmatched-node-opacity").fill("0");
 
   const referenceChip = node(page, nodes[0].id).locator(
-    ".graph-node-reference-chip",
+    ".graph-node-reference-filter",
   );
   await expect(referenceChip).toHaveCount(1);
   await referenceChip.dblclick();
@@ -1004,8 +1004,8 @@ test("following inline references replaces the browsing filter instead of accumu
   ]);
   await page.getByTestId("unmatched-node-opacity").fill("0");
 
-  await node(page, nodes[0].id).locator(".graph-node-reference-chip").click();
-  await node(page, nodes[1].id).locator(".graph-node-reference-chip").click();
+  await node(page, nodes[0].id).locator(".graph-node-reference-filter").click();
+  await node(page, nodes[1].id).locator(".graph-node-reference-filter").click();
 
   await expect(page.locator(".active-reference-filter")).toHaveCount(1);
   await expect(page.locator(".item-count")).toContainText("1 / 3");
@@ -1027,6 +1027,52 @@ test("following inline references replaces the browsing filter instead of accumu
       page.locator(`.react-flow__node[data-id="${syntheticNode.id}"]`),
     ).toBeVisible();
   }
+});
+
+test("an outgoing reference can be removed from its node without selecting the line", async ({
+  page,
+}) => {
+  const nodes = gridNodes(2, 1);
+  await openSyntheticWorkspace(page, nodes, [
+    { sourceNodeId: nodes[0].id, targetNodeId: nodes[1].id },
+  ]);
+
+  await node(page, nodes[0].id).locator(".graph-node-reference-remove").click();
+  await expect
+    .poll(async () => (await storedWorkspace(page))?.references)
+    .toEqual([]);
+
+  await page.keyboard.press("Control+z");
+  await expect
+    .poll(async () => (await storedWorkspace(page))?.references)
+    .toEqual([{ sourceNodeId: nodes[0].id, targetNodeId: nodes[1].id }]);
+});
+
+test("document import requires and records an explicit canvas position", async ({ page }) => {
+  const nodes = gridNodes(1, 1);
+  await openSyntheticWorkspace(page, nodes);
+
+  await page.getByTestId("document-import-open").click();
+  await expect(page.getByTestId("document-import-placement-status")).toHaveAttribute(
+    "data-selected",
+    "false",
+  );
+  await page.getByTestId("document-import-choose-placement").click();
+  await expect(page.getByTestId("canvas-point-selection")).toBeVisible();
+  await expect(page.getByTestId("graph-canvas")).toHaveAttribute(
+    "data-point-selection",
+    "true",
+  );
+
+  await page.getByTestId("graph-canvas").click({ position: { x: 760, y: 520 } });
+
+  await expect(page.getByTestId("document-import-placement-status")).toHaveAttribute(
+    "data-selected",
+    "true",
+  );
+  await expect(page.getByTestId("document-import-placement-status")).toContainText(
+    /760.*520/u,
+  );
 });
 
 test("canvas select all, delete, undo, redo and context menu share one keyboard model", async ({
@@ -1594,6 +1640,41 @@ test("multi-selected nodes enter the smart-reference queue as one batch", async 
   await expect(queue.locator(".smart-reference-queue-item")).toHaveCount(2);
   await expect(queue.locator('[data-status="failed"]')).toHaveCount(2);
   await expect(page.getByTestId("graph-canvas")).toBeVisible();
+});
+
+test("a long smart-reference queue owns a real scroll viewport", async ({ page }) => {
+  const nodes = gridNodes(7, 2);
+  await openSyntheticWorkspace(page, nodes);
+  const canvas = page.getByTestId("graph-canvas");
+
+  await canvas.click({ position: { x: 30, y: 30 } });
+  await page.keyboard.press("Control+a");
+  await node(page, nodes[0].id).click({
+    button: "right",
+    position: { x: 24, y: 24 },
+  });
+  await page.getByTestId("smart-reference-context-action").click();
+
+  const queueList = page.locator(".smart-reference-queue-list");
+  await expect(queueList.locator(".smart-reference-queue-item")).toHaveCount(
+    nodes.length,
+  );
+  await expect
+    .poll(() =>
+      queueList.evaluate((element) => ({
+        clientHeight: element.clientHeight,
+        overflowY: getComputedStyle(element).overflowY,
+        scrollHeight: element.scrollHeight,
+      })),
+    )
+    .toMatchObject({ overflowY: "auto" });
+  const dimensions = await queueList.evaluate((element) => ({
+    clientHeight: element.clientHeight,
+    scrollHeight: element.scrollHeight,
+  }));
+  expect(dimensions.scrollHeight).toBeGreaterThan(dimensions.clientHeight);
+  await queueList.locator(".smart-reference-queue-item").last().scrollIntoViewIfNeeded();
+  await expect(queueList.locator(".smart-reference-queue-item").last()).toBeVisible();
 });
 
 test("Shift marquee remains narrow while auto-panning and never selects the full graph", async ({

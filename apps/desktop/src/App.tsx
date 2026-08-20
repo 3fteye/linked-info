@@ -54,6 +54,7 @@ import {
   type DocumentImportCandidate,
   type DocumentImportDraft,
   type DocumentImportLlmGateway,
+  type DocumentImportPlacement,
 } from "./documentImport";
 import { importDocumentDraft, importTextDocument } from "./documentImportBridge";
 import {
@@ -456,8 +457,13 @@ function App({
   const [documentImportSourceText, setDocumentImportSourceText] = useState("");
   const [documentImportDraft, setDocumentImportDraft] =
     useState<DocumentImportDraft | null>(null);
+  const [documentImportPlacement, setDocumentImportPlacement] =
+    useState<DocumentImportPlacement | null>(null);
+  const [documentImportPlacementSelecting, setDocumentImportPlacementSelecting] =
+    useState(false);
   const [documentImportPreview, setDocumentImportPreview] = useState<{
     draft: DocumentImportDraft;
+    placement: DocumentImportPlacement;
     workspace: WorkspaceSnapshot;
   } | null>(null);
   const [pendingExtensionProposal, setPendingExtensionProposal] =
@@ -709,6 +715,8 @@ function App({
     documentImportCancelledRef.current = false;
     setDocumentImportOpen(true);
     setDocumentImportDraft(null);
+    setDocumentImportPlacement(null);
+    setDocumentImportPlacementSelecting(false);
     setDocumentImportPreview(null);
     setDocumentImportSourceName("");
     setDocumentImportSourceText("");
@@ -720,11 +728,36 @@ function App({
     documentImportCancelledRef.current = true;
     setDocumentImportOpen(false);
     setDocumentImportDraft(null);
+    setDocumentImportPlacement(null);
+    setDocumentImportPlacementSelecting(false);
     setDocumentImportSourceName("");
     setDocumentImportSourceText("");
     setDocumentImportError(null);
     setDocumentImportProgress(null);
     if (documentImportBusy) void localLlmRuntime.stop();
+  }
+
+  function chooseDocumentImportPlacement() {
+    if (documentImportBusy || documentImportExternalLoading) {
+      return;
+    }
+    setDocumentImportOpen(false);
+    setDocumentImportPlacementSelecting(true);
+    setActiveView("canvas");
+  }
+
+  function cancelDocumentImportPlacement() {
+    setDocumentImportPlacementSelecting(false);
+    setDocumentImportOpen(true);
+  }
+
+  function selectDocumentImportPlacement(position: { x: number; y: number }) {
+    setDocumentImportPlacement({
+      x: Math.round(position.x / 20) * 20,
+      y: Math.round(position.y / 20) * 20,
+    });
+    setDocumentImportPlacementSelecting(false);
+    setDocumentImportOpen(true);
   }
 
   async function chooseDocumentImportFile() {
@@ -877,14 +910,16 @@ function App({
   }
 
   function previewDocumentImport() {
-    if (documentImportDraft === null) return;
+    if (documentImportDraft === null || documentImportPlacement === null) return;
     try {
       const result = buildDocumentImportWorkspace(
         workspaceRef.current,
         documentImportDraft,
+        documentImportPlacement,
       );
       setDocumentImportPreview({
         draft: documentImportDraft,
+        placement: documentImportPlacement,
         workspace: result.workspace,
       });
       setDocumentImportOpen(false);
@@ -907,6 +942,7 @@ function App({
       const result = buildDocumentImportWorkspace(
         workspaceRef.current,
         documentImportPreview.draft,
+        documentImportPreview.placement,
       );
       updateWorkspace(() => result.workspace, {
         flushImmediately: true,
@@ -914,6 +950,8 @@ function App({
       });
       setDocumentImportPreview(null);
       setDocumentImportDraft(null);
+      setDocumentImportPlacement(null);
+      setDocumentImportPlacementSelecting(false);
       setDocumentImportSourceName("");
       setDocumentImportSourceText("");
       setActiveView("canvas");
@@ -4550,6 +4588,7 @@ function App({
               </span>
               <button
                 className="secondary-button"
+                data-testid="document-import-open"
                 onClick={openDocumentImport}
                 type="button"
               >
@@ -4603,6 +4642,8 @@ function App({
             />
           ) : documentImportPreview !== null ? (
             <WorkspaceRestorePreview
+              changedOnly
+              contextPadding={640}
               current={workspace}
               labels={{
                 title: t("documentImport.previewTitle"),
@@ -6164,6 +6205,8 @@ function App({
                 redo: t("actions.redo"),
                 resetNodeSize: t("nodeSize.reset"),
                 removeNodeFilter: t("filters.removeNodeFilter"),
+                removeReference: (name) =>
+                  t("references.remove", { name }),
                 sourceHandle: t("references.sourceHandle"),
                 smartReference: t("smartReference.action"),
                 smartReferenceMultiple: (count) =>
@@ -6216,6 +6259,16 @@ function App({
               references={workspace.references}
               filteredNodeIds={filteredNodeIds}
               unmatchedNodeOpacity={unmatchedNodeOpacity}
+              pointSelection={
+                documentImportPlacementSelecting
+                  ? {
+                      cancelLabel: t("actions.cancel"),
+                      instruction: t("documentImport.placementInstruction"),
+                      onCancel: cancelDocumentImportPlacement,
+                      onSelect: selectDocumentImportPlacement,
+                    }
+                  : null
+              }
               viewport={workspace.viewport}
             />
           ) : (
@@ -6861,6 +6914,10 @@ function App({
             references: t("references.list"),
             referencesPlaceholder: t("documentImport.referencesPlaceholder"),
             noCandidates: t("documentImport.noCandidates"),
+            choosePlacement: t("documentImport.choosePlacement"),
+            placementRequired: t("documentImport.placementRequired"),
+            placementSelected: (x, y) =>
+              t("documentImport.placementSelected", { x, y }),
           }}
           onAnalyze={() => void analyzeDocumentImport()}
           onCancel={() => {
@@ -6868,12 +6925,14 @@ function App({
           }}
           onChooseFile={() => void chooseDocumentImportFile()}
           onChooseExternalDraft={() => void chooseExternalDocumentImportDraft()}
+          onChoosePlacement={chooseDocumentImportPlacement}
           onPreview={previewDocumentImport}
           onSourceNameChange={setDocumentImportSourceName}
           onSourceTextChange={setDocumentImportSourceText}
           onUpdateCandidate={updateDocumentImportCandidate}
           loadingExternalDraft={documentImportExternalLoading}
           progress={documentImportProgress}
+          placement={documentImportPlacement}
           sourceName={documentImportSourceName}
           sourceText={documentImportSourceText}
         />

@@ -729,6 +729,10 @@ h1 {
   cursor: grabbing;
 }
 
+.graph-canvas[data-point-selection="true"] .react-flow__pane {
+  cursor: crosshair;
+}
+
 .graph-canvas .react-flow__node {
   transition: opacity 120ms ease-out;
 }
@@ -1578,16 +1582,31 @@ h1 {
   align-items: center;
   max-width: 100%;
   min-height: 25px;
-  padding: 4px 8px;
-  gap: 5px;
   border: 1px solid #d2dcd5;
   border-radius: 999px;
   color: #4c5b52;
   background: #f5f8f6;
   font-size: 10px;
+  overflow: hidden;
 }
 
-.graph-node-reference-chip span {
+.graph-node-reference-filter,
+.graph-node-reference-remove {
+  min-height: 23px;
+  border: 0;
+  color: inherit;
+  background: transparent;
+}
+
+.graph-node-reference-filter {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  padding: 3px 6px 3px 8px;
+  gap: 5px;
+}
+
+.graph-node-reference-filter span {
   overflow-wrap: anywhere;
   white-space: normal;
 }
@@ -1597,6 +1616,21 @@ h1 {
   border-color: #8fae9b;
   color: #18583a;
   background: #e3efe7;
+}
+
+.graph-node-reference-remove {
+  display: grid;
+  place-items: center;
+  width: 25px;
+  padding: 0;
+  border-left: 1px solid rgb(143 174 155 / 38%);
+  cursor: pointer;
+}
+
+.graph-node-reference-remove:hover,
+.graph-node-reference-remove:focus-visible {
+  color: #9b3d35;
+  background: #f8e9e7;
 }
 
 .graph-handle.react-flow__handle {
@@ -1698,6 +1732,35 @@ h1 {
 .canvas-action-panel {
   display: flex;
   gap: 6px;
+}
+
+.canvas-point-selection-panel {
+  display: flex;
+  align-items: center;
+  max-width: min(620px, calc(100vw - 300px));
+  padding: 9px 11px;
+  gap: 8px;
+  border: 1px solid #86ad96;
+  border-radius: 8px;
+  color: #214e35;
+  background: rgb(247 252 248 / 96%);
+  box-shadow: 0 8px 24px rgb(31 62 42 / 16%);
+  font-size: 12px;
+}
+
+.canvas-point-selection-panel span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.canvas-point-selection-panel button {
+  flex: none;
+  min-height: 28px;
+  padding: 0 9px;
+  border: 1px solid #b9cabf;
+  border-radius: 6px;
+  color: #355d46;
+  background: #fff;
 }
 
 .canvas-shortcuts-popover {
@@ -3503,8 +3566,8 @@ h1 {
 }
 
 .document-import-dialog {
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto auto;
+  display: flex;
+  flex-direction: column;
   width: min(920px, 100%);
   max-height: min(860px, calc(100vh - 48px));
   padding: 22px;
@@ -3555,6 +3618,7 @@ h1 {
 .document-import-input,
 .document-import-draft {
   min-height: 0;
+  flex: 1 1 auto;
   margin-top: 18px;
   overflow: auto;
 }
@@ -3643,7 +3707,8 @@ h1 {
 .document-import-progress,
 .document-import-loaded-status,
 .document-import-error,
-.document-import-empty {
+.document-import-empty,
+.document-import-placement-status {
   margin: 12px 0 0;
   color: #536159;
   font-size: 12px;
@@ -3663,7 +3728,22 @@ h1 {
   color: #a33b34;
 }
 
+.document-import-placement-status {
+  padding: 8px 10px;
+  border: 1px solid #e0c894;
+  border-radius: 7px;
+  color: #715b2f;
+  background: #fff9eb;
+}
+
+.document-import-placement-status[data-selected="true"] {
+  border-color: #b9d2c2;
+  color: #275e43;
+  background: #f2f8f4;
+}
+
 .document-import-actions {
+  flex-wrap: wrap;
   margin-top: 18px;
 }
 
@@ -4087,6 +4167,7 @@ h1 {
   top: 112px;
   right: 20px;
   display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
   width: min(390px, calc(100vw - 40px));
   max-height: min(560px, calc(100vh - 152px));
   overflow: hidden;
@@ -4139,7 +4220,10 @@ h1 {
 
 .smart-reference-queue-list {
   display: grid;
-  overflow: auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 
 .smart-reference-queue-item {
@@ -4165,6 +4249,8 @@ h1 {
 }
 
 .smart-reference-dialog {
+  display: flex;
+  flex-direction: column;
   width: min(620px, 100%);
   max-height: min(760px, calc(100vh - 48px));
   padding: 20px;
@@ -4208,10 +4294,13 @@ h1 {
 }
 
 .smart-reference-scroll {
-  max-height: min(500px, calc(100vh - 260px));
+  min-height: 0;
+  flex: 1 1 auto;
   margin-top: 14px;
   padding-right: 2px;
-  overflow: auto;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 
 .smart-reference-result-section + .smart-reference-result-section {
