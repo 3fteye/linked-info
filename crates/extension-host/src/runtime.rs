@@ -449,9 +449,10 @@ mod tests {
     #[test]
     fn refuses_components_with_any_host_import_including_wasi() {
         let wit = linked_info_extension_contracts::EXTENSION_WIT.replace(
-            "world node-extension {\n  export guest;",
-            "world node-extension {\n  import forbidden: func();\n  export guest;",
+            "  export guest;",
+            "  import forbidden: func();\n  export guest;",
         );
+        assert_ne!(wit, linked_info_extension_contracts::EXTENSION_WIT);
         let package = package_with_component(component_from_wit(&wit, |module| module));
 
         let Err(error) = ExtensionRuntime::new(package, 1, RuntimeLimits::default()) else {
