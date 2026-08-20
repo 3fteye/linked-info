@@ -194,8 +194,11 @@ fn subprocess_handshake_trap_revoke_and_shutdown_are_framed() {
         receive(&mut output),
         ExtensionHostResponseV1::Revoked { generation: 2 }
     );
-    send(&mut input, &ExtensionHostRequestV1::Shutdown);
-    assert_eq!(receive(&mut output), ExtensionHostResponseV1::ShuttingDown);
+    send(&mut input, &ExtensionHostRequestV1::Shutdown {});
+    assert_eq!(
+        receive(&mut output),
+        ExtensionHostResponseV1::ShuttingDown {}
+    );
     assert!(child.wait().unwrap().success());
     fs::remove_file(package_path).unwrap();
 }

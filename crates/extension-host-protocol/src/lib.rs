@@ -32,7 +32,7 @@ pub enum ExtensionHostRequestV1 {
     Revoke {
         generation: u64,
     },
-    Shutdown,
+    Shutdown {},
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -77,7 +77,7 @@ pub enum ExtensionHostResponseV1 {
     Revoked {
         generation: u64,
     },
-    ShuttingDown,
+    ShuttingDown {},
     Error {
         request_id: Option<u64>,
         generation: u64,
@@ -91,7 +91,7 @@ impl ExtensionHostRequestV1 {
             Self::Render { request_id, .. }
             | Self::Invoke { request_id, .. }
             | Self::MigrateMetadata { request_id, .. } => Some(*request_id),
-            Self::Hello { .. } | Self::Revoke { .. } | Self::Shutdown => None,
+            Self::Hello { .. } | Self::Revoke { .. } | Self::Shutdown { .. } => None,
         }
     }
 
@@ -101,7 +101,7 @@ impl ExtensionHostRequestV1 {
             | Self::Invoke { generation, .. }
             | Self::MigrateMetadata { generation, .. }
             | Self::Revoke { generation } => Some(*generation),
-            Self::Hello { .. } | Self::Shutdown => None,
+            Self::Hello { .. } | Self::Shutdown { .. } => None,
         }
     }
 }
@@ -113,7 +113,7 @@ impl ExtensionHostResponseV1 {
             | Self::Invoked { request_id, .. }
             | Self::MetadataMigrated { request_id, .. } => Some(*request_id),
             Self::Error { request_id, .. } => *request_id,
-            Self::Ready { .. } | Self::Revoked { .. } | Self::ShuttingDown => None,
+            Self::Ready { .. } | Self::Revoked { .. } | Self::ShuttingDown { .. } => None,
         }
     }
 
@@ -125,7 +125,7 @@ impl ExtensionHostResponseV1 {
             | Self::MetadataMigrated { generation, .. }
             | Self::Revoked { generation }
             | Self::Error { generation, .. } => Some(*generation),
-            Self::ShuttingDown => None,
+            Self::ShuttingDown { .. } => None,
         }
     }
 }
@@ -163,6 +163,16 @@ mod tests {
         assert!(
             serde_json::from_str::<ExtensionHostRequestV1>(
                 r#"{"type":"shutdown","unexpected":true}"#
+            )
+            .is_err()
+        );
+        assert_eq!(
+            serde_json::to_string(&ExtensionHostRequestV1::Shutdown {}).unwrap(),
+            r#"{"type":"shutdown"}"#
+        );
+        assert!(
+            serde_json::from_str::<ExtensionHostResponseV1>(
+                r#"{"type":"shuttingDown","unexpected":true}"#
             )
             .is_err()
         );

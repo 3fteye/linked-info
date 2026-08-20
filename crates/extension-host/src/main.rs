@@ -390,7 +390,7 @@ fn run() -> Result<(), ()> {
                 };
                 let _ = response_sender.send(response);
             }
-            ExtensionHostRequestV1::Shutdown => {
+            ExtensionHostRequestV1::Shutdown { .. } => {
                 if let Some(generation) = runtime.authorization_generation().checked_add(1) {
                     let _ = runtime.advance_generation(generation);
                 }
@@ -408,7 +408,7 @@ fn run() -> Result<(), ()> {
 
     drop(work_sender);
     let _ = worker_thread.join();
-    let _ = response_sender.send(ExtensionHostResponseV1::ShuttingDown);
+    let _ = response_sender.send(ExtensionHostResponseV1::ShuttingDown {});
     drop(response_sender);
     let _ = writer_thread.join();
     Ok(())

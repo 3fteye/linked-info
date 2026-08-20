@@ -406,7 +406,7 @@ fn sanitize_request_content(request: &mut ExtensionHostRequestV1) {
         ExtensionHostRequestV1::Hello { .. }
         | ExtensionHostRequestV1::MigrateMetadata { .. }
         | ExtensionHostRequestV1::Revoke { .. }
-        | ExtensionHostRequestV1::Shutdown => {}
+        | ExtensionHostRequestV1::Shutdown { .. } => {}
     }
 }
 
