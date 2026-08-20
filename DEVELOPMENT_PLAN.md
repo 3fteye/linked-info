@@ -310,7 +310,7 @@ Cloudflare 代码只允许存在于 Worker 入口和 Cloudflare 存储适配器�
 
 开放扩展框架已经提升为当前优先阶段，完整且具有约束力的设计基线见 [docs/extension-framework.md](docs/extension-framework.md)。目标是让外部开发者无需修改或重新编译主程序即可安装扩展，为节点增加本地展示、校验、派生结果和用户主动触发的处理动作；它不允许扩展核心数据模型。
 
-当前注册表仍然只是源码级静态扩展点，尚未达到开放框架完成标准。版本化 WIT、`.liext` 包验证边界、工作区 v3 命名空间元数据和声明式 UI 宿主已经落地；内置 JSON 检查器已经走通临时句柄快照、秘密剥离、声明式代码/选择器和节点级扩展元数据。隔离 Wasm 子进程、轻量 IPC、能力复验、资源限制、代次撤销和锁定立即终止底座已经通过 Windows CI 的实际编译与故障测试；原子修改提案接入、完整安装生命周期和正式 SDK 尚未实现。扩展只能通过临时句柄读取授权范围内的节点与直接引用，不能取得稳定节点 ID或用元数据建立隐藏关系；跨节点语义仍必须写成正式 `Reference`。
+当前注册表仍然只是源码级静态扩展点，尚未达到开放框架完成标准。版本化 WIT、`.liext` 包验证边界、工作区 v3 命名空间元数据和声明式 UI 宿主已经落地；内置 JSON 检查器已经走通临时句柄快照、秘密剥离、声明式代码/选择器、节点级扩展元数据和“格式化并写回”的修改提案。隔离 Wasm 子进程、轻量 IPC、能力复验、资源限制、代次撤销、锁定立即终止和原子修改提案闭环已经通过 Windows CI 的实际编译与故障测试；完整安装生命周期和正式 SDK 尚未实现。扩展只能通过临时句柄读取授权范围内的节点与直接引用，不能取得稳定节点 ID 或用元数据建立隐藏关系；跨节点语义仍必须写成正式 `Reference`。
 
 ### 6.5 LLM 辅助文档导入
 
@@ -623,7 +623,7 @@ crates/
 
 该阶段优先于新的文档导入模型、脚本执行、附件、同步和扩展市场。实现期间不得把通用插件 API 直接耦合到 React Flow、Tauri 窗口或 `Node + Reference` 领域结构；脚本执行和原始秘密读取继续后置。
 
-当前第 1～4 步的底座已实现并通过 [Windows CI 32329049322](https://github.com/3fteye/linked-info/actions/runs/32329049322)：`linked-info-extension-contracts` 独立 crate 已定义 WIT、清单 Schema、能力、声明式展示和修改提案，并提供不执行扩展代码的 `.liext` 严格验证器；WIT 纯数据类型直接属于导出的 `guest` 接口，不产生额外接口实例导入。`linked-info-extension-host` 使用 Wasmtime Component Model 在独立进程中重新验证并执行包，拒绝全部组件导入和通用 WASI，以新 Store、128 MiB 线性内存、512 MiB 进程总内存、fuel、epoch、墙钟和有界 IPC 控制调用及编译阶段；桌面 Rust 只依赖轻量协议，IPC 前再次剥离已知秘密，锁定或工作区代次变化通过独立 Job Object/进程终止权限立即撤销，不等待调用互斥锁。工作区与导出格式已升级为 v3，`view.extensionMetadata` 按扩展 ID 保存独立 Schema 版本、工作区级对象和按节点 ID 索引的对象；v1/v2 确定性迁移、未知扩展保留、容量/深度/悬空节点校验、节点删除清理、撤销、恢复对比和 TypeScript/Rust 共享夹具均覆盖该容器。内置 `app.linked-info.json-inspector` 通过同一受限快照和声明式展示宿主工作。桌面端尚未提供安装、授权、启停或卸载入口，不能因此提前宣称扩展可安装。
+当前第 1～5 步已经实现。第 1～4 步通过 [Windows CI 32329049322](https://github.com/3fteye/linked-info/actions/runs/32329049322)，第 5 步修改提案闭环通过 [Windows CI 32331518095](https://github.com/3fteye/linked-info/actions/runs/32331518095)：`linked-info-extension-contracts` 独立 crate 已定义 WIT、清单 Schema、能力、声明式展示和修改提案，并提供不执行扩展代码的 `.liext` 严格验证器；WIT 纯数据类型直接属于导出的 `guest` 接口，不产生额外接口实例导入。`linked-info-extension-host` 使用 Wasmtime Component Model 在独立进程中重新验证并执行包，拒绝全部组件导入和通用 WASI，以新 Store、128 MiB 线性内存、512 MiB 进程总内存、fuel、epoch、墙钟和有界 IPC 控制调用及编译阶段；桌面 Rust 只依赖轻量协议，IPC 前再次剥离已知秘密，锁定或工作区代次变化通过独立 Job Object/进程终止权限立即撤销，不等待调用互斥锁。工作区与导出格式已升级为 v3，`view.extensionMetadata` 按扩展 ID 保存独立 Schema 版本、工作区级对象和按节点 ID 索引的对象；v1/v2 确定性迁移、未知扩展保留、容量/深度/悬空节点校验、节点删除清理、撤销、恢复对比和 TypeScript/Rust 共享夹具均覆盖该容器。修改提案在应用层重新验证当前 revision、句柄、名称和引用，使用只挂载变化节点及引用端点的画布差异预览，确认后先原子持久化，再作为一次历史事务进入工作区。桌面端尚未提供安装、授权、启停或卸载入口，不能因此提前宣称扩展可安装。
 
 ## 11. 当前工程状态与开发约束
 
