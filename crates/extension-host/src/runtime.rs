@@ -12,7 +12,8 @@ use linked_info_extension_contracts::{
     ExtensionActionRequestV1, ExtensionActionResultV1, ExtensionMetadataMigrationRequestV1,
     ExtensionPresentationV1, ExtensionRenderRequestV1, ValidatedExtensionPackage,
 };
-use wasmtime::component::{Component, ComponentExportIndex, ComponentItem, Linker, Val};
+use wasmtime::component::types::ComponentItem;
+use wasmtime::component::{Component, ComponentExportIndex, Linker, Val};
 use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder, Trap};
 
 use crate::{
