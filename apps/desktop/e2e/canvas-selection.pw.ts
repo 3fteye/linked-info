@@ -1904,6 +1904,34 @@ test("the low-glare starry theme is selectable and persists on this device", asy
     helper: "rgb(154, 169, 189)",
     label: "rgb(201, 213, 231)",
   });
+  expect(
+    await page.evaluate(() => {
+      const fixture = document.createElement("div");
+      fixture.innerHTML = `
+        <div class="smart-reference-progress"><span>Downloading</span></div>
+        <div class="smart-reference-status">Analysis failed</div>
+        <div class="extension-presentation-select"><span>Indent</span><select></select></div>
+      `;
+      document.querySelector(".app-shell")?.append(fixture);
+      const colors = {
+        extension: getComputedStyle(
+          fixture.querySelector(".extension-presentation-select")!,
+        ).backgroundColor,
+        progress: getComputedStyle(
+          fixture.querySelector(".smart-reference-progress")!,
+        ).backgroundColor,
+        status: getComputedStyle(
+          fixture.querySelector(".smart-reference-status")!,
+        ).backgroundColor,
+      };
+      fixture.remove();
+      return colors;
+    }),
+  ).toEqual({
+    extension: "rgb(17, 26, 45)",
+    progress: "rgb(20, 35, 60)",
+    status: "rgb(50, 26, 40)",
+  });
 
   await page.getByTestId("settings-tab-general").click();
   const starry = page.getByTestId("appearance-theme-starry-dark");

@@ -5260,3 +5260,46 @@ h1 {
   color: #ffc0c2;
   background: #321a28;
 }
+
+:root[data-theme="starry-dark"] .smart-reference-status {
+  border-color: #8a4d59;
+  color: #ffc0c2;
+  background: #321a28;
+  box-shadow: 0 12px 34px rgb(0 2 10 / 48%);
+}
+
+:root[data-theme="starry-dark"] .smart-reference-progress {
+  border-color: #45618b;
+  color: #d5e0f1;
+  background: #14233c;
+  box-shadow: 0 12px 34px rgb(0 2 10 / 48%);
+}
+
+:root[data-theme="starry-dark"] .smart-reference-progress span {
+  color: #9fb0c8;
+}
+
+:root[data-theme="starry-dark"] .smart-reference-progress progress {
+  accent-color: #7896e4;
+}
+
+:root[data-theme="starry-dark"] .extension-presentation-select {
+  border-color: #2d3b55;
+  color: #b8c6da;
+  background: #111a2d;
+}
+
+:root[data-theme="starry-dark"] .extension-presentation-button {
+  border-color: #34445f;
+  color: #d5e0f1;
+  background: #18243b;
+}
+
+:root[data-theme="starry-dark"] .extension-presentation-table-scroll :where(th, td) {
+  border-color: #34445f;
+}
+
+:root[data-theme="starry-dark"] .extension-presentation-badge {
+  color: #c4d0e2;
+  background: #22304a;
+}
