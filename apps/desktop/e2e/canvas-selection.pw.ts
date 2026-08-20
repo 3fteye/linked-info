@@ -1092,6 +1092,12 @@ test("removing a reference commits the canvas active edit as a separate undo ste
     x: 100,
     y: 100,
   };
+  const spatialNeighbor = {
+    id: syntheticId(37),
+    name: "Spatial neighbor",
+    x: 100,
+    y: 230,
+  };
   const referenceSource = {
     id: syntheticId(35),
     name: "Reference source",
@@ -1104,13 +1110,19 @@ test("removing a reference commits the canvas active edit as a separate undo ste
     x: 900,
     y: 100,
   };
-  await openSyntheticWorkspace(page, [editingNode, referenceSource, target], [
-    { sourceNodeId: referenceSource.id, targetNodeId: target.id },
-  ]);
+  await openSyntheticWorkspace(
+    page,
+    [editingNode, spatialNeighbor, referenceSource, target],
+    [{ sourceNodeId: referenceSource.id, targetNodeId: target.id }],
+  );
 
   const editingNodeCard = node(page, editingNode.id);
+  const editedContent = Array.from(
+    { length: 14 },
+    (_, index) => `Synthetic line ${index + 1} expands automatic height`,
+  ).join("\n");
   await editingNodeCard.dblclick({ position: { x: 80, y: 24 } });
-  await editingNodeCard.locator("textarea").fill("Edited content");
+  await editingNodeCard.locator("textarea").fill(editedContent);
   await node(page, referenceSource.id)
     .getByRole("button", { name: "Remove reference: Reference target" })
     .click();
@@ -1126,7 +1138,15 @@ test("removing a reference commits the canvas active edit as a separate undo ste
         references: stored?.references,
       };
     })
-    .toEqual({ content: "Edited content", references: [] });
+    .toEqual({ content: editedContent, references: [] });
+  await expect
+    .poll(async () => {
+      const stored = await storedWorkspace(page);
+      return stored?.layout?.find(
+        (item: { nodeId: string }) => item.nodeId === spatialNeighbor.id,
+      );
+    })
+    .not.toMatchObject({ x: spatialNeighbor.x, y: spatialNeighbor.y });
 
   await page.keyboard.press("Control+z");
   await expect
@@ -1140,10 +1160,39 @@ test("removing a reference commits the canvas active edit as a separate undo ste
       };
     })
     .toEqual({
-      content: "Edited content",
+      content: editedContent,
       references: [
         { sourceNodeId: referenceSource.id, targetNodeId: target.id },
       ],
+    });
+  await expect
+    .poll(async () => {
+      const stored = await storedWorkspace(page);
+      return stored?.layout?.find(
+        (item: { nodeId: string }) => item.nodeId === spatialNeighbor.id,
+      );
+    })
+    .not.toMatchObject({ x: spatialNeighbor.x, y: spatialNeighbor.y });
+
+  await page.keyboard.press("Control+z");
+  await expect
+    .poll(async () => {
+      const stored = await storedWorkspace(page);
+      return {
+        content: stored?.nodes?.find(
+          (candidate: { id?: string }) => candidate.id === editingNode.id,
+        )?.content,
+        neighbor: stored?.layout?.find(
+          (item: { nodeId: string }) => item.nodeId === spatialNeighbor.id,
+        ),
+      };
+    })
+    .toEqual({
+      content: editedContent,
+      neighbor: expect.objectContaining({
+        x: spatialNeighbor.x,
+        y: spatialNeighbor.y,
+      }),
     });
 
   await page.keyboard.press("Control+z");

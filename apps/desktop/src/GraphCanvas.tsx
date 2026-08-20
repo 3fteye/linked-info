@@ -1261,6 +1261,8 @@ export default function GraphCanvas({
   );
   const nodesRef = useRef(nodes);
   nodesRef.current = nodes;
+  const editingNodeIdRef = useRef(editingNodeId);
+  editingNodeIdRef.current = editingNodeId;
   const referencesRef = useRef(references);
   const [flowInstance, setFlowInstance] =
     useState<ReactFlowInstance<InformationFlowNode, Edge> | null>(null);
@@ -1301,6 +1303,9 @@ export default function GraphCanvas({
     before: { height: number; width: number } | null;
     nodeId: string;
   } | null>(null);
+  const pendingReferenceRemovalsRef = useRef<
+    Array<{ sourceNodeId: string; targetNodeId: string }>
+  >([]);
   const smartArrangementAbortControllerRef = useRef<AbortController | null>(null);
 
   useEffect(
@@ -1460,6 +1465,9 @@ export default function GraphCanvas({
 
   const commitNodeAndScheduleAvoidance = useCallback(
     (nodeId: string) => {
+      if (editingNodeIdRef.current !== nodeId) {
+        return;
+      }
       pendingCommitAvoidanceRef.current = autoAvoidOverlaps
         ? {
             before:
@@ -1476,11 +1484,8 @@ export default function GraphCanvas({
     [autoAvoidOverlaps, onNodeCommit],
   );
 
-  const removeReference = useCallback(
+  const applyReferenceRemoval = useCallback(
     (sourceNodeId: string, targetNodeId: string) => {
-      if (editingNodeId !== null) {
-        commitNodeAndScheduleAvoidance(editingNodeId);
-      }
       const next = referencesRef.current.filter(
         (reference) =>
           reference.sourceNodeId !== sourceNodeId ||
@@ -1493,7 +1498,38 @@ export default function GraphCanvas({
       setSelectedReferenceId(null);
       onReferencesChange(next);
     },
-    [commitNodeAndScheduleAvoidance, editingNodeId, onReferencesChange],
+    [onReferencesChange],
+  );
+
+  const flushPendingReferenceRemovals = useCallback(() => {
+    const pending = pendingReferenceRemovalsRef.current;
+    pendingReferenceRemovalsRef.current = [];
+    for (const removal of pending) {
+      applyReferenceRemoval(removal.sourceNodeId, removal.targetNodeId);
+    }
+  }, [applyReferenceRemoval]);
+
+  const removeReference = useCallback(
+    (sourceNodeId: string, targetNodeId: string) => {
+      if (editingNodeId !== null) {
+        if (autoAvoidOverlaps) {
+          pendingReferenceRemovalsRef.current.push({
+            sourceNodeId,
+            targetNodeId,
+          });
+          commitNodeAndScheduleAvoidance(editingNodeId);
+          return;
+        }
+        commitNodeAndScheduleAvoidance(editingNodeId);
+      }
+      applyReferenceRemoval(sourceNodeId, targetNodeId);
+    },
+    [
+      applyReferenceRemoval,
+      autoAvoidOverlaps,
+      commitNodeAndScheduleAvoidance,
+      editingNodeId,
+    ],
   );
 
   useEffect(() => {
@@ -1528,6 +1564,7 @@ export default function GraphCanvas({
           nodeElement === undefined ||
           flowNode === undefined
         ) {
+          flushPendingReferenceRemovals();
           return;
         }
         const after = {
@@ -1540,6 +1577,7 @@ export default function GraphCanvas({
           (Math.abs(pending.before.width - after.width) < 1 &&
             Math.abs(pending.before.height - after.height) < 1)
         ) {
+          flushPendingReferenceRemovals();
           return;
         }
         const nextLayout = layoutWithAutomaticAvoidance(
@@ -1555,13 +1593,19 @@ export default function GraphCanvas({
         if (nextLayout !== layoutRef.current) {
           onLayoutChange(nextLayout);
         }
+        flushPendingReferenceRemovals();
       });
     });
     return () => {
       window.cancelAnimationFrame(firstFrame);
       window.cancelAnimationFrame(secondFrame);
     };
-  }, [editingNodeId, layoutWithAutomaticAvoidance, onLayoutChange]);
+  }, [
+    editingNodeId,
+    flushPendingReferenceRemovals,
+    layoutWithAutomaticAvoidance,
+    onLayoutChange,
+  ]);
 
   const openSmartArrangement = useCallback((nodeIds: readonly string[]) => {
     const uniqueNodeIds = Array.from(new Set(nodeIds));

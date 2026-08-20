@@ -198,6 +198,7 @@ import {
   type SmartReferenceResultCache,
   type SmartReferenceResultCacheStatus,
 } from "./smartReferenceCache";
+import { reconcileSmartReferenceAcceptance } from "./smartReferenceAcceptance";
 import "./App.css";
 
 type ViewId = "canvas" | "nodes" | "settings";
@@ -2062,21 +2063,16 @@ function App({
       cached,
       currentWorkspace,
     );
-    const currentNodeIds = new Set(currentWorkspace.nodes.map((node) => node.id));
-    const currentAutomaticallyAddedNodeIds = automaticallyAddedNodeIds.filter(
-      (nodeId) => currentNodeIds.has(nodeId),
+    const acceptance = reconcileSmartReferenceAcceptance(
+      cached.sourceNodeId,
+      currentWorkspace.nodes.map((node) => node.id),
+      currentWorkspace.references,
+      automaticallyAddedNodeIds,
     );
-    const acceptedNodeIds = currentWorkspace.references
-      .filter((reference) => reference.sourceNodeId === cached.sourceNodeId)
-      .map((reference) => reference.targetNodeId)
-      .filter((nodeId) => currentNodeIds.has(nodeId));
     return {
       ...filtered,
       analysisKey,
-      acceptedNodeIds: Array.from(
-        new Set([...acceptedNodeIds, ...currentAutomaticallyAddedNodeIds]),
-      ),
-      automaticallyAddedNodeIds: currentAutomaticallyAddedNodeIds,
+      ...acceptance,
     };
   }
 
