@@ -102,6 +102,7 @@ import {
 import { CodePreviewSensitivityCache } from "./codePreviewSensitivity";
 import { TotpSecondClockProvider } from "./totpContent";
 import type { CanvasOperationItem } from "./canvasOperations";
+import type { AppearanceTheme } from "./appearancePreferences";
 import {
   CONTENT_MARKER_NOTE_MAX_LENGTH,
   contentMarkerRegistry,
@@ -174,6 +175,7 @@ interface InformationNodeData extends Record<string, unknown> {
   filterActive: boolean;
   filterByNodeLabel: string;
   removeNodeFilterLabel: string;
+  removeReferenceLabel: (name: string) => string;
   sourceLabel: string;
   targetLabel: string;
   onCommit: (nodeId: string) => void;
@@ -190,6 +192,7 @@ interface InformationNodeData extends Record<string, unknown> {
     nodeMetadata: ExtensionMetadataPayload | null,
     workspaceMetadata: ExtensionMetadataPayload | null,
   ) => void;
+  onRemoveReference: (sourceNodeId: string, targetNodeId: string) => void;
   onCopyCodeSource: ((containsSensitive: boolean) => Promise<void>) | null;
   onCopyDerivedSecret: ((value: string) => Promise<void>) | null;
   onNameChange: (nodeId: string, name: string) => boolean;
@@ -315,6 +318,7 @@ interface GraphLabels {
   redo: string;
   resetNodeSize: string;
   removeNodeFilter: string;
+  removeReference: (name: string) => string;
   sourceHandle: string;
   smartReference: string;
   smartReferenceMultiple: (count: number) => string;
@@ -330,6 +334,7 @@ interface GraphLabels {
 
 interface GraphCanvasProps {
   analyzingNodeId: string | null;
+  appearanceTheme: AppearanceTheme;
   autoAvoidOverlaps: boolean;
   nodes: InformationNode[];
   layout: NodeLayout[];
@@ -1014,22 +1019,43 @@ export function InformationNodeCard({
           <span className="graph-node-references-label">{data.referencesLabel}</span>
           <div className="graph-node-reference-list">
             {data.referencedTargets.map((target) => (
-              <button
-                aria-pressed={target.filterActive}
+              <div
                 className="nodrag nowheel graph-node-reference-chip"
                 data-active={target.filterActive}
                 key={target.id}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  data.onToggleReferenceFilter(target.id);
-                }}
-                onPointerDown={(event) => event.stopPropagation()}
-                title={target.filterActive ? data.removeNodeFilterLabel : data.filterByNodeLabel}
-                type="button"
               >
-                <Link2 aria-hidden="true" size={11} />
-                <span>{target.label}</span>
-              </button>
+                <button
+                  aria-pressed={target.filterActive}
+                  className="graph-node-reference-filter"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    data.onToggleReferenceFilter(target.id);
+                  }}
+                  onPointerDown={(event) => event.stopPropagation()}
+                  title={
+                    target.filterActive
+                      ? data.removeNodeFilterLabel
+                      : data.filterByNodeLabel
+                  }
+                  type="button"
+                >
+                  <Link2 aria-hidden="true" size={11} />
+                  <span>{target.label}</span>
+                </button>
+                <button
+                  aria-label={data.removeReferenceLabel(target.label)}
+                  className="graph-node-reference-remove"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    data.onRemoveReference(id, target.id);
+                  }}
+                  onPointerDown={(event) => event.stopPropagation()}
+                  title={data.removeReferenceLabel(target.label)}
+                  type="button"
+                >
+                  <X aria-hidden="true" size={11} />
+                </button>
+              </div>
             ))}
           </div>
         </section>
@@ -1177,6 +1203,7 @@ function referencedNodeLabel(
 
 export default function GraphCanvas({
   analyzingNodeId,
+  appearanceTheme,
   autoAvoidOverlaps,
   contentMarkerOptions,
   contentProcessorByNodeId,
@@ -1255,6 +1282,22 @@ export default function GraphCanvas({
   const [referenceSearch, setReferenceSearch] =
     useState<ReferenceSearchState | null>(null);
   const [selectedReferenceId, setSelectedReferenceId] = useState<string | null>(null);
+  const removeReference = useCallback(
+    (sourceNodeId: string, targetNodeId: string) => {
+      const next = referencesRef.current.filter(
+        (reference) =>
+          reference.sourceNodeId !== sourceNodeId ||
+          reference.targetNodeId !== targetNodeId,
+      );
+      if (next.length === referencesRef.current.length) {
+        return;
+      }
+      referencesRef.current = next;
+      setSelectedReferenceId(null);
+      onReferencesChange(next);
+    },
+    [onReferencesChange],
+  );
   const [draggingNodeIds, setDraggingNodeIds] = useState<string[]>([]);
   const [canvasSelection, setCanvasSelection] =
     useState<CanvasSelectionRectangle | null>(null);
@@ -2357,6 +2400,7 @@ export default function GraphCanvas({
             filterActive: referenceFilterNodeIdSet.has(node.id),
             filterByNodeLabel: labels.filterByNode,
             removeNodeFilterLabel: labels.removeNodeFilter,
+            removeReferenceLabel: labels.removeReference,
             sourceLabel: labels.sourceHandle,
             targetLabel: labels.targetHandle,
             onCommit: commitNodeAndScheduleAvoidance,
@@ -2364,6 +2408,7 @@ export default function GraphCanvas({
             onContentChange: onNodeContentChange,
             onContentProcessorChange: onNodeContentProcessorChange,
             onExtensionMetadataChange: onNodeExtensionMetadataChange,
+            onRemoveReference: removeReference,
             onCopyCodeSource:
               codeSourceContainsSensitive && onCopySecret === null
                 ? null
@@ -2407,6 +2452,7 @@ export default function GraphCanvas({
     onNodeNameChange,
     openIncomingReferenceBrowser,
     onToggleReferenceFilter,
+    removeReference,
     referenceFilterNodeIdSet,
     referencedNodesBySource,
     setFlowNodes,
@@ -3268,6 +3314,7 @@ export default function GraphCanvas({
   return (
     <div
       className="graph-canvas"
+      data-theme={appearanceTheme}
       data-flow-ready={flowInstance !== null}
       data-space-pan={spacePanActive}
       data-testid="graph-canvas"
@@ -3281,7 +3328,7 @@ export default function GraphCanvas({
     >
       <TotpSecondClockProvider>
         <ReactFlow<InformationFlowNode, Edge>
-        colorMode="light"
+        colorMode={appearanceTheme === "starry-dark" ? "dark" : "light"}
         deleteKeyCode={["Backspace", "Delete"]}
         edges={noFlowEdges}
         edgesReconnectable={false}
@@ -3425,14 +3472,14 @@ export default function GraphCanvas({
           )}
         </ViewportPortal>
         <Background
-          color="#d0d8d2"
+          color={appearanceTheme === "starry-dark" ? "#18243d" : "#d0d8d2"}
           gap={24}
           id="minor-grid"
           lineWidth={1}
           variant={BackgroundVariant.Lines}
         />
         <Background
-          color="#aebbb2"
+          color={appearanceTheme === "starry-dark" ? "#2e4168" : "#aebbb2"}
           gap={120}
           id="major-grid"
           lineWidth={1.2}
@@ -3440,9 +3487,15 @@ export default function GraphCanvas({
         />
         <MiniMap
           className="graph-minimap"
-          maskColor="rgb(245 247 245 / 72%)"
-          nodeColor="#d7e5dc"
-          nodeStrokeColor="#2e7152"
+          maskColor={
+            appearanceTheme === "starry-dark"
+              ? "rgb(6 10 24 / 78%)"
+              : "rgb(245 247 245 / 72%)"
+          }
+          nodeColor={appearanceTheme === "starry-dark" ? "#263a62" : "#d7e5dc"}
+          nodeStrokeColor={
+            appearanceTheme === "starry-dark" ? "#8eabff" : "#2e7152"
+          }
           pannable
           zoomable
         />

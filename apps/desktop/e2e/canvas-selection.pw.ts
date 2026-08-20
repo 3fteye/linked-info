@@ -1029,6 +1029,58 @@ test("following inline references replaces the browsing filter instead of accumu
   }
 });
 
+test("outgoing reference remove circles delete one undoable reference", async ({
+  page,
+}) => {
+  const source = {
+    id: syntheticId(31),
+    name: "Reference source",
+    x: 100,
+    y: 100,
+  };
+  const firstTarget = {
+    id: syntheticId(32),
+    name: "First target",
+    x: 520,
+    y: 70,
+  };
+  const secondTarget = {
+    id: syntheticId(33),
+    name: "Second target",
+    x: 520,
+    y: 260,
+  };
+  await openSyntheticWorkspace(page, [source, firstTarget, secondTarget], [
+    { sourceNodeId: source.id, targetNodeId: firstTarget.id },
+    { sourceNodeId: source.id, targetNodeId: secondTarget.id },
+  ]);
+
+  const sourceNode = node(page, source.id);
+  const removeButtons = sourceNode.locator(".graph-node-reference-remove");
+  await expect(removeButtons).toHaveCount(2);
+  await expect(
+    sourceNode.getByRole("button", { name: "Remove reference: First target" }),
+  ).toHaveCSS("border-radius", "50%");
+
+  await sourceNode
+    .getByRole("button", { name: "Remove reference: First target" })
+    .click();
+  await expect(removeButtons).toHaveCount(1);
+  await expect
+    .poll(async () => (await storedWorkspace(page))?.references)
+    .toEqual([
+      { sourceNodeId: source.id, targetNodeId: secondTarget.id },
+    ]);
+
+  await page.keyboard.press("Control+z");
+  await expect(removeButtons).toHaveCount(2);
+  await expect
+    .poll(async () => (await storedWorkspace(page))?.references)
+    .toEqual([
+      { sourceNodeId: source.id, targetNodeId: firstTarget.id },
+      { sourceNodeId: source.id, targetNodeId: secondTarget.id },
+    ]);
+});
 test("canvas select all, delete, undo, redo and context menu share one keyboard model", async ({
   page,
 }) => {
@@ -1596,6 +1648,32 @@ test("multi-selected nodes enter the smart-reference queue as one batch", async 
   await expect(page.getByTestId("graph-canvas")).toBeVisible();
 });
 
+test("the low-glare starry theme is selectable and persists on this device", async ({
+  page,
+}) => {
+  await openSyntheticWorkspace(page, gridNodes(1, 1));
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "starry-dark");
+  await expect(page.getByTestId("graph-canvas")).toHaveAttribute(
+    "data-theme",
+    "starry-dark",
+  );
+
+  await page.getByTestId("settings-navigation").click();
+  const starry = page.getByTestId("appearance-theme-starry-dark");
+  const mint = page.getByTestId("appearance-theme-mint-light");
+  await expect(starry).toHaveAttribute("aria-pressed", "true");
+  await mint.click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "mint-light");
+  await expect(mint).toHaveAttribute("aria-pressed", "true");
+
+  await page.reload();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "mint-light");
+  await page.getByTestId("settings-navigation").click();
+  await expect(page.getByTestId("appearance-theme-mint-light")).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+});
 test("Shift marquee remains narrow while auto-panning and never selects the full graph", async ({
   page,
 }) => {

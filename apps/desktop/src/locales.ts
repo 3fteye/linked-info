@@ -194,6 +194,7 @@ export const resources = {
       },
       references: {
         list: "引用",
+        remove: "删除引用：{{name}}",
         incomingBrowserFilter: "以此节点筛选画布",
         incomingBrowserNoMatches: "没有匹配的来源节点",
         incomingBrowserSearch: "搜索来源节点",
@@ -260,6 +261,12 @@ export const resources = {
           dataSecurity: "数据与安全",
         },
         language: "界面语言",
+        theme: "界面主题",
+        themeDescription: "主题只保存在当前设备，不会进入工作区或备份。",
+        themes: {
+          "mint-light": "苹果青亮色",
+          "starry-dark": "暗色星空",
+        },
         generalTitle: "常规",
         generalDescription: "调整只影响当前应用界面的基础选项。",
         operationGuideTitle: "操作说明",
@@ -981,6 +988,7 @@ export const resources = {
       },
       references: {
         list: "References",
+        remove: "Remove reference: {{name}}",
         incomingBrowserFilter: "Filter the canvas by this node",
         incomingBrowserNoMatches: "No matching source nodes",
         incomingBrowserSearch: "Search source nodes",
@@ -1047,6 +1055,12 @@ export const resources = {
           dataSecurity: "Data and security",
         },
         language: "Interface language",
+        theme: "Interface theme",
+        themeDescription: "The theme is stored only on this device and is not included in the workspace or backups.",
+        themes: {
+          "mint-light": "Mint light",
+          "starry-dark": "Dark starfield",
+        },
         generalTitle: "General",
         generalDescription: "Basic options that affect only the current application interface.",
         operationGuideTitle: "Operation guide",
