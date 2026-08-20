@@ -1802,6 +1802,30 @@ test("the low-glare starry theme is selectable and persists on this device", asy
       ),
     )
     .toBe(4);
+  await page.getByTestId("settings-tab-smartReference").click();
+  const smartReferencePanel = page.locator("#settings-panel-smartReference");
+  await smartReferencePanel
+    .locator(".smart-reference-settings .segmented-control")
+    .first()
+    .getByRole("button", { name: "Remote" })
+    .click();
+  await expect(
+    smartReferencePanel.locator(".remote-embedding-fields input").first(),
+  ).toHaveCSS("background-color", "rgb(11, 18, 33)");
+
+  await page.getByTestId("settings-tab-dataSecurity").click();
+  expect(
+    await page.evaluate(() => {
+      const setting = document.createElement("label");
+      setting.className = "security-idle-setting";
+      document.querySelector(".app-shell")?.append(setting);
+      const backgroundColor = getComputedStyle(setting).backgroundColor;
+      setting.remove();
+      return backgroundColor;
+    }),
+  ).toBe("rgb(11, 18, 33)");
+
+  await page.getByTestId("settings-tab-general").click();
   const starry = page.getByTestId("appearance-theme-starry-dark");
   const mint = page.getByTestId("appearance-theme-mint-light");
   await expect(starry).toHaveAttribute("aria-pressed", "true");

@@ -5084,6 +5084,55 @@ h1 {
 }
 
 :root[data-theme="starry-dark"] :where(
+  .remote-embedding-fields input,
+  .offsite-target-selector select,
+  .offsite-automatic-settings select,
+  .security-idle-setting
+) {
+  border-color: #34445f;
+  color: #d5e0f1;
+  background: #0b1221;
+}
+
+:root[data-theme="starry-dark"] :where(
+  .remote-embedding-fields label,
+  .offsite-target-selector,
+  .offsite-automatic-settings > label:not(.switch-setting),
+  .security-idle-setting select,
+  .switch-setting,
+  .threshold-setting
+) {
+  color: #b8c6da;
+}
+
+:root[data-theme="starry-dark"] :where(
+  .offsite-target-summary,
+  .automatic-backup-entry
+) {
+  border-color: #293750;
+  background: #111a2d;
+}
+
+:root[data-theme="starry-dark"] :where(
+  .offsite-target-summary strong,
+  .automatic-backup-entry strong,
+  .automatic-backup-history-heading strong,
+  .offsite-target-form > strong
+) {
+  color: #d5e0f1;
+}
+
+:root[data-theme="starry-dark"] :where(
+  .offsite-backup-settings > small,
+  .offsite-target-summary small,
+  .automatic-backup-history-heading small,
+  .automatic-backup-entry small,
+  .security-settings-actions small
+) {
+  color: #91a0b6;
+}
+
+:root[data-theme="starry-dark"] :where(
   .confirmation-dialog p,
   .security-gate > p,
   .storage-problem-card > p

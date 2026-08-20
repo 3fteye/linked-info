@@ -1264,6 +1264,10 @@ export default function GraphCanvas({
   const editingNodeIdRef = useRef(editingNodeId);
   editingNodeIdRef.current = editingNodeId;
   const referencesRef = useRef(references);
+  const onLayoutChangeRef = useRef(onLayoutChange);
+  onLayoutChangeRef.current = onLayoutChange;
+  const onReferencesChangeRef = useRef(onReferencesChange);
+  onReferencesChangeRef.current = onReferencesChange;
   const [flowInstance, setFlowInstance] =
     useState<ReactFlowInstance<InformationFlowNode, Edge> | null>(null);
   const lastWorkspaceViewportRef = useRef<CanvasViewport | null>(viewport);
@@ -1299,19 +1303,17 @@ export default function GraphCanvas({
   const settledNodeSizeByIdRef = useRef(
     new Map<string, { height: number; width: number }>(),
   );
-  const pendingCommitAvoidanceRef = useRef<{
-    before: { height: number; width: number } | null;
-    nodeId: string;
-  } | null>(null);
-  const pendingReferenceRemovalsRef = useRef<
-    Array<{ sourceNodeId: string; targetNodeId: string }>
-  >([]);
+  const commitAvoidanceFrameIdsRef = useRef(new Set<number>());
   const smartArrangementAbortControllerRef = useRef<AbortController | null>(null);
 
   useEffect(
     () => () => {
       smartArrangementAbortControllerRef.current?.abort();
       smartArrangementAbortControllerRef.current = null;
+      for (const frameId of commitAvoidanceFrameIdsRef.current) {
+        window.cancelAnimationFrame(frameId);
+      }
+      commitAvoidanceFrameIdsRef.current.clear();
     },
     [],
   );
@@ -1376,6 +1378,8 @@ export default function GraphCanvas({
     },
     [autoAvoidOverlaps, canvasRectangles],
   );
+  const layoutWithAutomaticAvoidanceRef = useRef(layoutWithAutomaticAvoidance);
+  layoutWithAutomaticAvoidanceRef.current = layoutWithAutomaticAvoidance;
 
   const commitNodeDimensions = useCallback(
     (
@@ -1463,27 +1467,6 @@ export default function GraphCanvas({
     [commitNodeDimensions],
   );
 
-  const commitNodeAndScheduleAvoidance = useCallback(
-    (nodeId: string) => {
-      if (editingNodeIdRef.current !== nodeId) {
-        return;
-      }
-      pendingCommitAvoidanceRef.current = autoAvoidOverlaps
-        ? {
-            before:
-              settledNodeSizeByIdRef.current.get(nodeId) ??
-              {
-                height: defaultAutomaticNodeHeight,
-                width: defaultAutomaticNodeWidth,
-              },
-            nodeId,
-          }
-        : null;
-      onNodeCommit(nodeId);
-    },
-    [autoAvoidOverlaps, onNodeCommit],
-  );
-
   const applyReferenceRemoval = useCallback(
     (sourceNodeId: string, targetNodeId: string) => {
       const next = referencesRef.current.filter(
@@ -1496,37 +1479,98 @@ export default function GraphCanvas({
       }
       referencesRef.current = next;
       setSelectedReferenceId(null);
-      onReferencesChange(next);
+      onReferencesChangeRef.current(next);
     },
-    [onReferencesChange],
+    [],
   );
 
-  const flushPendingReferenceRemovals = useCallback(() => {
-    const pending = pendingReferenceRemovalsRef.current;
-    pendingReferenceRemovalsRef.current = [];
-    for (const removal of pending) {
-      applyReferenceRemoval(removal.sourceNodeId, removal.targetNodeId);
-    }
-  }, [applyReferenceRemoval]);
+  const scheduleCommittedNodeAvoidance = useCallback(
+    (
+      nodeId: string,
+      before: { height: number; width: number },
+      onComplete?: () => void,
+    ) => {
+      let firstFrame = 0;
+      let secondFrame = 0;
+      firstFrame = window.requestAnimationFrame(() => {
+        commitAvoidanceFrameIdsRef.current.delete(firstFrame);
+        secondFrame = window.requestAnimationFrame(() => {
+          commitAvoidanceFrameIdsRef.current.delete(secondFrame);
+          const nodeElement = containerRef.current?.querySelector<HTMLElement>(
+            `.graph-node[data-node-id="${nodeId}"]`,
+          );
+          const flowNode = flowNodesRef.current.find((node) => node.id === nodeId);
+          if (nodeElement !== null && nodeElement !== undefined && flowNode !== undefined) {
+            const after = {
+              height: nodeElement.offsetHeight,
+              width: nodeElement.offsetWidth,
+            };
+            settledNodeSizeByIdRef.current.set(nodeId, after);
+            if (
+              Math.abs(before.width - after.width) >= 1 ||
+              Math.abs(before.height - after.height) >= 1
+            ) {
+              const nextLayout = layoutWithAutomaticAvoidanceRef.current(
+                layoutRef.current,
+                nodeId,
+                {
+                  ...after,
+                  nodeId,
+                  x: flowNode.position.x,
+                  y: flowNode.position.y,
+                },
+              );
+              if (nextLayout !== layoutRef.current) {
+                onLayoutChangeRef.current(nextLayout);
+              }
+            }
+          }
+          onComplete?.();
+        });
+        commitAvoidanceFrameIdsRef.current.add(secondFrame);
+      });
+      commitAvoidanceFrameIdsRef.current.add(firstFrame);
+    },
+    [],
+  );
+
+  const commitNodeAndScheduleAvoidance = useCallback(
+    (nodeId: string, onComplete?: () => void) => {
+      if (editingNodeIdRef.current !== nodeId) {
+        return false;
+      }
+      const before =
+        settledNodeSizeByIdRef.current.get(nodeId) ??
+        {
+          height: defaultAutomaticNodeHeight,
+          width: defaultAutomaticNodeWidth,
+        };
+      onNodeCommit(nodeId);
+      if (autoAvoidOverlaps) {
+        scheduleCommittedNodeAvoidance(nodeId, before, onComplete);
+      } else {
+        onComplete?.();
+      }
+      return true;
+    },
+    [autoAvoidOverlaps, onNodeCommit, scheduleCommittedNodeAvoidance],
+  );
 
   const removeReference = useCallback(
     (sourceNodeId: string, targetNodeId: string) => {
       if (editingNodeId !== null) {
-        if (autoAvoidOverlaps) {
-          pendingReferenceRemovalsRef.current.push({
-            sourceNodeId,
-            targetNodeId,
-          });
-          commitNodeAndScheduleAvoidance(editingNodeId);
+        if (
+          commitNodeAndScheduleAvoidance(editingNodeId, () =>
+            applyReferenceRemoval(sourceNodeId, targetNodeId),
+          )
+        ) {
           return;
         }
-        commitNodeAndScheduleAvoidance(editingNodeId);
       }
       applyReferenceRemoval(sourceNodeId, targetNodeId);
     },
     [
       applyReferenceRemoval,
-      autoAvoidOverlaps,
       commitNodeAndScheduleAvoidance,
       editingNodeId,
     ],
@@ -1543,69 +1587,6 @@ export default function GraphCanvas({
       });
     }
   }, [editingNodeId, flowNodes]);
-
-  useEffect(() => {
-    const pending = pendingCommitAvoidanceRef.current;
-    if (pending === null || editingNodeId === pending.nodeId) {
-      return;
-    }
-    pendingCommitAvoidanceRef.current = null;
-    let secondFrame = 0;
-    const firstFrame = window.requestAnimationFrame(() => {
-      secondFrame = window.requestAnimationFrame(() => {
-        const nodeElement = containerRef.current?.querySelector<HTMLElement>(
-          `.graph-node[data-node-id="${pending.nodeId}"]`,
-        );
-        const flowNode = flowNodesRef.current.find(
-          (node) => node.id === pending.nodeId,
-        );
-        if (
-          nodeElement === null ||
-          nodeElement === undefined ||
-          flowNode === undefined
-        ) {
-          flushPendingReferenceRemovals();
-          return;
-        }
-        const after = {
-          height: nodeElement.offsetHeight,
-          width: nodeElement.offsetWidth,
-        };
-        settledNodeSizeByIdRef.current.set(pending.nodeId, after);
-        if (
-          pending.before === null ||
-          (Math.abs(pending.before.width - after.width) < 1 &&
-            Math.abs(pending.before.height - after.height) < 1)
-        ) {
-          flushPendingReferenceRemovals();
-          return;
-        }
-        const nextLayout = layoutWithAutomaticAvoidance(
-          layoutRef.current,
-          pending.nodeId,
-          {
-            ...after,
-            nodeId: pending.nodeId,
-            x: flowNode.position.x,
-            y: flowNode.position.y,
-          },
-        );
-        if (nextLayout !== layoutRef.current) {
-          onLayoutChange(nextLayout);
-        }
-        flushPendingReferenceRemovals();
-      });
-    });
-    return () => {
-      window.cancelAnimationFrame(firstFrame);
-      window.cancelAnimationFrame(secondFrame);
-    };
-  }, [
-    editingNodeId,
-    flushPendingReferenceRemovals,
-    layoutWithAutomaticAvoidance,
-    onLayoutChange,
-  ]);
 
   const openSmartArrangement = useCallback((nodeIds: readonly string[]) => {
     const uniqueNodeIds = Array.from(new Set(nodeIds));
