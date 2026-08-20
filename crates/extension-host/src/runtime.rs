@@ -12,7 +12,7 @@ use linked_info_extension_contracts::{
     ExtensionActionRequestV1, ExtensionActionResultV1, ExtensionMetadataMigrationRequestV1,
     ExtensionPresentationV1, ExtensionRenderRequestV1, ValidatedExtensionPackage,
 };
-use wasmtime::component::{Component, ComponentExportIndex, Linker, Val};
+use wasmtime::component::{Component, ComponentExportIndex, ComponentItem, Linker, Val};
 use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder, Trap};
 
 use crate::{
@@ -90,7 +90,11 @@ impl ExtensionRuntime {
         let engine = Engine::new(&config).map_err(|_| ExtensionRuntimeError::Internal)?;
         let component = Component::new(&engine, &package.component)
             .map_err(|_| ExtensionRuntimeError::ComponentInvalid)?;
-        if component.component_type().imports(&engine).next().is_some() {
+        if component
+            .component_type()
+            .imports(&engine)
+            .any(|(_, item)| !matches!(item.ty, ComponentItem::Type(_)))
+        {
             return Err(ExtensionRuntimeError::ComponentInvalid);
         }
         let guest = GUEST_EXPORT_NAMES

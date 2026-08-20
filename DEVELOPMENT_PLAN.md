@@ -623,7 +623,7 @@ crates/
 
 该阶段优先于新的文档导入模型、脚本执行、附件、同步和扩展市场。实现期间不得把通用插件 API 直接耦合到 React Flow、Tauri 窗口或 `Node + Reference` 领域结构；脚本执行和原始秘密读取继续后置。
 
-当前第 1～3 步已实现，第 4 步的隔离执行底座已进入源码并等待 Windows CI：`linked-info-extension-contracts` 独立 crate 已定义 WIT、清单 Schema、能力、声明式展示和修改提案，并提供不执行扩展代码的 `.liext` 严格验证器；`linked-info-extension-host` 使用 Wasmtime Component Model 在独立进程中重新验证并执行包，拒绝全部宿主导入和通用 WASI，以新 Store、128 MiB 线性内存、512 MiB 进程总内存、fuel、epoch、墙钟和有界 IPC 控制调用及编译阶段；桌面 Rust 只依赖轻量协议，IPC 前再次剥离已知秘密，锁定或工作区代次变化通过独立 Job Object/进程终止权限立即撤销，不等待调用互斥锁。工作区与导出格式已升级为 v3，`view.extensionMetadata` 按扩展 ID 保存独立 Schema 版本、工作区级对象和按节点 ID 索引的对象；v1/v2 确定性迁移、未知扩展保留、容量/深度/悬空节点校验、节点删除清理、撤销、恢复对比和 TypeScript/Rust 共享夹具均覆盖该容器。内置 `app.linked-info.json-inspector` 通过同一受限快照和声明式展示宿主工作。桌面端尚未提供安装、授权、启停或卸载入口，不能因此提前宣称扩展可安装。
+当前第 1～3 步已实现，第 4 步的隔离执行底座已进入源码并等待 Windows CI：`linked-info-extension-contracts` 独立 crate 已定义 WIT、清单 Schema、能力、声明式展示和修改提案，并提供不执行扩展代码的 `.liext` 严格验证器；`linked-info-extension-host` 使用 Wasmtime Component Model 在独立进程中重新验证并执行包，只允许无运行时能力的 WIT 类型导入，拒绝函数、模块、实例、资源及通用 WASI，以新 Store、128 MiB 线性内存、512 MiB 进程总内存、fuel、epoch、墙钟和有界 IPC 控制调用及编译阶段；桌面 Rust 只依赖轻量协议，IPC 前再次剥离已知秘密，锁定或工作区代次变化通过独立 Job Object/进程终止权限立即撤销，不等待调用互斥锁。工作区与导出格式已升级为 v3，`view.extensionMetadata` 按扩展 ID 保存独立 Schema 版本、工作区级对象和按节点 ID 索引的对象；v1/v2 确定性迁移、未知扩展保留、容量/深度/悬空节点校验、节点删除清理、撤销、恢复对比和 TypeScript/Rust 共享夹具均覆盖该容器。内置 `app.linked-info.json-inspector` 通过同一受限快照和声明式展示宿主工作。桌面端尚未提供安装、授权、启停或卸载入口，不能因此提前宣称扩展可安装。
 
 ## 11. 当前工程状态与开发约束
 
