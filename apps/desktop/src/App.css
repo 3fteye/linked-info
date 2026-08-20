@@ -5244,3 +5244,19 @@ h1 {
 :root[data-theme="starry-dark"] .security-error {
   color: #ffaaa5 !important;
 }
+
+:root[data-theme="starry-dark"] :where(
+  .clear-reference-filters,
+  .smart-arrangement-options select,
+  .restore-preview-mode button[data-active="true"]
+) {
+  border-color: #34445f;
+  color: #d5e0f1;
+  background: #18243b;
+}
+
+:root[data-theme="starry-dark"] .graph-status-toast[data-error="true"] {
+  border-color: #8a4d59;
+  color: #ffc0c2;
+  background: #321a28;
+}
