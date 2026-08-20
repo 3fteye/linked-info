@@ -1,0 +1,10 @@
+[package]
+name = "linked-info-extension-host-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+linked-info-extension-contracts = { path = "../extension-contracts" }
+serde.workspace = true
+serde_json.workspace = true

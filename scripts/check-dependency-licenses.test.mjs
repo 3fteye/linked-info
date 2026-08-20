@@ -43,6 +43,26 @@ test("license review accepts wasmparser's exact reviewed expression", () => {
   assert.equal(failures.length, 0);
 });
 
+test("license review accepts Wasmtime's LLVM-exception expression", () => {
+  const expression = "Apache-2.0 WITH LLVM-exception";
+  const failures = findUnapprovedLicenseGroups(
+    new Map([[expression, [{ name: "wasmtime", versions: ["47.0.3"] }]]]),
+    approvedRustLicenseExpressions,
+  );
+
+  assert.equal(failures.length, 0);
+});
+
+test("license review accepts encoding_rs with its bundled tables license", () => {
+  const expression = "(Apache-2.0 OR MIT) AND BSD-3-Clause";
+  const failures = findUnapprovedLicenseGroups(
+    new Map([[expression, [{ name: "encoding_rs", versions: ["0.8.35"] }]]]),
+    approvedRustLicenseExpressions,
+  );
+
+  assert.equal(failures.length, 0);
+});
+
 test("license review rejects missing license metadata", () => {
   const failures = findUnapprovedLicenseGroups(
     new Map([["", [{ name: "example", versions: ["1.0.0"] }]]]),

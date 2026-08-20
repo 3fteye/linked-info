@@ -50,6 +50,8 @@ jobs:
           -p linked-info-contracts
           -p linked-info-domain
           -p linked-info-extension-contracts
+          -p linked-info-extension-host-protocol
+          -p linked-info-extension-host
           -p linked-info-storage-port
           -p linked-info-storage-memory
           -p linked-info-application
@@ -62,6 +64,8 @@ jobs:
           -p linked-info-contracts
           -p linked-info-domain
           -p linked-info-extension-contracts
+          -p linked-info-extension-host-protocol
+          -p linked-info-extension-host
           -p linked-info-storage-port
           -p linked-info-storage-memory
           -p linked-info-application

@@ -1,4 +1,6 @@
 mod embedding;
+mod extension_runtime;
+mod extension_runtime_content;
 mod file_transfer;
 mod llm;
 mod offsite_backup;
@@ -17,12 +19,16 @@ use tauri::Manager;
 fn exit_application(
     app: tauri::AppHandle,
     embedding_state: tauri::State<'_, embedding::EmbeddingState>,
+    extension_runtime_state: tauri::State<'_, extension_runtime::ExtensionRuntimeState>,
     llm_state: tauri::State<'_, llm::LlmState>,
     vault_state: tauri::State<'_, workspace_file::WorkspaceVaultState>,
 ) {
+    // Revoke plaintext authority before waiting for any model or extension
+    // process cleanup. Application exit is not an exception to lock ordering.
+    vault_state.shutdown();
+    extension_runtime_state.shutdown();
     let _ = embedding_state.shutdown();
     llm_state.shutdown();
-    vault_state.shutdown();
     secret_clipboard::clear_active(&app);
     app.exit(0);
 }
@@ -44,6 +50,7 @@ pub fn run() {
 
     builder
         .manage(embedding::EmbeddingState::default())
+        .manage(extension_runtime::ExtensionRuntimeState::default())
         .manage(llm::LlmState::default())
         .manage(offsite_backup::OffsiteBackupState::default())
         .manage(secret_clipboard::SecretClipboardState::default())
