@@ -42,9 +42,16 @@ async function openSyntheticWorkspace(
   nodes: SyntheticNode[],
   references: SyntheticReference[] = [],
   viewport: SyntheticViewport = { x: 0, y: 0, zoom: 1 },
+  extensionMetadata: Record<string, unknown> | null = null,
 ) {
   await page.addInitScript(
-    ({ storageKey, syntheticNodes, syntheticReferences, syntheticViewport }) => {
+    ({
+      storageKey,
+      syntheticExtensionMetadata,
+      syntheticNodes,
+      syntheticReferences,
+      syntheticViewport,
+    }) => {
       const seedMarker = `${storageKey}.playwright-seeded`;
       if (sessionStorage.getItem(seedMarker) === "true") {
         return;
@@ -53,7 +60,7 @@ async function openSyntheticWorkspace(
       localStorage.setItem(
         storageKey,
         JSON.stringify({
-          version: 2,
+          version: syntheticExtensionMetadata === null ? 2 : 3,
           nodes: syntheticNodes.map((node) => ({
             id: node.id,
             name: node.name,
@@ -68,13 +75,19 @@ async function openSyntheticWorkspace(
           })),
           references: syntheticReferences,
           viewport: syntheticViewport,
-          view: { contentProcessorByNodeId: {} },
+          view: {
+            contentProcessorByNodeId: {},
+            ...(syntheticExtensionMetadata === null
+              ? {}
+              : { extensionMetadata: syntheticExtensionMetadata }),
+          },
         }),
       );
       sessionStorage.setItem(seedMarker, "true");
     },
     {
       storageKey: workspaceStorageKey,
+      syntheticExtensionMetadata: extensionMetadata,
       syntheticNodes: nodes,
       syntheticReferences: references,
       syntheticViewport: viewport,
@@ -1446,6 +1459,47 @@ test("settings tabs support standard keyboard navigation", async ({ page }) => {
     "id",
     "settings-panel-general",
   );
+});
+
+test("preserved extension metadata can be cleared separately and undone", async ({
+  page,
+}) => {
+  const nodes = gridNodes(1, 1);
+  await openSyntheticWorkspace(
+    page,
+    nodes,
+    [],
+    { x: 0, y: 0, zoom: 1 },
+    {
+      "dev.example.preview": {
+        schemaVersion: 1,
+        workspace: { theme: "dark" },
+        byNodeId: { [nodes[0].id]: { collapsed: true } },
+      },
+    },
+  );
+
+  await page.getByTestId("settings-navigation").click();
+  await page.getByTestId("settings-tab-extensions").click();
+  await expect(page.getByText("dev.example.preview", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Clear metadata" }).click();
+  await page
+    .getByRole("button", { name: "Click again to confirm clearing" })
+    .click();
+  await expect
+    .poll(async () => (await storedWorkspace(page))?.view?.extensionMetadata)
+    .toEqual({});
+
+  await page.getByRole("button", { name: "Undo" }).click();
+  await expect
+    .poll(async () => (await storedWorkspace(page))?.view?.extensionMetadata)
+    .toEqual({
+      "dev.example.preview": {
+        schemaVersion: 1,
+        workspace: { theme: "dark" },
+        byNodeId: { [nodes[0].id]: { collapsed: true } },
+      },
+    });
 });
 
 test("confirmed workspace replacement can be undone and redone from disk", async ({

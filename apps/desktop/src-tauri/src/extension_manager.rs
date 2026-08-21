@@ -655,8 +655,8 @@ pub async fn migrate_prepared_extension_metadata(
         return Err("extension_install_state_changed".to_owned());
     }
     let metadata_migration_id = uuid::Uuid::new_v4().to_string();
-    let mut prepared_installs = app
-        .state::<ExtensionManagerState>()
+    let manager = app.state::<ExtensionManagerState>();
+    let mut prepared_installs = manager
         .prepared
         .lock()
         .map_err(|_| "extension_manager_state_unavailable".to_owned())?;
