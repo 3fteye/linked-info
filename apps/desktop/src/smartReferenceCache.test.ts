@@ -19,13 +19,23 @@ function workspace(): WorkspaceSnapshot {
       { id: sourceId, name: "账号记录", content: "OpenAI Plus" },
       { id: candidateId, name: "OpenAI", content: "服务标签" },
     ],
-    layout: [
-      { nodeId: sourceId, x: 0, y: 0 },
-      { nodeId: candidateId, x: 300, y: 0 },
-    ],
     references: [],
-    viewport: null,
-    view: { contentProcessorByNodeId: {}, extensionMetadata: {} },
+    view: {
+      activeCanvasId: "00000000-0000-4000-8000-000000000001",
+      canvases: [
+        {
+          id: "00000000-0000-4000-8000-000000000001",
+          name: "Main",
+          layout: [
+            { nodeId: sourceId, x: 0, y: 0 },
+            { nodeId: candidateId, x: 300, y: 0 },
+          ],
+          viewport: null,
+        },
+      ],
+      contentProcessorByNodeId: {},
+      extensionMetadata: {},
+    },
   };
 }
 
@@ -52,7 +62,15 @@ describe("smart-reference result cache", () => {
     const reordered = {
       ...original,
       nodes: [...original.nodes].reverse(),
-      layout: [...original.layout].reverse(),
+      view: {
+        ...original.view,
+        canvases: [
+          {
+            ...original.view.canvases[0],
+            layout: [...original.view.canvases[0].layout].reverse(),
+          },
+        ],
+      },
     };
     const originalKey = await smartReferenceResultCacheKey(
       sourceId,

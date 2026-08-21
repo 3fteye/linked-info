@@ -4,24 +4,27 @@ import {
   ExtensionChangeProposalError,
   prepareExtensionChangeProposal,
 } from "./extensionChangeProposal";
-import { emptyWorkspace, type WorkspaceSnapshot } from "./workspaceData";
+import {
+  activeWorkspaceCanvas,
+  emptyWorkspace,
+  type WorkspaceSnapshot,
+} from "./workspaceData";
 
 const currentId = "00000000-0000-4000-8000-000000000001";
 const targetId = "00000000-0000-4000-8000-000000000002";
 const createdId = "00000000-0000-4000-8000-000000000003";
 
 function workspace(): WorkspaceSnapshot {
-  return {
-    ...emptyWorkspace(),
-    nodes: [
-      { id: currentId, name: "Source", content: "before" },
-      { id: targetId, name: "Target", content: null },
-    ],
-    layout: [
-      { nodeId: currentId, x: 10, y: 20 },
-      { nodeId: targetId, x: 400, y: 20 },
-    ],
-  };
+  const result = emptyWorkspace();
+  result.nodes = [
+    { id: currentId, name: "Source", content: "before" },
+    { id: targetId, name: "Target", content: null },
+  ];
+  activeWorkspaceCanvas(result).layout = [
+    { nodeId: currentId, x: 10, y: 20 },
+    { nodeId: targetId, x: 400, y: 20 },
+  ];
+  return result;
 }
 
 function prepare(proposal: ExtensionChangeProposalV1, base = workspace()) {
@@ -71,7 +74,8 @@ describe("extension change proposals", () => {
       { id: targetId, name: "Target", content: null },
       { id: createdId, name: "Created node", content: "created content" },
     ]);
-    expect(prepared.workspace.layout[prepared.workspace.layout.length - 1]).toEqual({
+    const preparedCanvas = activeWorkspaceCanvas(prepared.workspace);
+    expect(preparedCanvas.layout[preparedCanvas.layout.length - 1]).toEqual({
       nodeId: createdId,
       x: 330,
       y: 20,

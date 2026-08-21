@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  activeWorkspaceCanvas,
+  defaultCanvasId,
   isNodeNameAvailable,
+  migrateWorkspaceSnapshotV3,
   moveNodeLayoutToFront,
   parseWorkspaceSnapshot,
   persistedNodeNameFromDraft,
@@ -22,34 +25,48 @@ function validWorkspace(): WorkspaceSnapshot {
       { id: accountId, name: "Account", content: null },
       { id: serviceId, name: "OpenAI", content: "Shared service" },
     ],
-    layout: [
-      { nodeId: accountId, x: 10, y: 20 },
-      { nodeId: serviceId, x: 30, y: 40 },
-    ],
     references: [{ sourceNodeId: accountId, targetNodeId: serviceId }],
-    viewport: { x: 100, y: -50, zoom: 1.25 },
-    view: { contentProcessorByNodeId: {}, extensionMetadata: {} },
+    view: {
+      activeCanvasId: defaultCanvasId,
+      canvases: [
+        {
+          id: defaultCanvasId,
+          name: "Main",
+          layout: [
+            { nodeId: accountId, x: 10, y: 20 },
+            { nodeId: serviceId, x: 30, y: 40 },
+          ],
+          viewport: { x: 100, y: -50, zoom: 1.25 },
+        },
+      ],
+      contentProcessorByNodeId: {},
+      extensionMetadata: {},
+    },
   };
+}
+
+function layout(workspace: WorkspaceSnapshot) {
+  return activeWorkspaceCanvas(workspace).layout;
 }
 
 describe("parseWorkspaceSnapshot", () => {
   it("normalizes UUID casing before validating nodes, layout, and references", () => {
     const workspace = validWorkspace();
     workspace.nodes[0].id = accountId.toUpperCase();
-    workspace.layout[0].nodeId = accountId.toUpperCase();
+    layout(workspace)[0].nodeId = accountId.toUpperCase();
     workspace.references[0].sourceNodeId = accountId.toUpperCase();
 
     const parsed = parseWorkspaceSnapshot(workspace);
 
     expect(parsed?.nodes[0].id).toBe(accountId);
-    expect(parsed?.layout[0].nodeId).toBe(accountId);
+    expect(parsed === null ? null : layout(parsed)[0].nodeId).toBe(accountId);
     expect(parsed?.references[0].sourceNodeId).toBe(accountId);
   });
 
   it("rejects the same UUID written with different casing", () => {
     const workspace = validWorkspace();
     workspace.nodes[1].id = accountId.toUpperCase();
-    workspace.layout[1].nodeId = accountId.toUpperCase();
+    layout(workspace)[1].nodeId = accountId.toUpperCase();
     workspace.references = [];
 
     expect(parseWorkspaceSnapshot(workspace)).toBeNull();
@@ -62,33 +79,41 @@ describe("parseWorkspaceSnapshot", () => {
     expect(parseWorkspaceSnapshot(workspace)).toBeNull();
   });
 
-  it("rejects missing or duplicate layout entries", () => {
+  it("allows nodes outside every canvas and rejects duplicate placements within one canvas", () => {
     const missing = validWorkspace();
-    missing.layout.pop();
-    expect(parseWorkspaceSnapshot(missing)).toBeNull();
+    layout(missing).pop();
+    expect(parseWorkspaceSnapshot(missing)).not.toBeNull();
 
     const duplicate = validWorkspace();
-    duplicate.layout[1].nodeId = accountId;
+    layout(duplicate)[1].nodeId = accountId;
     expect(parseWorkspaceSnapshot(duplicate)).toBeNull();
   });
 
   it("accepts independent manual dimensions and rejects unsafe sizes", () => {
     const manual = validWorkspace();
-    manual.layout[0] = {
-      ...manual.layout[0],
+    layout(manual)[0] = {
+      ...layout(manual)[0],
       height: 360,
       width: 480,
     };
-    expect(parseWorkspaceSnapshot(manual)?.layout[0]).toEqual(manual.layout[0]);
+    const parsedManual = parseWorkspaceSnapshot(manual);
+    expect(parsedManual === null ? null : layout(parsedManual)[0]).toEqual(
+      layout(manual)[0],
+    );
 
-    const partial = validWorkspace() as WorkspaceSnapshot & {
-      layout: Array<Record<string, unknown>>;
-    };
-    partial.layout[0].width = 480;
-    expect(parseWorkspaceSnapshot(partial)?.layout[0]).toEqual(partial.layout[0]);
+    const partial = validWorkspace();
+    layout(partial)[0].width = 480;
+    const parsedPartial = parseWorkspaceSnapshot(partial);
+    expect(parsedPartial === null ? null : layout(parsedPartial)[0]).toEqual(
+      layout(partial)[0],
+    );
 
     const unsafe = validWorkspace();
-    unsafe.layout[0] = { ...unsafe.layout[0], height: 91, width: 480 };
+    layout(unsafe)[0] = {
+      ...layout(unsafe)[0],
+      height: 91,
+      width: 480,
+    };
     expect(parseWorkspaceSnapshot(unsafe)).toBeNull();
   });
 
@@ -102,13 +127,80 @@ describe("parseWorkspaceSnapshot", () => {
     expect(parseWorkspaceSnapshot(duplicate)).toBeNull();
   });
 
-  it("accepts legacy snapshots without a viewport and rejects invalid viewports", () => {
-    const { viewport: _viewport, ...legacy } = validWorkspace();
-    expect(parseWorkspaceSnapshot(legacy)?.viewport).toBeNull();
-
+  it("accepts a null canvas viewport and rejects invalid viewports", () => {
+    const withoutViewport = validWorkspace();
+    activeWorkspaceCanvas(withoutViewport).viewport = null;
+    expect(parseWorkspaceSnapshot(withoutViewport)).not.toBeNull();
     const invalid = validWorkspace();
-    invalid.viewport = { x: 0, y: 0, zoom: 0 };
+    activeWorkspaceCanvas(invalid).viewport = { x: 0, y: 0, zoom: 0 };
     expect(parseWorkspaceSnapshot(invalid)).toBeNull();
+  });
+
+  it("migrates a version 3 layout and viewport into the default canvas", () => {
+    const workspace = validWorkspace();
+    const currentCanvas = activeWorkspaceCanvas(workspace);
+    const migrated = migrateWorkspaceSnapshotV3({
+      nodes: workspace.nodes,
+      layout: currentCanvas.layout,
+      references: workspace.references,
+      viewport: currentCanvas.viewport,
+      view: {
+        contentProcessorByNodeId: {},
+        extensionMetadata: {},
+      },
+    });
+
+    expect(migrated).toEqual(workspace);
+  });
+
+  it("accepts one node on multiple canvases with independent layout", () => {
+    const workspace = validWorkspace();
+    const secondCanvasId = "33333333-3333-4333-8333-333333333333";
+    workspace.view.canvases.push({
+      id: secondCanvasId,
+      name: "Second",
+      layout: [{ nodeId: accountId, x: 900, y: -300, width: 640 }],
+      viewport: null,
+    });
+
+    const parsed = parseWorkspaceSnapshot(workspace);
+
+    expect(parsed?.view.canvases[1].layout).toEqual([
+      { nodeId: accountId, x: 900, y: -300, width: 640 },
+    ]);
+  });
+
+  it("rejects duplicate canvas identity, normalized names, and a dangling active canvas", () => {
+    const duplicateId = validWorkspace();
+    duplicateId.view.canvases.push({
+      ...structuredClone(duplicateId.view.canvases[0]),
+      name: "Second",
+    });
+    expect(parseWorkspaceSnapshot(duplicateId)).toBeNull();
+
+    const duplicateName = validWorkspace();
+    duplicateName.view.canvases.push({
+      id: "33333333-3333-4333-8333-333333333333",
+      name: " main ",
+      layout: [],
+      viewport: null,
+    });
+    expect(parseWorkspaceSnapshot(duplicateName)).toBeNull();
+
+    const danglingActive = validWorkspace();
+    danglingActive.view.activeCanvasId =
+      "33333333-3333-4333-8333-333333333333";
+    expect(parseWorkspaceSnapshot(danglingActive)).toBeNull();
+  });
+
+  it("rejects legacy top-level layout fields in a version 4 snapshot", () => {
+    const workspace = {
+      ...validWorkspace(),
+      layout: [],
+      viewport: null,
+    };
+
+    expect(parseWorkspaceSnapshot(workspace)).toBeNull();
   });
 
   it("preserves unknown content processor ids and rejects dangling selections", () => {
@@ -235,6 +327,15 @@ describe("removeNodesFromWorkspaceView", () => {
     expect(
       removeNodesFromWorkspaceView(workspace.view, new Set([accountId])),
     ).toEqual({
+      activeCanvasId: defaultCanvasId,
+      canvases: [
+        {
+          id: defaultCanvasId,
+          name: "Main",
+          layout: [{ nodeId: serviceId, x: 30, y: 40 }],
+          viewport: { x: 100, y: -50, zoom: 1.25 },
+        },
+      ],
       contentProcessorByNodeId: {},
       extensionMetadata: {
         "dev.example.preview": {
@@ -391,7 +492,7 @@ describe("persistedNodeNameFromDraft", () => {
 
 describe("moveNodeLayoutToFront", () => {
   it("moves the interacted node to the end without changing coordinates", () => {
-    const layout = validWorkspace().layout;
+    const layout = activeWorkspaceCanvas(validWorkspace()).layout;
 
     const next = moveNodeLayoutToFront(layout, accountId);
 
@@ -400,7 +501,7 @@ describe("moveNodeLayoutToFront", () => {
   });
 
   it("keeps the same array when the node is already frontmost or missing", () => {
-    const layout = validWorkspace().layout;
+    const layout = activeWorkspaceCanvas(validWorkspace()).layout;
 
     expect(moveNodeLayoutToFront(layout, serviceId)).toBe(layout);
     expect(
@@ -411,7 +512,7 @@ describe("moveNodeLayoutToFront", () => {
 
 describe("updateNodeLayoutPositions", () => {
   it("updates every dragged node while preserving the stacking order", () => {
-    const layout = validWorkspace().layout;
+    const layout = activeWorkspaceCanvas(validWorkspace()).layout;
 
     const next = updateNodeLayoutPositions(layout, [
       { nodeId: accountId, x: 110, y: 120 },
@@ -426,7 +527,7 @@ describe("updateNodeLayoutPositions", () => {
   });
 
   it("keeps the same array when no position changed", () => {
-    const layout = validWorkspace().layout;
+    const layout = activeWorkspaceCanvas(validWorkspace()).layout;
 
     expect(updateNodeLayoutPositions(layout, layout)).toBe(layout);
   });
@@ -434,7 +535,7 @@ describe("updateNodeLayoutPositions", () => {
 
 describe("updateNodeLayoutDimensions", () => {
   it("stores a manual size and preserves position changes from top or left resizing", () => {
-    const layout = validWorkspace().layout;
+    const layout = activeWorkspaceCanvas(validWorkspace()).layout;
     expect(
       updateNodeLayoutDimensions(layout, accountId, {
         height: 420,
@@ -449,7 +550,7 @@ describe("updateNodeLayoutDimensions", () => {
   });
 
   it("removes only saved dimensions when returning to automatic size", () => {
-    const layout = validWorkspace().layout;
+    const layout = activeWorkspaceCanvas(validWorkspace()).layout;
     layout[0] = { ...layout[0], height: 420, width: 560 };
     expect(updateNodeLayoutDimensions(layout, accountId, null)[0]).toEqual({
       nodeId: accountId,
@@ -461,7 +562,7 @@ describe("updateNodeLayoutDimensions", () => {
 
 describe("updateNodeLayoutSizeOverrides", () => {
   it("can normalize width without disabling automatic height", () => {
-    const layout = validWorkspace().layout;
+    const layout = activeWorkspaceCanvas(validWorkspace()).layout;
     const next = updateNodeLayoutSizeOverrides(layout, [
       { nodeId: accountId, width: 360 },
       { nodeId: serviceId, width: 360 },
@@ -474,7 +575,7 @@ describe("updateNodeLayoutSizeOverrides", () => {
   });
 
   it("preserves an untouched axis and can clear one override", () => {
-    const layout = validWorkspace().layout;
+    const layout = activeWorkspaceCanvas(validWorkspace()).layout;
     layout[0] = { ...layout[0], height: 420, width: 560 };
 
     expect(

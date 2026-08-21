@@ -1,16 +1,40 @@
 import { describe, expect, it } from "vitest";
 import { parseWorkspaceExport, serializeWorkspaceExport } from "./workspaceBackup";
-import type { WorkspaceSnapshot } from "./workspaceData";
+import {
+  activeWorkspaceCanvas,
+  defaultCanvasId,
+  type WorkspaceSnapshot,
+} from "./workspaceData";
 
 const nodeId = "11111111-1111-4111-8111-111111111111";
 
 function validWorkspace(): WorkspaceSnapshot {
   return {
     nodes: [{ id: nodeId, name: "OpenAI", content: "Service" }],
-    layout: [{ nodeId, x: 10, y: 20 }],
     references: [],
-    viewport: { x: 120, y: -80, zoom: 1.4 },
-    view: { contentProcessorByNodeId: {}, extensionMetadata: {} },
+    view: {
+      activeCanvasId: defaultCanvasId,
+      canvases: [
+        {
+          id: defaultCanvasId,
+          name: "Main",
+          layout: [{ nodeId, x: 10, y: 20 }],
+          viewport: { x: 120, y: -80, zoom: 1.4 },
+        },
+      ],
+      contentProcessorByNodeId: {},
+      extensionMetadata: {},
+    },
+  };
+}
+
+function legacyWorkspace(workspace: WorkspaceSnapshot) {
+  const canvas = activeWorkspaceCanvas(workspace);
+  return {
+    nodes: workspace.nodes,
+    layout: canvas.layout,
+    references: workspace.references,
+    viewport: canvas.viewport,
   };
 }
 
@@ -38,7 +62,7 @@ describe("workspace backup", () => {
       parseWorkspaceExport(
         JSON.stringify({
           format: "linked-info-workspace",
-          version: 4,
+          version: 5,
           exportedAt: new Date().toISOString(),
           workspace: validWorkspace(),
         }),
@@ -58,7 +82,7 @@ describe("workspace backup", () => {
 
   it("refuses to export a snapshot that cannot be imported", () => {
     const workspace = validWorkspace();
-    workspace.layout = [];
+    workspace.view.canvases = [];
 
     expect(() => serializeWorkspaceExport(workspace)).toThrow(
       "refusing to export an invalid workspace snapshot",
@@ -67,13 +91,12 @@ describe("workspace backup", () => {
 
   it("imports version 1 exports through the workspace migration chain", () => {
     const workspace = validWorkspace();
-    const { view: _view, ...versionOne } = workspace;
     const result = parseWorkspaceExport(
       JSON.stringify({
         format: "linked-info-workspace",
         version: 1,
         exportedAt: new Date().toISOString(),
-        workspace: versionOne,
+        workspace: legacyWorkspace(workspace),
       }),
     );
 
@@ -82,13 +105,35 @@ describe("workspace backup", () => {
 
   it("imports version 2 exports without inventing extension data", () => {
     const workspace = validWorkspace();
-    const { extensionMetadata: _metadata, ...versionTwoView } = workspace.view;
     const result = parseWorkspaceExport(
       JSON.stringify({
         format: "linked-info-workspace",
         version: 2,
         exportedAt: new Date().toISOString(),
-        workspace: { ...workspace, view: versionTwoView },
+        workspace: {
+          ...legacyWorkspace(workspace),
+          view: { contentProcessorByNodeId: {} },
+        },
+      }),
+    );
+
+    expect(result).toMatchObject({ ok: true, workspace });
+  });
+
+  it("imports version 3 exports into the default canvas", () => {
+    const workspace = validWorkspace();
+    const result = parseWorkspaceExport(
+      JSON.stringify({
+        format: "linked-info-workspace",
+        version: 3,
+        exportedAt: new Date().toISOString(),
+        workspace: {
+          ...legacyWorkspace(workspace),
+          view: {
+            contentProcessorByNodeId: {},
+            extensionMetadata: {},
+          },
+        },
       }),
     );
 

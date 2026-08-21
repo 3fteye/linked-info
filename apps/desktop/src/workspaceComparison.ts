@@ -1,4 +1,4 @@
-import type { WorkspaceSnapshot } from "./workspaceData";
+import type { NodeLayout, WorkspaceSnapshot } from "./workspaceData";
 
 export interface WorkspaceComparison {
   addedNodes: number;
@@ -14,6 +14,10 @@ export interface WorkspaceComparison {
 
 function referenceKey(sourceNodeId: string, targetNodeId: string): string {
   return `${sourceNodeId}\0${targetNodeId}`;
+}
+
+function placementKey(canvasId: string, nodeId: string): string {
+  return `${canvasId}\0${nodeId}`;
 }
 
 function stringRecordsEqual(
@@ -166,44 +170,98 @@ export function compareWorkspaces(
     }
   }
 
-  const retainedNodeIds = new Set(
-    current.nodes
-      .map((node) => node.id)
-      .filter((nodeId) => replacementNodes.has(nodeId)),
+  const currentCanvasesById = new Map(
+    current.view.canvases.map((canvas) => [canvas.id, canvas]),
   );
-  const currentStackIndex = new Map(
-    current.layout
-      .filter((layout) => retainedNodeIds.has(layout.nodeId))
-      .map((layout, index) => [layout.nodeId, index]),
+  const replacementCanvasesById = new Map(
+    replacement.view.canvases.map((canvas) => [canvas.id, canvas]),
   );
-  const replacementStackIndex = new Map(
-    replacement.layout
-      .filter((layout) => retainedNodeIds.has(layout.nodeId))
-      .map((layout, index) => [layout.nodeId, index]),
-  );
-  const currentLayout = new Map(
-    current.layout.map((layout) => [layout.nodeId, layout]),
-  );
+  const currentStackIndex = new Map<string, number>();
+  const replacementStackIndex = new Map<string, number>();
+  const currentLayout = new Map<string, NodeLayout>();
+  const replacementLayout = new Map<string, NodeLayout>();
+  for (const canvas of current.view.canvases) {
+    canvas.layout.forEach((layout) => {
+      const key = placementKey(canvas.id, layout.nodeId);
+      currentLayout.set(key, layout);
+    });
+  }
+  for (const canvas of replacement.view.canvases) {
+    canvas.layout.forEach((layout) => {
+      const key = placementKey(canvas.id, layout.nodeId);
+      replacementLayout.set(key, layout);
+    });
+  }
+  for (const canvas of current.view.canvases) {
+    const replacementCanvas = replacementCanvasesById.get(canvas.id);
+    if (replacementCanvas === undefined) {
+      continue;
+    }
+    const replacementPlacementNodeIds = new Set(
+      replacementCanvas.layout.map((layout) => layout.nodeId),
+    );
+    const sharedNodeIds = new Set(
+      canvas.layout
+        .map((layout) => layout.nodeId)
+        .filter((nodeId) => replacementPlacementNodeIds.has(nodeId)),
+    );
+    canvas.layout
+      .filter((layout) => sharedNodeIds.has(layout.nodeId))
+      .forEach((layout, index) => {
+        currentStackIndex.set(placementKey(canvas.id, layout.nodeId), index);
+      });
+    replacementCanvas.layout
+      .filter((layout) => sharedNodeIds.has(layout.nodeId))
+      .forEach((layout, index) => {
+        replacementStackIndex.set(
+          placementKey(canvas.id, layout.nodeId),
+          index,
+        );
+      });
+  }
   let changedLayouts = 0;
-  replacement.layout.forEach((layout) => {
-    const currentItem = currentLayout.get(layout.nodeId);
-    if (
-      currentItem !== undefined &&
-      (currentItem.x !== layout.x ||
+  for (const [key, layout] of replacementLayout) {
+    const currentItem = currentLayout.get(key);
+    if (currentItem === undefined) {
+      const canvasId = key.slice(0, key.indexOf("\0"));
+      if (currentNodes.has(layout.nodeId) && currentCanvasesById.has(canvasId)) {
+        changedLayouts += 1;
+      }
+    } else if (
+      currentItem.x !== layout.x ||
         currentItem.y !== layout.y ||
         currentItem.width !== layout.width ||
         currentItem.height !== layout.height ||
-        currentStackIndex.get(layout.nodeId) !==
-          replacementStackIndex.get(layout.nodeId))
+        currentStackIndex.get(key) !== replacementStackIndex.get(key)
     ) {
       changedLayouts += 1;
     }
-  });
+  }
+  for (const [key, layout] of currentLayout) {
+    const canvasId = key.slice(0, key.indexOf("\0"));
+    if (
+      !replacementLayout.has(key) &&
+      replacementNodes.has(layout.nodeId) &&
+      replacementCanvasesById.has(canvasId)
+    ) {
+      changedLayouts += 1;
+    }
+  }
 
   const viewportChanged =
-    current.viewport?.x !== replacement.viewport?.x ||
-    current.viewport?.y !== replacement.viewport?.y ||
-    current.viewport?.zoom !== replacement.viewport?.zoom;
+    current.view.activeCanvasId !== replacement.view.activeCanvasId ||
+    current.view.canvases.some((canvas) => {
+      const next = replacementCanvasesById.get(canvas.id);
+      return (
+        next === undefined ||
+        canvas.viewport?.x !== next.viewport?.x ||
+        canvas.viewport?.y !== next.viewport?.y ||
+        canvas.viewport?.zoom !== next.viewport?.zoom
+      );
+    }) ||
+    replacement.view.canvases.some(
+      (canvas) => !currentCanvasesById.has(canvas.id),
+    );
   const viewMetadataChanged =
     !stringRecordsEqual(
       current.view.contentProcessorByNodeId,
@@ -212,6 +270,10 @@ export function compareWorkspaces(
     !jsonValuesEqual(
       current.view.extensionMetadata,
       replacement.view.extensionMetadata,
+    ) ||
+    !jsonValuesEqual(
+      current.view.canvases.map(({ id, name }) => ({ id, name })),
+      replacement.view.canvases.map(({ id, name }) => ({ id, name })),
     );
   const identical =
     addedNodes === 0 &&

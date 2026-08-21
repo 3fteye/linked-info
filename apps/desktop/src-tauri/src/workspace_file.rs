@@ -42,7 +42,7 @@ const RECOVERY_SWAP_RECOVERY_FILE_NAME: &str = "workspace.recovery.v1.json";
 const ENCRYPTED_WORKSPACE_FORMAT: &str = "linked-info-encrypted-workspace";
 const ENCRYPTED_EXPORT_FORMAT: &str = "linked-info-encrypted-workspace-export";
 const WORKSPACE_EXPORT_FORMAT: &str = "linked-info-workspace";
-const CURRENT_WORKSPACE_STORAGE_VERSION: u64 = 3;
+const CURRENT_WORKSPACE_STORAGE_VERSION: u64 = 4;
 const VAULT_FORMAT: &str = "linked-info-workspace-vault";
 const DATA_KEY_ROTATION_FORMAT: &str = "linked-info-data-key-rotation";
 const RECOVERY_SWAP_FORMAT: &str = "linked-info-recovery-swap";
@@ -64,6 +64,11 @@ const MAXIMUM_NODE_EXTENSION_METADATA_BYTES: usize = 16 * 1024;
 const MAXIMUM_WORKSPACE_EXTENSION_METADATA_BYTES: usize = 64 * 1024;
 const MAXIMUM_SINGLE_EXTENSION_METADATA_BYTES: usize = 4 * 1024 * 1024;
 const MAXIMUM_TOTAL_EXTENSION_METADATA_BYTES: usize = 16 * 1024 * 1024;
+const MAXIMUM_CANVAS_COUNT: usize = 256;
+const MAXIMUM_CANVAS_NAME_CHARACTERS: usize = 128;
+const MAXIMUM_TOTAL_CANVAS_PLACEMENTS: usize = 1_000_000;
+const DEFAULT_CANVAS_ID: &str = "00000000-0000-4000-8000-000000000001";
+const DEFAULT_CANVAS_NAME: &str = "Main";
 const MAXIMUM_EXACT_JSON_INTEGER: u64 = 9_007_199_254_740_991;
 const BACKUP_INTERVAL_MILLISECONDS: u64 = 60 * 60 * 1_000;
 const BACKUP_MAXIMUM_COUNT: usize = 30;
@@ -3787,74 +3792,36 @@ fn validate_workspace_extension_metadata(
     Ok(())
 }
 
-fn validate_workspace_snapshot(value: &serde_json::Value, version: u64) -> io::Result<()> {
-    let workspace = value
+fn validate_workspace_viewport(value: Option<&serde_json::Value>) -> io::Result<()> {
+    let Some(value) = value.filter(|value| !value.is_null()) else {
+        return Ok(());
+    };
+    let viewport = value
         .as_object()
-        .ok_or_else(|| invalid_workspace_data("workspace snapshot must be an object"))?;
-    let nodes = workspace
-        .get("nodes")
-        .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| invalid_workspace_data("workspace nodes must be an array"))?;
-    let layout = workspace
-        .get("layout")
+        .ok_or_else(|| invalid_workspace_data("workspace viewport must be an object"))?;
+    finite_json_number(viewport.get("x"))
+        .ok_or_else(|| invalid_workspace_data("workspace viewport x must be finite"))?;
+    finite_json_number(viewport.get("y"))
+        .ok_or_else(|| invalid_workspace_data("workspace viewport y must be finite"))?;
+    let zoom = finite_json_number(viewport.get("zoom"))
+        .ok_or_else(|| invalid_workspace_data("workspace viewport zoom must be finite"))?;
+    if zoom <= 0.0 {
+        return Err(invalid_workspace_data(
+            "workspace viewport zoom must be positive",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_workspace_layout(
+    value: Option<&serde_json::Value>,
+    node_ids: &HashSet<String>,
+    require_every_node: bool,
+) -> io::Result<usize> {
+    let layout = value
         .and_then(serde_json::Value::as_array)
         .ok_or_else(|| invalid_workspace_data("workspace layout must be an array"))?;
-    let references = workspace
-        .get("references")
-        .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| invalid_workspace_data("workspace references must be an array"))?;
-
-    if let Some(viewport) = workspace.get("viewport").filter(|value| !value.is_null()) {
-        let viewport = viewport
-            .as_object()
-            .ok_or_else(|| invalid_workspace_data("workspace viewport must be an object"))?;
-        let _x = finite_json_number(viewport.get("x"))
-            .ok_or_else(|| invalid_workspace_data("workspace viewport x must be finite"))?;
-        let _y = finite_json_number(viewport.get("y"))
-            .ok_or_else(|| invalid_workspace_data("workspace viewport y must be finite"))?;
-        let zoom = finite_json_number(viewport.get("zoom"))
-            .ok_or_else(|| invalid_workspace_data("workspace viewport zoom must be finite"))?;
-        if zoom <= 0.0 {
-            return Err(invalid_workspace_data(
-                "workspace viewport zoom must be positive",
-            ));
-        }
-    }
-
-    let mut node_ids = HashSet::with_capacity(nodes.len());
-    let mut normalized_names = HashSet::new();
-    for node in nodes {
-        let node = node
-            .as_object()
-            .ok_or_else(|| invalid_workspace_data("workspace node must be an object"))?;
-        let id = canonical_workspace_node_id(
-            node.get("id")
-                .ok_or_else(|| invalid_workspace_data("workspace node id is missing"))?,
-        )
-        .ok_or_else(|| invalid_workspace_data("workspace node id is invalid"))?;
-        if !node_ids.insert(id) {
-            return Err(invalid_workspace_data("workspace node ids must be unique"));
-        }
-
-        match node.get("name") {
-            Some(value) if value.is_null() => {}
-            Some(value) if value.is_string() => {
-                let name = value.as_str().unwrap_or_default().trim();
-                let normalized = name.to_lowercase();
-                if normalized.is_empty() || !normalized_names.insert(normalized) {
-                    return Err(invalid_workspace_data(
-                        "workspace non-empty node names must be unique",
-                    ));
-                }
-            }
-            _ => return Err(invalid_workspace_data("workspace node name is invalid")),
-        }
-        if !matches!(node.get("content"), Some(value) if value.is_null() || value.is_string()) {
-            return Err(invalid_workspace_data("workspace node content is invalid"));
-        }
-    }
-
-    if layout.len() != nodes.len() {
+    if require_every_node && layout.len() != node_ids.len() {
         return Err(invalid_workspace_data(
             "workspace layout must contain every node exactly once",
         ));
@@ -3897,6 +3864,78 @@ fn validate_workspace_snapshot(value: &serde_json::Value, version: u64) -> io::R
             }
         }
     }
+    Ok(layout.len())
+}
+
+fn validate_workspace_snapshot(value: &serde_json::Value, version: u64) -> io::Result<()> {
+    let workspace = value
+        .as_object()
+        .ok_or_else(|| invalid_workspace_data("workspace snapshot must be an object"))?;
+    let allowed_fields: &[&str] = match version {
+        1 => &["version", "nodes", "layout", "references", "viewport"],
+        2 | 3 => &[
+            "version",
+            "nodes",
+            "layout",
+            "references",
+            "viewport",
+            "view",
+        ],
+        CURRENT_WORKSPACE_STORAGE_VERSION => &["version", "nodes", "references", "view"],
+        _ => return Err(invalid_workspace_data("workspace version is unsupported")),
+    };
+    if workspace
+        .keys()
+        .any(|field| !allowed_fields.contains(&field.as_str()))
+    {
+        return Err(invalid_workspace_data("workspace contains unknown fields"));
+    }
+    let nodes = workspace
+        .get("nodes")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| invalid_workspace_data("workspace nodes must be an array"))?;
+    let references = workspace
+        .get("references")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| invalid_workspace_data("workspace references must be an array"))?;
+
+    let mut node_ids = HashSet::with_capacity(nodes.len());
+    let mut normalized_names = HashSet::new();
+    for node in nodes {
+        let node = node
+            .as_object()
+            .ok_or_else(|| invalid_workspace_data("workspace node must be an object"))?;
+        let id = canonical_workspace_node_id(
+            node.get("id")
+                .ok_or_else(|| invalid_workspace_data("workspace node id is missing"))?,
+        )
+        .ok_or_else(|| invalid_workspace_data("workspace node id is invalid"))?;
+        if !node_ids.insert(id) {
+            return Err(invalid_workspace_data("workspace node ids must be unique"));
+        }
+
+        match node.get("name") {
+            Some(value) if value.is_null() => {}
+            Some(value) if value.is_string() => {
+                let name = value.as_str().unwrap_or_default().trim();
+                let normalized = name.to_lowercase();
+                if normalized.is_empty() || !normalized_names.insert(normalized) {
+                    return Err(invalid_workspace_data(
+                        "workspace non-empty node names must be unique",
+                    ));
+                }
+            }
+            _ => return Err(invalid_workspace_data("workspace node name is invalid")),
+        }
+        if !matches!(node.get("content"), Some(value) if value.is_null() || value.is_string()) {
+            return Err(invalid_workspace_data("workspace node content is invalid"));
+        }
+    }
+
+    if version < CURRENT_WORKSPACE_STORAGE_VERSION {
+        validate_workspace_layout(workspace.get("layout"), &node_ids, true)?;
+        validate_workspace_viewport(workspace.get("viewport"))?;
+    }
 
     let mut reference_keys = HashSet::with_capacity(references.len());
     for reference in references {
@@ -3930,11 +3969,89 @@ fn validate_workspace_snapshot(value: &serde_json::Value, version: u64) -> io::R
             let view = view
                 .as_object()
                 .ok_or_else(|| invalid_workspace_data("workspace view metadata is invalid"))?;
-            let expected_fields = if version == 2 { 1 } else { 2 };
+            let expected_fields = match version {
+                2 => 1,
+                3 => 2,
+                CURRENT_WORKSPACE_STORAGE_VERSION => 4,
+                _ => 0,
+            };
             if view.len() != expected_fields
                 || (version == 2 && view.contains_key("extensionMetadata"))
             {
                 return Err(invalid_workspace_data("workspace view metadata is invalid"));
+            }
+            if version == CURRENT_WORKSPACE_STORAGE_VERSION {
+                let canvases = view
+                    .get("canvases")
+                    .and_then(serde_json::Value::as_array)
+                    .filter(|canvases| {
+                        !canvases.is_empty() && canvases.len() <= MAXIMUM_CANVAS_COUNT
+                    })
+                    .ok_or_else(|| invalid_workspace_data("workspace canvases are invalid"))?;
+                let mut canvas_ids = HashSet::with_capacity(canvases.len());
+                let mut normalized_canvas_names = HashSet::with_capacity(canvases.len());
+                let mut total_placements = 0_usize;
+                for canvas in canvases {
+                    let canvas = canvas.as_object().ok_or_else(|| {
+                        invalid_workspace_data("workspace canvas must be an object")
+                    })?;
+                    if canvas.len() != 4
+                        || !canvas.contains_key("id")
+                        || !canvas.contains_key("name")
+                        || !canvas.contains_key("layout")
+                        || !canvas.contains_key("viewport")
+                    {
+                        return Err(invalid_workspace_data("workspace canvas is invalid"));
+                    }
+                    let canvas_id = canonical_workspace_node_id(
+                        canvas
+                            .get("id")
+                            .expect("validated workspace canvas id field"),
+                    )
+                    .ok_or_else(|| invalid_workspace_data("workspace canvas id is invalid"))?;
+                    if !canvas_ids.insert(canvas_id) {
+                        return Err(invalid_workspace_data(
+                            "workspace canvas ids must be unique",
+                        ));
+                    }
+                    let name = canvas
+                        .get("name")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::trim)
+                        .filter(|name| {
+                            !name.is_empty()
+                                && name.chars().count() <= MAXIMUM_CANVAS_NAME_CHARACTERS
+                        })
+                        .ok_or_else(|| {
+                            invalid_workspace_data("workspace canvas name is invalid")
+                        })?;
+                    if !normalized_canvas_names.insert(name.to_lowercase()) {
+                        return Err(invalid_workspace_data(
+                            "workspace canvas names must be unique",
+                        ));
+                    }
+                    let placements =
+                        validate_workspace_layout(canvas.get("layout"), &node_ids, false)?;
+                    total_placements = total_placements
+                        .checked_add(placements)
+                        .filter(|total| *total <= MAXIMUM_TOTAL_CANVAS_PLACEMENTS)
+                        .ok_or_else(|| {
+                            invalid_workspace_data("workspace contains too many canvas placements")
+                        })?;
+                    validate_workspace_viewport(canvas.get("viewport"))?;
+                }
+                let active_canvas_id =
+                    canonical_workspace_node_id(view.get("activeCanvasId").ok_or_else(|| {
+                        invalid_workspace_data("workspace active canvas id is missing")
+                    })?)
+                    .ok_or_else(|| {
+                        invalid_workspace_data("workspace active canvas id is invalid")
+                    })?;
+                if !canvas_ids.contains(&active_canvas_id) {
+                    return Err(invalid_workspace_data(
+                        "workspace active canvas does not exist",
+                    ));
+                }
             }
             let processors = view
                 .get("contentProcessorByNodeId")
@@ -3966,7 +4083,7 @@ fn validate_workspace_snapshot(value: &serde_json::Value, version: u64) -> io::R
                     ));
                 }
             }
-            if version == CURRENT_WORKSPACE_STORAGE_VERSION {
+            if version >= 3 {
                 validate_workspace_extension_metadata(
                     view.get("extensionMetadata").ok_or_else(|| {
                         invalid_workspace_data("workspace extension metadata is missing")
@@ -3985,24 +4102,14 @@ fn validate_storage_envelope(contents: &str) -> io::Result<()> {
     normalize_storage_envelope(contents).map(|_| ())
 }
 
-fn normalize_storage_envelope(contents: &str) -> io::Result<String> {
-    let mut value: serde_json::Value = serde_json::from_str(contents)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    let version = value.get("version").and_then(serde_json::Value::as_u64);
-    if !matches!(
-        version,
-        Some(1) | Some(2) | Some(CURRENT_WORKSPACE_STORAGE_VERSION)
-    ) {
-        return Err(invalid_workspace_data(
-            "workspace storage envelope version is unsupported",
-        ));
+fn migrate_workspace_object_to_v4(
+    workspace: &mut serde_json::Map<String, serde_json::Value>,
+    version: u64,
+) -> io::Result<()> {
+    if version == CURRENT_WORKSPACE_STORAGE_VERSION {
+        return Ok(());
     }
-    let version = version.expect("validated workspace storage version");
-    validate_workspace_snapshot(&value, version)?;
     if version == 1 {
-        let workspace = value
-            .as_object_mut()
-            .ok_or_else(|| invalid_workspace_data("workspace snapshot must be an object"))?;
         workspace.insert(
             "view".to_owned(),
             serde_json::json!({
@@ -4011,12 +4118,58 @@ fn normalize_storage_envelope(contents: &str) -> io::Result<String> {
             }),
         );
     } else if version == 2 {
-        value
+        workspace
             .get_mut("view")
             .and_then(serde_json::Value::as_object_mut)
             .expect("validated version 2 view metadata")
             .insert("extensionMetadata".to_owned(), serde_json::json!({}));
     }
+    let layout = workspace
+        .remove("layout")
+        .ok_or_else(|| invalid_workspace_data("workspace layout is missing"))?;
+    let viewport = workspace
+        .remove("viewport")
+        .unwrap_or(serde_json::Value::Null);
+    let view = workspace
+        .get_mut("view")
+        .and_then(serde_json::Value::as_object_mut)
+        .ok_or_else(|| invalid_workspace_data("workspace view metadata is invalid"))?;
+    view.insert(
+        "activeCanvasId".to_owned(),
+        serde_json::Value::String(DEFAULT_CANVAS_ID.to_owned()),
+    );
+    view.insert(
+        "canvases".to_owned(),
+        serde_json::json!([{
+            "id": DEFAULT_CANVAS_ID,
+            "name": DEFAULT_CANVAS_NAME,
+            "layout": layout,
+            "viewport": viewport
+        }]),
+    );
+    Ok(())
+}
+
+fn normalize_storage_envelope(contents: &str) -> io::Result<String> {
+    let mut value: serde_json::Value = serde_json::from_str(contents)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    let version = value.get("version").and_then(serde_json::Value::as_u64);
+    if !matches!(
+        version,
+        Some(1) | Some(2) | Some(3) | Some(CURRENT_WORKSPACE_STORAGE_VERSION)
+    ) {
+        return Err(invalid_workspace_data(
+            "workspace storage envelope version is unsupported",
+        ));
+    }
+    let version = version.expect("validated workspace storage version");
+    validate_workspace_snapshot(&value, version)?;
+    migrate_workspace_object_to_v4(
+        value
+            .as_object_mut()
+            .ok_or_else(|| invalid_workspace_data("workspace snapshot must be an object"))?,
+        version,
+    )?;
     value["version"] = serde_json::Value::from(CURRENT_WORKSPACE_STORAGE_VERSION);
     serde_json::to_string(&value).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
@@ -4030,7 +4183,7 @@ fn workspace_storage_from_export(contents: &str) -> io::Result<String> {
     if document.get("format").and_then(serde_json::Value::as_str) != Some(WORKSPACE_EXPORT_FORMAT)
         || !matches!(
             document.get("version").and_then(serde_json::Value::as_u64),
-            Some(1) | Some(2) | Some(CURRENT_WORKSPACE_STORAGE_VERSION)
+            Some(1) | Some(2) | Some(3) | Some(CURRENT_WORKSPACE_STORAGE_VERSION)
         )
         || document
             .get("exportedAt")
@@ -4053,21 +4206,7 @@ fn workspace_storage_from_export(contents: &str) -> io::Result<String> {
         .as_object()
         .cloned()
         .ok_or_else(|| invalid_workspace_data("workspace export payload must be an object"))?;
-    if export_version == 1 {
-        storage.insert(
-            "view".to_owned(),
-            serde_json::json!({
-                "contentProcessorByNodeId": {},
-                "extensionMetadata": {}
-            }),
-        );
-    } else if export_version == 2 {
-        storage
-            .get_mut("view")
-            .and_then(serde_json::Value::as_object_mut)
-            .expect("validated version 2 export view metadata")
-            .insert("extensionMetadata".to_owned(), serde_json::json!({}));
-    }
+    migrate_workspace_object_to_v4(&mut storage, export_version)?;
     storage.insert(
         "version".to_owned(),
         serde_json::Value::from(CURRENT_WORKSPACE_STORAGE_VERSION),
@@ -4219,14 +4358,19 @@ mod tests {
                 "name": name,
                 "content": null
             }],
-            "layout": [{
-                "nodeId": "11111111-1111-4111-8111-111111111111",
-                "x": 10,
-                "y": 20
-            }],
             "references": [],
-            "viewport": null,
             "view": {
+                "activeCanvasId": DEFAULT_CANVAS_ID,
+                "canvases": [{
+                    "id": DEFAULT_CANVAS_ID,
+                    "name": DEFAULT_CANVAS_NAME,
+                    "layout": [{
+                        "nodeId": "11111111-1111-4111-8111-111111111111",
+                        "x": 10,
+                        "y": 20
+                    }],
+                    "viewport": null
+                }],
                 "contentProcessorByNodeId": {},
                 "extensionMetadata": {}
             }
@@ -4243,7 +4387,7 @@ mod tests {
             .remove("version");
         serde_json::json!({
             "format": WORKSPACE_EXPORT_FORMAT,
-            "version": 3,
+            "version": CURRENT_WORKSPACE_STORAGE_VERSION,
             "exportedAt": "2026-08-13T00:00:00.000Z",
             "workspace": workspace
         })
@@ -4266,7 +4410,7 @@ mod tests {
                 "content": null
             }
         ]);
-        duplicate_name["layout"] = serde_json::json!([
+        duplicate_name["view"]["canvases"][0]["layout"] = serde_json::json!([
             {
                 "nodeId": "11111111-1111-4111-8111-111111111111",
                 "x": 0,
@@ -4290,23 +4434,28 @@ mod tests {
 
         let mut incomplete_layout: serde_json::Value =
             serde_json::from_str(&workspace("OpenAI")).unwrap();
-        incomplete_layout["layout"] = serde_json::json!([]);
-        assert!(validate_storage_envelope(&incomplete_layout.to_string()).is_err());
+        incomplete_layout["view"]["canvases"][0]["layout"] = serde_json::json!([]);
+        assert!(validate_storage_envelope(&incomplete_layout.to_string()).is_ok());
+
+        let mut missing_canvas: serde_json::Value =
+            serde_json::from_str(&workspace("OpenAI")).unwrap();
+        missing_canvas["view"]["canvases"] = serde_json::json!([]);
+        assert!(validate_storage_envelope(&missing_canvas.to_string()).is_err());
 
         let mut partial_dimensions: serde_json::Value =
             serde_json::from_str(&workspace("OpenAI")).unwrap();
-        partial_dimensions["layout"][0]["width"] = serde_json::json!(480);
+        partial_dimensions["view"]["canvases"][0]["layout"][0]["width"] = serde_json::json!(480);
         assert!(validate_storage_envelope(&partial_dimensions.to_string()).is_ok());
 
         let mut unsafe_dimensions: serde_json::Value =
             serde_json::from_str(&workspace("OpenAI")).unwrap();
-        unsafe_dimensions["layout"][0]["height"] = serde_json::json!(91);
+        unsafe_dimensions["view"]["canvases"][0]["layout"][0]["height"] = serde_json::json!(91);
         assert!(validate_storage_envelope(&unsafe_dimensions.to_string()).is_err());
 
         let mut manual_dimensions: serde_json::Value =
             serde_json::from_str(&workspace("OpenAI")).unwrap();
-        manual_dimensions["layout"][0]["width"] = serde_json::json!(480);
-        manual_dimensions["layout"][0]["height"] = serde_json::json!(360);
+        manual_dimensions["view"]["canvases"][0]["layout"][0]["width"] = serde_json::json!(480);
+        manual_dimensions["view"]["canvases"][0]["layout"][0]["height"] = serde_json::json!(360);
         assert!(validate_storage_envelope(&manual_dimensions.to_string()).is_ok());
     }
 

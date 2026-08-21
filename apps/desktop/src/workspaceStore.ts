@@ -1,15 +1,20 @@
 import {
   migrateWorkspaceSnapshotV1,
   migrateWorkspaceSnapshotV2,
+  migrateWorkspaceSnapshotV3,
   parseWorkspaceSnapshot,
   type WorkspaceSnapshot,
 } from "./workspaceData";
 
 export {
+  activeWorkspaceCanvas,
+  defaultCanvasId,
+  defaultCanvasName,
   emptyWorkspace,
   isNodeNameAvailable,
   isUnnamedNode,
   maximumManualNodeDimension,
+  maximumWorkspaceCanvasCount,
   minimumManualNodeHeight,
   minimumManualNodeWidth,
   moveNodeLayoutToFront,
@@ -20,6 +25,7 @@ export {
   updateNodeLayoutDimensions,
   updateNodeLayoutSizeOverrides,
   updateNodeLayoutPositions,
+  updateWorkspaceCanvas,
   updateNodeExtensionMetadata,
   type CanvasViewport,
   type InformationNode,
@@ -29,6 +35,7 @@ export {
   type ExtensionMetadataJsonValue,
   type ExtensionMetadataPayload,
   type WorkspaceSnapshot,
+  type WorkspaceCanvas,
   type WorkspaceExtensionMetadata,
   type WorkspaceViewMetadata,
 } from "./workspaceData";
@@ -55,7 +62,7 @@ export type WorkspaceStorageSlot = "primary" | "recovery";
 
 const workspaceStorageKey = "linked-info.workspace.v1";
 const workspaceRecoveryStorageKey = "linked-info.workspace.recovery.v1";
-export const currentWorkspaceStorageVersion = 3;
+export const currentWorkspaceStorageVersion = 4;
 
 function storageKey(slot: WorkspaceStorageSlot): string {
   return slot === "primary" ? workspaceStorageKey : workspaceRecoveryStorageKey;
@@ -78,6 +85,8 @@ export function parseStoredWorkspaceText(raw: string): WorkspaceLoadResult {
       ? migrateWorkspaceSnapshotV1(stored)
       : stored.version === 2
         ? migrateWorkspaceSnapshotV2(stored)
+        : stored.version === 3
+          ? migrateWorkspaceSnapshotV3(stored)
         : stored.version === currentWorkspaceStorageVersion
           ? parseWorkspaceSnapshot(stored)
           : null;

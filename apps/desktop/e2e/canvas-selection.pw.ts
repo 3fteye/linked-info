@@ -145,7 +145,19 @@ function node(page: Page, id: string) {
 async function storedWorkspace(page: Page) {
   return page.evaluate((storageKey) => {
     const raw = localStorage.getItem(storageKey);
-    return raw === null ? null : JSON.parse(raw);
+    if (raw === null) {
+      return null;
+    }
+    const stored = JSON.parse(raw);
+    const activeCanvas = stored?.view?.canvases?.find(
+      (canvas: { id: string }) => canvas.id === stored.view.activeCanvasId,
+    );
+    return {
+      ...stored,
+      layout: activeCanvas?.layout ?? stored.layout,
+      viewport:
+        activeCanvas === undefined ? stored.viewport : activeCanvas.viewport,
+    };
   }, workspaceStorageKey);
 }
 
@@ -521,7 +533,7 @@ test("the built-in JSON adapter persists one undoable namespaced preference", as
   await expect
     .poll(() => storedWorkspace(page))
     .toMatchObject({
-      version: 3,
+      version: 4,
       view: {
         contentProcessorByNodeId: { [jsonNode.id]: processorId },
         extensionMetadata: {
@@ -1262,6 +1274,46 @@ test("an invalid editor draft blocks reference removal without losing the draft"
   await expect(editor.locator("input")).toHaveValue(referenceSource.name);
 });
 
+test("multiple canvases share nodes while keeping placements independent", async ({
+  page,
+}) => {
+  const [syntheticNode] = gridNodes(1, 1);
+  await openSyntheticWorkspace(page, [syntheticNode]);
+  const canvasSelect = page.getByTestId("canvas-select");
+  const firstCanvasId = await canvasSelect.inputValue();
+
+  await page.getByTestId("canvas-create").click();
+  await expect(canvasSelect.locator("option")).toHaveCount(2);
+  const secondCanvasId = await canvasSelect.inputValue();
+  expect(secondCanvasId).not.toBe(firstCanvasId);
+  await expect(node(page, syntheticNode.id)).toHaveCount(0);
+
+  await canvasSelect.selectOption(firstCanvasId);
+  await expect(node(page, syntheticNode.id)).toBeVisible();
+  await canvasSelect.selectOption(secondCanvasId);
+  await expect(node(page, syntheticNode.id)).toHaveCount(0);
+
+  await page.getByTestId("nodes-navigation").click();
+  await page.getByTestId("node-list-row").click();
+  await expect(node(page, syntheticNode.id)).toBeVisible();
+  await page.locator(".react-flow__pane").click({ position: { x: 700, y: 500 } });
+  await node(page, syntheticNode.id).click();
+  await page.keyboard.press("Delete");
+  await page.locator(".confirmation-dialog .danger-button").click();
+  await expect(node(page, syntheticNode.id)).toHaveCount(0);
+
+  await page.getByTestId("canvas-delete").click();
+  await page.getByTestId("workspace-deletion-confirm").click();
+  await expect(canvasSelect.locator("option")).toHaveCount(1);
+  await expect(node(page, syntheticNode.id)).toBeVisible();
+
+  await page.getByTestId("nodes-navigation").click();
+  await page.getByTestId("node-delete-permanently").click();
+  await page.getByTestId("workspace-deletion-confirm").click();
+  await expect(page.getByTestId("node-list-row")).toHaveCount(0);
+  await expect.poll(async () => (await storedWorkspace(page))?.nodes).toEqual([]);
+});
+
 test("document import requires and records an explicit canvas position", async ({
   page,
 }) => {
@@ -1291,7 +1343,7 @@ test("document import requires and records an explicit canvas position", async (
   ).toContainText(/760.*520/u);
 });
 
-test("canvas select all, delete, undo, redo and context menu share one keyboard model", async ({
+test("canvas select all, remove, undo, redo and context menu share one keyboard model", async ({
   page,
 }) => {
   const nodes = gridNodes(3, 1);
@@ -1534,6 +1586,104 @@ test("confirmed workspace replacement can be undone and redone from disk", async
   await page.keyboard.press("Control+y");
   await expect(node(page, recovery.id)).toBeVisible();
   await expect(node(page, current.id)).toHaveCount(0);
+});
+
+test("workspace replacement preview can inspect every canvas", async ({ page }) => {
+  const mainCanvasId = "10000000-0000-4000-8000-000000000001";
+  const secondCanvasId = "20000000-0000-4000-8000-000000000002";
+  const currentMain = { id: syntheticId(911), name: "Current main", x: 100, y: 100 };
+  const currentSecond = {
+    id: syntheticId(912),
+    name: "Current second",
+    x: 200,
+    y: 200,
+  };
+  const recoveryMain = {
+    id: syntheticId(913),
+    name: "Recovery main",
+    x: 300,
+    y: 300,
+  };
+  const recoverySecond = {
+    id: syntheticId(914),
+    name: "Recovery second",
+    x: 400,
+    y: 400,
+  };
+  const recoveryUnplaced = {
+    id: syntheticId(915),
+    name: "Recovery unplaced",
+  };
+  const snapshot = (
+    activeCanvasId: string,
+    mainNode: SyntheticNode,
+    secondNode: SyntheticNode,
+  ) => ({
+    version: 4,
+    nodes: [mainNode, secondNode].map((item) => ({
+      id: item.id,
+      name: item.name,
+      content: null,
+    })),
+    references: [],
+    view: {
+      activeCanvasId,
+      canvases: [
+        {
+          id: mainCanvasId,
+          name: "Main",
+          layout: [{ nodeId: mainNode.id, x: mainNode.x, y: mainNode.y }],
+          viewport: null,
+        },
+        {
+          id: secondCanvasId,
+          name: "Second",
+          layout: [
+            { nodeId: secondNode.id, x: secondNode.x, y: secondNode.y },
+          ],
+          viewport: null,
+        },
+      ],
+      contentProcessorByNodeId: {},
+      extensionMetadata: {},
+    },
+  });
+  const recoverySnapshot = snapshot(
+    secondCanvasId,
+    recoveryMain,
+    recoverySecond,
+  );
+  recoverySnapshot.nodes.push({
+    id: recoveryUnplaced.id,
+    name: recoveryUnplaced.name,
+    content: null,
+  });
+  await page.addInitScript(
+    ({ primaryKey, primary, recoveryKey, recovery }) => {
+      localStorage.clear();
+      localStorage.setItem(primaryKey, JSON.stringify(primary));
+      localStorage.setItem(recoveryKey, JSON.stringify(recovery));
+    },
+    {
+      primaryKey: workspaceStorageKey,
+      primary: snapshot(mainCanvasId, currentMain, currentSecond),
+      recoveryKey: workspaceRecoveryStorageKey,
+      recovery: recoverySnapshot,
+    },
+  );
+  await page.goto("/");
+  await page.getByTestId("settings-navigation").click();
+  await page.getByTestId("settings-tab-dataSecurity").click();
+  await page.getByTestId("restore-recovery-workspace").click();
+
+  const previewCanvas = page.getByTestId("workspace-restore-canvas-select");
+  await expect(previewCanvas.locator("option")).toHaveCount(3);
+  await expect(previewCanvas).toHaveValue(secondCanvasId);
+  await expect(page.getByText(recoverySecond.name, { exact: true })).toBeVisible();
+  await previewCanvas.selectOption(mainCanvasId);
+  await expect(page.getByText(recoveryMain.name, { exact: true })).toBeVisible();
+  await previewCanvas.selectOption("__unplaced__");
+  await expect(page.getByText(recoveryUnplaced.name, { exact: true })).toBeVisible();
 });
 
 test("offsite backup exposes Cloudflare R2 through the shared S3 form", async ({ page }) => {

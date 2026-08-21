@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import type { WorkspaceSnapshot } from "./workspaceData";
+import {
+  activeWorkspaceCanvas,
+  defaultCanvasId,
+  type WorkspaceSnapshot,
+} from "./workspaceData";
 import {
   compareWorkspaces,
   createWorkspaceViewMetadataComparison,
@@ -16,12 +20,22 @@ function workspace(): WorkspaceSnapshot {
       { id: secondId, name: "OpenAI", content: null },
     ],
     references: [{ sourceNodeId: firstId, targetNodeId: secondId }],
-    layout: [
-      { nodeId: firstId, x: 10, y: 20 },
-      { nodeId: secondId, x: 30, y: 40 },
-    ],
-    viewport: { x: 0, y: 0, zoom: 1 },
-    view: { contentProcessorByNodeId: {}, extensionMetadata: {} },
+    view: {
+      activeCanvasId: defaultCanvasId,
+      canvases: [
+        {
+          id: defaultCanvasId,
+          name: "Main",
+          layout: [
+            { nodeId: firstId, x: 10, y: 20 },
+            { nodeId: secondId, x: 30, y: 40 },
+          ],
+          viewport: { x: 0, y: 0, zoom: 1 },
+        },
+      ],
+      contentProcessorByNodeId: {},
+      extensionMetadata: {},
+    },
   };
 }
 
@@ -49,8 +63,9 @@ describe("workspace replacement comparison", () => {
       { id: thirdId, name: "新增节点", content: null },
     ];
     replacement.references = [{ sourceNodeId: firstId, targetNodeId: thirdId }];
-    replacement.layout = [
-      replacement.layout[0],
+    const replacementCanvas = activeWorkspaceCanvas(replacement);
+    replacementCanvas.layout = [
+      replacementCanvas.layout[0],
       { nodeId: thirdId, x: 50, y: 60 },
     ];
 
@@ -67,7 +82,7 @@ describe("workspace replacement comparison", () => {
   it("counts coordinate and stacking-order changes for retained nodes", () => {
     const current = workspace();
     const replacement = workspace();
-    replacement.layout = [
+    activeWorkspaceCanvas(replacement).layout = [
       { nodeId: secondId, x: 31, y: 40 },
       { nodeId: firstId, x: 10, y: 20 },
     ];
@@ -78,8 +93,9 @@ describe("workspace replacement comparison", () => {
   it("counts manual node dimension changes as layout changes", () => {
     const current = workspace();
     const replacement = workspace();
-    replacement.layout[0] = {
-      ...replacement.layout[0],
+    const replacementCanvas = activeWorkspaceCanvas(replacement);
+    replacementCanvas.layout[0] = {
+      ...replacementCanvas.layout[0],
       height: 360,
       width: 480,
     };
@@ -92,7 +108,8 @@ describe("workspace replacement comparison", () => {
     const replacement = workspace();
     replacement.nodes = [replacement.nodes[1]];
     replacement.references = [];
-    replacement.layout = [replacement.layout[1]];
+    const replacementCanvas = activeWorkspaceCanvas(replacement);
+    replacementCanvas.layout = [replacementCanvas.layout[1]];
 
     expect(compareWorkspaces(current, replacement).changedLayouts).toBe(0);
   });
@@ -100,11 +117,55 @@ describe("workspace replacement comparison", () => {
   it("reports viewport-only changes", () => {
     const current = workspace();
     const replacement = workspace();
-    replacement.viewport = null;
+    activeWorkspaceCanvas(replacement).viewport = null;
 
     expect(compareWorkspaces(current, replacement)).toMatchObject({
       viewportChanged: true,
       identical: false,
+    });
+  });
+
+  it("compares independent placements on every canvas", () => {
+    const current = workspace();
+    const replacement = workspace();
+    const secondCanvasId = "44444444-4444-4444-8444-444444444444";
+    current.view.canvases.push({
+      id: secondCanvasId,
+      name: "Second",
+      layout: [{ nodeId: firstId, x: 400, y: 500 }],
+      viewport: null,
+    });
+    replacement.view.canvases.push({
+      id: secondCanvasId,
+      name: "Second",
+      layout: [{ nodeId: firstId, x: 700, y: 500 }],
+      viewport: null,
+    });
+
+    expect(compareWorkspaces(current, replacement)).toMatchObject({
+      changedLayouts: 1,
+      identical: false,
+      viewMetadataChanged: false,
+      viewportChanged: false,
+    });
+  });
+
+  it("reports a canvas added without duplicating node additions", () => {
+    const current = workspace();
+    const replacement = workspace();
+    replacement.view.canvases.push({
+      id: "44444444-4444-4444-8444-444444444444",
+      name: "Second",
+      layout: [{ nodeId: firstId, x: 400, y: 500 }],
+      viewport: null,
+    });
+
+    expect(compareWorkspaces(current, replacement)).toMatchObject({
+      addedNodes: 0,
+      changedLayouts: 0,
+      identical: false,
+      viewMetadataChanged: true,
+      viewportChanged: true,
     });
   });
 

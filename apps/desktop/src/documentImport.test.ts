@@ -8,13 +8,23 @@ import {
   validateExternalDocumentImportIsRestored,
   type DocumentImportDraft,
 } from "./documentImport";
-import { emptyWorkspace, type WorkspaceSnapshot } from "./workspaceData";
+import {
+  activeWorkspaceCanvas,
+  emptyWorkspace,
+  type WorkspaceSnapshot,
+} from "./workspaceData";
 
-const existing: WorkspaceSnapshot = {
-  ...emptyWorkspace(),
-  nodes: [{ id: "11111111-1111-4111-8111-111111111111", name: "OpenAI", content: null }],
-  layout: [{ nodeId: "11111111-1111-4111-8111-111111111111", x: 80, y: 80 }],
-};
+const existing: WorkspaceSnapshot = emptyWorkspace();
+existing.nodes = [
+  {
+    id: "11111111-1111-4111-8111-111111111111",
+    name: "OpenAI",
+    content: null,
+  },
+];
+activeWorkspaceCanvas(existing).layout = [
+  { nodeId: "11111111-1111-4111-8111-111111111111", x: 80, y: 80 },
+];
 
 describe("document import", () => {
   it("splits on paragraph boundaries before using overlap", () => {
@@ -138,7 +148,12 @@ describe("document import", () => {
 
   it("places the imported group at the explicit canvas anchor", () => {
     const base = structuredClone(existing);
-    base.layout[0] = { ...base.layout[0], height: 300, width: 800 };
+    const baseCanvas = activeWorkspaceCanvas(base);
+    baseCanvas.layout[0] = {
+      ...baseCanvas.layout[0],
+      height: 300,
+      width: 800,
+    };
     const draft: DocumentImportDraft = {
       sourceNodeId: "33333333-3333-4333-8333-333333333333",
       sourceName: "layout.txt",
@@ -154,7 +169,9 @@ describe("document import", () => {
       y: 1_260,
     });
     expect(
-      result.workspace.layout.find((item) => item.nodeId === draft.sourceNodeId),
+      activeWorkspaceCanvas(result.workspace).layout.find(
+        (item) => item.nodeId === draft.sourceNodeId,
+      ),
     ).toMatchObject({ x: -480, y: 1_260 });
   });
 

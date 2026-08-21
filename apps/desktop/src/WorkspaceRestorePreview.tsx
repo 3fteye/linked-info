@@ -41,6 +41,8 @@ interface RestorePreviewLabels {
   before: string;
   after: string;
   overlay: string;
+  canvas: string;
+  unplaced: string;
   cancel: string;
   confirm: string;
   identical: string;
@@ -128,6 +130,8 @@ function PreviewNodeCard({ data }: NodeProps<RestoreFlowNode>) {
 }
 
 const previewNodeTypes = { "restore-preview": PreviewNodeCard };
+const emptyPreviewLayout: NodeLayout[] = [];
+const unplacedPreviewCanvasId = "__unplaced__";
 
 function layoutsByNode(layout: NodeLayout[]): Map<string, NodeLayout> {
   return new Map(layout.map((item) => [item.nodeId, item]));
@@ -200,24 +204,26 @@ function makeReferenceEdge(
 function nodeDifferences(
   current: WorkspaceSnapshot,
   replacement: WorkspaceSnapshot,
+  currentLayoutItems: NodeLayout[],
+  replacementLayoutItems: NodeLayout[],
   viewComparison: WorkspaceViewMetadataComparison,
 ): Map<string, NodeDifference> {
   const currentNodes = new Map(current.nodes.map((node) => [node.id, node]));
   const replacementNodes = new Map(replacement.nodes.map((node) => [node.id, node]));
-  const currentLayout = layoutsByNode(current.layout);
-  const replacementLayout = layoutsByNode(replacement.layout);
+  const currentLayout = layoutsByNode(currentLayoutItems);
+  const replacementLayout = layoutsByNode(replacementLayoutItems);
   const retained = new Set(
-    current.nodes
-      .map((node) => node.id)
-      .filter((nodeId) => replacementNodes.has(nodeId)),
+    currentLayoutItems
+      .map((item) => item.nodeId)
+      .filter((nodeId) => replacementLayout.has(nodeId)),
   );
   const currentStack = new Map(
-    current.layout
+    currentLayoutItems
       .filter((item) => retained.has(item.nodeId))
       .map((item, index) => [item.nodeId, index]),
   );
   const replacementStack = new Map(
-    replacement.layout
+    replacementLayoutItems
       .filter((item) => retained.has(item.nodeId))
       .map((item, index) => [item.nodeId, index]),
   );
@@ -228,8 +234,12 @@ function nodeDifferences(
     const beforeLayout = currentLayout.get(nodeId);
     const afterLayout = replacementLayout.get(nodeId);
     result.set(nodeId, {
-      added: before === undefined,
-      removed: after === undefined,
+      added:
+        before === undefined ||
+        (beforeLayout === undefined && afterLayout !== undefined),
+      removed:
+        after === undefined ||
+        (beforeLayout !== undefined && afterLayout === undefined),
       modified:
         before !== undefined &&
         after !== undefined &&
@@ -284,13 +294,131 @@ export default function WorkspaceRestorePreview({
   onConfirm,
 }: WorkspaceRestorePreviewProps) {
   const [mode, setMode] = useState<PreviewMode>("overlay");
+  const unplacedLayouts = useMemo(() => {
+    const currentPlacedNodeIds = new Set(
+      current.view.canvases.flatMap((canvas) =>
+        canvas.layout.map((layout) => layout.nodeId),
+      ),
+    );
+    const replacementPlacedNodeIds = new Set(
+      replacement.view.canvases.flatMap((canvas) =>
+        canvas.layout.map((layout) => layout.nodeId),
+      ),
+    );
+    const currentUnplacedNodeIds = new Set(
+      current.nodes
+        .map((node) => node.id)
+        .filter((nodeId) => !currentPlacedNodeIds.has(nodeId)),
+    );
+    const replacementUnplacedNodeIds = new Set(
+      replacement.nodes
+        .map((node) => node.id)
+        .filter((nodeId) => !replacementPlacedNodeIds.has(nodeId)),
+    );
+    const orderedNodeIds: string[] = [];
+    const seenNodeIds = new Set<string>();
+    for (const nodes of [current.nodes, replacement.nodes]) {
+      for (const node of nodes) {
+        if (
+          !seenNodeIds.has(node.id) &&
+          (currentUnplacedNodeIds.has(node.id) ||
+            replacementUnplacedNodeIds.has(node.id))
+        ) {
+          seenNodeIds.add(node.id);
+          orderedNodeIds.push(node.id);
+        }
+      }
+    }
+    const positions = new Map(
+      orderedNodeIds.map((nodeId, index) => [
+        nodeId,
+        { x: (index % 4) * 320, y: Math.floor(index / 4) * 210 },
+      ]),
+    );
+    const layoutFor = (nodeIds: ReadonlySet<string>): NodeLayout[] =>
+      orderedNodeIds
+        .filter((nodeId) => nodeIds.has(nodeId))
+        .map((nodeId) => ({ nodeId, ...positions.get(nodeId)! }));
+    return {
+      current: layoutFor(currentUnplacedNodeIds),
+      replacement: layoutFor(replacementUnplacedNodeIds),
+    };
+  }, [current.nodes, current.view.canvases, replacement.nodes, replacement.view.canvases]);
+  const canvasOptions = useMemo(() => {
+    const byId = new Map<
+      string,
+      { id: string; name: string; before: boolean; after: boolean }
+    >();
+    for (const canvas of current.view.canvases) {
+      byId.set(canvas.id, {
+        id: canvas.id,
+        name: canvas.name,
+        before: true,
+        after: false,
+      });
+    }
+    for (const canvas of replacement.view.canvases) {
+      const existing = byId.get(canvas.id);
+      byId.set(canvas.id, {
+        id: canvas.id,
+        name: canvas.name,
+        before: existing?.before ?? false,
+        after: true,
+      });
+    }
+    if (unplacedLayouts.current.length > 0 || unplacedLayouts.replacement.length > 0) {
+      byId.set(unplacedPreviewCanvasId, {
+        id: unplacedPreviewCanvasId,
+        name: labels.unplaced,
+        before: unplacedLayouts.current.length > 0,
+        after: unplacedLayouts.replacement.length > 0,
+      });
+    }
+    return [...byId.values()];
+  }, [
+    current.view.canvases,
+    labels.unplaced,
+    replacement.view.canvases,
+    unplacedLayouts,
+  ]);
+  const [selectedCanvasId, setSelectedCanvasId] = useState(
+    replacement.view.activeCanvasId,
+  );
+  useEffect(() => {
+    if (!canvasOptions.some((canvas) => canvas.id === selectedCanvasId)) {
+      setSelectedCanvasId(
+        canvasOptions[0]?.id ?? replacement.view.activeCanvasId,
+      );
+    }
+  }, [canvasOptions, replacement.view.activeCanvasId, selectedCanvasId]);
+  const currentCanvas = current.view.canvases.find(
+    (canvas) => canvas.id === selectedCanvasId,
+  );
+  const replacementCanvas = replacement.view.canvases.find(
+    (canvas) => canvas.id === selectedCanvasId,
+  );
+  const currentLayout =
+    selectedCanvasId === unplacedPreviewCanvasId
+      ? unplacedLayouts.current
+      : currentCanvas?.layout ?? emptyPreviewLayout;
+  const replacementLayout =
+    selectedCanvasId === unplacedPreviewCanvasId
+      ? unplacedLayouts.replacement
+      : replacementCanvas?.layout ?? emptyPreviewLayout;
   const viewComparison = useMemo(
     () => createWorkspaceViewMetadataComparison(current, replacement),
     [current, replacement],
   );
   const differences = useMemo(
-    () => nodeDifferences(current, replacement, viewComparison),
-    [current, replacement, viewComparison],
+    () =>
+      nodeDifferences(
+        current,
+        replacement,
+        currentLayout,
+        replacementLayout,
+        viewComparison,
+      ),
+    [current, currentLayout, replacement, replacementLayout, viewComparison],
   );
   const currentNodes = useMemo(
     () => new Map(current.nodes.map((node) => [node.id, node])),
@@ -307,6 +435,14 @@ export default function WorkspaceRestorePreview({
   const replacementReferenceKeys = useMemo(
     () => new Set(replacement.references.map(referenceKey)),
     [replacement.references],
+  );
+  const currentLayoutNodeIds = useMemo(
+    () => new Set(currentLayout.map((layout) => layout.nodeId)),
+    [currentLayout],
+  );
+  const replacementLayoutNodeIds = useMemo(
+    () => new Set(replacementLayout.map((layout) => layout.nodeId)),
+    [replacementLayout],
   );
   const previewNodeIds = useMemo(() => {
     if (!changedOnly) return null;
@@ -338,7 +474,7 @@ export default function WorkspaceRestorePreview({
     if (contextPadding <= 0 || nodeIds.size === 0) {
       return nodeIds;
     }
-    const relevantLayouts = [...current.layout, ...replacement.layout].filter(
+    const relevantLayouts = [...currentLayout, ...replacementLayout].filter(
       (layout) => nodeIds.has(layout.nodeId),
     );
     if (relevantLayouts.length === 0) {
@@ -358,7 +494,7 @@ export default function WorkspaceRestorePreview({
           (layout) => layout.y + (layout.height ?? 160),
         ),
       ) + contextPadding;
-    for (const layout of [...current.layout, ...replacement.layout]) {
+    for (const layout of [...currentLayout, ...replacementLayout]) {
       const layoutRight = layout.x + (layout.width ?? 270);
       const layoutBottom = layout.y + (layout.height ?? 160);
       if (
@@ -374,12 +510,12 @@ export default function WorkspaceRestorePreview({
   }, [
     changedOnly,
     contextPadding,
-    current.layout,
+    currentLayout,
     current.references,
     currentReferenceKeys,
     differences,
     replacement.references,
-    replacement.layout,
+    replacementLayout,
     replacementReferenceKeys,
   ]);
 
@@ -398,7 +534,7 @@ export default function WorkspaceRestorePreview({
       previewNodeIds === null || previewNodeIds.has(nodeId);
 
     if (mode === "before") {
-      current.layout.forEach((layout, index) => {
+      currentLayout.forEach((layout, index) => {
         if (!nodeIsVisible(layout.nodeId)) return;
         const node = currentNodes.get(layout.nodeId);
         const difference = differences.get(layout.nodeId);
@@ -422,6 +558,8 @@ export default function WorkspaceRestorePreview({
       });
       current.references.forEach((reference) => {
         if (
+          !currentLayoutNodeIds.has(reference.sourceNodeId) ||
+          !currentLayoutNodeIds.has(reference.targetNodeId) ||
           !nodeIsVisible(reference.sourceNodeId) ||
           !nodeIsVisible(reference.targetNodeId)
         ) return;
@@ -440,7 +578,7 @@ export default function WorkspaceRestorePreview({
       return { nodes, edges };
     }
 
-    replacement.layout.forEach((layout, index) => {
+    replacementLayout.forEach((layout, index) => {
       if (!nodeIsVisible(layout.nodeId)) return;
       const node = replacementNodes.get(layout.nodeId);
       const difference = differences.get(layout.nodeId);
@@ -464,6 +602,8 @@ export default function WorkspaceRestorePreview({
     });
     replacement.references.forEach((reference) => {
       if (
+        !replacementLayoutNodeIds.has(reference.sourceNodeId) ||
+        !replacementLayoutNodeIds.has(reference.targetNodeId) ||
         !nodeIsVisible(reference.sourceNodeId) ||
         !nodeIsVisible(reference.targetNodeId)
       ) return;
@@ -483,7 +623,7 @@ export default function WorkspaceRestorePreview({
     }
 
     const beforeEndpoint = new Map<string, string>();
-    current.layout.forEach((layout, index) => {
+    currentLayout.forEach((layout, index) => {
       if (!nodeIsVisible(layout.nodeId)) return;
       const node = currentNodes.get(layout.nodeId);
       const difference = differences.get(layout.nodeId);
@@ -525,6 +665,8 @@ export default function WorkspaceRestorePreview({
     });
     current.references.forEach((reference) => {
       if (
+        !currentLayoutNodeIds.has(reference.sourceNodeId) ||
+        !currentLayoutNodeIds.has(reference.targetNodeId) ||
         !nodeIsVisible(reference.sourceNodeId) ||
         !nodeIsVisible(reference.targetNodeId)
       ) return;
@@ -537,7 +679,8 @@ export default function WorkspaceRestorePreview({
     });
     return { nodes, edges };
   }, [
-    current.layout,
+    currentLayout,
+    currentLayoutNodeIds,
     current.references,
     currentNodes,
     currentReferenceKeys,
@@ -545,7 +688,8 @@ export default function WorkspaceRestorePreview({
     labels,
     mode,
     previewNodeIds,
-    replacement.layout,
+    replacementLayout,
+    replacementLayoutNodeIds,
     replacement.references,
     replacementNodes,
     replacementReferenceKeys,
@@ -563,6 +707,7 @@ export default function WorkspaceRestorePreview({
       data-testid="workspace-restore-preview"
     >
       <ReactFlow<RestoreFlowNode, Edge>
+        key={selectedCanvasId}
         colorMode="light"
         deleteKeyCode={null}
         edges={graph.edges}
@@ -640,6 +785,26 @@ export default function WorkspaceRestorePreview({
               </button>
             ))}
           </div>
+          <label className="restore-preview-canvas-picker">
+            <span>{labels.canvas}</span>
+            <select
+              aria-label={labels.canvas}
+              data-testid="workspace-restore-canvas-select"
+              onChange={(event) => setSelectedCanvasId(event.target.value)}
+              value={selectedCanvasId}
+            >
+              {canvasOptions.map((canvas) => (
+                <option key={canvas.id} value={canvas.id}>
+                  {canvas.name}
+                  {!canvas.before
+                    ? ` (${labels.after})`
+                    : !canvas.after
+                      ? ` (${labels.before})`
+                      : ""}
+                </option>
+              ))}
+            </select>
+          </label>
           <div className="restore-preview-legend">
             <span data-status="added">{labels.legendAdded}</span>
             <span data-status="removed">{labels.legendRemoved}</span>

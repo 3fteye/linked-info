@@ -1,6 +1,77 @@
 {
   "cases": [
     {
+      "name": "valid-v4-multiple-canvases-and-unplaced-node",
+      "valid": true,
+      "storage": {
+        "version": 4,
+        "nodes": [
+          {
+            "id": "11111111-1111-4111-8111-111111111111",
+            "name": "Account",
+            "content": "example"
+          },
+          {
+            "id": "22222222-2222-4222-8222-222222222222",
+            "name": "OpenAI",
+            "content": null
+          },
+          {
+            "id": "33333333-3333-4333-8333-333333333333",
+            "name": "Unplaced",
+            "content": null
+          }
+        ],
+        "references": [
+          {
+            "sourceNodeId": "11111111-1111-4111-8111-111111111111",
+            "targetNodeId": "22222222-2222-4222-8222-222222222222"
+          }
+        ],
+        "view": {
+          "activeCanvasId": "44444444-4444-4444-8444-444444444444",
+          "canvases": [
+            {
+              "id": "00000000-0000-4000-8000-000000000001",
+              "name": "Main",
+              "layout": [
+                {
+                  "nodeId": "11111111-1111-4111-8111-111111111111",
+                  "x": 10,
+                  "y": 20
+                }
+              ],
+              "viewport": null
+            },
+            {
+              "id": "44444444-4444-4444-8444-444444444444",
+              "name": "Second",
+              "layout": [
+                {
+                  "nodeId": "11111111-1111-4111-8111-111111111111",
+                  "x": 900,
+                  "y": -300,
+                  "width": 640
+                },
+                {
+                  "nodeId": "22222222-2222-4222-8222-222222222222",
+                  "x": 1200,
+                  "y": -300
+                }
+              ],
+              "viewport": {
+                "x": 20,
+                "y": 30,
+                "zoom": 0.8
+              }
+            }
+          ],
+          "contentProcessorByNodeId": {},
+          "extensionMetadata": {}
+        }
+      }
+    },
+    {
       "name": "valid-v3-with-unknown-extension-metadata",
       "valid": true,
       "storage": {
@@ -275,6 +346,80 @@
               "byNodeId": {}
             }
           }
+        }
+      }
+    },
+    {
+      "name": "v4-duplicate-canvas-name",
+      "valid": false,
+      "storage": {
+        "version": 4,
+        "nodes": [],
+        "references": [],
+        "view": {
+          "activeCanvasId": "00000000-0000-4000-8000-000000000001",
+          "canvases": [
+            {
+              "id": "00000000-0000-4000-8000-000000000001",
+              "name": "Main",
+              "layout": [],
+              "viewport": null
+            },
+            {
+              "id": "44444444-4444-4444-8444-444444444444",
+              "name": " main ",
+              "layout": [],
+              "viewport": null
+            }
+          ],
+          "contentProcessorByNodeId": {},
+          "extensionMetadata": {}
+        }
+      }
+    },
+    {
+      "name": "v4-dangling-active-canvas",
+      "valid": false,
+      "storage": {
+        "version": 4,
+        "nodes": [],
+        "references": [],
+        "view": {
+          "activeCanvasId": "44444444-4444-4444-8444-444444444444",
+          "canvases": [
+            {
+              "id": "00000000-0000-4000-8000-000000000001",
+              "name": "Main",
+              "layout": [],
+              "viewport": null
+            }
+          ],
+          "contentProcessorByNodeId": {},
+          "extensionMetadata": {}
+        }
+      }
+    },
+    {
+      "name": "v4-rejects-legacy-top-level-layout",
+      "valid": false,
+      "storage": {
+        "version": 4,
+        "nodes": [],
+        "layout": [],
+        "references": [],
+        "viewport": null,
+        "view": {
+          "activeCanvasId": "00000000-0000-4000-8000-000000000001",
+          "canvases": [
+            {
+              "id": "00000000-0000-4000-8000-000000000001",
+              "name": "Main",
+              "layout": [],
+              "viewport": null
+            }
+          ],
+          "contentProcessorByNodeId": {},
+          "extensionMetadata": {}
         }
       }
     }

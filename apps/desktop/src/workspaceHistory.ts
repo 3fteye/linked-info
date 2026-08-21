@@ -1,17 +1,17 @@
 import type {
-  CanvasViewport,
   InformationNode,
-  NodeLayout,
   NodeReference,
   WorkspaceSnapshot,
   WorkspaceViewMetadata,
 } from "./workspaceData";
 
+export interface WorkspaceHistoryViewMetadata
+  extends Omit<WorkspaceViewMetadata, "activeCanvasId"> {}
+
 export interface WorkspaceHistoryState {
   nodes: InformationNode[];
-  layout: NodeLayout[];
   references: NodeReference[];
-  view: WorkspaceViewMetadata;
+  view: WorkspaceHistoryViewMetadata;
 }
 
 export interface WorkspaceHistoryEntry {
@@ -38,9 +38,12 @@ export function captureWorkspaceHistory(
 ): WorkspaceHistoryState {
   return {
     nodes: workspace.nodes,
-    layout: workspace.layout,
     references: workspace.references,
-    view: workspace.view,
+    view: {
+      canvases: workspace.view.canvases,
+      contentProcessorByNodeId: workspace.view.contentProcessorByNodeId,
+      extensionMetadata: workspace.view.extensionMetadata,
+    },
   };
 }
 
@@ -48,7 +51,16 @@ export function workspaceHistoryStatesEqual(
   left: WorkspaceHistoryState,
   right: WorkspaceHistoryState,
 ): boolean {
-  return JSON.stringify(left) === JSON.stringify(right);
+  const withoutViewports = (state: WorkspaceHistoryState) => ({
+    ...state,
+    view: {
+      ...state.view,
+      canvases: state.view.canvases.map(({ viewport: _viewport, ...canvas }) =>
+        canvas,
+      ),
+    },
+  });
+  return JSON.stringify(withoutViewports(left)) === JSON.stringify(withoutViewports(right));
 }
 
 export function appendWorkspaceHistory(
@@ -104,7 +116,37 @@ export function stepWorkspaceHistoryForward(
 
 export function restoreWorkspaceHistory(
   state: WorkspaceHistoryState,
-  viewport: CanvasViewport | null,
+  currentView: WorkspaceViewMetadata,
 ): WorkspaceSnapshot {
-  return { ...state, viewport };
+  const currentCanvasById = new Map(
+    currentView.canvases.map((canvas) => [canvas.id, canvas]),
+  );
+  const canvases = state.view.canvases.map((canvas) => {
+    const currentCanvas = currentCanvasById.get(canvas.id);
+    return {
+      ...canvas,
+      viewport:
+        currentCanvas === undefined ? canvas.viewport : currentCanvas.viewport,
+    };
+  });
+  const fallbackCanvas = canvases[0];
+  if (fallbackCanvas === undefined) {
+    throw new Error("Workspace history must contain at least one canvas.");
+  }
+  const activeCanvasId = canvases.some(
+    (canvas) => canvas.id === currentView.activeCanvasId,
+  )
+    ? currentView.activeCanvasId
+    : fallbackCanvas.id;
+
+  return {
+    nodes: state.nodes,
+    references: state.references,
+    view: {
+      activeCanvasId,
+      canvases,
+      contentProcessorByNodeId: state.view.contentProcessorByNodeId,
+      extensionMetadata: state.view.extensionMetadata,
+    },
+  };
 }

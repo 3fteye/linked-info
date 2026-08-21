@@ -2134,8 +2134,12 @@ export default function GraphCanvas({
   );
 
   useEffect(() => {
-    if (lastFilteredNodeIdsRef.current !== filteredNodeIds) {
-      lastFilteredNodeIdsRef.current = filteredNodeIds;
+    const previous = lastFilteredNodeIdsRef.current;
+    const filterChanged =
+      previous.size !== filteredNodeIds.size ||
+      [...previous].some((nodeId) => !filteredNodeIds.has(nodeId));
+    lastFilteredNodeIdsRef.current = filteredNodeIds;
+    if (filterChanged) {
       setNavigationFocusNodeId(null);
     }
   }, [filteredNodeIds]);
