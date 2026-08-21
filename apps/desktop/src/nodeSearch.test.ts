@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { NodeSearchIndex, type NodeSearchScope } from "./nodeSearch";
+import {
+  compareNodesByName,
+  NodeSearchIndex,
+  type NodeSearchScope,
+} from "./nodeSearch";
 import type { InformationNode } from "./workspaceStore";
 
 const nodes: InformationNode[] = [
@@ -57,5 +61,20 @@ describe("NodeSearchIndex", () => {
     expect([...index.matchingNodeIds(updated, "searchable", "content")]).toEqual([
       nodes[0].id,
     ]);
+  });
+
+  it("sorts navigation results by normalized human name with unnamed nodes last", () => {
+    const sortable: InformationNode[] = [
+      { id: "4", name: null, content: null },
+      { id: "3", name: "Account 10", content: null },
+      { id: "2", name: " account 2 ", content: null },
+      { id: "1", name: "Beta", content: null },
+    ];
+
+    expect(
+      sortable
+        .sort((left, right) => compareNodesByName(left, right, "en"))
+        .map((node) => node.id),
+    ).toEqual(["2", "3", "1", "4"]);
   });
 });

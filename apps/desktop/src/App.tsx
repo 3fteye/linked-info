@@ -102,7 +102,18 @@ import {
   type CodePreviewLanguage,
 } from "./codePreviewLanguages";
 import { contentMarkerRegistry } from "./contentMarker";
-import { NodeSearchIndex, type NodeSearchScope } from "./nodeSearch";
+import {
+  compareNodesByName,
+  NodeSearchIndex,
+  type NodeSearchScope,
+} from "./nodeSearch";
+import {
+  captureCanvasPlacements,
+  pasteCanvasPlacements,
+  suggestedCanvasTransferCenter,
+  type CanvasPlacementClipboard,
+  type CanvasPlacementClipboardMode,
+} from "./canvasTransfer";
 import { supportedLanguages, type SupportedLanguage } from "./locales";
 import {
   activeWorkspaceCanvas,
@@ -421,6 +432,19 @@ type PendingWorkspaceDeletion =
   | { kind: "canvas"; canvasId: string }
   | { kind: "nodes"; nodeIds: string[] };
 
+interface PendingCanvasTransfer {
+  mode: CanvasPlacementClipboardMode;
+  nodeIds: string[];
+  sourceCanvasId: string;
+  targetCanvasId: string;
+  viewportSize: { height: number; width: number };
+}
+
+interface CanvasFocusRequest {
+  nodeIds: string[];
+  token: number;
+}
+
 function extensionMetadataSchemaVersions(
   workspace: WorkspaceSnapshot,
 ): Record<string, number> {
@@ -490,6 +514,10 @@ function App({
   });
   const [searchTerm, setSearchTerm] = useState("");
   const [searchScope, setSearchScope] = useState<NodeSearchScope>("name");
+  const [searchNavigationNodeId, setSearchNavigationNodeId] = useState<
+    string | null
+  >(null);
+  const [searchNavigationOpen, setSearchNavigationOpen] = useState(false);
   const [unmatchedNodeOpacity, setUnmatchedNodeOpacity] = useState(20);
   const [appearanceTheme, setAppearanceTheme] = useState(() =>
     loadAppearanceTheme(
@@ -508,6 +536,13 @@ function App({
   const [canvasNameEditing, setCanvasNameEditing] = useState(false);
   const [pendingWorkspaceDeletion, setPendingWorkspaceDeletion] =
     useState<PendingWorkspaceDeletion | null>(null);
+  const [canvasPlacementClipboard, setCanvasPlacementClipboard] =
+    useState<CanvasPlacementClipboard | null>(null);
+  const [pendingCanvasTransfer, setPendingCanvasTransfer] =
+    useState<PendingCanvasTransfer | null>(null);
+  const [canvasFocusRequest, setCanvasFocusRequest] =
+    useState<CanvasFocusRequest | null>(null);
+  const canvasFocusRequestTokenRef = useRef(0);
   const [pendingWorkspaceReplacement, setPendingWorkspaceReplacement] =
     useState<PendingWorkspaceReplacement | null>(null);
   const [backupStatus, setBackupStatus] = useState<string | null>(null);
@@ -1568,6 +1603,55 @@ function App({
       ),
     [activeCanvasNodeIds, filteredNodes],
   );
+  const searchNavigationNodes = useMemo(
+    () =>
+      normalizeNodeName(deferredSearchTerm).length === 0
+        ? []
+        : filteredNodes
+            .filter((node) => activeCanvasNodeIds.has(node.id))
+            .sort((left, right) =>
+              compareNodesByName(left, right, i18n.language),
+            ),
+    [
+      activeCanvasNodeIds,
+      deferredSearchTerm,
+      filteredNodes,
+      i18n.language,
+    ],
+  );
+  const activeSearchNavigationIndex = searchNavigationNodes.findIndex(
+    (node) => node.id === searchNavigationNodeId,
+  );
+  const searchNavigationWindow = useMemo(() => {
+    const maximumRenderedResults = 100;
+    const centeredIndex = Math.max(0, activeSearchNavigationIndex);
+    const start = Math.max(
+      0,
+      Math.min(
+        centeredIndex - 4,
+        searchNavigationNodes.length - maximumRenderedResults,
+      ),
+    );
+    return {
+      nodes: searchNavigationNodes.slice(
+        start,
+        start + maximumRenderedResults,
+      ),
+      start,
+    };
+  }, [activeSearchNavigationIndex, searchNavigationNodes]);
+
+  useEffect(() => {
+    setSearchNavigationNodeId((current) => {
+      if (
+        current !== null &&
+        searchNavigationNodes.some((node) => node.id === current)
+      ) {
+        return current;
+      }
+      return searchNavigationNodes[0]?.id ?? null;
+    });
+  }, [searchNavigationNodes]);
 
   const contentMarkerOptions = useMemo(
     () =>
@@ -3569,6 +3653,191 @@ function App({
     editBaselineRef.current = null;
   }
 
+  function requestCanvasFocus(nodeIds: readonly string[]) {
+    const uniqueNodeIds = [...new Set(nodeIds)];
+    if (uniqueNodeIds.length === 0) {
+      return;
+    }
+    canvasFocusRequestTokenRef.current += 1;
+    setCanvasFocusRequest({
+      nodeIds: uniqueNodeIds,
+      token: canvasFocusRequestTokenRef.current,
+    });
+  }
+
+  function focusSearchResult(nodeId: string) {
+    if (!activeCanvasNodeIds.has(nodeId)) {
+      return;
+    }
+    setSearchNavigationNodeId(nodeId);
+    setActiveView("canvas");
+    requestCanvasFocus([nodeId]);
+  }
+
+  function moveSearchNavigation(direction: -1 | 1) {
+    if (searchNavigationNodes.length === 0) {
+      return;
+    }
+    const currentIndex = Math.max(0, activeSearchNavigationIndex);
+    const nextIndex =
+      (currentIndex + direction + searchNavigationNodes.length) %
+      searchNavigationNodes.length;
+    setSearchNavigationNodeId(searchNavigationNodes[nextIndex].id);
+  }
+
+  function captureCanvasPlacementClipboard(
+    nodeIds: readonly string[],
+    mode: CanvasPlacementClipboardMode,
+  ) {
+    const clipboard = captureCanvasPlacements(
+      workspaceRef.current,
+      workspaceRef.current.view.activeCanvasId,
+      nodeIds,
+      mode,
+    );
+    if (clipboard === null) {
+      showAppNotice(t("canvases.clipboardUnavailable"));
+      return;
+    }
+    setCanvasPlacementClipboard(clipboard);
+    showAppNotice(
+      t(
+        mode === "copy" ? "canvases.positionsCopied" : "canvases.positionsCut",
+        { count: clipboard.placements.length },
+      ),
+    );
+  }
+
+  function pasteCanvasPlacementClipboard(targetCenter: { x: number; y: number }) {
+    if (canvasPlacementClipboard === null) {
+      showAppNotice(t("canvases.clipboardUnavailable"));
+      return;
+    }
+    const targetCanvasId = workspaceRef.current.view.activeCanvasId;
+    if (canvasPlacementClipboard.sourceCanvasId === targetCanvasId) {
+      showAppNotice(t("canvases.pasteToSourceBlocked"));
+      return;
+    }
+    if (
+      canvasPlacementClipboard.mode === "cut" &&
+      !workspaceRef.current.view.canvases.some(
+        (canvas) => canvas.id === canvasPlacementClipboard.sourceCanvasId,
+      )
+    ) {
+      setCanvasPlacementClipboard(null);
+      showAppNotice(t("canvases.transferExpired"));
+      return;
+    }
+    const before = workspaceRef.current;
+    const result = pasteCanvasPlacements(
+      before,
+      canvasPlacementClipboard,
+      targetCanvasId,
+      targetCenter,
+    );
+    if (result.workspace === before) {
+      showAppNotice(t("canvases.alreadyOnCanvas"));
+      return;
+    }
+    updateWorkspace(() => result.workspace, {
+      flushImmediately: true,
+      recordHistory: true,
+    });
+    if (canvasPlacementClipboard.mode === "cut") {
+      setCanvasPlacementClipboard(null);
+    }
+    requestCanvasFocus(result.targetNodeIds);
+    showAppNotice(
+      t(
+        canvasPlacementClipboard.mode === "copy"
+          ? "canvases.positionsPasted"
+          : "canvases.positionsMoved",
+        { count: result.targetNodeIds.length },
+      ),
+    );
+  }
+
+  function openCanvasTransfer(
+    nodeIds: readonly string[],
+    mode: CanvasPlacementClipboardMode,
+    viewportSize: { height: number; width: number },
+  ) {
+    const sourceCanvasId = workspaceRef.current.view.activeCanvasId;
+    const target = workspaceRef.current.view.canvases.find(
+      (canvas) => canvas.id !== sourceCanvasId,
+    );
+    if (target === undefined) {
+      showAppNotice(t("canvases.noOtherCanvas"));
+      return;
+    }
+    setPendingCanvasTransfer({
+      mode,
+      nodeIds: [...new Set(nodeIds)],
+      sourceCanvasId,
+      targetCanvasId: target.id,
+      viewportSize,
+    });
+  }
+
+  function confirmCanvasTransfer() {
+    if (pendingCanvasTransfer === null) {
+      return;
+    }
+    const before = workspaceRef.current;
+    if (before.view.activeCanvasId !== pendingCanvasTransfer.sourceCanvasId) {
+      setPendingCanvasTransfer(null);
+      showAppNotice(t("canvases.transferExpired"));
+      return;
+    }
+    const clipboard = captureCanvasPlacements(
+      before,
+      pendingCanvasTransfer.sourceCanvasId,
+      pendingCanvasTransfer.nodeIds,
+      pendingCanvasTransfer.mode,
+    );
+    const target = before.view.canvases.find(
+      (canvas) => canvas.id === pendingCanvasTransfer.targetCanvasId,
+    );
+    if (clipboard === null || target === undefined) {
+      setPendingCanvasTransfer(null);
+      showAppNotice(t("canvases.transferExpired"));
+      return;
+    }
+    const result = pasteCanvasPlacements(
+      before,
+      clipboard,
+      target.id,
+      suggestedCanvasTransferCenter(
+        target,
+        pendingCanvasTransfer.viewportSize,
+        clipboard.placements,
+      ),
+    );
+    setPendingCanvasTransfer(null);
+    if (result.workspace === before) {
+      showAppNotice(t("canvases.alreadyOnCanvas"));
+      return;
+    }
+    updateWorkspace(
+      () => ({
+        ...result.workspace,
+        view: { ...result.workspace.view, activeCanvasId: target.id },
+      }),
+      { flushImmediately: true, recordHistory: true },
+    );
+    setEditingNodeId(null);
+    editBaselineRef.current = null;
+    requestCanvasFocus(result.targetNodeIds);
+    showAppNotice(
+      t(
+        pendingCanvasTransfer.mode === "copy"
+          ? "canvases.positionsPasted"
+          : "canvases.positionsMoved",
+        { count: result.targetNodeIds.length },
+      ),
+    );
+  }
+
   function nextCanvasName(canvases: readonly WorkspaceCanvas[]): string {
     const names = new Set(canvases.map((canvas) => normalizeNodeName(canvas.name)));
     let index = canvases.length + 1;
@@ -5077,12 +5346,45 @@ function App({
                   <Search aria-hidden="true" size={16} />
                   <span className="visually-hidden">{t("search.label")}</span>
                   <input
+                    aria-activedescendant={
+                      searchNavigationOpen && searchNavigationNodeId !== null
+                        ? `node-search-result-${searchNavigationNodeId}`
+                        : undefined
+                    }
+                    aria-autocomplete="list"
+                    aria-controls="node-search-results"
+                    aria-expanded={
+                      searchNavigationOpen && searchNavigationNodes.length > 0
+                    }
+                    role="combobox"
                     data-testid="node-search"
-                    onChange={(event) => setSearchTerm(event.target.value)}
+                    onBlur={() => {
+                      window.setTimeout(() => setSearchNavigationOpen(false), 0);
+                    }}
+                    onChange={(event) => {
+                      setSearchTerm(event.target.value);
+                      setSearchNavigationOpen(true);
+                    }}
+                    onFocus={() => setSearchNavigationOpen(true)}
                     onKeyDown={(event) => {
+                      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+                        event.preventDefault();
+                        setSearchNavigationOpen(true);
+                        moveSearchNavigation(event.key === "ArrowDown" ? 1 : -1);
+                        return;
+                      }
+                      if (
+                        event.key === "Enter" &&
+                        searchNavigationNodeId !== null
+                      ) {
+                        event.preventDefault();
+                        focusSearchResult(searchNavigationNodeId);
+                        return;
+                      }
                       if (event.key === "Escape") {
                         event.preventDefault();
                         setSearchTerm("");
+                        setSearchNavigationOpen(false);
                         event.currentTarget.blur();
                       }
                     }}
@@ -5091,6 +5393,55 @@ function App({
                     value={searchTerm}
                   />
                 </label>
+                {searchNavigationOpen &&
+                  normalizeNodeName(deferredSearchTerm).length > 0 &&
+                  searchNavigationNodes.length > 0 && (
+                    <div
+                      aria-label={t("search.navigationLabel")}
+                      className="node-search-results"
+                      data-testid="node-search-results"
+                      id="node-search-results"
+                      role="listbox"
+                    >
+                      <div className="node-search-results-header">
+                        <strong>
+                          {t("search.navigationIndex", {
+                            current: activeSearchNavigationIndex + 1,
+                            total: searchNavigationNodes.length,
+                          })}
+                        </strong>
+                        <span>{t("search.navigationHint")}</span>
+                      </div>
+                      <div className="node-search-results-list">
+                        {searchNavigationWindow.nodes.map((node, index) => {
+                          const absoluteIndex = searchNavigationWindow.start + index;
+                          const active = node.id === searchNavigationNodeId;
+                          return (
+                            <button
+                              aria-selected={active}
+                              className="node-search-result"
+                              data-active={active}
+                              id={`node-search-result-${node.id}`}
+                              key={node.id}
+                              onClick={() => focusSearchResult(node.id)}
+                              onMouseDown={(event) => event.preventDefault()}
+                              role="option"
+                              type="button"
+                            >
+                              <span>{absoluteIndex + 1}</span>
+                              <strong>
+                                {nodeFilterLabel(
+                                  node,
+                                  t("nodes.unnamed"),
+                                  t("nodes.noContent"),
+                                )}
+                              </strong>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
               </div>
               {activeView === "canvas" && (
                 <label
@@ -6757,12 +7108,14 @@ function App({
               analyzingNodeId={analyzingNodeId}
               appearanceTheme={appearanceTheme}
               autoAvoidOverlaps={autoAvoidCanvasOverlaps}
+              canPasteNodes={canvasPlacementClipboard !== null}
               canRedo={historyAvailability.canRedo}
               canUndo={historyAvailability.canUndo}
               editingNodeId={editingNodeId}
               historyBlocked={editingNodeId !== null}
               labels={{
                 analyzingNode: t("smartReference.analyzing"),
+                addToCanvas: t("canvases.addToAnother"),
                 cancel: t("actions.cancel"),
                 confirmDeleteNode: (count) =>
                   count === 1
@@ -6782,6 +7135,7 @@ function App({
                 copyCodeFailed: t("codePreview.copyFailed"),
                 copyCodeSuccess: t("codePreview.copied"),
                 copySecret: t("secretClipboard.copy"),
+                copyNodes: t("canvases.copyPositions"),
                 copySecretFailed: t("secretClipboard.failed"),
                 copySecretSuccess: t("secretClipboard.copied", {
                   seconds: Math.round(
@@ -6809,6 +7163,7 @@ function App({
                 totpMasked: contentEnhancementLabels.totp.masked,
                 totpRemaining: contentEnhancementLabels.totp.remaining,
                 editNode: t("actions.editNode"),
+                cutNodes: t("canvases.cutPositions"),
                 deleteNode: t("canvases.removeNode"),
                 deleteNodeBody: (names) =>
                   names.length === 1
@@ -6820,6 +7175,8 @@ function App({
                     : t("canvases.removeNodesTitle", { count }),
                 empty: t("empty.canvas"),
                 noMatches: t("empty.search"),
+                moveToCanvas: t("canvases.moveToAnother"),
+                pasteNodes: t("canvases.pastePositions"),
                 filterByNode: t("filters.filterByNode"),
                 fitNodeContent: t("nodeSize.fit"),
                 arrangeNodes: (count) =>
@@ -6893,6 +7250,7 @@ function App({
                 unnamed: t("nodes.unnamed"),
               }}
               layout={activeCanvas.layout}
+              focusRequest={canvasFocusRequest}
               contentProcessorByNodeId={workspace.view.contentProcessorByNodeId}
               extensionMetadata={workspace.view.extensionMetadata}
               extensionBaseRevision={extensionWorkspaceRevisionRef.current}
@@ -6910,11 +7268,13 @@ function App({
                     }
                   : null
               }
+              onCaptureNodes={captureCanvasPlacementClipboard}
               nodeFiltersActive={hasActiveNodeFilter}
               onClearNodeFilters={clearNodeFilters}
               onDeleteNodes={removeNodesFromActiveCanvas}
               onEditNode={editNode}
               onLayoutChange={updateLayout}
+              onPasteNodes={pasteCanvasPlacementClipboard}
               onNodeCommit={commitNode}
               onNodeContentChange={updateNodeContent}
               onNodeContentProcessorChange={updateNodeContentProcessor}
@@ -6925,6 +7285,7 @@ function App({
               onNodeNameChange={updateNodeName}
               onReferencesChange={updateReferences}
               onRedo={redoWorkspace}
+              onRequestCanvasTransfer={openCanvasTransfer}
               onToggleReferenceFilter={activateCanvasReferenceFilter}
               onUndo={undoWorkspace}
               onViewportChange={updateViewport}
@@ -7026,6 +7387,85 @@ function App({
 
         </div>
       </main>
+
+      {pendingCanvasTransfer !== null && (
+        <div className="modal-backdrop" role="presentation">
+          <section
+            aria-labelledby="canvas-transfer-dialog-title"
+            aria-modal="true"
+            className="confirmation-dialog canvas-transfer-dialog"
+            data-testid="canvas-transfer-dialog"
+            onKeyDown={(event) => {
+              if (event.key === "Escape") {
+                setPendingCanvasTransfer(null);
+              }
+            }}
+            role="dialog"
+          >
+            <h2 id="canvas-transfer-dialog-title">
+              {t(
+                pendingCanvasTransfer.mode === "copy"
+                  ? "canvases.addToAnotherTitle"
+                  : "canvases.moveToAnotherTitle",
+              )}
+            </h2>
+            <p>
+              {t(
+                pendingCanvasTransfer.mode === "copy"
+                  ? "canvases.addToAnotherDescription"
+                  : "canvases.moveToAnotherDescription",
+                { count: pendingCanvasTransfer.nodeIds.length },
+              )}
+            </p>
+            <label className="canvas-transfer-target">
+              <span>{t("canvases.targetCanvas")}</span>
+              <select
+                autoFocus
+                data-testid="canvas-transfer-target"
+                onChange={(event) =>
+                  setPendingCanvasTransfer((current) =>
+                    current === null
+                      ? null
+                      : { ...current, targetCanvasId: event.target.value },
+                  )
+                }
+                value={pendingCanvasTransfer.targetCanvasId}
+              >
+                {workspace.view.canvases
+                  .filter(
+                    (canvas) => canvas.id !== pendingCanvasTransfer.sourceCanvasId,
+                  )
+                  .map((canvas) => (
+                    <option key={canvas.id} value={canvas.id}>
+                      {canvas.name}
+                    </option>
+                  ))}
+              </select>
+            </label>
+            <div className="confirmation-dialog-actions">
+              <button
+                className="secondary-button"
+                onClick={() => setPendingCanvasTransfer(null)}
+                type="button"
+              >
+                {t("actions.cancel")}
+              </button>
+              <button
+                className="primary-button"
+                data-testid="canvas-transfer-confirm"
+                onClick={confirmCanvasTransfer}
+                type="button"
+              >
+                {t(
+                  pendingCanvasTransfer.mode === "copy"
+                    ? "canvases.addToAnotherConfirm"
+                    : "canvases.moveToAnotherConfirm",
+                )}
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
 
       {pendingWorkspaceDeletion !== null && (
         <div className="modal-backdrop" role="presentation">

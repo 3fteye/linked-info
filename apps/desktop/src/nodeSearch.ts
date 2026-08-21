@@ -3,6 +3,27 @@ import { normalizeNodeName, type InformationNode } from "./workspaceStore";
 
 export type NodeSearchScope = "name" | "content" | "both";
 
+export function compareNodesByName(
+  left: InformationNode,
+  right: InformationNode,
+  locale: string,
+): number {
+  const leftName = normalizeNodeName(left.name ?? "");
+  const rightName = normalizeNodeName(right.name ?? "");
+  if (leftName.length === 0 && rightName.length > 0) {
+    return 1;
+  }
+  if (rightName.length === 0 && leftName.length > 0) {
+    return -1;
+  }
+  return (
+    leftName.localeCompare(rightName, locale, {
+      numeric: true,
+      sensitivity: "base",
+    }) || left.id.localeCompare(right.id)
+  );
+}
+
 interface IndexedNodeText {
   content?: string;
   name?: string;

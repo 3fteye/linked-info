@@ -36,6 +36,7 @@ import {
   Redo2,
   RotateCcw,
   Search,
+  Scissors,
   Sparkles,
   Trash2,
   Undo2,
@@ -107,6 +108,7 @@ import {
 import { CodePreviewSensitivityCache } from "./codePreviewSensitivity";
 import { TotpSecondClockProvider } from "./totpContent";
 import type { CanvasOperationItem } from "./canvasOperations";
+import type { CanvasPlacementClipboardMode } from "./canvasTransfer";
 import type { AppearanceTheme } from "./appearancePreferences";
 import {
   CONTENT_MARKER_NOTE_MAX_LENGTH,
@@ -259,6 +261,7 @@ interface CanvasSelectionGesture {
 }
 
 interface GraphLabels {
+  addToCanvas: string;
   analyzingNode: string;
   cancel: string;
   confirmDeleteNode: (count: number) => string;
@@ -276,6 +279,7 @@ interface GraphLabels {
   extensionLabels: Readonly<Record<string, string>>;
   unsupportedContentProcessor: (processorId: string) => string;
   copySecret: string;
+  copyNodes: string;
   copyCodeFailed: string;
   copyCodeSuccess: string;
   copySecretFailed: string;
@@ -299,8 +303,11 @@ interface GraphLabels {
   totpMasked: string;
   totpRemaining: (seconds: number) => string;
   editNode: string;
+  cutNodes: string;
   empty: string;
   noMatches: string;
+  moveToCanvas: string;
+  pasteNodes: string;
   filterByNode: string;
   fitNodeContent: string;
   arrangeNodes: (count: number) => string;
@@ -363,6 +370,7 @@ interface GraphCanvasProps {
   viewport: CanvasViewport | null;
   editingNodeId: string | null;
   canRedo: boolean;
+  canPasteNodes: boolean;
   canUndo: boolean;
   historyBlocked: boolean;
   nodeFiltersActive: boolean;
@@ -371,6 +379,7 @@ interface GraphCanvasProps {
   filteredNodeIds: ReadonlySet<string>;
   unmatchedNodeOpacity: number;
   labels: GraphLabels;
+  focusRequest: { nodeIds: string[]; token: number } | null;
   pointSelection?: {
     cancelLabel: string;
     instruction: string;
@@ -385,10 +394,15 @@ interface GraphCanvasProps {
     position: { x: number; y: number },
   ) => string | null;
   onCopySecret: ((text: string) => Promise<void>) | null;
+  onCaptureNodes: (
+    nodeIds: string[],
+    mode: CanvasPlacementClipboardMode,
+  ) => void;
   onClearNodeFilters: () => void;
   onDeleteNodes: (nodeIds: string[]) => void;
   onEditNode: (nodeId: string) => void;
   onLayoutChange: (layout: NodeLayout[]) => void;
+  onPasteNodes: (position: { x: number; y: number }) => void;
   onNodeCommit: (nodeId: string) => void;
   onNodeContentChange: (nodeId: string, content: string) => void;
   onNodeContentProcessorChange: (nodeId: string, processorId: string) => void;
@@ -408,6 +422,11 @@ interface GraphCanvasProps {
   onNodeNameChange: (nodeId: string, name: string) => boolean;
   onReferencesChange: (references: NodeReference[]) => void;
   onRedo: () => void;
+  onRequestCanvasTransfer: (
+    nodeIds: string[],
+    mode: CanvasPlacementClipboardMode,
+    viewportSize: { height: number; width: number },
+  ) => void;
   onToggleReferenceFilter: (nodeId: string) => void;
   onUndo: () => void;
   onViewportChange: (viewport: CanvasViewport) => void;
@@ -1267,6 +1286,8 @@ export default function GraphCanvas({
   references,
   viewport,
   editingNodeId,
+  focusRequest,
+  canPasteNodes,
   canRedo,
   canUndo,
   historyBlocked,
@@ -1281,10 +1302,12 @@ export default function GraphCanvas({
   onCreateNode,
   onCreateReferencedNode,
   onCopySecret,
+  onCaptureNodes,
   onClearNodeFilters,
   onDeleteNodes,
   onEditNode,
   onLayoutChange,
+  onPasteNodes,
   onNodeCommit,
   onNodeContentChange,
   onNodeContentProcessorChange,
@@ -1295,6 +1318,7 @@ export default function GraphCanvas({
   onNodeNameChange,
   onReferencesChange,
   onRedo,
+  onRequestCanvasTransfer,
   onToggleReferenceFilter,
   onUndo,
   onViewportChange,
@@ -1376,6 +1400,7 @@ export default function GraphCanvas({
   );
   const commitAvoidanceFrameIdsRef = useRef(new Set<number>());
   const smartArrangementAbortControllerRef = useRef<AbortController | null>(null);
+  const handledFocusRequestTokenRef = useRef<number | null>(null);
 
   useEffect(() => {
     if (pointSelection === null) {
@@ -1785,20 +1810,16 @@ export default function GraphCanvas({
       ) {
         return;
       }
-      const left = Math.min(...nodesToFrame.map((node) => node.position.x));
-      const top = Math.min(...nodesToFrame.map((node) => node.position.y));
-      const right = Math.max(
-        ...nodesToFrame.map(
-          (node) =>
-            node.position.x + flowNodeWidth(node),
-        ),
-      );
-      const bottom = Math.max(
-        ...nodesToFrame.map(
-          (node) =>
-            node.position.y + flowNodeHeight(node),
-        ),
-      );
+      let left = Number.POSITIVE_INFINITY;
+      let top = Number.POSITIVE_INFINITY;
+      let right = Number.NEGATIVE_INFINITY;
+      let bottom = Number.NEGATIVE_INFINITY;
+      for (const node of nodesToFrame) {
+        left = Math.min(left, node.position.x);
+        top = Math.min(top, node.position.y);
+        right = Math.max(right, node.position.x + flowNodeWidth(node));
+        bottom = Math.max(bottom, node.position.y + flowNodeHeight(node));
+      }
       const nextViewport = getViewportForBounds(
         {
           height: Math.max(1, bottom - top),
@@ -1816,6 +1837,50 @@ export default function GraphCanvas({
     },
     [flowInstance],
   );
+
+  const canvasCenterPosition = useCallback(() => {
+    const bounds = containerRef.current?.getBoundingClientRect();
+    if (bounds === undefined || flowInstance === null) {
+      return null;
+    }
+    return flowInstance.screenToFlowPosition({
+      x: bounds.left + bounds.width / 2,
+      y: bounds.top + bounds.height / 2,
+    });
+  }, [flowInstance]);
+
+  const canvasViewportSize = useCallback(() => {
+    const bounds = containerRef.current?.getBoundingClientRect();
+    return {
+      height: Math.max(1, bounds?.height ?? 1),
+      width: Math.max(1, bounds?.width ?? 1),
+    };
+  }, []);
+
+  useEffect(() => {
+    if (
+      focusRequest === null ||
+      handledFocusRequestTokenRef.current === focusRequest.token
+    ) {
+      return;
+    }
+    const requestedNodeIds = new Set(focusRequest.nodeIds);
+    const targets = flowNodesRef.current.filter((node) =>
+      requestedNodeIds.has(node.id),
+    );
+    if (targets.length === 0) {
+      return;
+    }
+    handledFocusRequestTokenRef.current = focusRequest.token;
+    setSelectedReferenceId(null);
+    setFlowNodes((current) =>
+      current.map((node) => ({
+        ...node,
+        selected: requestedNodeIds.has(node.id),
+      })),
+    );
+    frameCanvasNodes(targets, targets.length === 1 ? 1.4 : 1);
+  }, [focusRequest, flowNodes, frameCanvasNodes, setFlowNodes]);
 
   const openIncomingReferenceBrowser = useCallback(
     (
@@ -2670,14 +2735,25 @@ export default function GraphCanvas({
         event.target.closest(
           ".graph-node-filter-button, .graph-node-reference-chip, .graph-node-incoming-button, .incoming-reference-browser",
         ) !== null;
+      const modifierPressed = event.ctrlKey || event.metaKey;
+      const placementClipboardShortcut =
+        modifierPressed &&
+        !event.altKey &&
+        contextMenu === null &&
+        (key === "c" || key === "x" || key === "v") &&
+        !isTextEntryTarget(event.target) &&
+        !(
+          event.target instanceof Element &&
+          event.target.closest("[role='dialog'], [role='menu'], [role='listbox']")
+        );
       if (
         isCanvasShortcutBlockedTarget(event.target) &&
-        !canvasTransientControlFocused
+        !canvasTransientControlFocused &&
+        !placementClipboardShortcut
       ) {
         return;
       }
 
-      const modifierPressed = event.ctrlKey || event.metaKey;
       if (!modifierPressed && key === "?") {
         event.preventDefault();
         setShortcutHelpOpen((current) => !current);
@@ -2775,6 +2851,30 @@ export default function GraphCanvas({
         return;
       }
 
+      if (modifierPressed && !event.altKey && (key === "c" || key === "x")) {
+        const selectedNodeIds = flowNodesRef.current
+          .filter(
+            (node) => node.selected && !node.hidden && node.selectable !== false,
+          )
+          .map((node) => node.id);
+        if (selectedNodeIds.length > 0) {
+          event.preventDefault();
+          event.stopPropagation();
+          onCaptureNodes(selectedNodeIds, key === "c" ? "copy" : "cut");
+        }
+        return;
+      }
+
+      if (modifierPressed && !event.altKey && key === "v" && canPasteNodes) {
+        const center = canvasCenterPosition();
+        if (center !== null) {
+          event.preventDefault();
+          event.stopPropagation();
+          onPasteNodes(center);
+        }
+        return;
+      }
+
       if (modifierPressed && key === "a") {
         event.preventDefault();
         setSelectedReferenceId(null);
@@ -2842,6 +2942,8 @@ export default function GraphCanvas({
     window.addEventListener("keydown", handleCanvasShortcut, true);
     return () => window.removeEventListener("keydown", handleCanvasShortcut, true);
   }, [
+    canPasteNodes,
+    canvasCenterPosition,
     contextMenu,
     frameCanvasNodes,
     flowInstance,
@@ -2850,7 +2952,9 @@ export default function GraphCanvas({
     interactiveReferenceIdSet,
     nodeFiltersActive,
     onClearNodeFilters,
+    onCaptureNodes,
     onEditNode,
+    onPasteNodes,
     onRedo,
     onReferencesChange,
     onUndo,
@@ -3146,7 +3250,7 @@ export default function GraphCanvas({
       contextMenuSelectionRef.current = [];
       setContextMenu({
         kind: "node",
-        ...positionContextMenu(event.clientX, event.clientY, 290),
+        ...positionContextMenu(event.clientX, event.clientY, 430),
         nodeId: node.id,
         nodeIds:
           selectedNodeIds.length > 1 ? selectedNodeIds : [node.id],
@@ -4026,16 +4130,31 @@ export default function GraphCanvas({
           style={{ left: contextMenu.left, top: contextMenu.top }}
         >
           {contextMenu.kind === "pane" ? (
-            <button
-              onClick={() => {
-                onCreateNode(contextMenu.position);
-                setContextMenu(null);
-              }}
-              type="button"
-            >
-              <Plus size={16} />
-              <span>{labels.createNode}</span>
-            </button>
+            <>
+              <button
+                onClick={() => {
+                  onCreateNode(contextMenu.position);
+                  setContextMenu(null);
+                }}
+                type="button"
+              >
+                <Plus size={16} />
+                <span>{labels.createNode}</span>
+              </button>
+              {canPasteNodes && (
+                <button
+                  data-testid="paste-nodes-context-action"
+                  onClick={() => {
+                    onPasteNodes(contextMenu.position);
+                    setContextMenu(null);
+                  }}
+                  type="button"
+                >
+                  <Copy size={16} />
+                  <span>{labels.pasteNodes}</span>
+                </button>
+              )}
+            </>
           ) : (
             <>
               <button
@@ -4081,6 +4200,58 @@ export default function GraphCanvas({
                     <span>{labels.copySecret}</span>
                   </button>
                 )}
+              <button
+                data-testid="copy-nodes-context-action"
+                onClick={() => {
+                  onCaptureNodes(contextMenu.nodeIds, "copy");
+                  setContextMenu(null);
+                }}
+                type="button"
+              >
+                <Copy size={16} />
+                <span>{labels.copyNodes}</span>
+              </button>
+              <button
+                data-testid="cut-nodes-context-action"
+                onClick={() => {
+                  onCaptureNodes(contextMenu.nodeIds, "cut");
+                  setContextMenu(null);
+                }}
+                type="button"
+              >
+                <Scissors size={16} />
+                <span>{labels.cutNodes}</span>
+              </button>
+              <button
+                data-testid="add-to-canvas-context-action"
+                onClick={() => {
+                  onRequestCanvasTransfer(
+                    contextMenu.nodeIds,
+                    "copy",
+                    canvasViewportSize(),
+                  );
+                  setContextMenu(null);
+                }}
+                type="button"
+              >
+                <Copy size={16} />
+                <span>{labels.addToCanvas}</span>
+              </button>
+              <button
+                data-testid="move-to-canvas-context-action"
+                onClick={() => {
+                  onRequestCanvasTransfer(
+                    contextMenu.nodeIds,
+                    "cut",
+                    canvasViewportSize(),
+                  );
+                  setContextMenu(null);
+                }}
+                type="button"
+              >
+                <Scissors size={16} />
+                <span>{labels.moveToCanvas}</span>
+              </button>
               {contextMenu.nodeIds.length > 1 && (
                 <button
                   data-node-count={contextMenu.nodeIds.length}
