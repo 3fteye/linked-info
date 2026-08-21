@@ -702,7 +702,7 @@ test("canvas keyboard navigation frames and zooms the current view", async ({ pa
   await page.keyboard.press("-");
   await expect
     .poll(async () => (await storedWorkspace(page))?.viewport?.zoom ?? null)
-    .toBeLessThan(1);
+    .toBeCloseTo(1 / 1.2, 2);
   await page.keyboard.press("+");
   await expect
     .poll(async () => (await storedWorkspace(page))?.viewport?.zoom ?? null)
@@ -1029,34 +1029,236 @@ test("following inline references replaces the browsing filter instead of accumu
   }
 });
 
-test("an outgoing reference can be removed from its node without selecting the line", async ({
+test("outgoing reference remove circles delete one undoable reference", async ({
   page,
 }) => {
-  const nodes = gridNodes(2, 1);
-  await openSyntheticWorkspace(page, nodes, [
-    { sourceNodeId: nodes[0].id, targetNodeId: nodes[1].id },
+  const source = {
+    id: syntheticId(31),
+    name: "Reference source",
+    x: 100,
+    y: 100,
+  };
+  const firstTarget = {
+    id: syntheticId(32),
+    name: "First target",
+    x: 520,
+    y: 70,
+  };
+  const secondTarget = {
+    id: syntheticId(33),
+    name: "Second target",
+    x: 520,
+    y: 260,
+  };
+  await openSyntheticWorkspace(page, [source, firstTarget, secondTarget], [
+    { sourceNodeId: source.id, targetNodeId: firstTarget.id },
+    { sourceNodeId: source.id, targetNodeId: secondTarget.id },
   ]);
 
-  await node(page, nodes[0].id).locator(".graph-node-reference-remove").click();
+  const sourceNode = node(page, source.id);
+  const removeButtons = sourceNode.locator(".graph-node-reference-remove");
+  await expect(removeButtons).toHaveCount(2);
+  await expect(
+    sourceNode.getByRole("button", { name: "Remove reference: First target" }),
+  ).toHaveCSS("border-radius", "50%");
+
+  await sourceNode
+    .getByRole("button", { name: "Remove reference: First target" })
+    .click();
+  await expect(removeButtons).toHaveCount(1);
   await expect
     .poll(async () => (await storedWorkspace(page))?.references)
-    .toEqual([]);
+    .toEqual([
+      { sourceNodeId: source.id, targetNodeId: secondTarget.id },
+    ]);
+
+  await page.keyboard.press("Control+z");
+  await expect(removeButtons).toHaveCount(2);
+  await expect
+    .poll(async () => (await storedWorkspace(page))?.references)
+    .toEqual([
+      { sourceNodeId: source.id, targetNodeId: firstTarget.id },
+      { sourceNodeId: source.id, targetNodeId: secondTarget.id },
+    ]);
+});
+
+test("removing a reference commits the canvas active edit as a separate undo step", async ({
+  page,
+}) => {
+  const editingNode = {
+    content: "Original content",
+    id: syntheticId(34),
+    name: "Editing node",
+    x: 100,
+    y: 100,
+  };
+  const spatialNeighbor = {
+    id: syntheticId(37),
+    name: "Spatial neighbor",
+    x: 100,
+    y: 230,
+  };
+  const referenceSource = {
+    id: syntheticId(35),
+    name: "Reference source",
+    x: 520,
+    y: 100,
+  };
+  const target = {
+    id: syntheticId(36),
+    name: "Reference target",
+    x: 900,
+    y: 100,
+  };
+  await openSyntheticWorkspace(
+    page,
+    [editingNode, spatialNeighbor, referenceSource, target],
+    [{ sourceNodeId: referenceSource.id, targetNodeId: target.id }],
+  );
+
+  const editingNodeCard = node(page, editingNode.id);
+  const editedContent = Array.from(
+    { length: 14 },
+    (_, index) => `Synthetic line ${index + 1} expands automatic height`,
+  ).join("\n");
+  await editingNodeCard.dblclick({ position: { x: 80, y: 24 } });
+  await editingNodeCard.locator("textarea").fill(editedContent);
+  await node(page, referenceSource.id)
+    .getByRole("button", { name: "Remove reference: Reference target" })
+    .click();
+
+  await expect(editingNodeCard).toHaveAttribute("data-editing", "false");
+  await expect
+    .poll(async () => {
+      const stored = await storedWorkspace(page);
+      return {
+        content: stored?.nodes?.find(
+          (candidate: { id?: string }) => candidate.id === editingNode.id,
+        )?.content,
+        references: stored?.references,
+      };
+    })
+    .toEqual({ content: editedContent, references: [] });
+  await expect
+    .poll(async () => {
+      const stored = await storedWorkspace(page);
+      return stored?.layout?.find(
+        (item: { nodeId: string }) => item.nodeId === spatialNeighbor.id,
+      );
+    })
+    .not.toMatchObject({ x: spatialNeighbor.x, y: spatialNeighbor.y });
 
   await page.keyboard.press("Control+z");
   await expect
-    .poll(async () => (await storedWorkspace(page))?.references)
-    .toEqual([{ sourceNodeId: nodes[0].id, targetNodeId: nodes[1].id }]);
+    .poll(async () => {
+      const stored = await storedWorkspace(page);
+      return {
+        content: stored?.nodes?.find(
+          (candidate: { id?: string }) => candidate.id === editingNode.id,
+        )?.content,
+        references: stored?.references,
+      };
+    })
+    .toEqual({
+      content: editedContent,
+      references: [
+        { sourceNodeId: referenceSource.id, targetNodeId: target.id },
+      ],
+    });
+  await expect
+    .poll(async () => {
+      const stored = await storedWorkspace(page);
+      return stored?.layout?.find(
+        (item: { nodeId: string }) => item.nodeId === spatialNeighbor.id,
+      );
+    })
+    .not.toMatchObject({ x: spatialNeighbor.x, y: spatialNeighbor.y });
+
+  await page.keyboard.press("Control+z");
+  await expect
+    .poll(async () => {
+      const stored = await storedWorkspace(page);
+      return {
+        content: stored?.nodes?.find(
+          (candidate: { id?: string }) => candidate.id === editingNode.id,
+        )?.content,
+        neighbor: stored?.layout?.find(
+          (item: { nodeId: string }) => item.nodeId === spatialNeighbor.id,
+        ),
+      };
+    })
+    .toEqual({
+      content: editedContent,
+      neighbor: expect.objectContaining({
+        x: spatialNeighbor.x,
+        y: spatialNeighbor.y,
+      }),
+    });
+
+  await page.keyboard.press("Control+z");
+  await expect
+    .poll(async () => {
+      const stored = await storedWorkspace(page);
+      return stored?.nodes?.find(
+        (candidate: { id?: string }) => candidate.id === editingNode.id,
+      )?.content;
+    })
+    .toBe("Original content");
 });
 
-test("document import requires and records an explicit canvas position", async ({ page }) => {
+test("an invalid editor draft blocks reference removal without losing the draft", async ({
+  page,
+}) => {
+  const editingNode = {
+    id: syntheticId(38),
+    name: "Editable node",
+    x: 100,
+    y: 100,
+  };
+  const referenceSource = {
+    id: syntheticId(39),
+    name: "Existing name",
+    x: 520,
+    y: 100,
+  };
+  const target = {
+    id: syntheticId(40),
+    name: "Reference target",
+    x: 900,
+    y: 100,
+  };
+  await openSyntheticWorkspace(page, [editingNode, referenceSource, target], [
+    { sourceNodeId: referenceSource.id, targetNodeId: target.id },
+  ]);
+
+  const editor = node(page, editingNode.id);
+  await editor.dblclick({ position: { x: 80, y: 24 } });
+  await editor.locator("input").fill(referenceSource.name);
+  await expect(editor.getByRole("alert")).toHaveText("This name already exists");
+
+  const remove = node(page, referenceSource.id).getByRole("button", {
+    name: "Remove reference: Reference target",
+  });
+  await expect(remove).toBeDisabled();
+  await expect
+    .poll(async () => (await storedWorkspace(page))?.references)
+    .toEqual([
+      { sourceNodeId: referenceSource.id, targetNodeId: target.id },
+    ]);
+  await expect(editor).toHaveAttribute("data-editing", "true");
+  await expect(editor.locator("input")).toHaveValue(referenceSource.name);
+});
+
+test("document import requires and records an explicit canvas position", async ({
+  page,
+}) => {
   const nodes = gridNodes(1, 1);
   await openSyntheticWorkspace(page, nodes);
 
   await page.getByTestId("document-import-open").click();
-  await expect(page.getByTestId("document-import-placement-status")).toHaveAttribute(
-    "data-selected",
-    "false",
-  );
+  await expect(
+    page.getByTestId("document-import-placement-status"),
+  ).toHaveAttribute("data-selected", "false");
   await page.getByTestId("document-import-choose-placement").click();
   await expect(page.getByTestId("canvas-point-selection")).toBeVisible();
   await expect(page.getByTestId("graph-canvas")).toHaveAttribute(
@@ -1064,15 +1266,16 @@ test("document import requires and records an explicit canvas position", async (
     "true",
   );
 
-  await page.getByTestId("graph-canvas").click({ position: { x: 760, y: 520 } });
+  await page.getByTestId("graph-canvas").click({
+    position: { x: 760, y: 520 },
+  });
 
-  await expect(page.getByTestId("document-import-placement-status")).toHaveAttribute(
-    "data-selected",
-    "true",
-  );
-  await expect(page.getByTestId("document-import-placement-status")).toContainText(
-    /760.*520/u,
-  );
+  await expect(
+    page.getByTestId("document-import-placement-status"),
+  ).toHaveAttribute("data-selected", "true");
+  await expect(
+    page.getByTestId("document-import-placement-status"),
+  ).toContainText(/760.*520/u);
 });
 
 test("canvas select all, delete, undo, redo and context menu share one keyboard model", async ({
@@ -1675,6 +1878,140 @@ test("a long smart-reference queue owns a real scroll viewport", async ({ page }
   expect(dimensions.scrollHeight).toBeGreaterThan(dimensions.clientHeight);
   await queueList.locator(".smart-reference-queue-item").last().scrollIntoViewIfNeeded();
   await expect(queueList.locator(".smart-reference-queue-item").last()).toBeVisible();
+});
+
+test("the low-glare starry theme is selectable and persists on this device", async ({
+  page,
+}) => {
+  const themedNodes = gridNodes(1, 1);
+  themedNodes[0].content =
+    "[[li:totp]]JBSWY3DPEHPK3PXP[[/li]] [[li:secret]]synthetic-secret[[/li]]";
+  await openSyntheticWorkspace(page, themedNodes);
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "starry-dark");
+  await expect(page.getByTestId("graph-canvas")).toHaveAttribute(
+    "data-theme",
+    "starry-dark",
+  );
+  await expect(page.locator(".totp-content-line")).toHaveCSS(
+    "background-color",
+    "rgb(17, 26, 45)",
+  );
+  await expect(page.locator(".secret-content")).toHaveCSS(
+    "background-color",
+    "rgb(17, 26, 45)",
+  );
+
+  await page.getByRole("button", { name: "Import document" }).click();
+  const importDialog = page.locator(".document-import-dialog");
+  await expect(importDialog).toHaveCSS("background-color", "rgb(16, 25, 43)");
+  await expect(importDialog.locator("input").first()).toHaveCSS(
+    "background-color",
+    "rgb(11, 18, 33)",
+  );
+  await importDialog.getByRole("button", { name: "Close" }).click();
+
+  await page.getByTestId("settings-navigation").click();
+  const settingsTabs = page.locator(".settings-tab-list .settings-tab");
+  await expect(settingsTabs).toHaveCount(5);
+  await expect
+    .poll(() =>
+      page.locator(".settings-tab-list").evaluate((element) =>
+        getComputedStyle(element).gridTemplateColumns.split(" ").length,
+      ),
+    )
+    .toBe(5);
+  await page.getByTestId("settings-tab-smartReference").click();
+  const smartReferencePanel = page.locator("#settings-panel-smartReference");
+  await smartReferencePanel
+    .locator(".smart-reference-settings .segmented-control")
+    .first()
+    .getByRole("button", { name: "Remote" })
+    .click();
+  await expect(
+    smartReferencePanel.locator(".remote-embedding-fields input").first(),
+  ).toHaveCSS("background-color", "rgb(11, 18, 33)");
+
+  await page.getByTestId("settings-tab-dataSecurity").click();
+  expect(
+    await page.evaluate(() => {
+      const setting = document.createElement("label");
+      setting.className = "security-idle-setting";
+      document.querySelector(".app-shell")?.append(setting);
+      const backgroundColor = getComputedStyle(setting).backgroundColor;
+      setting.remove();
+      return backgroundColor;
+    }),
+  ).toBe("rgb(11, 18, 33)");
+  expect(
+    await page.evaluate(() => {
+      const gate = document.createElement("div");
+      gate.className = "security-gate";
+      gate.innerHTML = `
+        <form class="security-unlock-form"><label>Master password</label></form>
+        <p class="security-error">Unlock failed</p>
+        <div class="security-unlock-divider">or</div>
+        <div class="security-system-unlock"><small>System unlock help</small></div>
+      `;
+      document.body.append(gate);
+      const colors = {
+        error: getComputedStyle(gate.querySelector(".security-error")!).color,
+        helper: getComputedStyle(
+          gate.querySelector(".security-system-unlock small")!,
+        ).color,
+        label: getComputedStyle(gate.querySelector("label")!).color,
+      };
+      gate.remove();
+      return colors;
+    }),
+  ).toEqual({
+    error: "rgb(255, 170, 165)",
+    helper: "rgb(154, 169, 189)",
+    label: "rgb(201, 213, 231)",
+  });
+  expect(
+    await page.evaluate(() => {
+      const fixture = document.createElement("div");
+      fixture.innerHTML = `
+        <div class="smart-reference-progress"><span>Downloading</span></div>
+        <div class="smart-reference-status">Analysis failed</div>
+        <div class="extension-presentation-select"><span>Indent</span><select></select></div>
+      `;
+      document.querySelector(".app-shell")?.append(fixture);
+      const colors = {
+        extension: getComputedStyle(
+          fixture.querySelector(".extension-presentation-select")!,
+        ).backgroundColor,
+        progress: getComputedStyle(
+          fixture.querySelector(".smart-reference-progress")!,
+        ).backgroundColor,
+        status: getComputedStyle(
+          fixture.querySelector(".smart-reference-status")!,
+        ).backgroundColor,
+      };
+      fixture.remove();
+      return colors;
+    }),
+  ).toEqual({
+    extension: "rgb(17, 26, 45)",
+    progress: "rgb(20, 35, 60)",
+    status: "rgb(50, 26, 40)",
+  });
+
+  await page.getByTestId("settings-tab-general").click();
+  const starry = page.getByTestId("appearance-theme-starry-dark");
+  const mint = page.getByTestId("appearance-theme-mint-light");
+  await expect(starry).toHaveAttribute("aria-pressed", "true");
+  await mint.click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "mint-light");
+  await expect(mint).toHaveAttribute("aria-pressed", "true");
+
+  await page.reload();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "mint-light");
+  await page.getByTestId("settings-navigation").click();
+  await expect(page.getByTestId("appearance-theme-mint-light")).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
 });
 
 test("Shift marquee remains narrow while auto-panning and never selects the full graph", async ({

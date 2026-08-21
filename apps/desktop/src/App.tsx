@@ -24,6 +24,7 @@ import {
   Link2,
   LockKeyhole,
   Network,
+  Palette,
   Pencil,
   Plus,
   Puzzle,
@@ -44,6 +45,11 @@ import {
   loadCanvasAutoAvoidOverlaps,
   saveCanvasAutoAvoidOverlaps,
 } from "./canvasPreferences";
+import {
+  appearanceThemes,
+  loadAppearanceTheme,
+  saveAppearanceTheme,
+} from "./appearancePreferences";
 import DocumentImportDialog from "./DocumentImportDialog";
 import ExtensionSettings from "./ExtensionSettings";
 import {
@@ -200,6 +206,7 @@ import {
   type SmartReferenceResultCache,
   type SmartReferenceResultCacheStatus,
 } from "./smartReferenceCache";
+import { reconcileSmartReferenceAcceptance } from "./smartReferenceAcceptance";
 import "./App.css";
 
 type ViewId = "canvas" | "nodes" | "settings";
@@ -444,6 +451,11 @@ function App({
   const [searchTerm, setSearchTerm] = useState("");
   const [searchScope, setSearchScope] = useState<NodeSearchScope>("name");
   const [unmatchedNodeOpacity, setUnmatchedNodeOpacity] = useState(20);
+  const [appearanceTheme, setAppearanceTheme] = useState(() =>
+    loadAppearanceTheme(
+      typeof localStorage === "undefined" ? null : localStorage,
+    ),
+  );
   const [autoAvoidCanvasOverlaps, setAutoAvoidCanvasOverlaps] = useState(() =>
     loadCanvasAutoAvoidOverlaps(
       typeof localStorage === "undefined" ? null : localStorage,
@@ -658,6 +670,14 @@ function App({
   useEffect(() => {
     editingNodeIdRef.current = editingNodeId;
   }, [editingNodeId]);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = appearanceTheme;
+    saveAppearanceTheme(
+      typeof localStorage === "undefined" ? null : localStorage,
+      appearanceTheme,
+    );
+  }, [appearanceTheme]);
 
   useEffect(() => {
     saveCanvasAutoAvoidOverlaps(
@@ -2118,21 +2138,16 @@ function App({
       cached,
       currentWorkspace,
     );
-    const currentNodeIds = new Set(currentWorkspace.nodes.map((node) => node.id));
-    const currentAutomaticallyAddedNodeIds = automaticallyAddedNodeIds.filter(
-      (nodeId) => currentNodeIds.has(nodeId),
+    const acceptance = reconcileSmartReferenceAcceptance(
+      cached.sourceNodeId,
+      currentWorkspace.nodes.map((node) => node.id),
+      currentWorkspace.references,
+      automaticallyAddedNodeIds,
     );
-    const acceptedNodeIds = currentWorkspace.references
-      .filter((reference) => reference.sourceNodeId === cached.sourceNodeId)
-      .map((reference) => reference.targetNodeId)
-      .filter((nodeId) => currentNodeIds.has(nodeId));
     return {
       ...filtered,
       analysisKey,
-      acceptedNodeIds: Array.from(
-        new Set([...acceptedNodeIds, ...currentAutomaticallyAddedNodeIds]),
-      ),
-      automaticallyAddedNodeIds: currentAutomaticallyAddedNodeIds,
+      ...acceptance,
     };
   }
 
@@ -4395,7 +4410,7 @@ function App({
   };
 
   return (
-    <div className="app-shell">
+    <div className="app-shell" data-theme={appearanceTheme}>
       <aside className="sidebar">
         <div className="brand">
           <span className="brand-mark" aria-hidden="true">
@@ -4764,6 +4779,39 @@ function App({
                         type="button"
                       >
                         {t(languageLabelKeys[language])}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div className="setting-row">
+                  <div className="setting-label">
+                    <Palette size={18} />
+                    <div className="setting-label-copy">
+                      <span>{t("settings.theme")}</span>
+                      <small>{t("settings.themeDescription")}</small>
+                    </div>
+                  </div>
+                  <div
+                    aria-label={t("settings.theme")}
+                    className="segmented-control theme-picker"
+                  >
+                    {appearanceThemes.map((theme) => (
+                      <button
+                        aria-pressed={appearanceTheme === theme}
+                        data-active={appearanceTheme === theme}
+                        data-testid={`appearance-theme-${theme}`}
+                        key={theme}
+                        onClick={() => setAppearanceTheme(theme)}
+                        type="button"
+                      >
+                        <span
+                          aria-hidden="true"
+                          className="theme-picker-swatch"
+                          data-theme-swatch={theme}
+                        />
+                        <span>
+                          {t(`settings.themes.${theme}` as const)}
+                        </span>
                       </button>
                     ))}
                   </div>
@@ -6102,6 +6150,7 @@ function App({
           ) : activeView === "canvas" ? (
             <GraphCanvas
               analyzingNodeId={analyzingNodeId}
+              appearanceTheme={appearanceTheme}
               autoAvoidOverlaps={autoAvoidCanvasOverlaps}
               canRedo={historyAvailability.canRedo}
               canUndo={historyAvailability.canUndo}

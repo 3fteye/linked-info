@@ -106,6 +106,7 @@ import {
 import { CodePreviewSensitivityCache } from "./codePreviewSensitivity";
 import { TotpSecondClockProvider } from "./totpContent";
 import type { CanvasOperationItem } from "./canvasOperations";
+import type { AppearanceTheme } from "./appearancePreferences";
 import {
   CONTENT_MARKER_NOTE_MAX_LENGTH,
   contentMarkerRegistry,
@@ -180,6 +181,7 @@ interface InformationNodeData extends Record<string, unknown> {
   filterByNodeLabel: string;
   removeNodeFilterLabel: string;
   removeReferenceLabel: (name: string) => string;
+  referenceRemovalBlocked: boolean;
   sourceLabel: string;
   targetLabel: string;
   onCommit: (nodeId: string) => void;
@@ -200,6 +202,7 @@ interface InformationNodeData extends Record<string, unknown> {
     nodeId: string,
     result: BuiltInExtensionActionHostResult,
   ) => void;
+  onEditorCommitBlockedChange: (nodeId: string, blocked: boolean) => void;
   onRemoveReference: (sourceNodeId: string, targetNodeId: string) => void;
   onCopyCodeSource: ((containsSensitive: boolean) => Promise<void>) | null;
   onCopyDerivedSecret: ((value: string) => Promise<void>) | null;
@@ -342,6 +345,7 @@ interface GraphLabels {
 
 interface GraphCanvasProps {
   analyzingNodeId: string | null;
+  appearanceTheme: AppearanceTheme;
   autoAvoidOverlaps: boolean;
   nodes: InformationNode[];
   layout: NodeLayout[];
@@ -464,6 +468,23 @@ export function InformationNodeCard({
   const [bodyOverflowing, setBodyOverflowing] = useState(false);
   const [resizing, setResizing] = useState(false);
   const wasEditingRef = useRef(data.editing);
+
+  useEffect(() => {
+    const blocked =
+      data.editing && (data.nameConflict || draft.nameConflict);
+    data.onEditorCommitBlockedChange(id, blocked);
+    return () => {
+      if (blocked) {
+        data.onEditorCommitBlockedChange(id, false);
+      }
+    };
+  }, [
+    data.editing,
+    data.nameConflict,
+    data.onEditorCommitBlockedChange,
+    draft.nameConflict,
+    id,
+  ]);
 
   useEffect(() => {
     if (data.editing) {
@@ -1066,6 +1087,7 @@ export function InformationNodeCard({
                 <button
                   aria-label={data.removeReferenceLabel(target.label)}
                   className="graph-node-reference-remove"
+                  disabled={data.referenceRemovalBlocked}
                   onClick={(event) => {
                     event.stopPropagation();
                     data.onRemoveReference(id, target.id);
@@ -1224,6 +1246,7 @@ function referencedNodeLabel(
 
 export default function GraphCanvas({
   analyzingNodeId,
+  appearanceTheme,
   autoAvoidOverlaps,
   contentMarkerOptions,
   contentProcessorByNodeId,
@@ -1284,7 +1307,13 @@ export default function GraphCanvas({
   );
   const nodesRef = useRef(nodes);
   nodesRef.current = nodes;
+  const editingNodeIdRef = useRef(editingNodeId);
+  editingNodeIdRef.current = editingNodeId;
   const referencesRef = useRef(references);
+  const onLayoutChangeRef = useRef(onLayoutChange);
+  onLayoutChangeRef.current = onLayoutChange;
+  const onReferencesChangeRef = useRef(onReferencesChange);
+  onReferencesChangeRef.current = onReferencesChange;
   const [flowInstance, setFlowInstance] =
     useState<ReactFlowInstance<InformationFlowNode, Edge> | null>(null);
   const lastWorkspaceViewportRef = useRef<CanvasViewport | null>(viewport);
@@ -1305,21 +1334,20 @@ export default function GraphCanvas({
   const [referenceSearch, setReferenceSearch] =
     useState<ReferenceSearchState | null>(null);
   const [selectedReferenceId, setSelectedReferenceId] = useState<string | null>(null);
-  const removeReference = useCallback(
-    (sourceNodeId: string, targetNodeId: string) => {
-      const next = referencesRef.current.filter(
-        (reference) =>
-          reference.sourceNodeId !== sourceNodeId ||
-          reference.targetNodeId !== targetNodeId,
-      );
-      if (next.length === referencesRef.current.length) {
-        return;
-      }
-      referencesRef.current = next;
-      setSelectedReferenceId(null);
-      onReferencesChange(next);
+  const [editorCommitBlockedNodeId, setEditorCommitBlockedNodeId] = useState<
+    string | null
+  >(null);
+  const editorCommitBlockedNodeIdRef = useRef<string | null>(null);
+  const updateEditorCommitBlocked = useCallback(
+    (nodeId: string, blocked: boolean) => {
+      editorCommitBlockedNodeIdRef.current = blocked
+        ? nodeId
+        : editorCommitBlockedNodeIdRef.current === nodeId
+          ? null
+          : editorCommitBlockedNodeIdRef.current;
+      setEditorCommitBlockedNodeId(editorCommitBlockedNodeIdRef.current);
     },
-    [onReferencesChange],
+    [],
   );
   const [draggingNodeIds, setDraggingNodeIds] = useState<string[]>([]);
   const [canvasSelection, setCanvasSelection] =
@@ -1336,10 +1364,7 @@ export default function GraphCanvas({
   const settledNodeSizeByIdRef = useRef(
     new Map<string, { height: number; width: number }>(),
   );
-  const pendingCommitAvoidanceRef = useRef<{
-    before: { height: number; width: number } | null;
-    nodeId: string;
-  } | null>(null);
+  const commitAvoidanceFrameIdsRef = useRef(new Set<number>());
   const smartArrangementAbortControllerRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
@@ -1361,6 +1386,10 @@ export default function GraphCanvas({
     () => () => {
       smartArrangementAbortControllerRef.current?.abort();
       smartArrangementAbortControllerRef.current = null;
+      for (const frameId of commitAvoidanceFrameIdsRef.current) {
+        window.cancelAnimationFrame(frameId);
+      }
+      commitAvoidanceFrameIdsRef.current.clear();
     },
     [],
   );
@@ -1425,6 +1454,8 @@ export default function GraphCanvas({
     },
     [autoAvoidOverlaps, canvasRectangles],
   );
+  const layoutWithAutomaticAvoidanceRef = useRef(layoutWithAutomaticAvoidance);
+  layoutWithAutomaticAvoidanceRef.current = layoutWithAutomaticAvoidance;
 
   const commitNodeDimensions = useCallback(
     (
@@ -1512,22 +1543,116 @@ export default function GraphCanvas({
     [commitNodeDimensions],
   );
 
-  const commitNodeAndScheduleAvoidance = useCallback(
-    (nodeId: string) => {
-      pendingCommitAvoidanceRef.current = autoAvoidOverlaps
-        ? {
-            before:
-              settledNodeSizeByIdRef.current.get(nodeId) ??
-              {
-                height: defaultAutomaticNodeHeight,
-                width: defaultAutomaticNodeWidth,
-              },
-            nodeId,
-          }
-        : null;
-      onNodeCommit(nodeId);
+  const applyReferenceRemoval = useCallback(
+    (sourceNodeId: string, targetNodeId: string) => {
+      const next = referencesRef.current.filter(
+        (reference) =>
+          reference.sourceNodeId !== sourceNodeId ||
+          reference.targetNodeId !== targetNodeId,
+      );
+      if (next.length === referencesRef.current.length) {
+        return;
+      }
+      referencesRef.current = next;
+      setSelectedReferenceId(null);
+      onReferencesChangeRef.current(next);
     },
-    [autoAvoidOverlaps, onNodeCommit],
+    [],
+  );
+
+  const scheduleCommittedNodeAvoidance = useCallback(
+    (
+      nodeId: string,
+      before: { height: number; width: number },
+      onComplete?: () => void,
+    ) => {
+      let firstFrame = 0;
+      let secondFrame = 0;
+      firstFrame = window.requestAnimationFrame(() => {
+        commitAvoidanceFrameIdsRef.current.delete(firstFrame);
+        secondFrame = window.requestAnimationFrame(() => {
+          commitAvoidanceFrameIdsRef.current.delete(secondFrame);
+          const nodeElement = containerRef.current?.querySelector<HTMLElement>(
+            `.graph-node[data-node-id="${nodeId}"]`,
+          );
+          const flowNode = flowNodesRef.current.find((node) => node.id === nodeId);
+          if (nodeElement !== null && nodeElement !== undefined && flowNode !== undefined) {
+            const after = {
+              height: nodeElement.offsetHeight,
+              width: nodeElement.offsetWidth,
+            };
+            settledNodeSizeByIdRef.current.set(nodeId, after);
+            if (
+              Math.abs(before.width - after.width) >= 1 ||
+              Math.abs(before.height - after.height) >= 1
+            ) {
+              const nextLayout = layoutWithAutomaticAvoidanceRef.current(
+                layoutRef.current,
+                nodeId,
+                {
+                  ...after,
+                  nodeId,
+                  x: flowNode.position.x,
+                  y: flowNode.position.y,
+                },
+              );
+              if (nextLayout !== layoutRef.current) {
+                onLayoutChangeRef.current(nextLayout);
+              }
+            }
+          }
+          onComplete?.();
+        });
+        commitAvoidanceFrameIdsRef.current.add(secondFrame);
+      });
+      commitAvoidanceFrameIdsRef.current.add(firstFrame);
+    },
+    [],
+  );
+
+  const commitNodeAndScheduleAvoidance = useCallback(
+    (nodeId: string, onComplete?: () => void) => {
+      if (editingNodeIdRef.current !== nodeId) {
+        return false;
+      }
+      const before =
+        settledNodeSizeByIdRef.current.get(nodeId) ??
+        {
+          height: defaultAutomaticNodeHeight,
+          width: defaultAutomaticNodeWidth,
+        };
+      onNodeCommit(nodeId);
+      if (autoAvoidOverlaps) {
+        scheduleCommittedNodeAvoidance(nodeId, before, onComplete);
+      } else {
+        onComplete?.();
+      }
+      return true;
+    },
+    [autoAvoidOverlaps, onNodeCommit, scheduleCommittedNodeAvoidance],
+  );
+
+  const removeReference = useCallback(
+    (sourceNodeId: string, targetNodeId: string) => {
+      if (editorCommitBlockedNodeIdRef.current !== null) {
+        return;
+      }
+      if (editingNodeId !== null) {
+        if (
+          commitNodeAndScheduleAvoidance(editingNodeId, () =>
+            applyReferenceRemoval(sourceNodeId, targetNodeId),
+          )
+        ) {
+          return;
+        }
+      }
+      applyReferenceRemoval(sourceNodeId, targetNodeId);
+    },
+    [
+      applyReferenceRemoval,
+      commitNodeAndScheduleAvoidance,
+      editingNodeId,
+    ],
   );
 
   useEffect(() => {
@@ -1541,61 +1666,6 @@ export default function GraphCanvas({
       });
     }
   }, [editingNodeId, flowNodes]);
-
-  useEffect(() => {
-    const pending = pendingCommitAvoidanceRef.current;
-    if (pending === null || editingNodeId === pending.nodeId) {
-      return;
-    }
-    pendingCommitAvoidanceRef.current = null;
-    let secondFrame = 0;
-    const firstFrame = window.requestAnimationFrame(() => {
-      secondFrame = window.requestAnimationFrame(() => {
-        const nodeElement = containerRef.current?.querySelector<HTMLElement>(
-          `.graph-node[data-node-id="${pending.nodeId}"]`,
-        );
-        const flowNode = flowNodesRef.current.find(
-          (node) => node.id === pending.nodeId,
-        );
-        if (
-          nodeElement === null ||
-          nodeElement === undefined ||
-          flowNode === undefined
-        ) {
-          return;
-        }
-        const after = {
-          height: nodeElement.offsetHeight,
-          width: nodeElement.offsetWidth,
-        };
-        settledNodeSizeByIdRef.current.set(pending.nodeId, after);
-        if (
-          pending.before === null ||
-          (Math.abs(pending.before.width - after.width) < 1 &&
-            Math.abs(pending.before.height - after.height) < 1)
-        ) {
-          return;
-        }
-        const nextLayout = layoutWithAutomaticAvoidance(
-          layoutRef.current,
-          pending.nodeId,
-          {
-            ...after,
-            nodeId: pending.nodeId,
-            x: flowNode.position.x,
-            y: flowNode.position.y,
-          },
-        );
-        if (nextLayout !== layoutRef.current) {
-          onLayoutChange(nextLayout);
-        }
-      });
-    });
-    return () => {
-      window.cancelAnimationFrame(firstFrame);
-      window.cancelAnimationFrame(secondFrame);
-    };
-  }, [editingNodeId, layoutWithAutomaticAvoidance, onLayoutChange]);
 
   const openSmartArrangement = useCallback((nodeIds: readonly string[]) => {
     const uniqueNodeIds = Array.from(new Set(nodeIds));
@@ -2440,6 +2510,7 @@ export default function GraphCanvas({
             filterByNodeLabel: labels.filterByNode,
             removeNodeFilterLabel: labels.removeNodeFilter,
             removeReferenceLabel: labels.removeReference,
+            referenceRemovalBlocked: editorCommitBlockedNodeId !== null,
             sourceLabel: labels.sourceHandle,
             targetLabel: labels.targetHandle,
             onCommit: commitNodeAndScheduleAvoidance,
@@ -2448,6 +2519,7 @@ export default function GraphCanvas({
             onContentProcessorChange: onNodeContentProcessorChange,
             onExtensionMetadataChange: onNodeExtensionMetadataChange,
             onExtensionProposal: onNodeExtensionProposal,
+            onEditorCommitBlockedChange: updateEditorCommitBlocked,
             onRemoveReference: removeReference,
             onCopyCodeSource:
               codeSourceContainsSensitive && onCopySecret === null
@@ -2475,6 +2547,7 @@ export default function GraphCanvas({
     canvasReferencePresentation,
     editingNodeId,
     extensionBaseRevision,
+    editorCommitBlockedNodeId,
     extensionMetadata,
     fitContentNodeId,
     clampedUnmatchedNodeOpacity,
@@ -2494,12 +2567,14 @@ export default function GraphCanvas({
     onNodeNameChange,
     openIncomingReferenceBrowser,
     onToggleReferenceFilter,
+    removeReference,
     referenceFilterNodeIdSet,
     referencedNodesBySource,
     removeReference,
     setFlowNodes,
     sensitiveCodeContentByNodeId,
     stackOrderByNode,
+    updateEditorCommitBlocked,
   ]);
 
   useEffect(() => {
@@ -3365,6 +3440,7 @@ export default function GraphCanvas({
   return (
     <div
       className="graph-canvas"
+      data-theme={appearanceTheme}
       data-flow-ready={flowInstance !== null}
       data-point-selection={pointSelection !== null}
       data-space-pan={spacePanActive}
@@ -3379,7 +3455,7 @@ export default function GraphCanvas({
     >
       <TotpSecondClockProvider>
         <ReactFlow<InformationFlowNode, Edge>
-        colorMode="light"
+        colorMode={appearanceTheme === "starry-dark" ? "dark" : "light"}
         deleteKeyCode={["Backspace", "Delete"]}
         edges={noFlowEdges}
         edgesReconnectable={false}
@@ -3534,14 +3610,14 @@ export default function GraphCanvas({
           )}
         </ViewportPortal>
         <Background
-          color="#d0d8d2"
+          color={appearanceTheme === "starry-dark" ? "#18243d" : "#d0d8d2"}
           gap={24}
           id="minor-grid"
           lineWidth={1}
           variant={BackgroundVariant.Lines}
         />
         <Background
-          color="#aebbb2"
+          color={appearanceTheme === "starry-dark" ? "#2e4168" : "#aebbb2"}
           gap={120}
           id="major-grid"
           lineWidth={1.2}
@@ -3549,9 +3625,15 @@ export default function GraphCanvas({
         />
         <MiniMap
           className="graph-minimap"
-          maskColor="rgb(245 247 245 / 72%)"
-          nodeColor="#d7e5dc"
-          nodeStrokeColor="#2e7152"
+          maskColor={
+            appearanceTheme === "starry-dark"
+              ? "rgb(6 10 24 / 78%)"
+              : "rgb(245 247 245 / 72%)"
+          }
+          nodeColor={appearanceTheme === "starry-dark" ? "#263a62" : "#d7e5dc"}
+          nodeStrokeColor={
+            appearanceTheme === "starry-dark" ? "#8eabff" : "#2e7152"
+          }
           pannable
           zoomable
         />
