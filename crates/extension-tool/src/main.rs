@@ -105,6 +105,7 @@ fn run() -> Result<(), String> {
     let command = arguments.next().ok_or_else(|| USAGE.to_owned())?;
     let arguments = arguments.collect::<Vec<_>>();
     match command.as_str() {
+        "help" | "--help" | "-h" => println!("{USAGE}"),
         "componentize" => {
             let options = Options::parse(arguments, &["--module", "--output"], &["--force"])?;
             let module =

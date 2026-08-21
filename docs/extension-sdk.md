@@ -28,8 +28,10 @@ edition = "2024"
 crate-type = ["cdylib"]
 
 [dependencies]
-linked-info-extension-sdk = "0.1.0"
+linked-info-extension-sdk = { path = "../linked-info/crates/extension-sdk" }
 ```
+
+当前 SDK 随公开仓库提供，尚未发布到 crates.io；不要把 `linked-info-extension-sdk = "0.1.0"` 当成现在可下载的依赖。可以下载仓库后使用上述路径依赖，也可以像仓库 CI 一样先运行 `cargo package -p linked-info-extension-sdk`，再从生成的 `.crate` 包建立固定依赖。首次正式发布后，文档才会改为 crates.io 版本或不可变 Git tag。
 
 实现 `linked_info_extension_sdk::guest::Guest` 的三个函数，然后导出组件 ABI：
 
@@ -98,13 +100,14 @@ cargo run -p linked-info-extension-tool -- invoke `
 
 ## 6. CI 验收
 
-仓库的 `test-rust-extension-sdk.ps1` 会把 SDK 和示例复制到检出目录之外，确保示例不能意外引用应用内部实现。随后依次验证：
+仓库的 `test-rust-extension-sdk.ps1` 会先把 SDK 生成为独立 `.crate` 包，再把解包后的 SDK 和示例放到 Git 检出目录之外，确保示例不能意外引用应用内部实现。随后依次验证：
 
-1. 独立 Rust Guest 能构建为无 WASI 的核心 Wasm。
-2. 核心 Wasm 能组件化为当前 `node-extension@1.0.0` world。
-3. 临时 Ed25519 发布者密钥能生成签名 `.liext`。
-4. 严格验证能复现同一包哈希和发布者身份。
-5. 真实 Wasmtime 宿主能获得声明式展示。
-6. 动作能返回节点元数据和绑定当前 revision 的修改提案。
+1. SDK 的发布包只依赖公开 crate，并包含构建所需的 WIT。
+2. 独立 Rust Guest 能构建为无 WASI 的核心 Wasm。
+3. 核心 Wasm 能组件化为当前 `node-extension@1.0.0` world。
+4. 临时 Ed25519 发布者密钥能生成签名 `.liext`。
+5. 严格验证能复现同一包哈希和发布者身份。
+6. 真实 Wasmtime 宿主能获得声明式展示。
+7. 动作能返回节点元数据和绑定当前 revision 的修改提案。
 
 应用内安装、启用、元数据持久化、修改确认和卸载保留继续由桌面生命周期测试覆盖；两组证据共同构成开放框架的完成门槛。

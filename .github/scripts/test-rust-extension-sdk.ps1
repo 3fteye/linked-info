@@ -9,8 +9,26 @@ $artifacts = Join-Path $externalRoot 'artifacts'
 New-Item -ItemType Directory -Path (Split-Path -Parent $externalSdk) -Force | Out-Null
 New-Item -ItemType Directory -Path (Split-Path -Parent $externalExample) -Force | Out-Null
 New-Item -ItemType Directory -Path $artifacts -Force | Out-Null
-Copy-Item -LiteralPath (Join-Path $repositoryRoot 'crates\extension-sdk') -Destination $externalSdk -Recurse
 Copy-Item -LiteralPath (Join-Path $repositoryRoot 'examples\rust-extension') -Destination $externalExample -Recurse
+
+Push-Location $repositoryRoot
+try {
+    & cargo package --locked -p linked-info-extension-sdk --no-verify
+    if ($LASTEXITCODE -ne 0) {
+        throw "extension SDK packaging failed with exit code $LASTEXITCODE"
+    }
+}
+finally {
+    Pop-Location
+}
+
+$sdkArchive = Join-Path $repositoryRoot 'target\package\linked-info-extension-sdk-0.1.0.crate'
+$sdkExtractionRoot = Split-Path -Parent $externalSdk
+& tar -xf $sdkArchive -C $sdkExtractionRoot
+if ($LASTEXITCODE -ne 0) {
+    throw "extension SDK extraction failed with exit code $LASTEXITCODE"
+}
+Move-Item -LiteralPath (Join-Path $sdkExtractionRoot 'linked-info-extension-sdk-0.1.0') -Destination $externalSdk
 
 Push-Location $externalExample
 try {
