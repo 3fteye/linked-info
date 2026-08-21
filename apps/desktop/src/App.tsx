@@ -54,7 +54,9 @@ import DocumentImportDialog from "./DocumentImportDialog";
 import ExtensionSettings from "./ExtensionSettings";
 import {
   commitExtensionInstall,
+  extensionManagerAvailable,
   migratePreparedExtensionMetadata,
+  recoverPendingExtensionUpgrades,
   type ExtensionInstallPreview,
   type InstalledExtension,
 } from "./extensionManager";
@@ -401,6 +403,16 @@ function nodeFilterLabel(
 
   const summary = compactContent(node.content);
   return `${unnamedLabel} · ${summary || noContentLabel}`;
+}
+
+function extensionMetadataSchemaVersions(
+  workspace: WorkspaceSnapshot,
+): Record<string, number> {
+  return Object.fromEntries(
+    Object.entries(workspace.view.extensionMetadata).map(
+      ([extensionId, metadata]) => [extensionId, metadata.schemaVersion],
+    ),
+  );
 }
 
 function App({
@@ -1327,6 +1339,25 @@ function App({
       active = false;
     };
   }, [persistence]);
+
+  useEffect(() => {
+    if (!persistenceReady || !extensionManagerAvailable) {
+      return;
+    }
+    let active = true;
+    void recoverPendingExtensionUpgrades(
+      extensionMetadataSchemaVersions(workspaceRef.current),
+    ).catch((error) => {
+      if (active) {
+        showAppNotice(
+          t("extensions.manager.recoveryFailed", { reason: errorReason(error) }),
+        );
+      }
+    });
+    return () => {
+      active = false;
+    };
+  }, [persistenceReady, t]);
 
   const referencedTargetIdsBySource = useMemo(() => {
     const targetIdsBySource = new Map<string, Set<string>>();
@@ -3002,6 +3033,7 @@ function App({
         const migration = await migratePreparedExtensionMetadata(
           preview,
           preparedMetadata.input,
+          true,
         );
         metadataMigrationId = migration.metadataMigrationId;
         const migratedMetadata = finishWorkspaceExtensionMetadataMigration(
@@ -3025,23 +3057,11 @@ function App({
         }
       }
 
-      let installed: InstalledExtension[];
-      try {
-        installed = await commitExtensionInstall(
-          preview,
-          true,
-          metadataMigrationId,
-        );
-      } catch (error) {
-        if (migratedWorkspacePersisted) {
-          try {
-            await persistence.save(current);
-          } catch {
-            throw new Error("extension_metadata_migration_rollback_failed");
-          }
-        }
-        throw error;
-      }
+      const installed = await commitExtensionInstall(
+        preview,
+        true,
+        metadataMigrationId,
+      );
 
       if (next !== current) {
         workspaceChangedInSessionRef.current = true;
@@ -3057,6 +3077,20 @@ function App({
         showAppNotice(t("extensions.manager.installCompleted"));
       }
       return installed;
+    } catch (error) {
+      if (metadataMigrationId !== null) {
+        try {
+          if (migratedWorkspacePersisted) {
+            await persistence.save(current);
+          }
+          await recoverPendingExtensionUpgrades(
+            extensionMetadataSchemaVersions(current),
+          );
+        } catch {
+          throw new Error("extension_metadata_migration_rollback_failed");
+        }
+      }
+      throw error;
     } finally {
       pendingWorkspaceCommitRef.current = null;
       workspaceMutationBlockedRef.current = false;

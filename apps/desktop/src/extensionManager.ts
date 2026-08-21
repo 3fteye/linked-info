@@ -85,10 +85,21 @@ export function commitExtensionInstall(
 export function migratePreparedExtensionMetadata(
   preview: ExtensionInstallPreview,
   metadata: ExtensionMetadataMigrationInput | null,
+  enabled: boolean,
 ): Promise<ExtensionMetadataMigrationPreview> {
   return invoke("migrate_prepared_extension_metadata", {
     preparedInstallId: preview.preparedInstallId,
     metadata,
+    grantedCapabilities: preview.capabilities,
+    enabled,
+  });
+}
+
+export function recoverPendingExtensionUpgrades(
+  metadataSchemaVersions: Readonly<Record<string, number>>,
+): Promise<InstalledExtension[]> {
+  return invoke("recover_pending_extension_upgrades", {
+    metadataSchemaVersions,
   });
 }
 

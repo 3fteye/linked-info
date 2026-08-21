@@ -21,6 +21,7 @@ use tauri_plugin_dialog::DialogExt;
 
 const REGISTRY_VERSION: u32 = 1;
 const REGISTRY_FILE: &str = "registry-v1.json";
+const PENDING_UPGRADES_FILE: &str = "pending-upgrades-v1.json";
 const PACKAGE_DIRECTORY: &str = "packages";
 const PENDING_PACKAGE_DIRECTORY: &str = "pending";
 const MAXIMUM_PREPARED_INSTALLS: usize = 4;
@@ -32,6 +33,7 @@ const METADATA_MIGRATION_TIMEOUT: Duration = Duration::from_secs(30);
 #[derive(Default)]
 pub struct ExtensionManagerState {
     prepared: Mutex<BTreeMap<String, PreparedExtensionInstall>>,
+    lifecycle: Mutex<()>,
 }
 
 #[derive(Clone)]
@@ -40,6 +42,7 @@ struct PreparedExtensionInstall {
     package: ValidatedExtensionPackage,
     update: bool,
     metadata_migration_id: Option<String>,
+    metadata_migration_journaled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,6 +72,30 @@ struct InstalledExtensionRecord {
     enabled: bool,
     metadata_schema_version: u32,
     granted_capabilities: Vec<ExtensionCapability>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PendingExtensionUpgrades {
+    version: u32,
+    extensions: BTreeMap<String, PendingExtensionUpgrade>,
+}
+
+impl Default for PendingExtensionUpgrades {
+    fn default() -> Self {
+        Self {
+            version: REGISTRY_VERSION,
+            extensions: BTreeMap::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PendingExtensionUpgrade {
+    metadata_migration_id: String,
+    previous: InstalledExtensionRecord,
+    next: InstalledExtensionRecord,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -137,6 +164,10 @@ fn registry_path(root: &Path) -> PathBuf {
     root.join(REGISTRY_FILE)
 }
 
+fn pending_upgrades_path(root: &Path) -> PathBuf {
+    root.join(PENDING_UPGRADES_FILE)
+}
+
 fn package_path(root: &Path, package_sha256: &str) -> Result<PathBuf, String> {
     if package_sha256.len() != 64
         || !package_sha256
@@ -175,6 +206,45 @@ fn write_registry(root: &Path, registry: &ExtensionRegistry) -> Result<(), Strin
         .map_err(|_| "extension_manager_registry_invalid".to_owned())?;
     crate::workspace_file::write_atomically(&registry_path(root), &bytes)
         .map_err(|_| "extension_manager_registry_write_failed".to_owned())
+}
+
+fn read_pending_upgrades(root: &Path) -> Result<PendingExtensionUpgrades, String> {
+    let path = pending_upgrades_path(root);
+    if !path.exists() {
+        return Ok(PendingExtensionUpgrades::default());
+    }
+    let bytes =
+        fs::read(path).map_err(|_| "extension_upgrade_recovery_journal_unavailable".to_owned())?;
+    let journal: PendingExtensionUpgrades = serde_json::from_slice(&bytes)
+        .map_err(|_| "extension_upgrade_recovery_journal_invalid".to_owned())?;
+    if journal.version != REGISTRY_VERSION
+        || journal.extensions.len() > MAXIMUM_PREPARED_INSTALLS
+        || journal.extensions.iter().any(|(id, upgrade)| {
+            id.len() > 128
+                || upgrade.metadata_migration_id.is_empty()
+                || upgrade.previous.metadata_schema_version >= upgrade.next.metadata_schema_version
+                || package_path(root, &upgrade.previous.package_sha256).is_err()
+                || package_path(root, &upgrade.next.package_sha256).is_err()
+        })
+    {
+        return Err("extension_upgrade_recovery_journal_invalid".to_owned());
+    }
+    Ok(journal)
+}
+
+fn write_pending_upgrades(root: &Path, journal: &PendingExtensionUpgrades) -> Result<(), String> {
+    fs::create_dir_all(root).map_err(|_| "extension_manager_directory_unavailable".to_owned())?;
+    if journal.extensions.is_empty() {
+        match fs::remove_file(pending_upgrades_path(root)) {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(_) => return Err("extension_upgrade_recovery_journal_write_failed".to_owned()),
+        }
+    }
+    let bytes = serde_json::to_vec(journal)
+        .map_err(|_| "extension_upgrade_recovery_journal_invalid".to_owned())?;
+    crate::workspace_file::write_atomically(&pending_upgrades_path(root), &bytes)
+        .map_err(|_| "extension_upgrade_recovery_journal_write_failed".to_owned())
 }
 
 fn capability_set(capabilities: &[ExtensionCapability]) -> BTreeSet<ExtensionCapability> {
@@ -216,6 +286,23 @@ fn validate_update(
         return Err("extension_update_metadata_schema_not_newer".to_owned());
     }
     Ok(())
+}
+
+fn installed_record(
+    package: &ValidatedExtensionPackage,
+    granted_capabilities: Vec<ExtensionCapability>,
+    enabled: bool,
+) -> InstalledExtensionRecord {
+    InstalledExtensionRecord {
+        version: package.manifest.version.clone(),
+        package_sha256: package.package_sha256.clone(),
+        publisher_name: package.manifest.publisher.name.clone(),
+        publisher_fingerprint: package.publisher_fingerprint.clone(),
+        signed: package.signed,
+        enabled,
+        metadata_schema_version: package.manifest.metadata_schema_version,
+        granted_capabilities,
+    }
 }
 
 fn validate_installed_package(
@@ -282,6 +369,22 @@ fn registry_views(root: &Path, registry: &ExtensionRegistry) -> Vec<InstalledExt
         .iter()
         .map(|(id, record)| record_view(root, id, record))
         .collect()
+}
+
+fn recovered_record_for_schema(
+    pending: &PendingExtensionUpgrade,
+    observed_schema_version: Option<u32>,
+) -> Result<(&InstalledExtensionRecord, &InstalledExtensionRecord), String> {
+    match observed_schema_version {
+        Some(version) if version == pending.next.metadata_schema_version => {
+            Ok((&pending.next, &pending.previous))
+        }
+        Some(version) if version == pending.previous.metadata_schema_version => {
+            Ok((&pending.previous, &pending.next))
+        }
+        None => Ok((&pending.previous, &pending.next)),
+        Some(_) => Err("extension_upgrade_recovery_metadata_schema_unknown".to_owned()),
+    }
 }
 
 fn validate_migration_payload(
@@ -526,7 +629,17 @@ pub async fn choose_extension_install(
     };
     crate::workspace_file::ensure_workspace_access(&app, &vault, permit)?;
     let root = extension_root(&app)?;
+    let _lifecycle = manager
+        .lifecycle
+        .lock()
+        .map_err(|_| "extension_manager_state_unavailable".to_owned())?;
     let registry = read_registry(&root)?;
+    if read_pending_upgrades(&root)?
+        .extensions
+        .contains_key(&package.manifest.id)
+    {
+        return Err("extension_upgrade_recovery_required".to_owned());
+    }
     let existing = registry.extensions.get(&package.manifest.id);
     if let Some(existing) = existing {
         validate_update(existing, &package)?;
@@ -578,6 +691,7 @@ pub async fn choose_extension_install(
             package,
             update: existing.is_some(),
             metadata_migration_id: None,
+            metadata_migration_journaled: false,
         },
     );
     Ok(Some(preview))
@@ -588,31 +702,54 @@ pub async fn migrate_prepared_extension_metadata(
     app: tauri::AppHandle,
     prepared_install_id: String,
     metadata: Option<ExtensionMetadataMigrationInput>,
+    granted_capabilities: Vec<ExtensionCapability>,
+    enabled: bool,
 ) -> Result<ExtensionMetadataMigrationPreview, String> {
     let vault = app.state::<crate::workspace_file::WorkspaceVaultState>();
+    let manager = app.state::<ExtensionManagerState>();
     let permit = crate::workspace_file::begin_workspace_access(&app, &vault)?;
     let generation = vault
         .access_generation()
         .load(std::sync::atomic::Ordering::Acquire);
-    let prepared = app
-        .state::<ExtensionManagerState>()
+    let prepared = manager
         .prepared
         .lock()
         .map_err(|_| "extension_manager_state_unavailable".to_owned())?
         .get(&prepared_install_id)
         .cloned()
         .ok_or_else(|| "extension_install_preparation_expired".to_owned())?;
+    if capability_set(&granted_capabilities)
+        != capability_set(&prepared.package.manifest.capabilities)
+        || granted_capabilities.len() != prepared.package.manifest.capabilities.len()
+    {
+        return Err("extension_install_capabilities_not_approved".to_owned());
+    }
     if !prepared.update {
         return Err("extension_metadata_migration_not_required".to_owned());
     }
     let root = extension_root(&app)?;
-    let registry = read_registry(&root)?;
-    let existing = registry
-        .extensions
-        .get(&prepared.package.manifest.id)
-        .cloned()
-        .ok_or_else(|| "extension_install_state_changed".to_owned())?;
-    validate_update(&existing, &prepared.package)?;
+    let (existing, old_package) = {
+        let _lifecycle = manager
+            .lifecycle
+            .lock()
+            .map_err(|_| "extension_manager_state_unavailable".to_owned())?;
+        if read_pending_upgrades(&root)?
+            .extensions
+            .contains_key(&prepared.package.manifest.id)
+        {
+            return Err("extension_upgrade_recovery_required".to_owned());
+        }
+        let registry = read_registry(&root)?;
+        let existing = registry
+            .extensions
+            .get(&prepared.package.manifest.id)
+            .cloned()
+            .ok_or_else(|| "extension_install_state_changed".to_owned())?;
+        validate_update(&existing, &prepared.package)?;
+        let old_package =
+            validate_installed_package(&root, &prepared.package.manifest.id, &existing)?;
+        (existing, old_package)
+    };
     let target_schema_version = prepared.package.manifest.metadata_schema_version;
     if target_schema_version <= existing.metadata_schema_version {
         return Err(
@@ -623,7 +760,6 @@ pub async fn migrate_prepared_extension_metadata(
             },
         );
     }
-    let old_package = validate_installed_package(&root, &prepared.package.manifest.id, &existing)?;
     let task_app = app.clone();
     let task_root = root.clone();
     let task_prepared_id = prepared_install_id.clone();
@@ -646,6 +782,12 @@ pub async fn migrate_prepared_extension_metadata(
     .await
     .map_err(|_| "extension_metadata_migration_task_failed".to_owned())??;
     crate::workspace_file::ensure_workspace_access(&app, &vault, permit)?;
+    let metadata_migration_id = uuid::Uuid::new_v4().to_string();
+    let next_record = installed_record(&prepared.package, granted_capabilities, enabled);
+    let _lifecycle = manager
+        .lifecycle
+        .lock()
+        .map_err(|_| "extension_manager_state_unavailable".to_owned())?;
     let current_registry = read_registry(&root)?;
     let current = current_registry
         .extensions
@@ -654,8 +796,27 @@ pub async fn migrate_prepared_extension_metadata(
     if current != &existing {
         return Err("extension_install_state_changed".to_owned());
     }
-    let metadata_migration_id = uuid::Uuid::new_v4().to_string();
-    let manager = app.state::<ExtensionManagerState>();
+    let journaled = migrated.is_some();
+    if journaled {
+        let path = package_path(&root, &prepared.package.package_sha256)?;
+        fs::create_dir_all(
+            path.parent()
+                .ok_or_else(|| "extension_manager_directory_unavailable".to_owned())?,
+        )
+        .map_err(|_| "extension_manager_directory_unavailable".to_owned())?;
+        crate::workspace_file::write_atomically(&path, &prepared.bytes)
+            .map_err(|_| "extension_install_package_write_failed".to_owned())?;
+        let mut journal = read_pending_upgrades(&root)?;
+        journal.extensions.insert(
+            prepared.package.manifest.id.clone(),
+            PendingExtensionUpgrade {
+                metadata_migration_id: metadata_migration_id.clone(),
+                previous: existing.clone(),
+                next: next_record,
+            },
+        );
+        write_pending_upgrades(&root, &journal)?;
+    }
     let mut prepared_installs = manager
         .prepared
         .lock()
@@ -668,6 +829,7 @@ pub async fn migrate_prepared_extension_metadata(
         })
         .ok_or_else(|| "extension_install_preparation_expired".to_owned())?;
     current_prepared.metadata_migration_id = Some(metadata_migration_id.clone());
+    current_prepared.metadata_migration_journaled = journaled;
     Ok(ExtensionMetadataMigrationPreview {
         metadata_migration_id,
         metadata: migrated,
@@ -685,6 +847,10 @@ pub fn commit_extension_install(
     metadata_migration_id: Option<String>,
 ) -> Result<Vec<InstalledExtensionView>, String> {
     let permit = crate::workspace_file::begin_workspace_access(&app, &vault)?;
+    let _lifecycle = manager
+        .lifecycle
+        .lock()
+        .map_err(|_| "extension_manager_state_unavailable".to_owned())?;
     let prepared = manager
         .prepared
         .lock()
@@ -699,6 +865,7 @@ pub fn commit_extension_install(
     }
     let root = extension_root(&app)?;
     let mut registry = read_registry(&root)?;
+    let mut journal = read_pending_upgrades(&root)?;
     let existing = registry
         .extensions
         .get(&prepared.package.manifest.id)
@@ -718,6 +885,24 @@ pub fn commit_extension_install(
             return Err("extension_metadata_migration_not_required".to_owned());
         }
     }
+    let next_record = installed_record(&prepared.package, granted_capabilities, enabled);
+    if prepared.metadata_migration_journaled {
+        let pending = journal
+            .extensions
+            .get(&prepared.package.manifest.id)
+            .ok_or_else(|| "extension_upgrade_recovery_journal_missing".to_owned())?;
+        if pending.metadata_migration_id != metadata_migration_id.clone().unwrap_or_default()
+            || pending.previous != existing.clone().expect("validated update record")
+            || pending.next != next_record
+        {
+            return Err("extension_upgrade_recovery_journal_mismatch".to_owned());
+        }
+    } else if journal
+        .extensions
+        .contains_key(&prepared.package.manifest.id)
+    {
+        return Err("extension_upgrade_recovery_required".to_owned());
+    }
     crate::workspace_file::ensure_workspace_access(&app, &vault, permit)?;
     let path = package_path(&root, &prepared.package.package_sha256)?;
     fs::create_dir_all(
@@ -730,21 +915,18 @@ pub fn commit_extension_install(
     let old_hash = existing
         .as_ref()
         .map(|record| record.package_sha256.clone());
-    registry.extensions.insert(
-        prepared.package.manifest.id.clone(),
-        InstalledExtensionRecord {
-            version: prepared.package.manifest.version.clone(),
-            package_sha256: prepared.package.package_sha256.clone(),
-            publisher_name: prepared.package.manifest.publisher.name.clone(),
-            publisher_fingerprint: prepared.package.publisher_fingerprint.clone(),
-            signed: prepared.package.signed,
-            enabled,
-            metadata_schema_version: prepared.package.manifest.metadata_schema_version,
-            granted_capabilities,
-        },
-    );
+    registry
+        .extensions
+        .insert(prepared.package.manifest.id.clone(), next_record);
     write_registry(&root, &registry)?;
+    let journal_cleaned = if prepared.metadata_migration_journaled {
+        journal.extensions.remove(&prepared.package.manifest.id);
+        write_pending_upgrades(&root, &journal).is_ok()
+    } else {
+        true
+    };
     if let Some(old_hash) = old_hash.filter(|hash| hash != &prepared.package.package_sha256)
+        && journal_cleaned
         && !registry
             .extensions
             .values()
@@ -757,11 +939,74 @@ pub fn commit_extension_install(
 }
 
 #[tauri::command]
+pub fn recover_pending_extension_upgrades(
+    app: tauri::AppHandle,
+    manager: tauri::State<'_, ExtensionManagerState>,
+    runtime: tauri::State<'_, crate::extension_runtime::ExtensionRuntimeState>,
+    vault: tauri::State<'_, crate::workspace_file::WorkspaceVaultState>,
+    metadata_schema_versions: BTreeMap<String, u32>,
+) -> Result<Vec<InstalledExtensionView>, String> {
+    let permit = crate::workspace_file::begin_workspace_access(&app, &vault)?;
+    let _lifecycle = manager
+        .lifecycle
+        .lock()
+        .map_err(|_| "extension_manager_state_unavailable".to_owned())?;
+    let root = extension_root(&app)?;
+    let journal = read_pending_upgrades(&root)?;
+    let mut registry = read_registry(&root)?;
+    if journal.extensions.is_empty() {
+        crate::workspace_file::ensure_workspace_access(&app, &vault, permit)?;
+        return Ok(registry_views(&root, &registry));
+    }
+
+    let mut unselected_hashes = Vec::new();
+    for (extension_id, pending) in &journal.extensions {
+        let _previous_package = validate_installed_package(&root, extension_id, &pending.previous)?;
+        let next_package = validate_installed_package(&root, extension_id, &pending.next)?;
+        validate_update(&pending.previous, &next_package)?;
+        let observed = metadata_schema_versions.get(extension_id).copied();
+        let (selected, unselected) = recovered_record_for_schema(pending, observed)?;
+        registry
+            .extensions
+            .insert(extension_id.clone(), selected.clone());
+        if unselected.package_sha256 != selected.package_sha256 {
+            unselected_hashes.push(unselected.package_sha256.clone());
+        }
+    }
+    crate::workspace_file::ensure_workspace_access(&app, &vault, permit)?;
+    write_registry(&root, &registry)?;
+
+    let journal_cleaned =
+        write_pending_upgrades(&root, &PendingExtensionUpgrades::default()).is_ok();
+    for extension_id in journal.extensions.keys() {
+        runtime.stop(extension_id);
+    }
+    if journal_cleaned {
+        for hash in unselected_hashes {
+            if !registry
+                .extensions
+                .values()
+                .any(|record| record.package_sha256 == hash)
+                && let Ok(path) = package_path(&root, &hash)
+            {
+                let _ = fs::remove_file(path);
+            }
+        }
+    }
+    Ok(registry_views(&root, &registry))
+}
+
+#[tauri::command]
 pub fn inspect_installed_extensions(
     app: tauri::AppHandle,
+    manager: tauri::State<'_, ExtensionManagerState>,
     vault: tauri::State<'_, crate::workspace_file::WorkspaceVaultState>,
 ) -> Result<Vec<InstalledExtensionView>, String> {
     let permit = crate::workspace_file::begin_workspace_access(&app, &vault)?;
+    let _lifecycle = manager
+        .lifecycle
+        .lock()
+        .map_err(|_| "extension_manager_state_unavailable".to_owned())?;
     let root = extension_root(&app)?;
     let registry = read_registry(&root)?;
     let result = registry_views(&root, &registry);
@@ -772,13 +1017,24 @@ pub fn inspect_installed_extensions(
 #[tauri::command]
 pub fn set_extension_enabled(
     app: tauri::AppHandle,
+    manager: tauri::State<'_, ExtensionManagerState>,
     runtime: tauri::State<'_, crate::extension_runtime::ExtensionRuntimeState>,
     vault: tauri::State<'_, crate::workspace_file::WorkspaceVaultState>,
     extension_id: String,
     enabled: bool,
 ) -> Result<Vec<InstalledExtensionView>, String> {
     let permit = crate::workspace_file::begin_workspace_access(&app, &vault)?;
+    let _lifecycle = manager
+        .lifecycle
+        .lock()
+        .map_err(|_| "extension_manager_state_unavailable".to_owned())?;
     let root = extension_root(&app)?;
+    if read_pending_upgrades(&root)?
+        .extensions
+        .contains_key(&extension_id)
+    {
+        return Err("extension_upgrade_recovery_required".to_owned());
+    }
     let mut registry = read_registry(&root)?;
     let record = registry
         .extensions
@@ -799,12 +1055,23 @@ pub fn set_extension_enabled(
 #[tauri::command]
 pub fn uninstall_extension(
     app: tauri::AppHandle,
+    manager: tauri::State<'_, ExtensionManagerState>,
     runtime: tauri::State<'_, crate::extension_runtime::ExtensionRuntimeState>,
     vault: tauri::State<'_, crate::workspace_file::WorkspaceVaultState>,
     extension_id: String,
 ) -> Result<Vec<InstalledExtensionView>, String> {
     let permit = crate::workspace_file::begin_workspace_access(&app, &vault)?;
+    let _lifecycle = manager
+        .lifecycle
+        .lock()
+        .map_err(|_| "extension_manager_state_unavailable".to_owned())?;
     let root = extension_root(&app)?;
+    if read_pending_upgrades(&root)?
+        .extensions
+        .contains_key(&extension_id)
+    {
+        return Err("extension_upgrade_recovery_required".to_owned());
+    }
     let mut registry = read_registry(&root)?;
     let removed = registry
         .extensions
@@ -872,6 +1139,19 @@ mod tests {
         }
     }
 
+    fn installed_test_record(version: &str, schema_version: u32) -> InstalledExtensionRecord {
+        InstalledExtensionRecord {
+            version: version.to_owned(),
+            package_sha256: format!("{schema_version:064x}"),
+            publisher_name: "Metadata test".to_owned(),
+            publisher_fingerprint: None,
+            signed: false,
+            enabled: true,
+            metadata_schema_version: schema_version,
+            granted_capabilities: Vec::new(),
+        }
+    }
+
     #[test]
     fn registry_rejects_unknown_fields_instead_of_resetting_authorization() {
         let invalid = br#"{"version":1,"extensions":{},"unexpected":true}"#;
@@ -920,5 +1200,36 @@ mod tests {
         let mut invalid = valid;
         invalid.nodes = vec![json!({ "hiddenReference": "node-id" })];
         assert!(validate_migration_input(&invalid, 1, &package).is_err());
+    }
+
+    #[test]
+    fn pending_upgrade_recovery_follows_only_the_observed_schema() {
+        let previous = installed_test_record("1.0.0", 1);
+        let next = installed_test_record("2.0.0", 2);
+        let pending = PendingExtensionUpgrade {
+            metadata_migration_id: "migration-1".to_owned(),
+            previous: previous.clone(),
+            next: next.clone(),
+        };
+
+        assert_eq!(
+            recovered_record_for_schema(&pending, Some(1)).unwrap().0,
+            &previous
+        );
+        assert_eq!(
+            recovered_record_for_schema(&pending, Some(2)).unwrap().0,
+            &next
+        );
+        assert_eq!(
+            recovered_record_for_schema(&pending, None).unwrap().0,
+            &previous
+        );
+        assert!(recovered_record_for_schema(&pending, Some(3)).is_err());
+    }
+
+    #[test]
+    fn pending_upgrade_journal_rejects_unknown_fields() {
+        let invalid = br#"{"version":1,"extensions":{},"unexpected":true}"#;
+        assert!(serde_json::from_slice::<PendingExtensionUpgrades>(invalid).is_err());
     }
 }
