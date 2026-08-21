@@ -742,7 +742,7 @@ test("canvas shortcut help exposes the complete interaction baseline", async ({ 
   await toggle.click();
   await expect(toggle).toHaveAttribute("aria-expanded", "true");
   await expect(popover).toBeVisible();
-  await expect(popover.locator("dt")).toHaveCount(13);
+  await expect(popover.locator("dt")).toHaveCount(14);
   const canvasBounds = await page.getByTestId("graph-canvas").boundingBox();
   const popoverBounds = await popover.boundingBox();
   expect(canvasBounds).not.toBeNull();
@@ -915,6 +915,60 @@ test("search scope and unmatched opacity preserve canvas context", async ({ page
 
   await searchInput.fill("synthetic-hidden-value");
   await expect(page.locator(".item-count")).toContainText("0 / 3");
+});
+
+test("search results use natural name order and keyboard focus navigation", async ({
+  page,
+}) => {
+  const nodes = [
+    { ...gridNodes(1, 1)[0], id: syntheticId(301), name: "Result 10", x: 100 },
+    { ...gridNodes(1, 1)[0], id: syntheticId(302), name: "Result 2", x: 3_000 },
+    { ...gridNodes(1, 1)[0], id: syntheticId(303), name: "Result Alpha", x: 6_000 },
+  ];
+  await openSyntheticWorkspace(page, nodes);
+
+  const searchInput = page.getByTestId("node-search");
+  await searchInput.fill("Result");
+  const results = page.getByTestId("node-search-results");
+  await expect(results).toBeVisible();
+  await expect(results.locator(".node-search-result strong")).toHaveText([
+    "Result 2",
+    "Result 10",
+    "Result Alpha",
+  ]);
+  await expect(results.locator(".node-search-results-header strong")).toHaveText(
+    "1 / 3",
+  );
+
+  await page.keyboard.press("ArrowDown");
+  await expect(results.locator(".node-search-results-header strong")).toHaveText(
+    "2 / 3",
+  );
+  await page.keyboard.press("Enter");
+  await expect(node(page, syntheticId(301))).toHaveAttribute(
+    "data-selected",
+    "true",
+  );
+  const canvasBounds = await page.getByTestId("graph-canvas").boundingBox();
+  const focusedBounds = await node(page, syntheticId(301)).boundingBox();
+  expect(canvasBounds).not.toBeNull();
+  expect(focusedBounds).not.toBeNull();
+  await expect
+    .poll(async () => {
+      const current = await node(page, syntheticId(301)).boundingBox();
+      return current === null || canvasBounds === null
+        ? Number.POSITIVE_INFINITY
+        : Math.abs(
+            current.x + current.width / 2 -
+              (canvasBounds.x + canvasBounds.width / 2),
+          );
+    })
+    .toBeLessThan(130);
+
+  await searchInput.focus();
+  await page.keyboard.press("End");
+  await page.keyboard.press("Space");
+  await expect(searchInput).toHaveValue("Result ");
 });
 
 test("reference search can target nodes outside the current canvas filter", async ({
@@ -1314,6 +1368,64 @@ test("multiple canvases share nodes while keeping placements independent", async
   await expect.poll(async () => (await storedWorkspace(page))?.nodes).toEqual([]);
 });
 
+test("selected placements can be copied and moved between canvases", async ({
+  page,
+}) => {
+  const nodes = gridNodes(2, 1);
+  await openSyntheticWorkspace(page, nodes);
+  const canvasSelect = page.getByTestId("canvas-select");
+  const firstCanvasId = await canvasSelect.inputValue();
+
+  await page.getByTestId("graph-canvas").click({ position: { x: 30, y: 30 } });
+  await page.keyboard.press("Control+a");
+  await page.keyboard.press("Control+c");
+  await page.getByTestId("canvas-create").click();
+  const secondCanvasId = await canvasSelect.inputValue();
+  await page.keyboard.press("Control+v");
+  await expect(page.locator('[data-node-id][data-selected="true"]')).toHaveCount(2);
+  await expect(node(page, nodes[0].id)).toBeVisible();
+  await expect(node(page, nodes[1].id)).toBeVisible();
+
+  const copiedWorkspace = await storedWorkspace(page);
+  const firstCanvas = copiedWorkspace?.view?.canvases?.find(
+    (canvas: { id: string }) => canvas.id === firstCanvasId,
+  );
+  const secondCanvas = copiedWorkspace?.view?.canvases?.find(
+    (canvas: { id: string }) => canvas.id === secondCanvasId,
+  );
+  expect(firstCanvas?.layout).toHaveLength(2);
+  expect(secondCanvas?.layout).toHaveLength(2);
+  expect(secondCanvas.layout[1].x - secondCanvas.layout[0].x).toBe(
+    firstCanvas.layout[1].x - firstCanvas.layout[0].x,
+  );
+
+  await page.keyboard.press("Control+x");
+  await page.getByTestId("canvas-create").click();
+  const thirdCanvasId = await canvasSelect.inputValue();
+  await page.keyboard.press("Control+v");
+  await expect(page.locator('[data-node-id][data-selected="true"]')).toHaveCount(2);
+  const movedWorkspace = await storedWorkspace(page);
+  expect(
+    movedWorkspace?.view?.canvases?.find(
+      (canvas: { id: string }) => canvas.id === secondCanvasId,
+    )?.layout,
+  ).toEqual([]);
+  expect(
+    movedWorkspace?.view?.canvases?.find(
+      (canvas: { id: string }) => canvas.id === thirdCanvasId,
+    )?.layout,
+  ).toHaveLength(2);
+
+  await canvasSelect.selectOption(firstCanvasId);
+  await node(page, nodes[0].id).click({ button: "right" });
+  await page.getByTestId("add-to-canvas-context-action").click();
+  await expect(page.getByTestId("canvas-transfer-dialog")).toBeVisible();
+  await page.getByTestId("canvas-transfer-target").selectOption(secondCanvasId);
+  await page.getByTestId("canvas-transfer-confirm").click();
+  await expect(canvasSelect).toHaveValue(secondCanvasId);
+  await expect(node(page, nodes[0].id)).toBeVisible();
+});
+
 test("document import requires and records an explicit canvas position", async ({
   page,
 }) => {
@@ -1401,7 +1513,7 @@ test("settings operation guide demonstrates every shared canvas control", async 
   const stage = page.getByTestId("canvas-operation-stage");
   await expect(page.getByTestId("operation-guide-heading")).toBeVisible();
   await expect(guide).toBeVisible();
-  await expect(guide.locator(".canvas-operation-picker-item")).toHaveCount(13);
+  await expect(guide.locator(".canvas-operation-picker-item")).toHaveCount(14);
 
   const animatedTargets: Record<string, string> = {
     pan: ".canvas-operation-scene",
@@ -1413,6 +1525,7 @@ test("settings operation guide demonstrates every shared canvas control", async 
     resize: ".canvas-operation-node-a",
     arrange: ".canvas-operation-node-b",
     search: ".canvas-operation-search",
+    transfer: ".canvas-operation-node-a",
     history: ".canvas-operation-node-c",
     contextMenu: ".canvas-operation-context-menu",
     cancel: ".canvas-operation-node-b",
@@ -1451,7 +1564,7 @@ test("settings operation guide demonstrates every shared canvas control", async 
   await expect(page.getByTestId("operation-guide-heading")).toHaveText(
     "Operation guide",
   );
-  await expect(guide.locator(".canvas-operation-picker-item")).toHaveCount(13);
+  await expect(guide.locator(".canvas-operation-picker-item")).toHaveCount(14);
 });
 
 test("settings operation guide honors reduced motion", async ({ page }) => {
