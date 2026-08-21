@@ -64,6 +64,7 @@ import {
   finishWorkspaceExtensionMetadataMigration,
   prepareWorkspaceExtensionMetadataMigration,
 } from "./extensionInstallLifecycle";
+import { managedExtensionRegistry } from "./managedExtensions";
 import {
   buildDocumentImportWorkspace,
   mergeDocumentImportCandidates,
@@ -439,6 +440,7 @@ function App({
   const [activeSettingsTab, setActiveSettingsTab] =
     useState<SettingsTabId>("general");
   const [workspace, setWorkspace] = useState(emptyWorkspace);
+  const [managedExtensions, setManagedExtensions] = useState<InstalledExtension[]>([]);
   const workspaceRef = useRef(workspace);
   const extensionWorkspaceRevisionRef = useRef(0);
   const workspaceSaveTimerRef = useRef<number | null>(null);
@@ -755,6 +757,11 @@ function App({
       setAppNotice(null);
       appNoticeTimerRef.current = null;
     }, action === undefined ? 6_000 : 10_000);
+  }
+
+  function updateManagedExtensions(installed: InstalledExtension[]) {
+    managedExtensionRegistry.replace(installed);
+    setManagedExtensions(installed);
   }
 
   function openDocumentImport() {
@@ -1340,6 +1347,13 @@ function App({
     };
   }, [persistence]);
 
+  useEffect(
+    () => () => {
+      managedExtensionRegistry.replace([]);
+    },
+    [],
+  );
+
   useEffect(() => {
     if (!persistenceReady || !extensionManagerAvailable) {
       return;
@@ -1347,13 +1361,19 @@ function App({
     let active = true;
     void recoverPendingExtensionUpgrades(
       extensionMetadataSchemaVersions(workspaceRef.current),
-    ).catch((error) => {
-      if (active) {
-        showAppNotice(
-          t("extensions.manager.recoveryFailed", { reason: errorReason(error) }),
-        );
-      }
-    });
+    )
+      .then((installed) => {
+        if (active) {
+          updateManagedExtensions(installed);
+        }
+      })
+      .catch((error) => {
+        if (active) {
+          showAppNotice(
+            t("extensions.manager.recoveryFailed", { reason: errorReason(error) }),
+          );
+        }
+      });
     return () => {
       active = false;
     };
@@ -1367,6 +1387,17 @@ function App({
       targetIdsBySource.set(reference.sourceNodeId, targetIds);
     }
     return targetIdsBySource;
+  }, [workspace.references]);
+
+  const referencingSourceIdsByTarget = useMemo(() => {
+    const sourceIdsByTarget = new Map<string, Set<string>>();
+    for (const reference of workspace.references) {
+      const sourceIds =
+        sourceIdsByTarget.get(reference.targetNodeId) ?? new Set<string>();
+      sourceIds.add(reference.sourceNodeId);
+      sourceIdsByTarget.set(reference.targetNodeId, sourceIds);
+    }
+    return sourceIdsByTarget;
   }, [workspace.references]);
 
   const searchMatchedNodeIds = useMemo(
@@ -1457,8 +1488,8 @@ function App({
   );
 
   const contentProcessorOptions = useMemo(
-    () =>
-      contentProcessorRegistry.list().map((processor) => {
+    () => [
+      ...contentProcessorRegistry.list().map((processor) => {
         const codeLanguage = codePreviewLanguageFromProcessorId(processor.id);
         return {
           id: processor.id,
@@ -1474,7 +1505,17 @@ function App({
                     : t(`editor.codeLanguages.${codeLanguage}`),
         };
       }),
-    [t],
+      ...managedExtensionRegistry.listProcessors().map((processor) => ({
+        id: processor.fullId,
+        label:
+          managedExtensionRegistry.resolveLabel(
+            processor.extensionId,
+            processor.labelKey,
+            i18n.language,
+          ) ?? processor.fullId,
+      })),
+    ],
+    [i18n.language, managedExtensions, t],
   );
 
   const contentMarkerOptions = useMemo(
@@ -1506,6 +1547,7 @@ function App({
         truncated: t("codePreview.truncated"),
       },
       extension: {
+        language: i18n.language,
         resolve: (key: string) =>
           builtInExtensionLabels[
             key as keyof typeof builtInExtensionLabels
@@ -1526,7 +1568,7 @@ function App({
         remaining: (seconds: number) => t("totp.remaining", { seconds }),
       },
     }),
-    [builtInExtensionLabels, t],
+    [builtInExtensionLabels, i18n.language, t],
   );
 
   useEffect(() => {
@@ -3062,6 +3104,7 @@ function App({
         true,
         metadataMigrationId,
       );
+      updateManagedExtensions(installed);
 
       if (next !== current) {
         workspaceChangedInSessionRef.current = true;
@@ -3213,9 +3256,16 @@ function App({
         createdNodeIds: prepared.createdNodeIds,
         currentNodeId: nodeId,
         result,
-        sourceName: builtInExtensionLabels[
-          titleKey as keyof typeof builtInExtensionLabels
-        ] ?? titleKey,
+        sourceName:
+          managedExtensionRegistry.resolveLabel(
+            result.extensionId,
+            titleKey,
+            i18n.language,
+          ) ??
+          builtInExtensionLabels[
+            titleKey as keyof typeof builtInExtensionLabels
+          ] ??
+          titleKey,
         workspace: prepared.workspace,
       });
     } catch (error) {
@@ -5498,8 +5548,10 @@ function App({
                 {activeSettingsTab === "extensions" && (
                   <ExtensionSettings
                     extensionMetadata={workspace.view.extensionMetadata}
+                    installed={managedExtensions}
                     onClearMetadata={clearManagedExtensionMetadata}
                     onInstall={installManagedExtension}
+                    onInstalledChange={updateManagedExtensions}
                   />
                 )}
               </section>
@@ -6345,6 +6397,7 @@ function App({
                 codeCopy: contentEnhancementLabels.code.copy,
                 codeLanguages: contentEnhancementLabels.code.languages,
                 codeTruncated: contentEnhancementLabels.code.truncated,
+                extensionLanguage: i18n.language,
                 extensionLabels: builtInExtensionLabels,
                 content: t("editor.content"),
                 contentPlaceholder: t("editor.contentPlaceholder"),
@@ -6541,6 +6594,12 @@ function App({
                         </strong>
                         <NodeContentHost
                           content={node.content}
+                          directIncomingNodeIds={[
+                            ...(referencingSourceIdsByTarget.get(node.id) ?? []),
+                          ]}
+                          directOutgoingNodeIds={[
+                            ...(referencedTargetIdsBySource.get(node.id) ?? []),
+                          ]}
                           emptyContent={t("nodes.noContent")}
                           enhancementLabels={contentEnhancementLabels}
                           extensionBaseRevision={extensionWorkspaceRevisionRef.current}

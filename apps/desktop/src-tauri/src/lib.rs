@@ -4,6 +4,7 @@ mod extension_runtime;
 mod extension_runtime_content;
 mod file_transfer;
 mod llm;
+mod managed_extension_runtime;
 mod offsite_backup;
 mod s3_backup_target;
 mod secret_clipboard;
@@ -99,6 +100,8 @@ pub fn run() {
             llm::extract_local_document_import,
             llm::inspect_local_llm_models,
             llm::prepare_local_llm_model,
+            managed_extension_runtime::invoke_managed_extension_action,
+            managed_extension_runtime::render_managed_extension_processor,
             llm::review_local_references,
             llm::stop_local_llm,
             offsite_backup::configure_s3_backup_target,

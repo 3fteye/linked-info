@@ -2,12 +2,17 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { invoke } from "@tauri-apps/api/core";
 import { contentEnhancerRegistry } from "./contentEnhancer";
 import { NodeContentHost } from "./contentProcessor";
 import {
   builtInJsonInspectorExtensionId,
   builtInJsonInspectorProcessorId,
 } from "./builtinJsonInspector";
+import { managedExtensionRegistry } from "./managedExtensions";
+import type { InstalledExtension } from "./extensionManager";
+
+vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 
 const enhancementLabels = {
   code: {
@@ -26,6 +31,7 @@ const enhancementLabels = {
     truncated: "Preview truncated",
   },
   extension: {
+    language: "en",
     resolve: (key: string) =>
       ({
         "action.format-json": "Format and write back",
@@ -67,7 +73,100 @@ describe("NodeContentHost", () => {
 
   afterEach(() => {
     act(() => root.unmount());
+    managedExtensionRegistry.replace([]);
+    vi.mocked(invoke).mockReset();
     container.remove();
+  });
+
+  it("renders and invokes an enabled managed extension through the declarative host", async () => {
+    const installed: InstalledExtension = {
+      id: "dev.example.preview",
+      version: "1.0.0",
+      publisherName: "Preview test",
+      publisherFingerprint: null,
+      packageSha256: "00".repeat(32),
+      signed: false,
+      enabled: true,
+      valid: true,
+      errorCode: null,
+      metadataSchemaVersion: 1,
+      grantedCapabilities: ["node.read.content", "metadata.node.write"],
+      processors: [{ id: "preview", labelKey: "processor.label" }],
+      actions: [
+        { id: "remember", labelKey: "action.remember", scope: "current-node" },
+      ],
+      locales: {
+        en: {
+          "processor.label": "Managed preview",
+          "action.remember": "Remember",
+        },
+      },
+      defaultLocale: "en",
+    };
+    managedExtensionRegistry.replace([installed]);
+    vi.mocked(invoke).mockImplementation(async (command) => {
+      if (command === "render_managed_extension_processor") {
+        return {
+          extensionId: installed.id,
+          metadataSchemaVersion: 1,
+          inputTruncated: false,
+          presentation: {
+            elements: [
+              { type: "text", text: "Managed result" },
+              { type: "button", actionId: "remember" },
+            ],
+          },
+        };
+      }
+      if (command === "invoke_managed_extension_action") {
+        return {
+          extensionId: installed.id,
+          metadataSchemaVersion: 1,
+          handleNodeIds: {
+            "1": "11111111-1111-4111-8111-111111111111",
+          },
+          result: {
+            presentation: null,
+            nodeMetadata: { remembered: true },
+            workspaceMetadata: null,
+            proposal: null,
+          },
+        };
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+    const onMetadata = vi.fn();
+
+    await act(async () => {
+      root.render(
+        <NodeContentHost
+          content="ordinary content"
+          enhancementLabels={enhancementLabels}
+          nodeId="11111111-1111-4111-8111-111111111111"
+          nodeName="Managed node"
+          onExtensionMetadataChange={onMetadata}
+          processorId="dev.example.preview.preview"
+          variant="canvas"
+        />,
+      );
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain("Managed result");
+    const button = [...container.querySelectorAll("button")].find(
+      (candidate) => candidate.textContent === "Remember",
+    );
+    expect(button).toBeDefined();
+    await act(async () => {
+      button!.click();
+      await Promise.resolve();
+    });
+    expect(onMetadata).toHaveBeenCalledWith(
+      installed.id,
+      1,
+      { remembered: true },
+      null,
+    );
   });
 
   it("renders Markdown without enabling HTML, navigation, or remote images", () => {

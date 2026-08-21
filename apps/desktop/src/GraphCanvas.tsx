@@ -140,6 +140,8 @@ import "@xyflow/react/dist/style.css";
 interface InformationNodeData extends Record<string, unknown> {
   name: string | null;
   content: string | null;
+  directIncomingNodeIds: readonly string[];
+  directOutgoingNodeIds: readonly string[];
   contentProcessorId: string | null;
   codeSourceContainsSensitive: boolean;
   contentProcessorLabel: string;
@@ -268,6 +270,7 @@ interface GraphLabels {
   codeCopy: string;
   codeLanguages: Record<CodePreviewLanguage, string>;
   codeTruncated: string;
+  extensionLanguage: string;
   extensionLabels: Readonly<Record<string, string>>;
   unsupportedContentProcessor: (processorId: string) => string;
   copySecret: string;
@@ -1028,6 +1031,8 @@ export function InformationNodeCard({
           className="graph-node-content"
           codeSourceContainsSensitive={data.codeSourceContainsSensitive}
           content={data.content}
+          directIncomingNodeIds={data.directIncomingNodeIds}
+          directOutgoingNodeIds={data.directOutgoingNodeIds}
           enhancementLabels={data.enhancementLabels}
           extensionBaseRevision={data.extensionBaseRevision}
           extensionMetadata={data.extensionMetadata}
@@ -2434,6 +2439,12 @@ export default function GraphCanvas({
           data: {
             name: node.name,
             content: renderedContent,
+            directIncomingNodeIds: (incomingNodesByTarget.get(node.id) ?? []).map(
+              (related) => related.id,
+            ),
+            directOutgoingNodeIds: (referencedNodesBySource.get(node.id) ?? []).map(
+              (related) => related.id,
+            ),
             contentFullyRendered,
             contentTruncated: renderedContent !== node.content,
             contentProcessorId,
@@ -2463,6 +2474,7 @@ export default function GraphCanvas({
                 truncated: labels.codeTruncated,
               },
               extension: {
+                language: labels.extensionLanguage,
                 resolve: (key) => labels.extensionLabels[key] ?? null,
               },
               secret: {

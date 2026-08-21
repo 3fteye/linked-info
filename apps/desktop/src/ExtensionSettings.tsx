@@ -1,10 +1,9 @@
 import { AlertTriangle, Eraser, PackagePlus, Puzzle, Trash2 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { ExtensionCapability } from "./builtinExtensionHost";
 import {
   chooseExtensionInstall,
-  inspectInstalledExtensions,
   setExtensionEnabled,
   uninstallExtension,
   extensionManagerAvailable,
@@ -31,17 +30,20 @@ function errorReason(error: unknown): string {
 
 interface ExtensionSettingsProps {
   extensionMetadata: Readonly<Record<string, WorkspaceExtensionMetadata>>;
+  installed: readonly InstalledExtension[];
   onClearMetadata: (extensionId: string) => Promise<void>;
   onInstall: (preview: ExtensionInstallPreview) => Promise<InstalledExtension[]>;
+  onInstalledChange: (installed: InstalledExtension[]) => void;
 }
 
 export default function ExtensionSettings({
   extensionMetadata,
+  installed,
   onClearMetadata,
   onInstall,
+  onInstalledChange,
 }: ExtensionSettingsProps) {
   const { t } = useTranslation();
-  const [installed, setInstalled] = useState<InstalledExtension[]>([]);
   const [preview, setPreview] = useState<ExtensionInstallPreview | null>(null);
   const [approved, setApproved] = useState<Set<ExtensionCapability>>(new Set());
   const [busy, setBusy] = useState(false);
@@ -50,17 +52,6 @@ export default function ExtensionSettings({
   const [confirmClearMetadataId, setConfirmClearMetadataId] = useState<
     string | null
   >(null);
-
-  useEffect(() => {
-    if (!extensionManagerAvailable) return;
-    let active = true;
-    void inspectInstalledExtensions()
-      .then((items) => active && setInstalled(items))
-      .catch((reason) => active && setError(errorReason(reason)));
-    return () => {
-      active = false;
-    };
-  }, []);
 
   const allApproved = useMemo(
     () =>
@@ -100,7 +91,7 @@ export default function ExtensionSettings({
     setBusy(true);
     setError(null);
     try {
-      setInstalled(await onInstall(preview));
+      onInstalledChange(await onInstall(preview));
       setPreview(null);
       setApproved(new Set());
     } catch (reason) {
@@ -131,7 +122,7 @@ export default function ExtensionSettings({
     setBusy(true);
     setError(null);
     try {
-      setInstalled(await setExtensionEnabled(item.id, !item.enabled));
+      onInstalledChange(await setExtensionEnabled(item.id, !item.enabled));
     } catch (reason) {
       setError(errorReason(reason));
     } finally {
@@ -147,7 +138,7 @@ export default function ExtensionSettings({
     setBusy(true);
     setError(null);
     try {
-      setInstalled(await uninstallExtension(item.id));
+      onInstalledChange(await uninstallExtension(item.id));
       setConfirmUninstallId(null);
     } catch (reason) {
       setError(errorReason(reason));

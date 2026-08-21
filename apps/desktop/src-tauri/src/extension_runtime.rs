@@ -174,6 +174,7 @@ impl ExtensionHostEntry {
 
 pub struct ExtensionRuntimeState {
     hosts: Mutex<BTreeMap<String, Arc<ExtensionHostEntry>>>,
+    start_lock: Mutex<()>,
     generation: AtomicU64,
     next_request_id: AtomicU64,
 }
@@ -182,6 +183,7 @@ impl Default for ExtensionRuntimeState {
     fn default() -> Self {
         Self {
             hosts: Mutex::new(BTreeMap::new()),
+            start_lock: Mutex::new(()),
             generation: AtomicU64::new(0),
             next_request_id: AtomicU64::new(1),
         }
@@ -189,6 +191,37 @@ impl Default for ExtensionRuntimeState {
 }
 
 impl ExtensionRuntimeState {
+    pub(crate) fn ensure_started(
+        &self,
+        app: &tauri::AppHandle,
+        runtime_key: &str,
+        expected_extension_id: &str,
+        package_path: &Path,
+        generation: u64,
+        allow_unsigned_development: bool,
+    ) -> Result<(), String> {
+        let _start = self
+            .start_lock
+            .lock()
+            .map_err(|_| "extension_runtime_state_unavailable".to_owned())?;
+        if self
+            .hosts
+            .lock()
+            .map_err(|_| "extension_runtime_state_unavailable".to_owned())?
+            .contains_key(runtime_key)
+        {
+            return Ok(());
+        }
+        self.start(
+            app,
+            runtime_key,
+            expected_extension_id,
+            package_path,
+            generation,
+            allow_unsigned_development,
+        )
+    }
+
     pub(crate) fn start(
         &self,
         app: &tauri::AppHandle,

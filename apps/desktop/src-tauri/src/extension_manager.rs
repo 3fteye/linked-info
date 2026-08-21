@@ -138,6 +138,14 @@ pub struct InstalledExtensionView {
     default_locale: Option<String>,
 }
 
+#[derive(Clone)]
+pub(crate) struct ManagedExtensionRuntimeRegistration {
+    pub extension_id: String,
+    pub package_path: PathBuf,
+    pub package: ValidatedExtensionPackage,
+    pub allow_unsigned_development: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ExtensionMetadataMigrationInput {
@@ -369,6 +377,37 @@ fn registry_views(root: &Path, registry: &ExtensionRegistry) -> Vec<InstalledExt
         .iter()
         .map(|(id, record)| record_view(root, id, record))
         .collect()
+}
+
+pub(crate) fn managed_extension_runtime_registration(
+    app: &tauri::AppHandle,
+    manager: &ExtensionManagerState,
+    extension_id: &str,
+) -> Result<ManagedExtensionRuntimeRegistration, String> {
+    let _lifecycle = manager
+        .lifecycle
+        .lock()
+        .map_err(|_| "extension_manager_state_unavailable".to_owned())?;
+    let root = extension_root(app)?;
+    if read_pending_upgrades(&root)?
+        .extensions
+        .contains_key(extension_id)
+    {
+        return Err("extension_upgrade_recovery_required".to_owned());
+    }
+    let registry = read_registry(&root)?;
+    let record = registry
+        .extensions
+        .get(extension_id)
+        .filter(|record| record.enabled)
+        .ok_or_else(|| "extension_not_enabled".to_owned())?;
+    let package = validate_installed_package(&root, extension_id, record)?;
+    Ok(ManagedExtensionRuntimeRegistration {
+        extension_id: extension_id.to_owned(),
+        package_path: package_path(&root, &record.package_sha256)?,
+        allow_unsigned_development: !record.signed,
+        package,
+    })
 }
 
 fn recovered_record_for_schema(
@@ -840,6 +879,7 @@ pub async fn migrate_prepared_extension_metadata(
 pub fn commit_extension_install(
     app: tauri::AppHandle,
     manager: tauri::State<'_, ExtensionManagerState>,
+    runtime: tauri::State<'_, crate::extension_runtime::ExtensionRuntimeState>,
     vault: tauri::State<'_, crate::workspace_file::WorkspaceVaultState>,
     prepared_install_id: String,
     granted_capabilities: Vec<ExtensionCapability>,
@@ -919,6 +959,9 @@ pub fn commit_extension_install(
         .extensions
         .insert(prepared.package.manifest.id.clone(), next_record);
     write_registry(&root, &registry)?;
+    if existing.is_some() {
+        runtime.stop(&prepared.package.manifest.id);
+    }
     let journal_cleaned = if prepared.metadata_migration_journaled {
         journal.extensions.remove(&prepared.package.manifest.id);
         write_pending_upgrades(&root, &journal).is_ok()
