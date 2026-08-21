@@ -114,6 +114,10 @@ import {
   type CanvasPlacementClipboard,
   type CanvasPlacementClipboardMode,
 } from "./canvasTransfer";
+import {
+  buildCanvasMembershipIndex,
+  preferredCanvasForNode,
+} from "./canvasMembership";
 import { supportedLanguages, type SupportedLanguage } from "./locales";
 import {
   activeWorkspaceCanvas,
@@ -246,6 +250,7 @@ import { reconcileSmartReferenceAcceptance } from "./smartReferenceAcceptance";
 import "./App.css";
 
 type ViewId = "canvas" | "nodes" | "settings";
+type SearchLocationScope = "canvas" | "workspace";
 type SettingsTabId =
   | "general"
   | "operations"
@@ -514,6 +519,8 @@ function App({
   });
   const [searchTerm, setSearchTerm] = useState("");
   const [searchScope, setSearchScope] = useState<NodeSearchScope>("name");
+  const [searchLocationScope, setSearchLocationScope] =
+    useState<SearchLocationScope>("canvas");
   const [searchNavigationNodeId, setSearchNavigationNodeId] = useState<
     string | null
   >(null);
@@ -540,6 +547,11 @@ function App({
     useState<CanvasPlacementClipboard | null>(null);
   const [pendingCanvasTransfer, setPendingCanvasTransfer] =
     useState<PendingCanvasTransfer | null>(null);
+  const [pendingCanvasMembershipNodeId, setPendingCanvasMembershipNodeId] =
+    useState<string | null>(null);
+  const [nodeListFocusNodeId, setNodeListFocusNodeId] = useState<string | null>(
+    null,
+  );
   const [canvasFocusRequest, setCanvasFocusRequest] =
     useState<CanvasFocusRequest | null>(null);
   const canvasFocusRequestTokenRef = useRef(0);
@@ -1485,6 +1497,20 @@ function App({
       ),
     [activeCanvasNodeIds, workspace.references],
   );
+  const canvasMembershipsByNodeId = useMemo(
+    () => buildCanvasMembershipIndex(workspace.view.canvases),
+    [workspace.view.canvases],
+  );
+  const pendingCanvasMembershipNode =
+    pendingCanvasMembershipNodeId === null
+      ? null
+      : workspace.nodes.find(
+          (node) => node.id === pendingCanvasMembershipNodeId,
+        ) ?? null;
+  const pendingCanvasMemberships =
+    pendingCanvasMembershipNodeId === null
+      ? []
+      : canvasMembershipsByNodeId.get(pendingCanvasMembershipNodeId) ?? [];
 
   const filteredNodes = useMemo(() => {
     return workspace.nodes.filter(
@@ -1608,15 +1634,22 @@ function App({
       normalizeNodeName(deferredSearchTerm).length === 0
         ? []
         : filteredNodes
-            .filter((node) => activeCanvasNodeIds.has(node.id))
+            .filter(
+              (node) =>
+                activeView !== "canvas" ||
+                searchLocationScope === "workspace" ||
+                activeCanvasNodeIds.has(node.id),
+            )
             .sort((left, right) =>
               compareNodesByName(left, right, i18n.language),
             ),
     [
       activeCanvasNodeIds,
+      activeView,
       deferredSearchTerm,
       filteredNodes,
       i18n.language,
+      searchLocationScope,
     ],
   );
   const activeSearchNavigationIndex = searchNavigationNodes.findIndex(
@@ -1652,6 +1685,24 @@ function App({
       return searchNavigationNodes[0]?.id ?? null;
     });
   }, [searchNavigationNodes]);
+
+  useEffect(() => {
+    if (activeView !== "nodes" || nodeListFocusNodeId === null) {
+      return;
+    }
+    const focusTimer = window.setTimeout(() => {
+      const target = document.querySelector<HTMLElement>(
+        `[data-node-list-id="${nodeListFocusNodeId}"]`,
+      );
+      if (target === null) {
+        return;
+      }
+      target.focus({ preventScroll: true });
+      target.scrollIntoView({ block: "center" });
+      setNodeListFocusNodeId(null);
+    }, 0);
+    return () => window.clearTimeout(focusTimer);
+  }, [activeView, filteredNodes, nodeListFocusNodeId]);
 
   const contentMarkerOptions = useMemo(
     () =>
@@ -3665,13 +3716,32 @@ function App({
     });
   }
 
-  function focusSearchResult(nodeId: string) {
-    if (!activeCanvasNodeIds.has(nodeId)) {
+  function focusNodeOnCanvas(nodeId: string, canvasId: string) {
+    const memberships = canvasMembershipsByNodeId.get(nodeId) ?? [];
+    if (!memberships.some((item) => item.canvasId === canvasId)) {
       return;
     }
+    switchCanvas(canvasId);
     setSearchNavigationNodeId(nodeId);
     setActiveView("canvas");
     requestCanvasFocus([nodeId]);
+  }
+
+  function focusSearchResult(nodeId: string, preferredCanvasId?: string) {
+    const memberships = canvasMembershipsByNodeId.get(nodeId) ?? [];
+    const canvasId = preferredCanvasForNode(
+      memberships,
+      workspaceRef.current.view.activeCanvasId,
+      preferredCanvasId,
+    );
+    setSearchNavigationNodeId(nodeId);
+    if (canvasId !== null) {
+      focusNodeOnCanvas(nodeId, canvasId);
+      return;
+    }
+    setActiveView("nodes");
+    setNodeListFocusNodeId(nodeId);
+    showAppNotice(t("search.openedUnplacedNode"));
   }
 
   function moveSearchNavigation(direction: -1 | 1) {
@@ -5326,7 +5396,34 @@ function App({
                   </button>
                 </div>
               )}
-              <div className="node-search-control">
+              <div
+                className="node-search-control"
+                data-has-location-scope={activeView === "canvas"}
+              >
+                {activeView === "canvas" && (
+                  <label className="search-location-picker">
+                    <span className="visually-hidden">
+                      {t("search.locationScopeLabel")}
+                    </span>
+                    <select
+                      aria-label={t("search.locationScopeLabel")}
+                      data-testid="node-search-location-scope"
+                      onChange={(event) =>
+                        setSearchLocationScope(
+                          event.target.value as SearchLocationScope,
+                        )
+                      }
+                      value={searchLocationScope}
+                    >
+                      <option value="canvas">
+                        {t("search.locations.canvas")}
+                      </option>
+                      <option value="workspace">
+                        {t("search.locations.workspace")}
+                      </option>
+                    </select>
+                  </label>
+                )}
                 <label className="search-scope-picker">
                   <span className="visually-hidden">{t("search.scopeLabel")}</span>
                   <select
@@ -5416,27 +5513,68 @@ function App({
                         {searchNavigationWindow.nodes.map((node, index) => {
                           const absoluteIndex = searchNavigationWindow.start + index;
                           const active = node.id === searchNavigationNodeId;
+                          const memberships =
+                            canvasMembershipsByNodeId.get(node.id) ?? [];
+                          const showMemberships =
+                            activeView !== "canvas" ||
+                            searchLocationScope === "workspace";
                           return (
-                            <button
+                            <div
                               aria-selected={active}
                               className="node-search-result"
                               data-active={active}
                               id={`node-search-result-${node.id}`}
                               key={node.id}
-                              onClick={() => focusSearchResult(node.id)}
-                              onMouseDown={(event) => event.preventDefault()}
                               role="option"
-                              type="button"
                             >
-                              <span>{absoluteIndex + 1}</span>
-                              <strong>
-                                {nodeFilterLabel(
-                                  node,
-                                  t("nodes.unnamed"),
-                                  t("nodes.noContent"),
-                                )}
-                              </strong>
-                            </button>
+                              <button
+                                className="node-search-result-main"
+                                onClick={() => focusSearchResult(node.id)}
+                                onMouseDown={(event) => event.preventDefault()}
+                                type="button"
+                              >
+                                <span>{absoluteIndex + 1}</span>
+                                <strong>
+                                  {nodeFilterLabel(
+                                    node,
+                                    t("nodes.unnamed"),
+                                    t("nodes.noContent"),
+                                  )}
+                                </strong>
+                              </button>
+                              {showMemberships && (
+                                <div className="node-search-result-memberships">
+                                  {memberships.length === 0 ? (
+                                    <span>{t("search.unplaced")}</span>
+                                  ) : (
+                                    memberships.map((membership) => (
+                                      <button
+                                        aria-label={t("search.focusOnCanvas", {
+                                          canvas: membership.canvasName,
+                                        })}
+                                        data-testid="node-search-result-canvas"
+                                        data-current={
+                                          membership.canvasId === activeCanvas.id
+                                        }
+                                        key={membership.canvasId}
+                                        onClick={() =>
+                                          focusSearchResult(
+                                            node.id,
+                                            membership.canvasId,
+                                          )
+                                        }
+                                        onMouseDown={(event) =>
+                                          event.preventDefault()
+                                        }
+                                        type="button"
+                                      >
+                                        {membership.canvasName}
+                                      </button>
+                                    ))
+                                  )}
+                                </div>
+                              )}
+                            </div>
                           );
                         })}
                       </div>
@@ -5537,7 +5675,14 @@ function App({
                 <span>{t("filters.unnamedOnly")}</span>
               </label>
               <span className="item-count">
-                {activeView === "canvas" && hasActiveNodeFilter
+                {activeView === "canvas" && searchLocationScope === "workspace"
+                  ? hasActiveNodeFilter
+                    ? t("workspace.filteredItemCount", {
+                        count: filteredNodes.length,
+                        total: workspace.nodes.length,
+                      })
+                    : t("workspace.itemCount", { count: workspace.nodes.length })
+                  : activeView === "canvas" && hasActiveNodeFilter
                   ? t("workspace.filteredItemCount", {
                       count: canvasFilteredNodeIds.size,
                       total: canvasNodes.length,
@@ -7116,6 +7261,7 @@ function App({
               labels={{
                 analyzingNode: t("smartReference.analyzing"),
                 addToCanvas: t("canvases.addToAnother"),
+                canvasMemberships: t("canvases.membershipsAction"),
                 cancel: t("actions.cancel"),
                 confirmDeleteNode: (count) =>
                   count === 1
@@ -7259,6 +7405,7 @@ function App({
               nameConflictNodeIds={nameConflictNodeIds}
               nodes={canvasNodes}
               onAnalyzeNodes={enqueueSmartReferenceNodes}
+              onBrowseNodeCanvases={setPendingCanvasMembershipNodeId}
               onCreateNode={createNode}
               onCreateReferencedNode={createReferencedNode}
               onCopySecret={
@@ -7312,6 +7459,8 @@ function App({
               ) : (
                 <div className="node-list">
                   {filteredNodes.map((node) => {
+                    const memberships =
+                      canvasMembershipsByNodeId.get(node.id) ?? [];
                     const processorId =
                       workspace.view.contentProcessorByNodeId[node.id] ?? null;
                     const extensionId = contentProcessorExtensionId(processorId);
@@ -7323,13 +7472,23 @@ function App({
                       <div className="node-list-row-shell" key={node.id}>
                         <button
                           className="node-list-row"
+                          data-node-list-id={node.id}
                           data-testid="node-list-row"
                           onClick={() => editNode(node.id)}
                           type="button"
                         >
-                        <strong data-unnamed={isUnnamedNode(node)}>
-                          {node.name ?? t("nodes.unnamed")}
-                        </strong>
+                        <div className="node-list-identity">
+                          <strong data-unnamed={isUnnamedNode(node)}>
+                            {node.name ?? t("nodes.unnamed")}
+                          </strong>
+                          <span className="node-list-canvas-summary">
+                            {memberships.length === 0
+                              ? t("search.unplaced")
+                              : memberships
+                                  .map((membership) => membership.canvasName)
+                                  .join(" · ")}
+                          </span>
+                        </div>
                         <NodeContentHost
                           content={node.content}
                           directIncomingNodeIds={[
@@ -7387,6 +7546,75 @@ function App({
 
         </div>
       </main>
+
+      {pendingCanvasMembershipNode !== null && (
+        <div className="modal-backdrop" role="presentation">
+          <section
+            aria-labelledby="canvas-membership-dialog-title"
+            aria-modal="true"
+            className="confirmation-dialog canvas-membership-dialog"
+            data-testid="canvas-membership-dialog"
+            onKeyDown={(event) => {
+              if (event.key === "Escape") {
+                setPendingCanvasMembershipNodeId(null);
+              }
+            }}
+            role="dialog"
+          >
+            <h2 id="canvas-membership-dialog-title">
+              {t("canvases.membershipsTitle")}
+            </h2>
+            <p>
+              {t("canvases.membershipsDescription", {
+                name: nodeFilterLabel(
+                  pendingCanvasMembershipNode,
+                  t("nodes.unnamed"),
+                  t("nodes.noContent"),
+                ),
+              })}
+            </p>
+            <div className="canvas-membership-list">
+              {pendingCanvasMemberships.map((membership) => {
+                const current = membership.canvasId === activeCanvas.id;
+                return (
+                  <button
+                    className="canvas-membership-item"
+                    data-current={current}
+                    data-testid="canvas-membership-item"
+                    key={membership.canvasId}
+                    onClick={() => {
+                      setPendingCanvasMembershipNodeId(null);
+                      focusNodeOnCanvas(
+                        pendingCanvasMembershipNode.id,
+                        membership.canvasId,
+                      );
+                    }}
+                    type="button"
+                  >
+                    <Network aria-hidden="true" size={16} />
+                    <strong>{membership.canvasName}</strong>
+                    <span>
+                      {current
+                        ? t("canvases.currentCanvas")
+                        : t("canvases.goToCanvas")}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+            <div className="confirmation-dialog-actions">
+              <button
+                autoFocus
+                className="secondary-button"
+                onClick={() => setPendingCanvasMembershipNodeId(null)}
+                type="button"
+              >
+                {t("actions.close")}
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
 
       {pendingCanvasTransfer !== null && (
         <div className="modal-backdrop" role="presentation">

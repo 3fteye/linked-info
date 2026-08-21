@@ -21,6 +21,13 @@ interface SyntheticViewport {
   zoom: number;
 }
 
+interface SyntheticCanvas {
+  id: string;
+  name: string;
+  nodeIds: string[];
+  viewport?: SyntheticViewport | null;
+}
+
 const workspaceStorageKey = "linked-info.workspace.v1";
 const workspaceRecoveryStorageKey = "linked-info.workspace.recovery.v1";
 
@@ -91,6 +98,72 @@ async function openSyntheticWorkspace(
       syntheticNodes: nodes,
       syntheticReferences: references,
       syntheticViewport: viewport,
+    },
+  );
+  await page.goto("/");
+  await expect(page.getByTestId("graph-canvas")).toBeVisible();
+  await expect(page.getByTestId("graph-canvas")).toHaveAttribute(
+    "data-flow-ready",
+    "true",
+  );
+}
+
+async function openSyntheticMultiCanvasWorkspace(
+  page: Page,
+  nodes: SyntheticNode[],
+  canvases: SyntheticCanvas[],
+  activeCanvasId: string,
+) {
+  await page.addInitScript(
+    ({ storageKey, syntheticActiveCanvasId, syntheticCanvases, syntheticNodes }) => {
+      const seedMarker = `${storageKey}.playwright-multi-canvas-seeded`;
+      if (sessionStorage.getItem(seedMarker) === "true") {
+        return;
+      }
+      localStorage.clear();
+      const nodeById = new Map(syntheticNodes.map((node) => [node.id, node]));
+      localStorage.setItem(
+        storageKey,
+        JSON.stringify({
+          version: 4,
+          nodes: syntheticNodes.map((node) => ({
+            id: node.id,
+            name: node.name,
+            content: node.content ?? `Generated test content for ${node.name}`,
+          })),
+          references: [],
+          view: {
+            activeCanvasId: syntheticActiveCanvasId,
+            canvases: syntheticCanvases.map((canvas) => ({
+              id: canvas.id,
+              name: canvas.name,
+              layout: canvas.nodeIds.map((nodeId, index) => {
+                const node = nodeById.get(nodeId);
+                if (node === undefined) {
+                  throw new Error(`Synthetic canvas node is missing: ${nodeId}`);
+                }
+                return {
+                  nodeId,
+                  x: node.x + index * 20,
+                  y: node.y + index * 20,
+                  ...(node.width === undefined ? {} : { width: node.width }),
+                  ...(node.height === undefined ? {} : { height: node.height }),
+                };
+              }),
+              viewport: canvas.viewport ?? null,
+            })),
+            contentProcessorByNodeId: {},
+            extensionMetadata: {},
+          },
+        }),
+      );
+      sessionStorage.setItem(seedMarker, "true");
+    },
+    {
+      storageKey: workspaceStorageKey,
+      syntheticActiveCanvasId: activeCanvasId,
+      syntheticCanvases: canvases,
+      syntheticNodes: nodes,
     },
   );
   await page.goto("/");
@@ -969,6 +1042,98 @@ test("search results use natural name order and keyboard focus navigation", asyn
   await page.keyboard.press("End");
   await page.keyboard.press("Space");
   await expect(searchInput).toHaveValue("Result ");
+});
+
+test("workspace search shows canvas memberships and navigates without creating placements", async ({
+  page,
+}) => {
+  const nodes = [
+    { ...gridNodes(1, 1)[0], id: syntheticId(311), name: "Global Alpha" },
+    { ...gridNodes(1, 1)[0], id: syntheticId(312), name: "Global Beta" },
+    { ...gridNodes(1, 1)[0], id: syntheticId(313), name: "Global Shared" },
+    { ...gridNodes(1, 1)[0], id: syntheticId(314), name: "Global Unplaced" },
+  ];
+  const mainCanvasId = syntheticId(401);
+  const archiveCanvasId = syntheticId(402);
+  await openSyntheticMultiCanvasWorkspace(
+    page,
+    nodes,
+    [
+      {
+        id: mainCanvasId,
+        name: "Main",
+        nodeIds: [nodes[0].id, nodes[2].id],
+      },
+      {
+        id: archiveCanvasId,
+        name: "Archive",
+        nodeIds: [nodes[1].id, nodes[2].id],
+      },
+    ],
+    mainCanvasId,
+  );
+
+  const searchInput = page.getByTestId("node-search");
+  const locationScope = page.getByTestId("node-search-location-scope");
+  await searchInput.fill("Global");
+  await expect(page.locator(".node-search-result")).toHaveCount(2);
+  await locationScope.selectOption("workspace");
+  await expect(page.locator(".node-search-result")).toHaveCount(4);
+  await expect(page.locator(".item-count")).toContainText("4 / 4");
+
+  const sharedResult = page
+    .locator(".node-search-result")
+    .filter({ hasText: "Global Shared" });
+  await expect(sharedResult.getByTestId("node-search-result-canvas")).toHaveText([
+    "Main",
+    "Archive",
+  ]);
+  const unplacedResult = page
+    .locator(".node-search-result")
+    .filter({ hasText: "Global Unplaced" });
+  await expect(unplacedResult).toContainText("Not placed on any canvas");
+
+  const betaResult = page
+    .locator(".node-search-result")
+    .filter({ hasText: "Global Beta" });
+  await betaResult.getByTestId("node-search-result-canvas").click();
+  await expect(page.getByTestId("canvas-select")).toHaveValue(archiveCanvasId);
+  await expect(node(page, nodes[1].id)).toHaveAttribute("data-selected", "true");
+
+  await page.getByTestId("canvas-select").selectOption(mainCanvasId);
+  await node(page, nodes[2].id).click({ button: "right" });
+  await page.getByTestId("browse-node-canvases-context-action").click();
+  const membershipDialog = page.getByTestId("canvas-membership-dialog");
+  await expect(membershipDialog).toBeVisible();
+  await expect(membershipDialog.getByTestId("canvas-membership-item")).toHaveText([
+    /Main.*Current canvas/u,
+    /Archive.*Open/u,
+  ]);
+  await membershipDialog
+    .getByTestId("canvas-membership-item")
+    .filter({ hasText: "Archive" })
+    .click();
+  await expect(page.getByTestId("canvas-select")).toHaveValue(archiveCanvasId);
+  await expect(node(page, nodes[2].id)).toHaveAttribute("data-selected", "true");
+
+  await searchInput.fill("Global Unplaced");
+  await page
+    .locator(".node-search-result")
+    .filter({ hasText: "Global Unplaced" })
+    .locator(".node-search-result-main")
+    .click();
+  const unplacedListRow = page.locator(
+    `[data-node-list-id="${nodes[3].id}"]`,
+  );
+  await expect(unplacedListRow).toBeFocused();
+  await expect(unplacedListRow).toContainText("Not placed on any canvas");
+
+  const stored = await storedWorkspace(page);
+  expect(
+    stored?.view?.canvases?.some((canvas: { layout: Array<{ nodeId: string }> }) =>
+      canvas.layout.some((placement) => placement.nodeId === nodes[3].id),
+    ),
+  ).toBe(false);
 });
 
 test("reference search can target nodes outside the current canvas filter", async ({
