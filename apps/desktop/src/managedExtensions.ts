@@ -9,7 +9,10 @@ import type {
   ExtensionProposalEndpointV1,
 } from "./builtinExtensionHost";
 import type { InstalledExtension } from "./extensionManager";
-import type { ExtensionMetadataPayload } from "./workspaceStore";
+import type {
+  ExtensionMetadataPayload,
+  WorkspaceSnapshot,
+} from "./workspaceStore";
 
 export interface ManagedExtensionProcessorRegistration {
   extensionId: string;
@@ -25,6 +28,26 @@ export interface ManagedExtensionNodeInput {
   content: string | null;
   directOutgoingNodeIds: string[];
   directIncomingNodeIds: string[];
+}
+
+export function managedExtensionNodeInputForWorkspace(
+  workspace: WorkspaceSnapshot,
+  nodeId: string,
+): ManagedExtensionNodeInput | null {
+  const node = workspace.nodes.find((candidate) => candidate.id === nodeId);
+  return node === undefined
+    ? null
+    : {
+        id: node.id,
+        name: node.name,
+        content: node.content,
+        directOutgoingNodeIds: workspace.references
+          .filter((reference) => reference.sourceNodeId === nodeId)
+          .map((reference) => reference.targetNodeId),
+        directIncomingNodeIds: workspace.references
+          .filter((reference) => reference.targetNodeId === nodeId)
+          .map((reference) => reference.sourceNodeId),
+      };
 }
 
 interface ManagedExtensionRenderWireResult {

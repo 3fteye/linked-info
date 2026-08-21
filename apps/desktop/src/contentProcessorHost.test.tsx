@@ -158,6 +158,14 @@ describe("NodeContentHost", () => {
       button!.click();
       await Promise.resolve();
     });
+    expect(onManagedAction).toHaveBeenCalledWith(
+      installed.id,
+      "remember",
+      "11111111-1111-4111-8111-111111111111",
+      null,
+      null,
+      0,
+    );
     expect(onMetadata).toHaveBeenCalledWith(
       installed.id,
       1,

@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   invokeManagedExtensionAction,
+  managedExtensionNodeInputForWorkspace,
   managedExtensionRegistry,
 } from "./managedExtensions";
 
@@ -11,6 +12,32 @@ describe("managed extension frontend boundary", () => {
   afterEach(() => {
     vi.mocked(invoke).mockReset();
     managedExtensionRegistry.replace([]);
+  });
+
+  it("loads full current node content only at the active action boundary", () => {
+    const sourceId = "11111111-1111-4111-8111-111111111111";
+    const targetId = "22222222-2222-4222-8222-222222222222";
+    const fullContent = "full action content ".repeat(1_000);
+    const input = managedExtensionNodeInputForWorkspace(
+      {
+        nodes: [
+          { id: sourceId, name: "Source", content: fullContent },
+          { id: targetId, name: "Target", content: null },
+        ],
+        layout: [
+          { nodeId: sourceId, x: 0, y: 0 },
+          { nodeId: targetId, x: 300, y: 0 },
+        ],
+        references: [{ sourceNodeId: sourceId, targetNodeId: targetId }],
+        viewport: null,
+        view: { contentProcessorByNodeId: {}, extensionMetadata: {} },
+      },
+      sourceId,
+    );
+
+    expect(input?.content).toBe(fullContent);
+    expect(input?.directOutgoingNodeIds).toEqual([targetId]);
+    expect(input?.directIncomingNodeIds).toEqual([]);
   });
 
   it("normalizes wire handles to bigint without exposing them as stable ids", async () => {

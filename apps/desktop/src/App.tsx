@@ -66,8 +66,8 @@ import {
 } from "./extensionInstallLifecycle";
 import {
   invokeManagedExtensionAction,
+  managedExtensionNodeInputForWorkspace,
   managedExtensionRegistry,
-  type ManagedExtensionNodeInput,
 } from "./managedExtensions";
 import {
   buildDocumentImportWorkspace,
@@ -3257,21 +3257,10 @@ function App({
     baseRevision: number,
   ): Promise<BuiltInExtensionActionHostResult> {
     const current = workspaceRef.current;
-    const node = current.nodes.find((candidate) => candidate.id === nodeId);
-    if (node === undefined) {
+    const input = managedExtensionNodeInputForWorkspace(current, nodeId);
+    if (input === null) {
       throw new Error("extension_runtime_snapshot_stale");
     }
-    const input: ManagedExtensionNodeInput = {
-      id: node.id,
-      name: node.name,
-      content: node.content,
-      directOutgoingNodeIds: current.references
-        .filter((reference) => reference.sourceNodeId === nodeId)
-        .map((reference) => reference.targetNodeId),
-      directIncomingNodeIds: current.references
-        .filter((reference) => reference.targetNodeId === nodeId)
-        .map((reference) => reference.sourceNodeId),
-    };
     return invokeManagedExtensionAction(
       extensionId,
       actionId,
