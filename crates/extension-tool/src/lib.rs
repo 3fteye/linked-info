@@ -282,8 +282,8 @@ mod tests {
 
     #[test]
     fn signing_key_parser_requires_canonical_lower_hex() {
-        let encoded = "11".repeat(32);
-        assert_eq!(parse_signing_key(&encoded).unwrap().to_bytes(), [0x11; 32]);
+        let encoded = "ab".repeat(32);
+        assert_eq!(parse_signing_key(&encoded).unwrap().to_bytes(), [0xab; 32]);
         assert!(parse_signing_key(&encoded.to_uppercase()).is_err());
         assert!(parse_signing_key("11").is_err());
     }
