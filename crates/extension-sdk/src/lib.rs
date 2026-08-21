@@ -23,7 +23,7 @@ pub use bindings::exports::linked_info::extension::guest;
 /// The supplied type must implement [`guest::Guest`].
 #[macro_export]
 macro_rules! export_extension {
-    ($extension:ty) => {
+    ($extension:ident) => {
         $crate::bindings::export_extension_component!(
             $extension with_types_in $crate::bindings
         );
