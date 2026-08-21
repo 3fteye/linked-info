@@ -32,6 +32,9 @@ const labels: DocumentImportDialogLabels = {
   references: "引用",
   referencesPlaceholder: "引用名称",
   noCandidates: "没有候选",
+  choosePlacement: "选择导入落点",
+  placementRequired: "尚未选择导入落点",
+  placementSelected: (x, y) => `已选择 ${x},${y}`,
 };
 
 const draft: DocumentImportDraft = {
@@ -75,7 +78,11 @@ describe("DocumentImportDialog", () => {
     container.remove();
   });
 
-  function render(currentDraft: DocumentImportDraft | null, loadingExternalDraft = false) {
+  function render(
+    currentDraft: DocumentImportDraft | null,
+    loadingExternalDraft = false,
+    placement: { x: number; y: number } | null = { x: 120, y: 240 },
+  ) {
     act(() => {
       root.render(
         <DocumentImportDialog
@@ -88,11 +95,13 @@ describe("DocumentImportDialog", () => {
           onCancel={noOp}
           onChooseExternalDraft={noOp}
           onChooseFile={noOp}
+          onChoosePlacement={noOp}
           onPreview={noOp}
           onSourceNameChange={noOp}
           onSourceTextChange={noOp}
           onUpdateCandidate={noOp}
           progress={null}
+          placement={placement}
           sourceName=""
           sourceText=""
         />,
@@ -120,5 +129,15 @@ describe("DocumentImportDialog", () => {
     expect(loadingButton).toBeDefined();
     expect(loadingButton?.disabled).toBe(true);
     expect(buttons.find((button) => button.textContent?.includes("选择文档"))?.disabled).toBe(true);
+  });
+
+  it("requires an explicit canvas position before preview", () => {
+    render(draft, false, null);
+
+    const preview = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent?.includes("预览"),
+    );
+    expect(container.textContent).toContain("尚未选择导入落点");
+    expect(preview?.disabled).toBe(true);
   });
 });

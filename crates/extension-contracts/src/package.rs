@@ -41,6 +41,9 @@ pub enum SignaturePolicy {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidatedExtensionPackage {
     pub manifest: ExtensionManifestV1,
+    pub component: Vec<u8>,
+    pub metadata_schema: Value,
+    pub locales: BTreeMap<String, BTreeMap<String, String>>,
     pub package_sha256: String,
     pub publisher_fingerprint: Option<String>,
     pub signed: bool,
@@ -203,10 +206,10 @@ pub fn validate_extension_package(
         .map_err(|_| ExtensionPackageError::InvalidManifestJson)?;
     validate_extension_manifest(&manifest)?;
     validate_declared_files(&files, &manifest)?;
-    validate_locales(&files, &manifest)?;
+    let locales = validate_locales(&files, &manifest)?;
 
     let metadata_schema = required_file(&files, METADATA_SCHEMA_PATH)?;
-    validate_metadata_schema(metadata_schema)?;
+    let metadata_schema = validate_metadata_schema(metadata_schema)?;
 
     let checksums_bytes = required_file(&files, CHECKSUMS_PATH)?;
     validate_checksums(&files, checksums_bytes)?;
@@ -224,6 +227,9 @@ pub fn validate_extension_package(
 
     Ok(ValidatedExtensionPackage {
         manifest,
+        component: wasm.to_vec(),
+        metadata_schema,
+        locales,
         package_sha256,
         publisher_fingerprint,
         signed,
@@ -316,7 +322,7 @@ fn validate_declared_files(
 fn validate_locales(
     files: &BTreeMap<String, Vec<u8>>,
     manifest: &ExtensionManifestV1,
-) -> Result<(), ExtensionPackageError> {
+) -> Result<BTreeMap<String, BTreeMap<String, String>>, ExtensionPackageError> {
     let mut parsed = BTreeMap::<String, BTreeMap<String, String>>::new();
     for locale in &manifest.locales {
         let path = format!("locales/{locale}.json");
@@ -356,7 +362,7 @@ fn validate_locales(
             return Err(ExtensionPackageError::MissingLocaleLabel(label.clone()));
         }
     }
-    Ok(())
+    Ok(parsed)
 }
 
 fn valid_locale_key(key: &str) -> bool {
@@ -369,7 +375,7 @@ fn valid_locale_key(key: &str) -> bool {
         && !key.contains("..")
 }
 
-fn validate_metadata_schema(bytes: &[u8]) -> Result<(), ExtensionPackageError> {
+fn validate_metadata_schema(bytes: &[u8]) -> Result<Value, ExtensionPackageError> {
     let schema = serde_json::from_slice::<Value>(bytes)
         .map_err(|_| ExtensionPackageError::InvalidMetadataSchema)?;
     let root = schema
@@ -380,7 +386,12 @@ fn validate_metadata_schema(bytes: &[u8]) -> Result<(), ExtensionPackageError> {
     {
         return Err(ExtensionPackageError::InvalidMetadataSchema);
     }
-    validate_schema_node(&schema, 0)
+    validate_schema_node(&schema, 0)?;
+    Ok(schema)
+}
+
+pub fn extension_metadata_matches_schema(schema: &Value, value: &Value) -> bool {
+    metadata_value_satisfies_schema(schema, value, true)
 }
 
 fn validate_schema_node(schema: &Value, depth: usize) -> Result<(), ExtensionPackageError> {
@@ -993,6 +1004,9 @@ mod tests {
             validate_extension_package(&package, SignaturePolicy::RequireSigned).unwrap();
 
         assert_eq!(validated.manifest.id, "dev.example.json-tools");
+        assert!(validated.component.starts_with(&WASM_COMPONENT_HEADER));
+        assert_eq!(validated.metadata_schema["type"], "object");
+        assert_eq!(validated.locales["en"]["processor.label"], "JSON tools");
         assert!(validated.signed);
         assert_eq!(validated.file_count, 7);
         assert_eq!(validated.package_sha256.len(), 64);

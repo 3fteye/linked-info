@@ -6,6 +6,8 @@ const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url))
 
 export const sensitiveSourcePaths = [
   "apps/desktop/src-tauri/src/embedding.rs",
+  "apps/desktop/src-tauri/src/extension_runtime.rs",
+  "apps/desktop/src-tauri/src/extension_runtime_content.rs",
   "apps/desktop/src-tauri/src/file_transfer.rs",
   "apps/desktop/src-tauri/src/llm.rs",
   "apps/desktop/src-tauri/src/offsite_backup.rs",
@@ -14,6 +16,10 @@ export const sensitiveSourcePaths = [
   "apps/desktop/src-tauri/src/system_unlock.rs",
   "apps/desktop/src-tauri/src/vector_cache.rs",
   "apps/desktop/src-tauri/src/workspace_file.rs",
+  "crates/extension-host/src/main.rs",
+  "crates/extension-host/src/runtime.rs",
+  "crates/extension-host/src/validation.rs",
+  "crates/extension-host/src/value.rs",
   "apps/desktop/src/App.tsx",
   "apps/desktop/src/GraphCanvas.tsx",
   "apps/desktop/src/WorkspaceSecurityGate.tsx",

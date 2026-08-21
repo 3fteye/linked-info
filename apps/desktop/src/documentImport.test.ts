@@ -120,7 +120,10 @@ describe("document import", () => {
         },
       ],
     };
-    const result = buildDocumentImportWorkspace(existing, draft);
+    const result = buildDocumentImportWorkspace(existing, draft, {
+      x: 1_200,
+      y: 640,
+    });
     expect(result.addedNodeCount).toBe(2);
     expect(result.workspace.nodes).toHaveLength(3);
     const source = result.workspace.nodes.find((node) => node.name === "来源：杂项.txt");
@@ -133,7 +136,7 @@ describe("document import", () => {
     );
   });
 
-  it("places imported nodes after the rendered edge of a manually sized node", () => {
+  it("places the imported group at the explicit canvas anchor", () => {
     const base = structuredClone(existing);
     base.layout[0] = { ...base.layout[0], height: 300, width: 800 };
     const draft: DocumentImportDraft = {
@@ -146,10 +149,13 @@ describe("document import", () => {
       candidates: [],
     };
 
-    const result = buildDocumentImportWorkspace(base, draft);
+    const result = buildDocumentImportWorkspace(base, draft, {
+      x: -480,
+      y: 1_260,
+    });
     expect(
-      result.workspace.layout.find((item) => item.nodeId === draft.sourceNodeId)?.x,
-    ).toBe(970);
+      result.workspace.layout.find((item) => item.nodeId === draft.sourceNodeId),
+    ).toMatchObject({ x: -480, y: 1_260 });
   });
 
   it("rejects a selected candidate that conflicts with its source node", () => {
@@ -169,7 +175,9 @@ describe("document import", () => {
         selected: true,
       }],
     };
-    expect(() => buildDocumentImportWorkspace(existing, draft)).toThrow(
+    expect(() =>
+      buildDocumentImportWorkspace(existing, draft, { x: 80, y: 80 }),
+    ).toThrow(
       "documentImportNameConflict",
     );
   });

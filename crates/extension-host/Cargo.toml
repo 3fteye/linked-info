@@ -1,0 +1,26 @@
+[package]
+name = "linked-info-extension-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+linked-info-extension-contracts = { path = "../extension-contracts" }
+linked-info-extension-host-protocol = { path = "../extension-host-protocol" }
+serde_json.workspace = true
+wasmtime.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+wit-component = { workspace = true, features = ["dummy-module"] }
+wit-parser.workspace = true
+wasmprinter.workspace = true
+wat.workspace = true
+sha2.workspace = true
+zip.workspace = true
+
+[[bin]]
+name = "linked-info-extension-host"
+path = "src/main.rs"

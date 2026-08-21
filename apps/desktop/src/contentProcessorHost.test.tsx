@@ -2,12 +2,17 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { invoke } from "@tauri-apps/api/core";
 import { contentEnhancerRegistry } from "./contentEnhancer";
 import { NodeContentHost } from "./contentProcessor";
 import {
   builtInJsonInspectorExtensionId,
   builtInJsonInspectorProcessorId,
 } from "./builtinJsonInspector";
+import { managedExtensionRegistry } from "./managedExtensions";
+import type { InstalledExtension } from "./extensionManager";
+
+vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 
 const enhancementLabels = {
   code: {
@@ -26,8 +31,10 @@ const enhancementLabels = {
     truncated: "Preview truncated",
   },
   extension: {
+    language: "en",
     resolve: (key: string) =>
       ({
+        "action.format-json": "Format and write back",
         "indent.label": "Indentation",
         "indent.two": "2 spaces",
         "indent.four": "4 spaces",
@@ -66,7 +73,105 @@ describe("NodeContentHost", () => {
 
   afterEach(() => {
     act(() => root.unmount());
+    managedExtensionRegistry.replace([]);
+    vi.mocked(invoke).mockReset();
     container.remove();
+  });
+
+  it("renders and invokes an enabled managed extension through the declarative host", async () => {
+    const installed: InstalledExtension = {
+      id: "dev.example.preview",
+      version: "1.0.0",
+      publisherName: "Preview test",
+      publisherFingerprint: null,
+      packageSha256: "00".repeat(32),
+      signed: false,
+      enabled: true,
+      valid: true,
+      errorCode: null,
+      metadataSchemaVersion: 1,
+      grantedCapabilities: ["node.read.content", "metadata.node.write"],
+      processors: [{ id: "preview", labelKey: "processor.label" }],
+      actions: [
+        { id: "remember", labelKey: "action.remember", scope: "current-node" },
+      ],
+      locales: {
+        en: {
+          "processor.label": "Managed preview",
+          "action.remember": "Remember",
+        },
+      },
+      defaultLocale: "en",
+    };
+    managedExtensionRegistry.replace([installed]);
+    vi.mocked(invoke).mockImplementation(async (command) => {
+      if (command === "render_managed_extension_processor") {
+        return {
+          extensionId: installed.id,
+          metadataSchemaVersion: 1,
+          inputTruncated: false,
+          presentation: {
+            elements: [
+              { type: "text", text: "Managed result" },
+              { type: "button", actionId: "remember" },
+            ],
+          },
+        };
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+    const onMetadata = vi.fn();
+    const onManagedAction = vi.fn().mockResolvedValue({
+      extensionId: installed.id,
+      metadataSchemaVersion: 1,
+      handleNodeIds: new Map([
+        [1n, "11111111-1111-4111-8111-111111111111"],
+      ]),
+      presentation: null,
+      nodeMetadata: { remembered: true },
+      workspaceMetadata: null,
+      proposal: null,
+    });
+
+    await act(async () => {
+      root.render(
+        <NodeContentHost
+          content="ordinary content"
+          enhancementLabels={enhancementLabels}
+          nodeId="11111111-1111-4111-8111-111111111111"
+          nodeName="Managed node"
+          onExtensionMetadataChange={onMetadata}
+          onManagedExtensionAction={onManagedAction}
+          processorId="dev.example.preview.preview"
+          variant="canvas"
+        />,
+      );
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain("Managed result");
+    const button = [...container.querySelectorAll("button")].find(
+      (candidate) => candidate.textContent === "Remember",
+    );
+    expect(button).toBeDefined();
+    await act(async () => {
+      button!.click();
+      await Promise.resolve();
+    });
+    expect(onManagedAction).toHaveBeenCalledWith(
+      installed.id,
+      "remember",
+      "11111111-1111-4111-8111-111111111111",
+      null,
+      null,
+      0,
+    );
+    expect(onMetadata).toHaveBeenCalledWith(
+      installed.id,
+      1,
+      { remembered: true },
+      null,
+    );
   });
 
   it("renders Markdown without enabling HTML, navigation, or remote images", () => {
@@ -142,14 +247,18 @@ describe("NodeContentHost", () => {
 
   it("renders the built-in JSON adapter through declarative UI and stores its action result", async () => {
     const onExtensionMetadataChange = vi.fn();
+    const onExtensionProposal = vi.fn();
     await import("./codePreview");
     await act(async () => {
       root.render(
         <NodeContentHost
           content={'{"outer":{"value":1}}'}
           enhancementLabels={enhancementLabels}
+          extensionBaseRevision={31}
           extensionMetadata={{ node: {}, schemaVersion: 1, workspace: {} }}
+          nodeId="00000000-0000-4000-8000-000000000031"
           onExtensionMetadataChange={onExtensionMetadataChange}
+          onExtensionProposal={onExtensionProposal}
           processorId={builtInJsonInspectorProcessorId}
           variant="canvas"
         />,
@@ -173,6 +282,15 @@ describe("NodeContentHost", () => {
       1,
       { indentSize: 4 },
       null,
+    );
+    const formatButton = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Format and write back",
+    );
+    act(() => formatButton?.click());
+    expect(onExtensionProposal).toHaveBeenCalledWith(
+      expect.objectContaining({
+        proposal: expect.objectContaining({ baseRevision: 31 }),
+      }),
     );
   });
 

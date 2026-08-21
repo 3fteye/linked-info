@@ -310,6 +310,36 @@ pub struct NodeSnapshotV1 {
     pub direct_incoming: Vec<NodeHandle>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExtensionRenderRequestV1 {
+    pub processor_id: String,
+    pub node: NodeSnapshotV1,
+    pub node_metadata_json: Option<String>,
+    pub workspace_metadata_json: Option<String>,
+    pub monotonic_time_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExtensionActionRequestV1 {
+    pub action_id: String,
+    pub nodes: Vec<NodeSnapshotV1>,
+    pub node_metadata_json: Option<String>,
+    pub workspace_metadata_json: Option<String>,
+    pub input_value: Option<String>,
+    pub monotonic_time_ms: Option<u64>,
+    pub base_revision: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExtensionMetadataMigrationRequestV1 {
+    pub from_version: u32,
+    pub to_version: u32,
+    pub metadata_json: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum PresentationElement {

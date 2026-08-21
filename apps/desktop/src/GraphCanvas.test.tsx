@@ -120,6 +120,8 @@ function cardProps(overrides: Record<string, unknown> = {}): NodeProps<any> {
       onCommit: vi.fn(),
       onContentChange: vi.fn(),
       onContentProcessorChange: vi.fn(),
+      onExtensionMetadataChange: vi.fn(),
+      onExtensionProposal: vi.fn(),
       onEditorCommitBlockedChange: vi.fn(),
       onCopyCodeSource: vi.fn(),
       onCopyDerivedSecret: null,
@@ -557,7 +559,6 @@ describe("InformationNodeCard", () => {
     act(() => remove.click());
     expect(props.data.onRemoveReference).not.toHaveBeenCalled();
   });
-
   it("loads full content only when a preview node enters editing", () => {
     const fullContent = "x".repeat(10_000);
     renderCard(

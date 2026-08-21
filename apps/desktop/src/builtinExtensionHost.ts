@@ -124,6 +124,7 @@ export interface BuiltInExtensionNodeInput {
   content: string | null;
   directIncomingCount?: number;
   directOutgoingCount?: number;
+  hostNodeId?: string;
   name: string | null;
 }
 
@@ -142,9 +143,11 @@ export interface BuiltInExtensionRenderResult {
 
 export interface BuiltInExtensionActionHostResult {
   extensionId: string;
+  handleNodeIds: ReadonlyMap<NodeHandle, string>;
   metadataSchemaVersion: number;
   nodeMetadata: ExtensionMetadataPayload | null;
   presentation: ExtensionPresentationV1 | null;
+  proposal: ExtensionChangeProposalV1 | null;
   workspaceMetadata: ExtensionMetadataPayload | null;
 }
 
@@ -204,7 +207,11 @@ function relationHandles(count: number | undefined, first: bigint): NodeHandle[]
 function buildNodeSnapshot(
   node: BuiltInExtensionNodeInput,
   capabilities: ReadonlySet<ExtensionCapability>,
-): { snapshot: NodeSnapshotV1; truncated: boolean } {
+): {
+  handleNodeIds: ReadonlyMap<NodeHandle, string>;
+  snapshot: NodeSnapshotV1;
+  truncated: boolean;
+} {
   const bounded = boundedPassiveContent(
     capabilities.has("node.read.content") ? node.content : null,
   );
@@ -215,6 +222,9 @@ function buildNodeSnapshot(
     ? relationHandles(node.directIncomingCount, 2n + BigInt(outgoing.length))
     : [];
   return {
+    handleNodeIds: new Map([
+      [1n, node.hostNodeId ?? "00000000-0000-4000-8000-000000000001"],
+    ]),
     snapshot: {
       handle: 1n,
       name: capabilities.has("node.read.name") ? node.name : null,
@@ -224,6 +234,57 @@ function buildNodeSnapshot(
     },
     truncated: bounded.truncated,
   };
+}
+
+function validProposalEndpoint(
+  endpoint: ExtensionProposalEndpointV1,
+  handles: ReadonlySet<NodeHandle>,
+  temporaryIds: ReadonlySet<string>,
+): boolean {
+  return endpoint.kind === "existing"
+    ? handles.has(endpoint.handle)
+    : temporaryIds.has(endpoint.temporaryId);
+}
+
+function validateProposal(
+  proposal: ExtensionChangeProposalV1,
+  request: ExtensionActionRequestV1,
+  manifest: BuiltInExtensionManifest,
+): void {
+  if (
+    !manifest.capabilities.includes("workspace.propose") ||
+    proposal.baseRevision !== request.baseRevision ||
+    !manifest.localizationKeys.has(proposal.titleKey) ||
+    proposal.operations.length === 0 ||
+    proposal.operations.length > 256
+  ) {
+    throw new Error("built-in extension returned an invalid proposal");
+  }
+  const temporaryIds = new Set<string>();
+  for (const operation of proposal.operations) {
+    if (operation.type !== "create-node") continue;
+    if (
+      !/^[A-Za-z0-9_-]{1,64}$/.test(operation.temporaryId) ||
+      temporaryIds.has(operation.temporaryId)
+    ) {
+      throw new Error("built-in extension returned an invalid proposal");
+    }
+    temporaryIds.add(operation.temporaryId);
+  }
+  const handles = new Set(request.nodes.map((node) => node.handle));
+  for (const operation of proposal.operations) {
+    if (operation.type === "update-current-node" && request.nodes.length !== 1) {
+      throw new Error("built-in extension returned an invalid proposal");
+    }
+    if (
+      (operation.type === "create-reference" ||
+        operation.type === "remove-reference") &&
+      (!validProposalEndpoint(operation.source, handles, temporaryIds) ||
+        !validProposalEndpoint(operation.target, handles, temporaryIds))
+    ) {
+      throw new Error("built-in extension returned an invalid proposal");
+    }
+  }
 }
 
 function parseMetadataJson(
@@ -491,7 +552,23 @@ export class BuiltInExtensionHost {
       baseRevision,
     });
     if (result.proposal !== null) {
-      throw new Error("built-in adapter cannot apply workspace proposals yet");
+      validateProposal(result.proposal, {
+        actionId,
+        nodes: [invocationNode.snapshot],
+        nodeMetadataJson:
+          metadataMatches && capabilities.has("metadata.node.read")
+            ? JSON.stringify(metadata.node)
+            : null,
+        workspaceMetadataJson:
+          metadataMatches && capabilities.has("metadata.workspace.read")
+            ? JSON.stringify(metadata.workspace)
+            : null,
+        inputValue,
+        monotonicTimeMs: capabilities.has("clock.monotonic")
+          ? performance.now()
+          : null,
+        baseRevision,
+      }, manifest);
     }
     const nodeMetadata = parseMetadataJson(
       result.nodeMetadataJson,
@@ -512,12 +589,14 @@ export class BuiltInExtensionHost {
     }
     return {
       extensionId,
+      handleNodeIds: invocationNode.handleNodeIds,
       metadataSchemaVersion: manifest.metadataSchemaVersion,
       nodeMetadata,
       presentation:
         result.presentation === null
           ? null
           : validatePresentation(result.presentation, manifest),
+      proposal: result.proposal,
       workspaceMetadata,
     };
   }

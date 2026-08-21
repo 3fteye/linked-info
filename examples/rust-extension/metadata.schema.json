@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "lastAction": {
+      "type": "string",
+      "maxLength": 32,
+      "enum": ["uppercase"]
+    }
+  }
+}

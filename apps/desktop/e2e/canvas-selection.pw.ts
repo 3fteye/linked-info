@@ -42,9 +42,16 @@ async function openSyntheticWorkspace(
   nodes: SyntheticNode[],
   references: SyntheticReference[] = [],
   viewport: SyntheticViewport = { x: 0, y: 0, zoom: 1 },
+  extensionMetadata: Record<string, unknown> | null = null,
 ) {
   await page.addInitScript(
-    ({ storageKey, syntheticNodes, syntheticReferences, syntheticViewport }) => {
+    ({
+      storageKey,
+      syntheticExtensionMetadata,
+      syntheticNodes,
+      syntheticReferences,
+      syntheticViewport,
+    }) => {
       const seedMarker = `${storageKey}.playwright-seeded`;
       if (sessionStorage.getItem(seedMarker) === "true") {
         return;
@@ -53,7 +60,7 @@ async function openSyntheticWorkspace(
       localStorage.setItem(
         storageKey,
         JSON.stringify({
-          version: 2,
+          version: syntheticExtensionMetadata === null ? 2 : 3,
           nodes: syntheticNodes.map((node) => ({
             id: node.id,
             name: node.name,
@@ -68,13 +75,19 @@ async function openSyntheticWorkspace(
           })),
           references: syntheticReferences,
           viewport: syntheticViewport,
-          view: { contentProcessorByNodeId: {} },
+          view: {
+            contentProcessorByNodeId: {},
+            ...(syntheticExtensionMetadata === null
+              ? {}
+              : { extensionMetadata: syntheticExtensionMetadata }),
+          },
         }),
       );
       sessionStorage.setItem(seedMarker, "true");
     },
     {
       storageKey: workspaceStorageKey,
+      syntheticExtensionMetadata: extensionMetadata,
       syntheticNodes: nodes,
       syntheticReferences: references,
       syntheticViewport: viewport,
@@ -702,7 +715,7 @@ test("canvas keyboard navigation frames and zooms the current view", async ({ pa
   await page.keyboard.press("-");
   await expect
     .poll(async () => (await storedWorkspace(page))?.viewport?.zoom ?? null)
-    .toBeLessThan(1);
+    .toBeCloseTo(1 / 1.2, 2);
   await page.keyboard.press("+");
   await expect
     .poll(async () => (await storedWorkspace(page))?.viewport?.zoom ?? null)
@@ -981,7 +994,7 @@ test("double-clicking an inline reference filter leaves every node visible", asy
   await page.getByTestId("unmatched-node-opacity").fill("0");
 
   const referenceChip = node(page, nodes[0].id).locator(
-    ".graph-node-reference-chip",
+    ".graph-node-reference-filter",
   );
   await expect(referenceChip).toHaveCount(1);
   await referenceChip.dblclick();
@@ -1004,8 +1017,8 @@ test("following inline references replaces the browsing filter instead of accumu
   ]);
   await page.getByTestId("unmatched-node-opacity").fill("0");
 
-  await node(page, nodes[0].id).locator(".graph-node-reference-chip").click();
-  await node(page, nodes[1].id).locator(".graph-node-reference-chip").click();
+  await node(page, nodes[0].id).locator(".graph-node-reference-filter").click();
+  await node(page, nodes[1].id).locator(".graph-node-reference-filter").click();
 
   await expect(page.locator(".active-reference-filter")).toHaveCount(1);
   await expect(page.locator(".item-count")).toContainText("1 / 3");
@@ -1249,6 +1262,35 @@ test("an invalid editor draft blocks reference removal without losing the draft"
   await expect(editor.locator("input")).toHaveValue(referenceSource.name);
 });
 
+test("document import requires and records an explicit canvas position", async ({
+  page,
+}) => {
+  const nodes = gridNodes(1, 1);
+  await openSyntheticWorkspace(page, nodes);
+
+  await page.getByTestId("document-import-open").click();
+  await expect(
+    page.getByTestId("document-import-placement-status"),
+  ).toHaveAttribute("data-selected", "false");
+  await page.getByTestId("document-import-choose-placement").click();
+  await expect(page.getByTestId("canvas-point-selection")).toBeVisible();
+  await expect(page.getByTestId("graph-canvas")).toHaveAttribute(
+    "data-point-selection",
+    "true",
+  );
+
+  await page.getByTestId("graph-canvas").click({
+    position: { x: 760, y: 520 },
+  });
+
+  await expect(
+    page.getByTestId("document-import-placement-status"),
+  ).toHaveAttribute("data-selected", "true");
+  await expect(
+    page.getByTestId("document-import-placement-status"),
+  ).toContainText(/760.*520/u);
+});
+
 test("canvas select all, delete, undo, redo and context menu share one keyboard model", async ({
   page,
 }) => {
@@ -1417,6 +1459,47 @@ test("settings tabs support standard keyboard navigation", async ({ page }) => {
     "id",
     "settings-panel-general",
   );
+});
+
+test("preserved extension metadata can be cleared separately and undone", async ({
+  page,
+}) => {
+  const nodes = gridNodes(1, 1);
+  await openSyntheticWorkspace(
+    page,
+    nodes,
+    [],
+    { x: 0, y: 0, zoom: 1 },
+    {
+      "dev.example.preview": {
+        schemaVersion: 1,
+        workspace: { theme: "dark" },
+        byNodeId: { [nodes[0].id]: { collapsed: true } },
+      },
+    },
+  );
+
+  await page.getByTestId("settings-navigation").click();
+  await page.getByTestId("settings-tab-extensions").click();
+  await expect(page.getByText("dev.example.preview", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Clear metadata" }).click();
+  await page
+    .getByRole("button", { name: "Click again to confirm clearing" })
+    .click();
+  await expect
+    .poll(async () => (await storedWorkspace(page))?.view?.extensionMetadata)
+    .toEqual({});
+
+  await page.getByRole("button", { name: "Undo" }).click();
+  await expect
+    .poll(async () => (await storedWorkspace(page))?.view?.extensionMetadata)
+    .toEqual({
+      "dev.example.preview": {
+        schemaVersion: 1,
+        workspace: { theme: "dark" },
+        byNodeId: { [nodes[0].id]: { collapsed: true } },
+      },
+    });
 });
 
 test("confirmed workspace replacement can be undone and redone from disk", async ({
@@ -1816,6 +1899,41 @@ test("multi-selected nodes enter the smart-reference queue as one batch", async 
   await expect(page.getByTestId("graph-canvas")).toBeVisible();
 });
 
+test("a long smart-reference queue owns a real scroll viewport", async ({ page }) => {
+  const nodes = gridNodes(7, 2);
+  await openSyntheticWorkspace(page, nodes);
+  const canvas = page.getByTestId("graph-canvas");
+
+  await canvas.click({ position: { x: 30, y: 30 } });
+  await page.keyboard.press("Control+a");
+  await node(page, nodes[0].id).click({
+    button: "right",
+    position: { x: 24, y: 24 },
+  });
+  await page.getByTestId("smart-reference-context-action").click();
+
+  const queueList = page.locator(".smart-reference-queue-list");
+  await expect(queueList.locator(".smart-reference-queue-item")).toHaveCount(
+    nodes.length,
+  );
+  await expect
+    .poll(() =>
+      queueList.evaluate((element) => ({
+        clientHeight: element.clientHeight,
+        overflowY: getComputedStyle(element).overflowY,
+        scrollHeight: element.scrollHeight,
+      })),
+    )
+    .toMatchObject({ overflowY: "auto" });
+  const dimensions = await queueList.evaluate((element) => ({
+    clientHeight: element.clientHeight,
+    scrollHeight: element.scrollHeight,
+  }));
+  expect(dimensions.scrollHeight).toBeGreaterThan(dimensions.clientHeight);
+  await queueList.locator(".smart-reference-queue-item").last().scrollIntoViewIfNeeded();
+  await expect(queueList.locator(".smart-reference-queue-item").last()).toBeVisible();
+});
+
 test("the low-glare starry theme is selectable and persists on this device", async ({
   page,
 }) => {
@@ -1848,14 +1966,14 @@ test("the low-glare starry theme is selectable and persists on this device", asy
 
   await page.getByTestId("settings-navigation").click();
   const settingsTabs = page.locator(".settings-tab-list .settings-tab");
-  await expect(settingsTabs).toHaveCount(4);
+  await expect(settingsTabs).toHaveCount(5);
   await expect
     .poll(() =>
       page.locator(".settings-tab-list").evaluate((element) =>
         getComputedStyle(element).gridTemplateColumns.split(" ").length,
       ),
     )
-    .toBe(4);
+    .toBe(5);
   await page.getByTestId("settings-tab-smartReference").click();
   const smartReferencePanel = page.locator("#settings-panel-smartReference");
   await smartReferencePanel

@@ -2,7 +2,8 @@ mod package;
 mod protocol;
 
 pub use package::{
-    ExtensionPackageError, SignaturePolicy, ValidatedExtensionPackage, validate_extension_package,
+    ExtensionPackageError, MAXIMUM_EXTENSION_PACKAGE_BYTES, SignaturePolicy,
+    ValidatedExtensionPackage, extension_metadata_matches_schema, validate_extension_package,
 };
 pub use protocol::*;
 

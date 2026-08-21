@@ -729,6 +729,10 @@ h1 {
   cursor: grabbing;
 }
 
+.graph-canvas[data-point-selection="true"] .react-flow__pane {
+  cursor: crosshair;
+}
+
 .graph-canvas .react-flow__node {
   transition: opacity 120ms ease-out;
 }
@@ -1641,7 +1645,6 @@ h1 {
   outline: 2px solid rgb(155 61 53 / 24%);
   outline-offset: 1px;
 }
-
 .graph-handle.react-flow__handle {
   width: 12px;
   height: 12px;
@@ -1741,6 +1744,35 @@ h1 {
 .canvas-action-panel {
   display: flex;
   gap: 6px;
+}
+
+.canvas-point-selection-panel {
+  display: flex;
+  align-items: center;
+  max-width: min(620px, calc(100vw - 300px));
+  padding: 9px 11px;
+  gap: 8px;
+  border: 1px solid #86ad96;
+  border-radius: 8px;
+  color: #214e35;
+  background: rgb(247 252 248 / 96%);
+  box-shadow: 0 8px 24px rgb(31 62 42 / 16%);
+  font-size: 12px;
+}
+
+.canvas-point-selection-panel span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.canvas-point-selection-panel button {
+  flex: none;
+  min-height: 28px;
+  padding: 0 9px;
+  border: 1px solid #b9cabf;
+  border-radius: 6px;
+  color: #355d46;
+  background: #fff;
 }
 
 .canvas-shortcuts-popover {
@@ -2215,7 +2247,7 @@ h1 {
   z-index: 8;
   top: 0;
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   width: min(920px, 100%);
   padding: 4px;
   gap: 4px;
@@ -2267,6 +2299,116 @@ h1 {
 
 .settings-tab-panel[hidden] {
   display: none;
+}
+
+.extension-manager,
+.extension-manager-list,
+.extension-install-dialog fieldset {
+  display: grid;
+  gap: 12px;
+}
+
+.extension-manager-actions,
+.extension-manager-item-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.extension-manager-actions button,
+.extension-manager-item-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.extension-manager-boundary,
+.extension-manager-empty,
+.extension-manager-error,
+.extension-manager-warning {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 7px;
+  color: #5c665f;
+  background: #f4f7f5;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.extension-manager-error,
+.extension-manager-warning {
+  color: #8d3d35;
+  background: #fff0ee;
+}
+
+.extension-manager-list > article {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 13px 14px;
+  gap: 16px;
+  border: 1px solid #d8dfda;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.extension-manager-list > article > div:first-child {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.extension-manager-list span,
+.extension-manager-list small {
+  color: #667169;
+  font-size: 11px;
+}
+
+.extension-manager-preserved {
+  display: grid;
+  gap: 8px;
+  padding-top: 4px;
+}
+
+.extension-manager-preserved h3,
+.extension-manager-preserved p {
+  margin: 0;
+}
+
+.extension-manager-preserved h3 {
+  color: #2f3731;
+  font-size: 13px;
+}
+
+.extension-manager-preserved > p {
+  color: #667169;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.extension-install-dialog {
+  width: min(620px, 100%);
+}
+
+.extension-install-dialog > code {
+  overflow-wrap: anywhere;
+  font-size: 10px;
+}
+
+.extension-install-dialog fieldset {
+  margin: 12px 0 0;
+  padding: 12px;
+  border: 1px solid #d6ded8;
+  border-radius: 8px;
+}
+
+.extension-install-dialog fieldset label {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 .settings-group-heading {
@@ -3546,8 +3688,8 @@ h1 {
 }
 
 .document-import-dialog {
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto auto;
+  display: flex;
+  flex-direction: column;
   width: min(920px, 100%);
   max-height: min(860px, calc(100vh - 48px));
   padding: 22px;
@@ -3598,6 +3740,7 @@ h1 {
 .document-import-input,
 .document-import-draft {
   min-height: 0;
+  flex: 1 1 auto;
   margin-top: 18px;
   overflow: auto;
 }
@@ -3686,7 +3829,8 @@ h1 {
 .document-import-progress,
 .document-import-loaded-status,
 .document-import-error,
-.document-import-empty {
+.document-import-empty,
+.document-import-placement-status {
   margin: 12px 0 0;
   color: #536159;
   font-size: 12px;
@@ -3706,7 +3850,22 @@ h1 {
   color: #a33b34;
 }
 
+.document-import-placement-status {
+  padding: 8px 10px;
+  border: 1px solid #e0c894;
+  border-radius: 7px;
+  color: #715b2f;
+  background: #fff9eb;
+}
+
+.document-import-placement-status[data-selected="true"] {
+  border-color: #b9d2c2;
+  color: #275e43;
+  background: #f2f8f4;
+}
+
 .document-import-actions {
+  flex-wrap: wrap;
   margin-top: 18px;
 }
 
@@ -4130,6 +4289,7 @@ h1 {
   top: 112px;
   right: 20px;
   display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
   width: min(390px, calc(100vw - 40px));
   max-height: min(560px, calc(100vh - 152px));
   overflow: hidden;
@@ -4182,7 +4342,10 @@ h1 {
 
 .smart-reference-queue-list {
   display: grid;
-  overflow: auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 
 .smart-reference-queue-item {
@@ -4208,6 +4371,8 @@ h1 {
 }
 
 .smart-reference-dialog {
+  display: flex;
+  flex-direction: column;
   width: min(620px, 100%);
   max-height: min(760px, calc(100vh - 48px));
   padding: 20px;
@@ -4251,10 +4416,13 @@ h1 {
 }
 
 .smart-reference-scroll {
-  max-height: min(500px, calc(100vh - 260px));
+  min-height: 0;
+  flex: 1 1 auto;
   margin-top: 14px;
   padding-right: 2px;
-  overflow: auto;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 
 .smart-reference-result-section + .smart-reference-result-section {
@@ -4915,8 +5083,15 @@ h1 {
 
 :root[data-theme="starry-dark"] .settings-group-heading p,
 :root[data-theme="starry-dark"] .setting-label-copy small,
-:root[data-theme="starry-dark"] .embedding-model-note span {
+:root[data-theme="starry-dark"] .embedding-model-note span,
+:root[data-theme="starry-dark"] .extension-manager-list span,
+:root[data-theme="starry-dark"] .extension-manager-list small,
+:root[data-theme="starry-dark"] .extension-manager-preserved > p {
   color: #8c9bb2;
+}
+
+:root[data-theme="starry-dark"] .extension-manager-preserved h3 {
+  color: #dce6f5;
 }
 
 :root[data-theme="starry-dark"] .setting-label > svg {

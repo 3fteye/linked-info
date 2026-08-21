@@ -24,6 +24,7 @@ import {
 } from "@xyflow/react";
 import {
   Copy,
+  Crosshair,
   Filter,
   GripVertical,
   Keyboard,
@@ -93,8 +94,12 @@ import {
   contentProcessorExtensionId,
   contentProcessorUsesCodePresentation,
   type ContentEnhancementLabels,
+  type ManagedExtensionActionInvoker,
 } from "./contentProcessor";
-import type { BuiltInExtensionMetadataInput } from "./builtinExtensionHost";
+import type {
+  BuiltInExtensionActionHostResult,
+  BuiltInExtensionMetadataInput,
+} from "./builtinExtensionHost";
 import {
   codePreviewLanguageFromProcessorId,
   type CodePreviewLanguage,
@@ -136,6 +141,8 @@ import "@xyflow/react/dist/style.css";
 interface InformationNodeData extends Record<string, unknown> {
   name: string | null;
   content: string | null;
+  directIncomingNodeIds: readonly string[];
+  directOutgoingNodeIds: readonly string[];
   contentProcessorId: string | null;
   codeSourceContainsSensitive: boolean;
   contentProcessorLabel: string;
@@ -159,6 +166,7 @@ interface InformationNodeData extends Record<string, unknown> {
   contentLabel: string;
   contentPlaceholder: string;
   enhancementLabels: ContentEnhancementLabels;
+  extensionBaseRevision: number;
   extensionMetadata: BuiltInExtensionMetadataInput | null;
   editing: boolean;
   interactive: boolean;
@@ -193,6 +201,11 @@ interface InformationNodeData extends Record<string, unknown> {
     nodeMetadata: ExtensionMetadataPayload | null,
     workspaceMetadata: ExtensionMetadataPayload | null,
   ) => void;
+  onExtensionProposal: (
+    nodeId: string,
+    result: BuiltInExtensionActionHostResult,
+  ) => void;
+  onManagedExtensionAction: ManagedExtensionActionInvoker;
   onEditorCommitBlockedChange: (nodeId: string, blocked: boolean) => void;
   onRemoveReference: (sourceNodeId: string, targetNodeId: string) => void;
   onCopyCodeSource: ((containsSensitive: boolean) => Promise<void>) | null;
@@ -259,6 +272,7 @@ interface GraphLabels {
   codeCopy: string;
   codeLanguages: Record<CodePreviewLanguage, string>;
   codeTruncated: string;
+  extensionLanguage: string;
   extensionLabels: Readonly<Record<string, string>>;
   unsupportedContentProcessor: (processorId: string) => string;
   copySecret: string;
@@ -343,6 +357,7 @@ interface GraphCanvasProps {
   references: NodeReference[];
   contentProcessorByNodeId: Readonly<Record<string, string>>;
   extensionMetadata: Readonly<Record<string, WorkspaceExtensionMetadata>>;
+  extensionBaseRevision?: number;
   contentProcessorOptions: readonly ContentProcessorOption[];
   contentMarkerOptions: readonly ContentMarkerOption[];
   viewport: CanvasViewport | null;
@@ -356,6 +371,12 @@ interface GraphCanvasProps {
   filteredNodeIds: ReadonlySet<string>;
   unmatchedNodeOpacity: number;
   labels: GraphLabels;
+  pointSelection?: {
+    cancelLabel: string;
+    instruction: string;
+    onCancel: () => void;
+    onSelect: (position: { x: number; y: number }) => void;
+  } | null;
   onAnalyzeNodes: (nodeIds: string[]) => void;
   onCreateNode: (position: { x: number; y: number }) => void;
   onCreateReferencedNode: (
@@ -378,6 +399,11 @@ interface GraphCanvasProps {
     nodeMetadata: ExtensionMetadataPayload | null,
     workspaceMetadata: ExtensionMetadataPayload | null,
   ) => void;
+  onNodeExtensionProposal?: (
+    nodeId: string,
+    result: BuiltInExtensionActionHostResult,
+  ) => void;
+  onManagedExtensionAction: ManagedExtensionActionInvoker;
   onNodeBringToFront: (nodeId: string) => void;
   onNodeNameChange: (nodeId: string, name: string) => boolean;
   onReferencesChange: (references: NodeReference[]) => void;
@@ -1008,10 +1034,14 @@ export function InformationNodeCard({
           className="graph-node-content"
           codeSourceContainsSensitive={data.codeSourceContainsSensitive}
           content={data.content}
+          directIncomingNodeIds={data.directIncomingNodeIds}
+          directOutgoingNodeIds={data.directOutgoingNodeIds}
           enhancementLabels={data.enhancementLabels}
+          extensionBaseRevision={data.extensionBaseRevision}
           extensionMetadata={data.extensionMetadata}
           hideWhenEmpty
           nodeName={data.name}
+          nodeId={id}
           onCopyCodeSource={data.onCopyCodeSource ?? undefined}
           onCopySecret={data.onCopyDerivedSecret ?? undefined}
           onExtensionMetadataChange={(
@@ -1028,6 +1058,8 @@ export function InformationNodeCard({
               workspaceMetadata,
             )
           }
+          onExtensionProposal={(result) => data.onExtensionProposal(id, result)}
+          onManagedExtensionAction={data.onManagedExtensionAction}
           processorId={data.contentProcessorId}
           sourceTruncated={data.contentTruncated}
           variant="canvas"
@@ -1228,6 +1260,7 @@ export default function GraphCanvas({
   contentMarkerOptions,
   contentProcessorByNodeId,
   contentProcessorOptions,
+  extensionBaseRevision = 0,
   extensionMetadata,
   nodes,
   layout,
@@ -1243,6 +1276,7 @@ export default function GraphCanvas({
   filteredNodeIds,
   unmatchedNodeOpacity,
   labels,
+  pointSelection = null,
   onAnalyzeNodes,
   onCreateNode,
   onCreateReferencedNode,
@@ -1255,6 +1289,8 @@ export default function GraphCanvas({
   onNodeContentChange,
   onNodeContentProcessorChange,
   onNodeExtensionMetadataChange,
+  onNodeExtensionProposal = () => undefined,
+  onManagedExtensionAction,
   onNodeBringToFront,
   onNodeNameChange,
   onReferencesChange,
@@ -1340,6 +1376,21 @@ export default function GraphCanvas({
   );
   const commitAvoidanceFrameIdsRef = useRef(new Set<number>());
   const smartArrangementAbortControllerRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    if (pointSelection === null) {
+      return;
+    }
+    const cancelOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        pointSelection.onCancel();
+      }
+    };
+    window.addEventListener("keydown", cancelOnEscape, true);
+    return () => window.removeEventListener("keydown", cancelOnEscape, true);
+  }, [pointSelection]);
 
   useEffect(
     () => () => {
@@ -2393,6 +2444,12 @@ export default function GraphCanvas({
           data: {
             name: node.name,
             content: renderedContent,
+            directIncomingNodeIds: (incomingNodesByTarget.get(node.id) ?? []).map(
+              (related) => related.id,
+            ),
+            directOutgoingNodeIds: (referencedNodesBySource.get(node.id) ?? []).map(
+              (related) => related.id,
+            ),
             contentFullyRendered,
             contentTruncated: renderedContent !== node.content,
             contentProcessorId,
@@ -2422,6 +2479,7 @@ export default function GraphCanvas({
                 truncated: labels.codeTruncated,
               },
               extension: {
+                language: labels.extensionLanguage,
                 resolve: (key) => labels.extensionLabels[key] ?? null,
               },
               secret: {
@@ -2439,6 +2497,7 @@ export default function GraphCanvas({
                 remaining: labels.totpRemaining,
               },
             },
+            extensionBaseRevision,
             editing,
             extensionMetadata: nodeExtensionMetadata,
             interactive,
@@ -2476,6 +2535,8 @@ export default function GraphCanvas({
             onContentChange: onNodeContentChange,
             onContentProcessorChange: onNodeContentProcessorChange,
             onExtensionMetadataChange: onNodeExtensionMetadataChange,
+            onExtensionProposal: onNodeExtensionProposal,
+            onManagedExtensionAction,
             onEditorCommitBlockedChange: updateEditorCommitBlocked,
             onRemoveReference: removeReference,
             onCopyCodeSource:
@@ -2503,6 +2564,7 @@ export default function GraphCanvas({
     commitNodeAndScheduleAvoidance,
     canvasReferencePresentation,
     editingNodeId,
+    extensionBaseRevision,
     editorCommitBlockedNodeId,
     extensionMetadata,
     fitContentNodeId,
@@ -2518,6 +2580,8 @@ export default function GraphCanvas({
     onNodeContentChange,
     onNodeContentProcessorChange,
     onNodeExtensionMetadataChange,
+    onNodeExtensionProposal,
+    onManagedExtensionAction,
     onCopySecret,
     onNodeNameChange,
     openIncomingReferenceBrowser,
@@ -2525,6 +2589,7 @@ export default function GraphCanvas({
     removeReference,
     referenceFilterNodeIdSet,
     referencedNodesBySource,
+    removeReference,
     setFlowNodes,
     sensitiveCodeContentByNodeId,
     stackOrderByNode,
@@ -3239,6 +3304,11 @@ export default function GraphCanvas({
         target !== null &&
         (target.classList.contains("react-flow__pane") ||
           target.closest(".react-flow__background") !== null);
+      if (pointSelection !== null) {
+        canvasPointerGestureRef.current = null;
+        canvasSelectionGestureRef.current = null;
+        return;
+      }
       if (
         event.button === 0 &&
         event.shiftKey &&
@@ -3284,7 +3354,7 @@ export default function GraphCanvas({
         startY: event.clientY,
       };
     },
-    [flowInstance],
+    [flowInstance, pointSelection],
   );
 
   const handleCanvasPointerMoveCapture = useCallback(
@@ -3343,6 +3413,10 @@ export default function GraphCanvas({
 
   const handleCanvasClickCapture = useCallback(
     (event: ReactMouseEvent<HTMLDivElement>) => {
+      if (pointSelection !== null) {
+        canvasPointerGestureRef.current = null;
+        return;
+      }
       const gesture = canvasPointerGestureRef.current;
       canvasPointerGestureRef.current = null;
       if (gesture === null || gesture.moved || flowInstance === null) {
@@ -3369,7 +3443,7 @@ export default function GraphCanvas({
         current.map((node) => (node.selected ? { ...node, selected: false } : node)),
       );
     },
-    [flowInstance, interactiveReferenceCurves, setFlowNodes],
+    [flowInstance, interactiveReferenceCurves, pointSelection, setFlowNodes],
   );
 
   const emptyStateLabel =
@@ -3387,6 +3461,7 @@ export default function GraphCanvas({
       className="graph-canvas"
       data-theme={appearanceTheme}
       data-flow-ready={flowInstance !== null}
+      data-point-selection={pointSelection !== null}
       data-space-pan={spacePanActive}
       data-testid="graph-canvas"
       onClickCapture={handleCanvasClickCapture}
@@ -3403,7 +3478,7 @@ export default function GraphCanvas({
         deleteKeyCode={["Backspace", "Delete"]}
         edges={noFlowEdges}
         edgesReconnectable={false}
-        elementsSelectable={!spacePanActive}
+        elementsSelectable={!spacePanActive && pointSelection === null}
         elevateNodesOnSelect={false}
         defaultViewport={viewport ?? defaultCanvasViewport}
         fitView={viewport === null}
@@ -3412,8 +3487,8 @@ export default function GraphCanvas({
         minZoom={minimumCanvasZoom}
         nodeTypes={nodeTypes}
         nodes={flowNodes}
-        nodesConnectable={!spacePanActive}
-        nodesDraggable={!spacePanActive}
+        nodesConnectable={!spacePanActive && pointSelection === null}
+        nodesDraggable={!spacePanActive && pointSelection === null}
         onlyRenderVisibleElements
         onConnect={handleConnect}
         onConnectEnd={handleConnectEnd}
@@ -3458,13 +3533,24 @@ export default function GraphCanvas({
         onNodeDragStop={handleNodeDragStop}
         onNodesChange={handleNodesChange}
         onMoveEnd={(_event, nextViewport) => onViewportChange(nextViewport)}
-        onPaneClick={() => {
+        onPaneClick={(event) => {
+          if (pointSelection !== null && flowInstance !== null) {
+            pointSelection.onSelect(
+              flowInstance.screenToFlowPosition({
+                x: event.clientX,
+                y: event.clientY,
+              }),
+            );
+            return;
+          }
           setContextMenu(null);
           setSelectedReferenceId(null);
         }}
-        onPaneContextMenu={handlePaneContextMenu}
+        onPaneContextMenu={
+          pointSelection === null ? handlePaneContextMenu : undefined
+        }
         panActivationKeyCode="Space"
-        panOnDrag={[0, 1]}
+        panOnDrag={pointSelection === null ? [0, 1] : [1]}
         proOptions={{ hideAttribution: true }}
         multiSelectionKeyCode={["Control", "Shift"]}
         selectionKeyCode={null}
@@ -3571,6 +3657,19 @@ export default function GraphCanvas({
           zoomable
         />
         <Controls className="graph-controls" position="bottom-left" showInteractive={false} />
+        {pointSelection !== null && (
+          <Panel
+            className="canvas-point-selection-panel"
+            data-testid="canvas-point-selection"
+            position="top-center"
+          >
+            <Crosshair aria-hidden="true" size={16} />
+            <span>{pointSelection.instruction}</span>
+            <button onClick={pointSelection.onCancel} type="button">
+              {pointSelection.cancelLabel}
+            </button>
+          </Panel>
+        )}
         <Panel className="canvas-action-panel" position="top-right">
           <button
             aria-label={labels.undo}

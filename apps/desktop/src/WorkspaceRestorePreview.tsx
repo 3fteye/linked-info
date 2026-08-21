@@ -61,6 +61,8 @@ interface RestorePreviewLabels {
 }
 
 interface WorkspaceRestorePreviewProps {
+  changedOnly?: boolean;
+  contextPadding?: number;
   current: WorkspaceSnapshot;
   replacement: WorkspaceSnapshot;
   labels: RestorePreviewLabels;
@@ -273,6 +275,8 @@ function badgesFor(
 }
 
 export default function WorkspaceRestorePreview({
+  changedOnly = false,
+  contextPadding = 0,
   current,
   replacement,
   labels,
@@ -304,6 +308,80 @@ export default function WorkspaceRestorePreview({
     () => new Set(replacement.references.map(referenceKey)),
     [replacement.references],
   );
+  const previewNodeIds = useMemo(() => {
+    if (!changedOnly) return null;
+    const nodeIds = new Set<string>();
+    for (const [nodeId, difference] of differences) {
+      if (
+        difference.added ||
+        difference.removed ||
+        difference.modified ||
+        difference.moved ||
+        difference.resized ||
+        difference.stackingChanged
+      ) {
+        nodeIds.add(nodeId);
+      }
+    }
+    for (const reference of current.references) {
+      if (!replacementReferenceKeys.has(referenceKey(reference))) {
+        nodeIds.add(reference.sourceNodeId);
+        nodeIds.add(reference.targetNodeId);
+      }
+    }
+    for (const reference of replacement.references) {
+      if (!currentReferenceKeys.has(referenceKey(reference))) {
+        nodeIds.add(reference.sourceNodeId);
+        nodeIds.add(reference.targetNodeId);
+      }
+    }
+    if (contextPadding <= 0 || nodeIds.size === 0) {
+      return nodeIds;
+    }
+    const relevantLayouts = [...current.layout, ...replacement.layout].filter(
+      (layout) => nodeIds.has(layout.nodeId),
+    );
+    if (relevantLayouts.length === 0) {
+      return nodeIds;
+    }
+    const left = Math.min(...relevantLayouts.map((layout) => layout.x)) - contextPadding;
+    const top = Math.min(...relevantLayouts.map((layout) => layout.y)) - contextPadding;
+    const right =
+      Math.max(
+        ...relevantLayouts.map(
+          (layout) => layout.x + (layout.width ?? 270),
+        ),
+      ) + contextPadding;
+    const bottom =
+      Math.max(
+        ...relevantLayouts.map(
+          (layout) => layout.y + (layout.height ?? 160),
+        ),
+      ) + contextPadding;
+    for (const layout of [...current.layout, ...replacement.layout]) {
+      const layoutRight = layout.x + (layout.width ?? 270);
+      const layoutBottom = layout.y + (layout.height ?? 160);
+      if (
+        layout.x <= right &&
+        layoutRight >= left &&
+        layout.y <= bottom &&
+        layoutBottom >= top
+      ) {
+        nodeIds.add(layout.nodeId);
+      }
+    }
+    return nodeIds;
+  }, [
+    changedOnly,
+    contextPadding,
+    current.layout,
+    current.references,
+    currentReferenceKeys,
+    differences,
+    replacement.references,
+    replacement.layout,
+    replacementReferenceKeys,
+  ]);
 
   useEffect(() => {
     const cancelOnEscape = (event: KeyboardEvent) => {
@@ -316,9 +394,12 @@ export default function WorkspaceRestorePreview({
   const graph = useMemo(() => {
     const nodes: RestoreFlowNode[] = [];
     const edges: Edge[] = [];
+    const nodeIsVisible = (nodeId: string) =>
+      previewNodeIds === null || previewNodeIds.has(nodeId);
 
     if (mode === "before") {
       current.layout.forEach((layout, index) => {
+        if (!nodeIsVisible(layout.nodeId)) return;
         const node = currentNodes.get(layout.nodeId);
         const difference = differences.get(layout.nodeId);
         if (node === undefined || difference === undefined) return;
@@ -340,6 +421,10 @@ export default function WorkspaceRestorePreview({
         );
       });
       current.references.forEach((reference) => {
+        if (
+          !nodeIsVisible(reference.sourceNodeId) ||
+          !nodeIsVisible(reference.targetNodeId)
+        ) return;
         edges.push(
           makeReferenceEdge(
             "before",
@@ -356,6 +441,7 @@ export default function WorkspaceRestorePreview({
     }
 
     replacement.layout.forEach((layout, index) => {
+      if (!nodeIsVisible(layout.nodeId)) return;
       const node = replacementNodes.get(layout.nodeId);
       const difference = differences.get(layout.nodeId);
       if (node === undefined || difference === undefined) return;
@@ -377,6 +463,10 @@ export default function WorkspaceRestorePreview({
       );
     });
     replacement.references.forEach((reference) => {
+      if (
+        !nodeIsVisible(reference.sourceNodeId) ||
+        !nodeIsVisible(reference.targetNodeId)
+      ) return;
       edges.push(
         makeReferenceEdge(
           "after",
@@ -394,6 +484,7 @@ export default function WorkspaceRestorePreview({
 
     const beforeEndpoint = new Map<string, string>();
     current.layout.forEach((layout, index) => {
+      if (!nodeIsVisible(layout.nodeId)) return;
       const node = currentNodes.get(layout.nodeId);
       const difference = differences.get(layout.nodeId);
       if (node === undefined || difference === undefined) return;
@@ -433,6 +524,10 @@ export default function WorkspaceRestorePreview({
       }
     });
     current.references.forEach((reference) => {
+      if (
+        !nodeIsVisible(reference.sourceNodeId) ||
+        !nodeIsVisible(reference.targetNodeId)
+      ) return;
       if (replacementReferenceKeys.has(referenceKey(reference))) return;
       const source = beforeEndpoint.get(reference.sourceNodeId);
       const target = beforeEndpoint.get(reference.targetNodeId);
@@ -449,6 +544,7 @@ export default function WorkspaceRestorePreview({
     differences,
     labels,
     mode,
+    previewNodeIds,
     replacement.layout,
     replacement.references,
     replacementNodes,

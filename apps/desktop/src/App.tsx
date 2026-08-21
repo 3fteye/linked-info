@@ -27,6 +27,7 @@ import {
   Palette,
   Pencil,
   Plus,
+  Puzzle,
   RefreshCw,
   Search,
   Settings,
@@ -50,6 +51,24 @@ import {
   saveAppearanceTheme,
 } from "./appearancePreferences";
 import DocumentImportDialog from "./DocumentImportDialog";
+import ExtensionSettings from "./ExtensionSettings";
+import {
+  commitExtensionInstall,
+  extensionManagerAvailable,
+  migratePreparedExtensionMetadata,
+  recoverPendingExtensionUpgrades,
+  type ExtensionInstallPreview,
+  type InstalledExtension,
+} from "./extensionManager";
+import {
+  finishWorkspaceExtensionMetadataMigration,
+  prepareWorkspaceExtensionMetadataMigration,
+} from "./extensionInstallLifecycle";
+import {
+  invokeManagedExtensionAction,
+  managedExtensionNodeInputForWorkspace,
+  managedExtensionRegistry,
+} from "./managedExtensions";
 import {
   buildDocumentImportWorkspace,
   mergeDocumentImportCandidates,
@@ -60,6 +79,7 @@ import {
   type DocumentImportCandidate,
   type DocumentImportDraft,
   type DocumentImportLlmGateway,
+  type DocumentImportPlacement,
 } from "./documentImport";
 import { importDocumentDraft, importTextDocument } from "./documentImportBridge";
 import {
@@ -68,6 +88,14 @@ import {
   contentProcessorRegistry,
 } from "./contentProcessor";
 import { builtInJsonInspectorProcessorId } from "./builtinJsonInspector";
+import type {
+  BuiltInExtensionActionHostResult,
+  BuiltInExtensionMetadataInput,
+} from "./builtinExtensionHost";
+import {
+  ExtensionChangeProposalError,
+  prepareExtensionChangeProposal,
+} from "./extensionChangeProposal";
 import {
   codePreviewLanguageFromProcessorId,
   codePreviewLanguages,
@@ -84,6 +112,7 @@ import {
   normalizeNodeName,
   parseStoredWorkspaceText,
   persistedNodeNameFromDraft,
+  replaceWorkspaceExtensionMetadata,
   removeNodesFromWorkspaceView,
   updateNodeExtensionMetadata,
   type CanvasViewport,
@@ -206,6 +235,7 @@ type SettingsTabId =
   | "general"
   | "operations"
   | "smartReference"
+  | "extensions"
   | "dataSecurity";
 
 interface PendingWorkspaceReplacement {
@@ -218,6 +248,14 @@ interface PendingWorkspaceReplacement {
 
 interface PendingEncryptedWorkspaceImport extends ImportedWorkspaceFile {
   bootstrapRestore: boolean;
+}
+
+interface PendingExtensionProposal {
+  createdNodeIds: string[];
+  currentNodeId: string;
+  result: BuiltInExtensionActionHostResult;
+  sourceName: string;
+  workspace: WorkspaceSnapshot;
 }
 
 type WorkspaceReplacementHistoryBoundary = "undo" | "redo" | null;
@@ -375,6 +413,16 @@ function nodeFilterLabel(
   return `${unnamedLabel} · ${summary || noContentLabel}`;
 }
 
+function extensionMetadataSchemaVersions(
+  workspace: WorkspaceSnapshot,
+): Record<string, number> {
+  return Object.fromEntries(
+    Object.entries(workspace.view.extensionMetadata).map(
+      ([extensionId, metadata]) => [extensionId, metadata.schemaVersion],
+    ),
+  );
+}
+
 function App({
   documentImportLlmGateway,
   embeddingGateway,
@@ -399,7 +447,11 @@ function App({
   const [activeSettingsTab, setActiveSettingsTab] =
     useState<SettingsTabId>("general");
   const [workspace, setWorkspace] = useState(emptyWorkspace);
+  const [managedExtensions, setManagedExtensions] = useState<InstalledExtension[]>([]);
   const workspaceRef = useRef(workspace);
+  const extensionWorkspaceRevisionRef = useRef(0);
+  const workspaceSaveTimerRef = useRef<number | null>(null);
+  const pendingWorkspaceCommitRef = useRef<WorkspaceSnapshot | null>(null);
   const skipUnmountFlushRef = useRef(false);
   const workspaceReplacementGenerationRef = useRef(0);
   const documentImportCancelledRef = useRef(false);
@@ -422,6 +474,7 @@ function App({
     useRef<WorkspaceReplacementHistoryBoundary>(null);
   const workspaceReplacementHistoryBusyRef = useRef(false);
   const workspaceReplacementApplyBusyRef = useRef(false);
+  const extensionProposalApplyBusyRef = useRef(false);
   const workspaceMutationBlockedRef = useRef(false);
   const [historyAvailability, setHistoryAvailability] = useState({
     canUndo: false,
@@ -451,10 +504,17 @@ function App({
   const [documentImportSourceText, setDocumentImportSourceText] = useState("");
   const [documentImportDraft, setDocumentImportDraft] =
     useState<DocumentImportDraft | null>(null);
+  const [documentImportPlacement, setDocumentImportPlacement] =
+    useState<DocumentImportPlacement | null>(null);
+  const [documentImportPlacementSelecting, setDocumentImportPlacementSelecting] =
+    useState(false);
   const [documentImportPreview, setDocumentImportPreview] = useState<{
     draft: DocumentImportDraft;
+    placement: DocumentImportPlacement;
     workspace: WorkspaceSnapshot;
   } | null>(null);
+  const [pendingExtensionProposal, setPendingExtensionProposal] =
+    useState<PendingExtensionProposal | null>(null);
   const [documentImportBusy, setDocumentImportBusy] = useState(false);
   const [documentImportExternalLoading, setDocumentImportExternalLoading] = useState(false);
   const [documentImportProgress, setDocumentImportProgress] = useState<{
@@ -706,10 +766,17 @@ function App({
     }, action === undefined ? 6_000 : 10_000);
   }
 
+  function updateManagedExtensions(installed: InstalledExtension[]) {
+    managedExtensionRegistry.replace(installed);
+    setManagedExtensions(installed);
+  }
+
   function openDocumentImport() {
     documentImportCancelledRef.current = false;
     setDocumentImportOpen(true);
     setDocumentImportDraft(null);
+    setDocumentImportPlacement(null);
+    setDocumentImportPlacementSelecting(false);
     setDocumentImportPreview(null);
     setDocumentImportSourceName("");
     setDocumentImportSourceText("");
@@ -721,11 +788,36 @@ function App({
     documentImportCancelledRef.current = true;
     setDocumentImportOpen(false);
     setDocumentImportDraft(null);
+    setDocumentImportPlacement(null);
+    setDocumentImportPlacementSelecting(false);
     setDocumentImportSourceName("");
     setDocumentImportSourceText("");
     setDocumentImportError(null);
     setDocumentImportProgress(null);
     if (documentImportBusy) void localLlmRuntime.stop();
+  }
+
+  function chooseDocumentImportPlacement() {
+    if (documentImportBusy || documentImportExternalLoading) {
+      return;
+    }
+    setDocumentImportOpen(false);
+    setDocumentImportPlacementSelecting(true);
+    setActiveView("canvas");
+  }
+
+  function cancelDocumentImportPlacement() {
+    setDocumentImportPlacementSelecting(false);
+    setDocumentImportOpen(true);
+  }
+
+  function selectDocumentImportPlacement(position: { x: number; y: number }) {
+    setDocumentImportPlacement({
+      x: Math.round(position.x / 20) * 20,
+      y: Math.round(position.y / 20) * 20,
+    });
+    setDocumentImportPlacementSelecting(false);
+    setDocumentImportOpen(true);
   }
 
   async function chooseDocumentImportFile() {
@@ -878,14 +970,16 @@ function App({
   }
 
   function previewDocumentImport() {
-    if (documentImportDraft === null) return;
+    if (documentImportDraft === null || documentImportPlacement === null) return;
     try {
       const result = buildDocumentImportWorkspace(
         workspaceRef.current,
         documentImportDraft,
+        documentImportPlacement,
       );
       setDocumentImportPreview({
         draft: documentImportDraft,
+        placement: documentImportPlacement,
         workspace: result.workspace,
       });
       setDocumentImportOpen(false);
@@ -908,6 +1002,7 @@ function App({
       const result = buildDocumentImportWorkspace(
         workspaceRef.current,
         documentImportPreview.draft,
+        documentImportPreview.placement,
       );
       updateWorkspace(() => result.workspace, {
         flushImmediately: true,
@@ -915,6 +1010,8 @@ function App({
       });
       setDocumentImportPreview(null);
       setDocumentImportDraft(null);
+      setDocumentImportPlacement(null);
+      setDocumentImportPlacementSelecting(false);
       setDocumentImportSourceName("");
       setDocumentImportSourceText("");
       setActiveView("canvas");
@@ -1257,6 +1354,38 @@ function App({
     };
   }, [persistence]);
 
+  useEffect(
+    () => () => {
+      managedExtensionRegistry.replace([]);
+    },
+    [],
+  );
+
+  useEffect(() => {
+    if (!persistenceReady || !extensionManagerAvailable) {
+      return;
+    }
+    let active = true;
+    void recoverPendingExtensionUpgrades(
+      extensionMetadataSchemaVersions(workspaceRef.current),
+    )
+      .then((installed) => {
+        if (active) {
+          updateManagedExtensions(installed);
+        }
+      })
+      .catch((error) => {
+        if (active) {
+          showAppNotice(
+            t("extensions.manager.recoveryFailed", { reason: errorReason(error) }),
+          );
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [persistenceReady, t]);
+
   const referencedTargetIdsBySource = useMemo(() => {
     const targetIdsBySource = new Map<string, Set<string>>();
     for (const reference of workspace.references) {
@@ -1265,6 +1394,17 @@ function App({
       targetIdsBySource.set(reference.sourceNodeId, targetIds);
     }
     return targetIdsBySource;
+  }, [workspace.references]);
+
+  const referencingSourceIdsByTarget = useMemo(() => {
+    const sourceIdsByTarget = new Map<string, Set<string>>();
+    for (const reference of workspace.references) {
+      const sourceIds =
+        sourceIdsByTarget.get(reference.targetNodeId) ?? new Set<string>();
+      sourceIds.add(reference.sourceNodeId);
+      sourceIdsByTarget.set(reference.targetNodeId, sourceIds);
+    }
+    return sourceIdsByTarget;
   }, [workspace.references]);
 
   const searchMatchedNodeIds = useMemo(
@@ -1341,18 +1481,22 @@ function App({
 
   const builtInExtensionLabels = useMemo(
     () => ({
+      "action.format-json": t("extensions.jsonInspector.actions.formatJson"),
       "action.set-indent": t("extensions.jsonInspector.actions.setIndent"),
       "indent.four": t("extensions.jsonInspector.indent.four"),
       "indent.label": t("extensions.jsonInspector.indent.label"),
       "indent.two": t("extensions.jsonInspector.indent.two"),
       "processor.label": t("editor.contentProcessors.jsonInspector"),
+      "proposal.format-json.title": t(
+        "extensions.jsonInspector.proposals.formatJson",
+      ),
     }),
     [t],
   );
 
   const contentProcessorOptions = useMemo(
-    () =>
-      contentProcessorRegistry.list().map((processor) => {
+    () => [
+      ...contentProcessorRegistry.list().map((processor) => {
         const codeLanguage = codePreviewLanguageFromProcessorId(processor.id);
         return {
           id: processor.id,
@@ -1368,7 +1512,17 @@ function App({
                     : t(`editor.codeLanguages.${codeLanguage}`),
         };
       }),
-    [t],
+      ...managedExtensionRegistry.listProcessors().map((processor) => ({
+        id: processor.fullId,
+        label:
+          managedExtensionRegistry.resolveLabel(
+            processor.extensionId,
+            processor.labelKey,
+            i18n.language,
+          ) ?? processor.fullId,
+      })),
+    ],
+    [i18n.language, managedExtensions, t],
   );
 
   const contentMarkerOptions = useMemo(
@@ -1400,6 +1554,7 @@ function App({
         truncated: t("codePreview.truncated"),
       },
       extension: {
+        language: i18n.language,
         resolve: (key: string) =>
           builtInExtensionLabels[
             key as keyof typeof builtInExtensionLabels
@@ -1420,7 +1575,7 @@ function App({
         remaining: (seconds: number) => t("totp.remaining", { seconds }),
       },
     }),
-    [builtInExtensionLabels, t],
+    [builtInExtensionLabels, i18n.language, t],
   );
 
   useEffect(() => {
@@ -1432,6 +1587,9 @@ function App({
     const automaticOffsiteRevision = automaticOffsiteRevisionRef.current;
     const saveTimer = window.setTimeout(
       () => {
+        if (workspaceSaveTimerRef.current === saveTimer) {
+          workspaceSaveTimerRef.current = null;
+        }
         void persistence
           .save(workspace)
           .then(async () => {
@@ -1458,7 +1616,13 @@ function App({
       },
       300,
     );
-    return () => window.clearTimeout(saveTimer);
+    workspaceSaveTimerRef.current = saveTimer;
+    return () => {
+      window.clearTimeout(saveTimer);
+      if (workspaceSaveTimerRef.current === saveTimer) {
+        workspaceSaveTimerRef.current = null;
+      }
+    };
   }, [
     persistence,
     persistenceReady,
@@ -1476,7 +1640,9 @@ function App({
     let active = true;
     let unregister: (() => void) | null = null;
     const flushLocalWorkspace = async () => {
-      await persistence.save(workspaceRef.current);
+      await persistence.save(
+        pendingWorkspaceCommitRef.current ?? workspaceRef.current,
+      );
       if (!workspaceChangedInSessionRef.current || !workspaceBackupHistory.available) {
         return;
       }
@@ -2578,6 +2744,7 @@ function App({
     workspaceChangedInSessionRef.current = true;
     if (options.affectsOffsiteBackup !== false) {
       automaticOffsiteRevisionRef.current += 1;
+      extensionWorkspaceRevisionRef.current += 1;
     }
     if (options.recordHistory) {
       recordHistory(captureWorkspaceHistory(current), captureWorkspaceHistory(next));
@@ -2637,6 +2804,7 @@ function App({
     const next = restoreWorkspaceHistory(state, workspaceRef.current.viewport);
     workspaceChangedInSessionRef.current = true;
     automaticOffsiteRevisionRef.current += 1;
+    extensionWorkspaceRevisionRef.current += 1;
     workspaceRef.current = next;
     setWorkspace(next);
     setEditingNodeId(null);
@@ -2888,6 +3056,317 @@ function App({
       },
       { flushImmediately: true, recordHistory: true },
     );
+  }
+
+  async function installManagedExtension(
+    preview: ExtensionInstallPreview,
+  ): Promise<InstalledExtension[]> {
+    if (workspaceMutationBlockedRef.current) {
+      throw new Error("workspace_mutation_blocked");
+    }
+    workspaceMutationBlockedRef.current = true;
+    if (workspaceSaveTimerRef.current !== null) {
+      window.clearTimeout(workspaceSaveTimerRef.current);
+      workspaceSaveTimerRef.current = null;
+    }
+    const current = workspaceRef.current;
+    let next = current;
+    let metadataMigrationId: string | null = null;
+    let migratedWorkspacePersisted = false;
+    try {
+      await persistence.save(current);
+      if (preview.metadataMigrationRequired) {
+        const preparedMetadata = prepareWorkspaceExtensionMetadataMigration(
+          current.view.extensionMetadata[preview.id],
+        );
+        const migration = await migratePreparedExtensionMetadata(
+          preview,
+          preparedMetadata.input,
+          true,
+        );
+        metadataMigrationId = migration.metadataMigrationId;
+        const migratedMetadata = finishWorkspaceExtensionMetadataMigration(
+          preparedMetadata,
+          migration,
+        );
+        const view = replaceWorkspaceExtensionMetadata(
+          current.view,
+          current.nodes,
+          preview.id,
+          migratedMetadata,
+        );
+        if (view === null) {
+          throw new Error("extension_metadata_migration_result_invalid");
+        }
+        next = view === current.view ? current : { ...current, view };
+        if (next !== current) {
+          pendingWorkspaceCommitRef.current = next;
+          await persistence.save(next);
+          migratedWorkspacePersisted = true;
+        }
+      }
+
+      const installed = await commitExtensionInstall(
+        preview,
+        true,
+        metadataMigrationId,
+      );
+      updateManagedExtensions(installed);
+
+      if (next !== current) {
+        workspaceChangedInSessionRef.current = true;
+        automaticOffsiteRevisionRef.current += 1;
+        extensionWorkspaceRevisionRef.current += 1;
+        workspaceRef.current = next;
+        setWorkspace(next);
+      }
+      if (preview.metadataMigrationRequired) {
+        clearHistory();
+        showAppNotice(t("extensions.manager.migrationCompleted"));
+      } else {
+        showAppNotice(t("extensions.manager.installCompleted"));
+      }
+      return installed;
+    } catch (error) {
+      if (metadataMigrationId !== null) {
+        try {
+          if (migratedWorkspacePersisted) {
+            await persistence.save(current);
+          }
+          await recoverPendingExtensionUpgrades(
+            extensionMetadataSchemaVersions(current),
+          );
+        } catch {
+          throw new Error("extension_metadata_migration_rollback_failed");
+        }
+      }
+      throw error;
+    } finally {
+      pendingWorkspaceCommitRef.current = null;
+      workspaceMutationBlockedRef.current = false;
+    }
+  }
+
+  async function clearManagedExtensionMetadata(extensionId: string): Promise<void> {
+    if (workspaceMutationBlockedRef.current) {
+      throw new Error("workspace_mutation_blocked");
+    }
+    const current = workspaceRef.current;
+    const view = replaceWorkspaceExtensionMetadata(
+      current.view,
+      current.nodes,
+      extensionId,
+      null,
+    );
+    if (view === null) {
+      throw new Error("extension_metadata_clear_invalid");
+    }
+    if (view === current.view) {
+      return;
+    }
+    const next = { ...current, view };
+    workspaceMutationBlockedRef.current = true;
+    if (workspaceSaveTimerRef.current !== null) {
+      window.clearTimeout(workspaceSaveTimerRef.current);
+      workspaceSaveTimerRef.current = null;
+    }
+    pendingWorkspaceCommitRef.current = next;
+    try {
+      await persistence.save(next);
+      recordHistory(captureWorkspaceHistory(current), captureWorkspaceHistory(next));
+      workspaceChangedInSessionRef.current = true;
+      automaticOffsiteRevisionRef.current += 1;
+      extensionWorkspaceRevisionRef.current += 1;
+      workspaceRef.current = next;
+      setWorkspace(next);
+      showAppNotice(t("extensions.manager.metadataCleared"), {
+        label: t("actions.undo"),
+        run: undoWorkspace,
+      });
+    } finally {
+      pendingWorkspaceCommitRef.current = null;
+      workspaceMutationBlockedRef.current = false;
+    }
+  }
+
+  function prepareExtensionActionWorkspace(
+    current: WorkspaceSnapshot,
+    nodeId: string,
+    result: BuiltInExtensionActionHostResult,
+    createdNodeIds?: readonly string[],
+  ) {
+    if (result.proposal === null) {
+      throw new ExtensionChangeProposalError("invalid-result");
+    }
+    let candidate = current;
+    if (result.nodeMetadata !== null || result.workspaceMetadata !== null) {
+      const view = updateNodeExtensionMetadata(
+        current.view,
+        current.nodes,
+        result.extensionId,
+        result.metadataSchemaVersion,
+        nodeId,
+        result.nodeMetadata,
+        result.workspaceMetadata,
+      );
+      if (view === null) {
+        throw new ExtensionChangeProposalError("invalid-result");
+      }
+      candidate = view === current.view ? current : { ...current, view };
+    }
+    let createdNodeIndex = 0;
+    const prepared = prepareExtensionChangeProposal(candidate, result.proposal, {
+      baseRevision: extensionWorkspaceRevisionRef.current,
+      currentNodeId: nodeId,
+      handleNodeIds: result.handleNodeIds,
+      ...(createdNodeIds === undefined
+        ? {}
+        : {
+            createNodeId: () => {
+              const createdNodeId = createdNodeIds[createdNodeIndex];
+              createdNodeIndex += 1;
+              if (createdNodeId === undefined) {
+                throw new ExtensionChangeProposalError("invalid-result");
+              }
+              return createdNodeId;
+            },
+          }),
+    });
+    if (
+      createdNodeIds !== undefined &&
+      prepared.createdNodeIds.length !== createdNodeIds.length
+    ) {
+      throw new ExtensionChangeProposalError("invalid-result");
+    }
+    return prepared;
+  }
+
+  function extensionProposalErrorMessage(error: unknown): string {
+    return error instanceof ExtensionChangeProposalError &&
+      error.reason === "stale-revision"
+      ? t("extensions.proposal.outdated")
+      : t("extensions.proposal.invalid");
+  }
+
+  async function invokeManagedNodeExtensionAction(
+    extensionId: string,
+    actionId: string,
+    nodeId: string,
+    metadata: BuiltInExtensionMetadataInput | null,
+    inputValue: string | null,
+    baseRevision: number,
+  ): Promise<BuiltInExtensionActionHostResult> {
+    const current = workspaceRef.current;
+    const input = managedExtensionNodeInputForWorkspace(current, nodeId);
+    if (input === null) {
+      throw new Error("extension_runtime_snapshot_stale");
+    }
+    return invokeManagedExtensionAction(
+      extensionId,
+      actionId,
+      [input],
+      metadata,
+      inputValue,
+      baseRevision,
+    );
+  }
+
+  function openExtensionProposal(
+    nodeId: string,
+    result: BuiltInExtensionActionHostResult,
+  ) {
+    try {
+      const prepared = prepareExtensionActionWorkspace(
+        workspaceRef.current,
+        nodeId,
+        result,
+      );
+      const titleKey = result.proposal?.titleKey ?? "";
+      setPendingExtensionProposal({
+        createdNodeIds: prepared.createdNodeIds,
+        currentNodeId: nodeId,
+        result,
+        sourceName:
+          managedExtensionRegistry.resolveLabel(
+            result.extensionId,
+            titleKey,
+            i18n.language,
+          ) ??
+          builtInExtensionLabels[
+            titleKey as keyof typeof builtInExtensionLabels
+          ] ??
+          titleKey,
+        workspace: prepared.workspace,
+      });
+    } catch (error) {
+      showAppNotice(extensionProposalErrorMessage(error));
+    }
+  }
+
+  function cancelExtensionProposal() {
+    if (!extensionProposalApplyBusyRef.current) {
+      setPendingExtensionProposal(null);
+    }
+  }
+
+  async function confirmExtensionProposal() {
+    const pending = pendingExtensionProposal;
+    if (pending === null || extensionProposalApplyBusyRef.current) {
+      return;
+    }
+    extensionProposalApplyBusyRef.current = true;
+    workspaceMutationBlockedRef.current = true;
+    if (workspaceSaveTimerRef.current !== null) {
+      window.clearTimeout(workspaceSaveTimerRef.current);
+      workspaceSaveTimerRef.current = null;
+    }
+    try {
+      const current = workspaceRef.current;
+      const prepared = prepareExtensionActionWorkspace(
+        current,
+        pending.currentNodeId,
+        pending.result,
+        pending.createdNodeIds,
+      );
+      pendingWorkspaceCommitRef.current = prepared.workspace;
+      await persistence.save(prepared.workspace);
+      recordHistory(
+        captureWorkspaceHistory(current),
+        captureWorkspaceHistory(prepared.workspace),
+      );
+      workspaceChangedInSessionRef.current = true;
+      automaticOffsiteRevisionRef.current += 1;
+      extensionWorkspaceRevisionRef.current += 1;
+      workspaceRef.current = prepared.workspace;
+      pendingWorkspaceCommitRef.current = null;
+      setWorkspace(prepared.workspace);
+      setPendingExtensionProposal(null);
+      setActiveView("canvas");
+      showAppNotice(t("extensions.proposal.applied"), {
+        label: t("actions.undo"),
+        run: undoWorkspace,
+      });
+    } catch (error) {
+      pendingWorkspaceCommitRef.current = null;
+      if (
+        error instanceof ExtensionChangeProposalError &&
+        error.reason === "stale-revision"
+      ) {
+        setPendingExtensionProposal(null);
+      }
+      showAppNotice(
+        error instanceof ExtensionChangeProposalError
+          ? extensionProposalErrorMessage(error)
+          : t("extensions.proposal.saveFailed"),
+      );
+      void persistence.save(workspaceRef.current).catch(() => {
+        setBackupStatus(t("storage.saveFailed"));
+      });
+    } finally {
+      pendingWorkspaceCommitRef.current = null;
+      workspaceMutationBlockedRef.current = false;
+      extensionProposalApplyBusyRef.current = false;
+    }
   }
 
   function commitNode(nodeId: string) {
@@ -3784,6 +4263,7 @@ function App({
       }
       workspaceChangedInSessionRef.current = true;
       automaticOffsiteRevisionRef.current += 1;
+      extensionWorkspaceRevisionRef.current += 1;
       workspaceReplacementGenerationRef.current += 1;
       workspaceRef.current = replacementWorkspace;
       setWorkspace(replacementWorkspace);
@@ -3865,6 +4345,7 @@ function App({
       const next = result.workspace;
       workspaceChangedInSessionRef.current = true;
       automaticOffsiteRevisionRef.current += 1;
+      extensionWorkspaceRevisionRef.current += 1;
       workspaceReplacementGenerationRef.current += 1;
       workspaceRef.current = next;
       setWorkspace(next);
@@ -3973,6 +4454,7 @@ function App({
       await persistence.save(initialWorkspace);
       workspaceChangedInSessionRef.current = true;
       workspaceReplacementGenerationRef.current += 1;
+      extensionWorkspaceRevisionRef.current += 1;
       smartReferenceQueueGenerationRef.current += 1;
       smartReferenceMemoryCacheRef.current.clear();
       workspaceRef.current = initialWorkspace;
@@ -4142,6 +4624,11 @@ function App({
       id: "smartReference" as const,
       icon: BrainCircuit,
       label: t("settings.tabs.smartReference"),
+    },
+    {
+      id: "extensions" as const,
+      icon: Puzzle,
+      label: t("settings.tabs.extensions"),
     },
     {
       id: "dataSecurity" as const,
@@ -4376,6 +4863,7 @@ function App({
               </span>
               <button
                 className="secondary-button"
+                data-testid="document-import-open"
                 onClick={openDocumentImport}
                 type="button"
               >
@@ -4395,8 +4883,42 @@ function App({
         </header>
 
         <div className="workspace-content">
-          {documentImportPreview !== null ? (
+          {pendingExtensionProposal !== null ? (
             <WorkspaceRestorePreview
+              changedOnly
+              current={workspace}
+              labels={{
+                title: t("extensions.proposal.previewTitle"),
+                source: pendingExtensionProposal.sourceName,
+                before: t("extensions.proposal.before"),
+                after: t("extensions.proposal.after"),
+                overlay: t("backup.preview.overlay"),
+                cancel: t("actions.cancel"),
+                confirm: t("extensions.proposal.apply"),
+                identical: t("extensions.proposal.identical"),
+                added: t("backup.preview.added"),
+                removed: t("backup.preview.removed"),
+                modified: t("backup.preview.modified"),
+                moved: t("backup.preview.moved"),
+                resized: t("backup.preview.resized"),
+                stacking: t("backup.preview.stacking"),
+                beforePosition: t("backup.preview.beforePosition"),
+                unnamed: t("nodes.unnamed"),
+                noContent: t("nodes.noContent"),
+                legendAdded: t("backup.preview.legendAdded"),
+                legendRemoved: t("backup.preview.legendRemoved"),
+                legendModified: t("backup.preview.legendModified"),
+                legendMoved: t("backup.preview.legendMoved"),
+                legendResized: t("backup.preview.legendResized"),
+              }}
+              onCancel={cancelExtensionProposal}
+              onConfirm={() => void confirmExtensionProposal()}
+              replacement={pendingExtensionProposal.workspace}
+            />
+          ) : documentImportPreview !== null ? (
+            <WorkspaceRestorePreview
+              changedOnly
+              contextPadding={640}
               current={workspace}
               labels={{
                 title: t("documentImport.previewTitle"),
@@ -5045,6 +5567,23 @@ function App({
                   )}
                 </div>
               </div>
+              </section>
+              <section
+                aria-labelledby="settings-tab-extensions"
+                className="settings-tab-panel"
+                hidden={activeSettingsTab !== "extensions"}
+                id="settings-panel-extensions"
+                role="tabpanel"
+              >
+                {activeSettingsTab === "extensions" && (
+                  <ExtensionSettings
+                    extensionMetadata={workspace.view.extensionMetadata}
+                    installed={managedExtensions}
+                    onClearMetadata={clearManagedExtensionMetadata}
+                    onInstall={installManagedExtension}
+                    onInstalledChange={updateManagedExtensions}
+                  />
+                )}
               </section>
               <section
                 aria-labelledby="settings-tab-dataSecurity"
@@ -5888,6 +6427,7 @@ function App({
                 codeCopy: contentEnhancementLabels.code.copy,
                 codeLanguages: contentEnhancementLabels.code.languages,
                 codeTruncated: contentEnhancementLabels.code.truncated,
+                extensionLanguage: i18n.language,
                 extensionLabels: builtInExtensionLabels,
                 content: t("editor.content"),
                 contentPlaceholder: t("editor.contentPlaceholder"),
@@ -6010,6 +6550,7 @@ function App({
               layout={workspace.layout}
               contentProcessorByNodeId={workspace.view.contentProcessorByNodeId}
               extensionMetadata={workspace.view.extensionMetadata}
+              extensionBaseRevision={extensionWorkspaceRevisionRef.current}
               contentProcessorOptions={contentProcessorOptions}
               contentMarkerOptions={contentMarkerOptions}
               nameConflictNodeIds={nameConflictNodeIds}
@@ -6033,6 +6574,8 @@ function App({
               onNodeContentChange={updateNodeContent}
               onNodeContentProcessorChange={updateNodeContentProcessor}
               onNodeExtensionMetadataChange={applyNodeExtensionMetadata}
+              onNodeExtensionProposal={openExtensionProposal}
+              onManagedExtensionAction={invokeManagedNodeExtensionAction}
               onNodeBringToFront={bringNodeToFront}
               onNodeNameChange={updateNodeName}
               onReferencesChange={updateReferences}
@@ -6044,6 +6587,16 @@ function App({
               references={workspace.references}
               filteredNodeIds={filteredNodeIds}
               unmatchedNodeOpacity={unmatchedNodeOpacity}
+              pointSelection={
+                documentImportPlacementSelecting
+                  ? {
+                      cancelLabel: t("actions.cancel"),
+                      instruction: t("documentImport.placementInstruction"),
+                      onCancel: cancelDocumentImportPlacement,
+                      onSelect: selectDocumentImportPlacement,
+                    }
+                  : null
+              }
               viewport={workspace.viewport}
             />
           ) : (
@@ -6072,8 +6625,15 @@ function App({
                         </strong>
                         <NodeContentHost
                           content={node.content}
+                          directIncomingNodeIds={[
+                            ...(referencingSourceIdsByTarget.get(node.id) ?? []),
+                          ]}
+                          directOutgoingNodeIds={[
+                            ...(referencedTargetIdsBySource.get(node.id) ?? []),
+                          ]}
                           emptyContent={t("nodes.noContent")}
                           enhancementLabels={contentEnhancementLabels}
+                          extensionBaseRevision={extensionWorkspaceRevisionRef.current}
                           extensionMetadata={
                             storedExtensionMetadata === undefined
                               ? null
@@ -6086,6 +6646,7 @@ function App({
                                 }
                           }
                           nodeName={node.name}
+                          nodeId={node.id}
                           processorId={processorId}
                           variant="list"
                         />
@@ -6687,6 +7248,10 @@ function App({
             references: t("references.list"),
             referencesPlaceholder: t("documentImport.referencesPlaceholder"),
             noCandidates: t("documentImport.noCandidates"),
+            choosePlacement: t("documentImport.choosePlacement"),
+            placementRequired: t("documentImport.placementRequired"),
+            placementSelected: (x, y) =>
+              t("documentImport.placementSelected", { x, y }),
           }}
           onAnalyze={() => void analyzeDocumentImport()}
           onCancel={() => {
@@ -6694,12 +7259,14 @@ function App({
           }}
           onChooseFile={() => void chooseDocumentImportFile()}
           onChooseExternalDraft={() => void chooseExternalDocumentImportDraft()}
+          onChoosePlacement={chooseDocumentImportPlacement}
           onPreview={previewDocumentImport}
           onSourceNameChange={setDocumentImportSourceName}
           onSourceTextChange={setDocumentImportSourceText}
           onUpdateCandidate={updateDocumentImportCandidate}
           loadingExternalDraft={documentImportExternalLoading}
           progress={documentImportProgress}
+          placement={documentImportPlacement}
           sourceName={documentImportSourceName}
           sourceText={documentImportSourceText}
         />

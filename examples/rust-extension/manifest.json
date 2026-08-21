@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "id": "dev.linked-info.example-inspector",
+  "version": "0.1.0",
+  "apiVersion": "1.0",
+  "publisher": {
+    "name": "Linked Info examples"
+  },
+  "defaultLocale": "en",
+  "locales": ["en", "zh-CN"],
+  "entrypoint": "extension.wasm",
+  "metadataSchema": "metadata.schema.json",
+  "metadataSchemaVersion": 1,
+  "capabilities": [
+    "node.read.content",
+    "metadata.node.write",
+    "workspace.propose"
+  ],
+  "contributions": {
+    "processors": [
+      {
+        "id": "summary",
+        "labelKey": "processor.summary"
+      }
+    ],
+    "actions": [
+      {
+        "id": "uppercase",
+        "labelKey": "action.uppercase",
+        "scope": "current-node"
+      }
+    ]
+  }
+}

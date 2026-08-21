@@ -1,6 +1,10 @@
 import { useEffect, useState } from "react";
-import { FileJson, FileText, Sparkles, Upload, X } from "lucide-react";
-import type { DocumentImportCandidate, DocumentImportDraft } from "./documentImport";
+import { Crosshair, FileJson, FileText, Sparkles, Upload, X } from "lucide-react";
+import type {
+  DocumentImportCandidate,
+  DocumentImportDraft,
+  DocumentImportPlacement,
+} from "./documentImport";
 
 export interface DocumentImportDialogLabels {
   title: string;
@@ -28,6 +32,9 @@ export interface DocumentImportDialogLabels {
   references: string;
   referencesPlaceholder: string;
   noCandidates: string;
+  choosePlacement: string;
+  placementRequired: string;
+  placementSelected: (x: number, y: number) => string;
 }
 
 interface DocumentImportDialogProps {
@@ -37,12 +44,14 @@ interface DocumentImportDialogProps {
   labels: DocumentImportDialogLabels;
   loadingExternalDraft: boolean;
   progress: { current: number; total: number } | null;
+  placement: DocumentImportPlacement | null;
   sourceName: string;
   sourceText: string;
   onAnalyze: () => void;
   onCancel: () => void;
   onChooseFile: () => void;
   onChooseExternalDraft: () => void;
+  onChoosePlacement: () => void;
   onPreview: () => void;
   onSourceNameChange: (value: string) => void;
   onSourceTextChange: (value: string) => void;
@@ -99,12 +108,14 @@ export default function DocumentImportDialog({
   labels,
   loadingExternalDraft,
   progress,
+  placement,
   sourceName,
   sourceText,
   onAnalyze,
   onCancel,
   onChooseFile,
   onChooseExternalDraft,
+  onChoosePlacement,
   onPreview,
   onSourceNameChange,
   onSourceTextChange,
@@ -233,6 +244,16 @@ export default function DocumentImportDialog({
         )}
 
         {error !== null && <p className="document-import-error" role="alert">{error}</p>}
+        <p
+          className="document-import-placement-status"
+          data-selected={placement !== null}
+          data-testid="document-import-placement-status"
+          role="status"
+        >
+          {placement === null
+            ? labels.placementRequired
+            : labels.placementSelected(placement.x, placement.y)}
+        </p>
         <footer className="document-import-actions">
           {draft === null && (
             <div className="document-import-file-actions">
@@ -246,6 +267,16 @@ export default function DocumentImportDialog({
               </button>
             </div>
           )}
+          <button
+            className="secondary-button"
+            data-testid="document-import-choose-placement"
+            disabled={busy || loadingExternalDraft}
+            onClick={onChoosePlacement}
+            type="button"
+          >
+            <Crosshair aria-hidden="true" size={15} />
+            {labels.choosePlacement}
+          </button>
           <span />
           <button className="secondary-button" onClick={onCancel} type="button">
             {labels.cancel}
@@ -263,7 +294,7 @@ export default function DocumentImportDialog({
           ) : (
             <button
               className="primary-button"
-              disabled={selectedCount === 0}
+              disabled={selectedCount === 0 || placement === null}
               onClick={onPreview}
               type="button"
             >

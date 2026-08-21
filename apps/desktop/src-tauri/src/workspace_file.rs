@@ -1151,6 +1151,8 @@ pub async fn enable_workspace_encryption(
     password: String,
 ) -> Result<WorkspaceSecurityStatus, String> {
     validate_new_password(&password)?;
+    app.state::<crate::extension_runtime::ExtensionRuntimeState>()
+        .shutdown();
     crate::vector_cache::purge_for_encryption(&app, &vector_cache_state).await?;
     let store = workspace_store(&app).map_err(|error| error.to_string())?;
     let operation_lock = Arc::clone(&state.operation_lock);
@@ -1269,6 +1271,8 @@ pub async fn rotate_workspace_data_key(
 
     crate::smart_reference_cache::purge(&app, &smart_reference_cache_state).await?;
     state.revoke_access()?;
+    app.state::<crate::extension_runtime::ExtensionRuntimeState>()
+        .revoke_all(state.access_generation().load(Ordering::Acquire));
     cleanup_locked_workspace(&app);
     crate::secret_clipboard::clear_active(&app);
     let rotation_result = tauri::async_runtime::spawn_blocking(move || {
@@ -1940,6 +1944,8 @@ pub async fn commit_workspace_restore(
     system_unlock_state: tauri::State<'_, SystemUnlockState>,
     restore_id: uuid::Uuid,
 ) -> Result<WorkspaceSecurityTransactionResult, String> {
+    app.state::<crate::extension_runtime::ExtensionRuntimeState>()
+        .shutdown();
     crate::vector_cache::purge_for_encryption(&app, &vector_cache_state).await?;
     crate::smart_reference_cache::purge(&app, &smart_reference_cache_state).await?;
     let prepared = {
@@ -2092,6 +2098,8 @@ pub(crate) fn ensure_access_generation(
 pub fn revoke_workspace_access(app: &AppHandle, reason: &str) -> bool {
     let state = app.state::<WorkspaceVaultState>();
     let was_unlocked = state.shutdown();
+    app.state::<crate::extension_runtime::ExtensionRuntimeState>()
+        .revoke_all(state.access_generation().load(Ordering::Acquire));
     if was_unlocked {
         let _ = app.emit(WORKSPACE_LOCKED_EVENT, reason);
     }

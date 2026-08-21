@@ -1,6 +1,10 @@
 mod embedding;
+mod extension_manager;
+mod extension_runtime;
+mod extension_runtime_content;
 mod file_transfer;
 mod llm;
+mod managed_extension_runtime;
 mod offsite_backup;
 mod s3_backup_target;
 mod secret_clipboard;
@@ -17,12 +21,16 @@ use tauri::Manager;
 fn exit_application(
     app: tauri::AppHandle,
     embedding_state: tauri::State<'_, embedding::EmbeddingState>,
+    extension_runtime_state: tauri::State<'_, extension_runtime::ExtensionRuntimeState>,
     llm_state: tauri::State<'_, llm::LlmState>,
     vault_state: tauri::State<'_, workspace_file::WorkspaceVaultState>,
 ) {
+    // Revoke plaintext authority before waiting for any model or extension
+    // process cleanup. Application exit is not an exception to lock ordering.
+    vault_state.shutdown();
+    extension_runtime_state.shutdown();
     let _ = embedding_state.shutdown();
     llm_state.shutdown();
-    vault_state.shutdown();
     secret_clipboard::clear_active(&app);
     app.exit(0);
 }
@@ -44,6 +52,8 @@ pub fn run() {
 
     builder
         .manage(embedding::EmbeddingState::default())
+        .manage(extension_runtime::ExtensionRuntimeState::default())
+        .manage(extension_manager::ExtensionManagerState::default())
         .manage(llm::LlmState::default())
         .manage(offsite_backup::OffsiteBackupState::default())
         .manage(secret_clipboard::SecretClipboardState::default())
@@ -79,10 +89,19 @@ pub fn run() {
             file_transfer::import_document_draft,
             file_transfer::import_workspace_transfer,
             file_transfer::import_text_document,
+            extension_manager::choose_extension_install,
+            extension_manager::commit_extension_install,
+            extension_manager::inspect_installed_extensions,
+            extension_manager::migrate_prepared_extension_metadata,
+            extension_manager::recover_pending_extension_upgrades,
+            extension_manager::set_extension_enabled,
+            extension_manager::uninstall_extension,
             llm::cancel_local_llm_download,
             llm::extract_local_document_import,
             llm::inspect_local_llm_models,
             llm::prepare_local_llm_model,
+            managed_extension_runtime::invoke_managed_extension_action,
+            managed_extension_runtime::render_managed_extension_processor,
             llm::review_local_references,
             llm::stop_local_llm,
             offsite_backup::configure_s3_backup_target,
