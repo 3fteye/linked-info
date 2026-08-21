@@ -8,24 +8,39 @@ import {
   stepWorkspaceHistoryForward,
   workspaceHistoryStatesEqual,
 } from "./workspaceHistory";
-import type { WorkspaceSnapshot } from "./workspaceData";
+import {
+  activeWorkspaceCanvas,
+  defaultCanvasId,
+  type WorkspaceSnapshot,
+} from "./workspaceData";
 
 const nodeId = "11111111-1111-4111-8111-111111111111";
 
 function workspace(): WorkspaceSnapshot {
   return {
     nodes: [{ id: nodeId, name: "Account", content: null }],
-    layout: [{ nodeId, x: 10, y: 20 }],
     references: [],
-    viewport: { x: 100, y: -50, zoom: 1.2 },
-    view: { contentProcessorByNodeId: {}, extensionMetadata: {} },
+    view: {
+      activeCanvasId: defaultCanvasId,
+      canvases: [
+        {
+          id: defaultCanvasId,
+          name: "Main",
+          layout: [{ nodeId, x: 10, y: 20 }],
+          viewport: { x: 100, y: -50, zoom: 1.2 },
+        },
+      ],
+      contentProcessorByNodeId: {},
+      extensionMetadata: {},
+    },
   };
 }
 
 describe("workspace history", () => {
   it("excludes viewport changes from undoable state", () => {
     const first = workspace();
-    const second = { ...first, viewport: { x: 500, y: 300, zoom: 2 } };
+    const second = structuredClone(first);
+    activeWorkspaceCanvas(second).viewport = { x: 500, y: 300, zoom: 2 };
 
     expect(
       workspaceHistoryStatesEqual(
@@ -38,16 +53,18 @@ describe("workspace history", () => {
   it("restores nodes, references, and layout while preserving the current viewport", () => {
     const state = captureWorkspaceHistory(workspace());
     const viewport = { x: -20, y: 80, zoom: 0.7 };
+    const currentView = structuredClone(workspace().view);
+    currentView.canvases[0].viewport = viewport;
 
-    expect(restoreWorkspaceHistory(state, viewport)).toEqual({ ...state, viewport });
+    expect(
+      activeWorkspaceCanvas(restoreWorkspaceHistory(state, currentView)).viewport,
+    ).toEqual(viewport);
   });
 
   it("detects an undoable layout change", () => {
     const before = captureWorkspaceHistory(workspace());
-    const after = {
-      ...before,
-      layout: [{ nodeId, x: 40, y: 60 }],
-    };
+    const after = structuredClone(before);
+    after.view.canvases[0].layout = [{ nodeId, x: 40, y: 60 }];
 
     expect(workspaceHistoryStatesEqual(before, after)).toBe(false);
   });
@@ -57,13 +74,16 @@ describe("workspace history", () => {
     const after = {
       ...before,
       view: {
+        ...before.view,
         contentProcessorByNodeId: { [nodeId]: "plugin.example" },
-        extensionMetadata: {},
       },
     };
 
     expect(workspaceHistoryStatesEqual(before, after)).toBe(false);
-    expect(restoreWorkspaceHistory(after, null).view).toEqual(after.view);
+    expect(
+      restoreWorkspaceHistory(after, workspace().view).view
+        .contentProcessorByNodeId,
+    ).toEqual(after.view.contentProcessorByNodeId);
   });
 
   it("keeps unknown extension metadata inside the same undo transaction", () => {
@@ -83,7 +103,9 @@ describe("workspace history", () => {
     );
 
     expect(stepWorkspaceHistoryBackward(timeline)?.state).toEqual(before);
-    expect(restoreWorkspaceHistory(after, null).view).toEqual(after.view);
+    expect(
+      restoreWorkspaceHistory(after, workspace().view).view.extensionMetadata,
+    ).toEqual(after.view.extensionMetadata);
   });
 
   it("steps backward and forward through an operation", () => {
@@ -109,8 +131,10 @@ describe("workspace history", () => {
 
   it("caps undo entries and clears redo when a new operation is recorded", () => {
     const base = captureWorkspaceHistory(workspace());
-    const first = { ...base, layout: [{ nodeId, x: 20, y: 20 }] };
-    const second = { ...base, layout: [{ nodeId, x: 30, y: 20 }] };
+    const first = structuredClone(base);
+    first.view.canvases[0].layout = [{ nodeId, x: 20, y: 20 }];
+    const second = structuredClone(base);
+    second.view.canvases[0].layout = [{ nodeId, x: 30, y: 20 }];
     let timeline = appendWorkspaceHistory(
       emptyWorkspaceHistoryTimeline(),
       base,
@@ -127,9 +151,55 @@ describe("workspace history", () => {
 
   it("rejects an invalid history limit", () => {
     const state = captureWorkspaceHistory(workspace());
-    const changed = { ...state, layout: [{ nodeId, x: 50, y: 60 }] };
+    const changed = structuredClone(state);
+    changed.view.canvases[0].layout = [{ nodeId, x: 50, y: 60 }];
 
     expect(() => appendWorkspaceHistory(emptyWorkspaceHistoryTimeline(), state, changed, 0))
       .toThrow("positive integer");
+  });
+
+  it("preserves the currently selected canvas across undo", () => {
+    const original = workspace();
+    const secondCanvasId = "22222222-2222-4222-8222-222222222222";
+    original.view.canvases.push({
+      id: secondCanvasId,
+      name: "Second",
+      layout: [{ nodeId, x: 300, y: 400 }],
+      viewport: { x: 20, y: 30, zoom: 0.9 },
+    });
+    const state = captureWorkspaceHistory(original);
+    const currentView = structuredClone(original.view);
+    currentView.activeCanvasId = secondCanvasId;
+
+    const restored = restoreWorkspaceHistory(state, currentView);
+
+    expect(restored.view.activeCanvasId).toBe(secondCanvasId);
+    expect(activeWorkspaceCanvas(restored).viewport).toEqual({
+      x: 20,
+      y: 30,
+      zoom: 0.9,
+    });
+  });
+
+  it("restores the last saved viewport when undo brings back a deleted canvas", () => {
+    const original = workspace();
+    const secondCanvasId = "22222222-2222-4222-8222-222222222222";
+    original.view.canvases.push({
+      id: secondCanvasId,
+      name: "Second",
+      layout: [],
+      viewport: { x: 500, y: -200, zoom: 1.4 },
+    });
+    const state = captureWorkspaceHistory(original);
+    const currentView = structuredClone(original.view);
+    currentView.canvases.pop();
+
+    const restored = restoreWorkspaceHistory(state, currentView);
+
+    expect(restored.view.canvases[1].viewport).toEqual({
+      x: 500,
+      y: -200,
+      zoom: 1.4,
+    });
   });
 });

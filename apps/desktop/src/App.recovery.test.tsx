@@ -7,6 +7,7 @@ import type { WorkspacePersistence } from "./workspaceStore";
 
 const canvasHarness = vi.hoisted(() => ({
   editName: null as null | ((name: string) => void),
+  removeNodes: null as null | ((nodeIds: string[]) => void),
 }));
 
 const workspaceFileHarness = vi.hoisted(() => ({
@@ -16,6 +17,7 @@ const workspaceFileHarness = vi.hoisted(() => ({
 vi.mock("./GraphCanvas", () => ({
   default: (props: {
     nodes: Array<{ id: string; name: string | null }>;
+    onDeleteNodes: (nodeIds: string[]) => void;
     onNodeNameChange: (nodeId: string, name: string) => void;
   }) => {
     const first = props.nodes[0];
@@ -24,6 +26,7 @@ vi.mock("./GraphCanvas", () => ({
         props.onNodeNameChange(first.id, name);
       }
     };
+    canvasHarness.removeNodes = props.onDeleteNodes;
     return <div data-testid="mock-canvas">{first?.name ?? "empty"}</div>;
   },
 }));
@@ -69,16 +72,26 @@ function workspace(nodeId: string, name: string): WorkspaceSnapshot {
   return {
     nodes: [{ id: nodeId, name, content: null }],
     references: [],
-    layout: [{ nodeId, x: 0, y: 0 }],
-    viewport: null,
-    view: { contentProcessorByNodeId: {}, extensionMetadata: {} },
+    view: {
+      activeCanvasId: "00000000-0000-4000-8000-000000000001",
+      canvases: [
+        {
+          id: "00000000-0000-4000-8000-000000000001",
+          name: "Main",
+          layout: [{ nodeId, x: 0, y: 0 }],
+          viewport: null,
+        },
+      ],
+      contentProcessorByNodeId: {},
+      extensionMetadata: {},
+    },
   };
 }
 
 function workspaceExport(snapshot: WorkspaceSnapshot): string {
   return JSON.stringify({
     format: "linked-info-workspace",
-    version: 3,
+    version: 4,
     exportedAt: "2026-08-19T00:00:00.000Z",
     workspace: snapshot,
   });
@@ -182,6 +195,7 @@ describe("App recovery transaction boundary", () => {
     ).IS_REACT_ACT_ENVIRONMENT = true;
     localStorage.clear();
     canvasHarness.editName = null;
+    canvasHarness.removeNodes = null;
     workspaceFileHarness.imported = null;
     container = document.createElement("div");
     document.body.append(container);
@@ -433,5 +447,58 @@ describe("App recovery transaction boundary", () => {
 
     expect(document.querySelector('[data-testid="mock-canvas"]')).toBeNull();
     expect(updateStatus).toHaveBeenCalledWith(lockedStatus);
+  });
+
+  it("creates an independent canvas and keeps nodes globally available after removing a placement", async () => {
+    let primary = workspace(currentNodeId, "Global node");
+    const persistence: WorkspacePersistence = {
+      async load() {
+        return { status: "ready", workspace: primary };
+      },
+      async loadRecovery() {
+        return { status: "missing" };
+      },
+      async preserveForRecovery() {},
+      runExclusiveTransaction(transaction) {
+        return transaction();
+      },
+      async save(next) {
+        primary = next;
+      },
+      async swapWithRecovery() {
+        throw new Error("swap is not used in this test");
+      },
+    };
+
+    await renderApp({
+      persistence,
+      security: unavailableWorkspaceSecurity,
+      updateStatus: () => {},
+    });
+    expect((await find("mock-canvas")).textContent).toBe("Global node");
+
+    await click("canvas-create");
+    expect((await find("mock-canvas")).textContent).toBe("empty");
+    const picker = (await find("canvas-select")) as HTMLSelectElement;
+    expect(picker.options).toHaveLength(2);
+    expect(primary.view.canvases).toHaveLength(2);
+
+    await click("nodes-navigation");
+    await click("node-list-row");
+    expect((await find("mock-canvas")).textContent).toBe("Global node");
+    expect(primary.view.canvases[1].layout).toEqual([
+      expect.objectContaining({ nodeId: currentNodeId }),
+    ]);
+
+    await act(async () => {
+      canvasHarness.removeNodes?.([currentNodeId]);
+      await Promise.resolve();
+    });
+    expect((await find("mock-canvas")).textContent).toBe("empty");
+    expect(primary.nodes).toEqual([
+      { id: currentNodeId, name: "Global node", content: null },
+    ]);
+    expect(primary.view.canvases[0].layout).toHaveLength(1);
+    expect(primary.view.canvases[1].layout).toHaveLength(0);
   });
 });

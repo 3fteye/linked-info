@@ -105,22 +105,26 @@ import { contentMarkerRegistry } from "./contentMarker";
 import { NodeSearchIndex, type NodeSearchScope } from "./nodeSearch";
 import { supportedLanguages, type SupportedLanguage } from "./locales";
 import {
+  activeWorkspaceCanvas,
   emptyWorkspace,
   isNodeNameAvailable,
   isUnnamedNode,
   moveNodeLayoutToFront,
+  maximumWorkspaceCanvasCount,
   normalizeNodeName,
   parseStoredWorkspaceText,
   persistedNodeNameFromDraft,
   replaceWorkspaceExtensionMetadata,
   removeNodesFromWorkspaceView,
   updateNodeExtensionMetadata,
+  updateWorkspaceCanvas,
   type CanvasViewport,
   type ExtensionMetadataPayload,
   type InformationNode,
   type NodeLayout,
   type NodeReference,
   type WorkspaceSnapshot,
+  type WorkspaceCanvas,
   type WorkspaceLoadResult,
   type WorkspacePersistence,
 } from "./workspaceStore";
@@ -413,6 +417,10 @@ function nodeFilterLabel(
   return `${unnamedLabel} · ${summary || noContentLabel}`;
 }
 
+type PendingWorkspaceDeletion =
+  | { kind: "canvas"; canvasId: string }
+  | { kind: "nodes"; nodeIds: string[] };
+
 function extensionMetadataSchemaVersions(
   workspace: WorkspaceSnapshot,
 ): Record<string, number> {
@@ -496,6 +504,10 @@ function App({
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [unnamedOnly, setUnnamedOnly] = useState(false);
   const [referenceFilterNodeIds, setReferenceFilterNodeIds] = useState<string[]>([]);
+  const [canvasNameDraft, setCanvasNameDraft] = useState("");
+  const [canvasNameEditing, setCanvasNameEditing] = useState(false);
+  const [pendingWorkspaceDeletion, setPendingWorkspaceDeletion] =
+    useState<PendingWorkspaceDeletion | null>(null);
   const [pendingWorkspaceReplacement, setPendingWorkspaceReplacement] =
     useState<PendingWorkspaceReplacement | null>(null);
   const [backupStatus, setBackupStatus] = useState<string | null>(null);
@@ -1417,6 +1429,28 @@ function App({
     [deferredSearchTerm, nodeSearchIndex, searchScope, workspace.nodes],
   );
 
+  const activeCanvas = useMemo(
+    () => activeWorkspaceCanvas(workspace),
+    [workspace],
+  );
+  const activeCanvasNodeIds = useMemo(
+    () => new Set(activeCanvas.layout.map((item) => item.nodeId)),
+    [activeCanvas.layout],
+  );
+  const canvasNodes = useMemo(
+    () => workspace.nodes.filter((node) => activeCanvasNodeIds.has(node.id)),
+    [activeCanvasNodeIds, workspace.nodes],
+  );
+  const canvasReferences = useMemo(
+    () =>
+      workspace.references.filter(
+        (reference) =>
+          activeCanvasNodeIds.has(reference.sourceNodeId) &&
+          activeCanvasNodeIds.has(reference.targetNodeId),
+      ),
+    [activeCanvasNodeIds, workspace.references],
+  );
+
   const filteredNodes = useMemo(() => {
     return workspace.nodes.filter(
       (node) =>
@@ -1434,14 +1468,15 @@ function App({
     workspace.nodes,
   ]);
 
-  const filteredNodeIds = useMemo(
-    () => new Set(filteredNodes.map((node) => node.id)),
-    [filteredNodes],
-  );
   const hasActiveNodeFilter =
     normalizeNodeName(deferredSearchTerm).length > 0 ||
     unnamedOnly ||
     referenceFilterNodeIds.length > 0;
+
+  useEffect(() => {
+    setCanvasNameDraft(activeCanvas.name);
+    setCanvasNameEditing(false);
+  }, [activeCanvas.id, activeCanvas.name]);
 
   const selectedReferenceFilterNodes = useMemo(() => {
     const nodesById = new Map(workspace.nodes.map((node) => [node.id, node]));
@@ -1523,6 +1558,15 @@ function App({
       })),
     ],
     [i18n.language, managedExtensions, t],
+  );
+  const canvasFilteredNodeIds = useMemo(
+    () =>
+      new Set(
+        filteredNodes
+          .filter((node) => activeCanvasNodeIds.has(node.id))
+          .map((node) => node.id),
+      ),
+    [activeCanvasNodeIds, filteredNodes],
   );
 
   const contentMarkerOptions = useMemo(
@@ -2801,7 +2845,7 @@ function App({
   }
 
   function applyHistoryState(state: WorkspaceHistoryState) {
-    const next = restoreWorkspaceHistory(state, workspaceRef.current.viewport);
+    const next = restoreWorkspaceHistory(state, workspaceRef.current.view);
     workspaceChangedInSessionRef.current = true;
     automaticOffsiteRevisionRef.current += 1;
     extensionWorkspaceRevisionRef.current += 1;
@@ -2851,15 +2895,23 @@ function App({
   }
 
   function createNode(
-    position = defaultNodePosition(workspaceRef.current.nodes.length),
+    position = defaultNodePosition(
+      activeWorkspaceCanvas(workspaceRef.current).layout.length,
+    ),
   ) {
     const nodeId = crypto.randomUUID();
     const next = updateWorkspace(
-      (current) => ({
-        ...current,
-        nodes: [...current.nodes, { id: nodeId, name: null, content: null }],
-        layout: [...current.layout, { nodeId, x: position.x, y: position.y }],
-      }),
+      (current) => {
+        const canvas = activeWorkspaceCanvas(current);
+        return {
+          ...current,
+          nodes: [...current.nodes, { id: nodeId, name: null, content: null }],
+          view: updateWorkspaceCanvas(current.view, canvas.id, (item) => ({
+            ...item,
+            layout: [...item.layout, { nodeId, x: position.x, y: position.y }],
+          })),
+        };
+      },
       { flushImmediately: true, recordHistory: true },
     );
     editBaselineRef.current = {
@@ -2886,19 +2938,25 @@ function App({
     }
 
     updateWorkspace(
-      (current) => ({
-        ...current,
-        nodes: [
-          ...current.nodes,
-          { id: nodeId, name: trimmedName, content: null },
-        ],
-        layout: [...current.layout, { nodeId, x: position.x, y: position.y }],
-        references: appendNodeReference(
-          current.references,
-          sourceNodeId,
-          nodeId,
-        ),
-      }),
+      (current) => {
+        const canvas = activeWorkspaceCanvas(current);
+        return {
+          ...current,
+          nodes: [
+            ...current.nodes,
+            { id: nodeId, name: trimmedName, content: null },
+          ],
+          view: updateWorkspaceCanvas(current.view, canvas.id, (item) => ({
+            ...item,
+            layout: [...item.layout, { nodeId, x: position.x, y: position.y }],
+          })),
+          references: appendNodeReference(
+            current.references,
+            sourceNodeId,
+            nodeId,
+          ),
+        };
+      },
       { flushImmediately: true, recordHistory: true },
     );
     return nodeId;
@@ -2906,6 +2964,7 @@ function App({
 
   function editNode(nodeId: string) {
     if (workspaceRef.current.nodes.some((node) => node.id === nodeId)) {
+      ensureNodeOnActiveCanvas(nodeId);
       bringNodeToFront(nodeId);
       editBaselineRef.current = {
         nodeId,
@@ -2919,14 +2978,23 @@ function App({
   function bringNodeToFront(nodeId: string) {
     updateWorkspace(
       (current) => {
-        const layout = moveNodeLayoutToFront(current.layout, nodeId);
-        return layout === current.layout ? current : { ...current, layout };
+        const canvas = activeWorkspaceCanvas(current);
+        const layout = moveNodeLayoutToFront(canvas.layout, nodeId);
+        return layout === canvas.layout
+          ? current
+          : {
+              ...current,
+              view: updateWorkspaceCanvas(current.view, canvas.id, (item) => ({
+                ...item,
+                layout,
+              })),
+            };
       },
       { flushImmediately: true },
     );
   }
 
-  function deleteNodes(nodeIds: string[]) {
+  function permanentlyDeleteNodes(nodeIds: string[]) {
     const deletedNodeIds = new Set(nodeIds);
     if (deletedNodeIds.size === 0) {
       return;
@@ -2935,7 +3003,6 @@ function App({
       (current) => ({
         ...current,
         nodes: current.nodes.filter((node) => !deletedNodeIds.has(node.id)),
-        layout: current.layout.filter((item) => !deletedNodeIds.has(item.nodeId)),
         references: current.references.filter(
           (reference) =>
             !deletedNodeIds.has(reference.sourceNodeId) &&
@@ -2975,6 +3042,53 @@ function App({
         relatedNodes: current.relatedNodes.filter((related) => keep(related.nodeId)),
       };
     });
+  }
+
+  function removeNodesFromActiveCanvas(nodeIds: string[]) {
+    const removedNodeIds = new Set(nodeIds);
+    if (removedNodeIds.size === 0) {
+      return;
+    }
+    updateWorkspace(
+      (current) => {
+        const canvas = activeWorkspaceCanvas(current);
+        const layout = canvas.layout.filter(
+          (item) => !removedNodeIds.has(item.nodeId),
+        );
+        return layout.length === canvas.layout.length
+          ? current
+          : {
+              ...current,
+              view: updateWorkspaceCanvas(current.view, canvas.id, (item) => ({
+                ...item,
+                layout,
+              })),
+            };
+      },
+      { flushImmediately: true, recordHistory: true },
+    );
+    setEditingNodeId((current) =>
+      current !== null && removedNodeIds.has(current) ? null : current,
+    );
+  }
+
+  function ensureNodeOnActiveCanvas(nodeId: string) {
+    const current = workspaceRef.current;
+    const canvas = activeWorkspaceCanvas(current);
+    if (canvas.layout.some((item) => item.nodeId === nodeId)) {
+      return;
+    }
+    const position = defaultNodePosition(canvas.layout.length);
+    updateWorkspace(
+      (workspace) => ({
+        ...workspace,
+        view: updateWorkspaceCanvas(workspace.view, canvas.id, (item) => ({
+          ...item,
+          layout: [...item.layout, { nodeId, x: position.x, y: position.y }],
+        })),
+      }),
+      { flushImmediately: true, recordHistory: true },
+    );
   }
 
   function updateNodeName(nodeId: string, name: string): boolean {
@@ -3394,10 +3508,19 @@ function App({
   }
 
   function updateLayout(layout: NodeLayout[]) {
-    updateWorkspace((current) => ({ ...current, layout }), {
-      flushImmediately: true,
-      recordHistory: true,
-    });
+    updateWorkspace(
+      (current) => {
+        const canvas = activeWorkspaceCanvas(current);
+        return {
+          ...current,
+          view: updateWorkspaceCanvas(current.view, canvas.id, (item) => ({
+            ...item,
+            layout,
+          })),
+        };
+      },
+      { flushImmediately: true, recordHistory: true },
+    );
   }
 
   function updateReferences(references: NodeReference[]) {
@@ -3409,15 +3532,143 @@ function App({
 
   function updateViewport(viewport: CanvasViewport) {
     updateWorkspace(
-      (current) =>
-        current.viewport !== null &&
-        current.viewport.x === viewport.x &&
-        current.viewport.y === viewport.y &&
-        current.viewport.zoom === viewport.zoom
+      (current) => {
+        const canvas = activeWorkspaceCanvas(current);
+        return canvas.viewport !== null &&
+          canvas.viewport.x === viewport.x &&
+          canvas.viewport.y === viewport.y &&
+          canvas.viewport.zoom === viewport.zoom
           ? current
-          : { ...current, viewport },
+          : {
+              ...current,
+              view: updateWorkspaceCanvas(current.view, canvas.id, (item) => ({
+                ...item,
+                viewport,
+              })),
+            };
+      },
       { flushImmediately: true, affectsOffsiteBackup: false },
     );
+  }
+
+  function switchCanvas(canvasId: string) {
+    if (
+      canvasId === workspaceRef.current.view.activeCanvasId ||
+      !workspaceRef.current.view.canvases.some((canvas) => canvas.id === canvasId)
+    ) {
+      return;
+    }
+    updateWorkspace(
+      (current) => ({
+        ...current,
+        view: { ...current.view, activeCanvasId: canvasId },
+      }),
+      { flushImmediately: true, affectsOffsiteBackup: false },
+    );
+    setEditingNodeId(null);
+    editBaselineRef.current = null;
+  }
+
+  function nextCanvasName(canvases: readonly WorkspaceCanvas[]): string {
+    const names = new Set(canvases.map((canvas) => normalizeNodeName(canvas.name)));
+    let index = canvases.length + 1;
+    let candidate = t("canvases.generatedName", { index });
+    while (names.has(normalizeNodeName(candidate))) {
+      index += 1;
+      candidate = t("canvases.generatedName", { index });
+    }
+    return candidate;
+  }
+
+  function createCanvas() {
+    if (workspaceRef.current.view.canvases.length >= maximumWorkspaceCanvasCount) {
+      showAppNotice(t("canvases.maximumReached", {
+        count: maximumWorkspaceCanvasCount,
+      }));
+      return;
+    }
+    const id = crypto.randomUUID();
+    updateWorkspace(
+      (current) => ({
+        ...current,
+        view: {
+          ...current.view,
+          activeCanvasId: id,
+          canvases: [
+            ...current.view.canvases,
+            {
+              id,
+              name: nextCanvasName(current.view.canvases),
+              layout: [],
+              viewport: null,
+            },
+          ],
+        },
+      }),
+      { flushImmediately: true, recordHistory: true },
+    );
+    setEditingNodeId(null);
+  }
+
+  function commitCanvasName() {
+    const name = canvasNameDraft.trim();
+    const current = workspaceRef.current;
+    const canvas = activeWorkspaceCanvas(current);
+    if (name === canvas.name) {
+      setCanvasNameEditing(false);
+      return;
+    }
+    if (
+      name.length === 0 ||
+      [...name].length > 128 ||
+      current.view.canvases.some(
+        (item) =>
+          item.id !== canvas.id &&
+          normalizeNodeName(item.name) === normalizeNodeName(name),
+      )
+    ) {
+      setCanvasNameDraft(canvas.name);
+      setCanvasNameEditing(false);
+      showAppNotice(t("canvases.nameInvalid"));
+      return;
+    }
+    updateWorkspace(
+      (workspace) => ({
+        ...workspace,
+        view: updateWorkspaceCanvas(workspace.view, canvas.id, (item) => ({
+          ...item,
+          name,
+        })),
+      }),
+      { flushImmediately: true, recordHistory: true },
+    );
+    setCanvasNameEditing(false);
+  }
+
+  function deleteCanvas(canvasId: string) {
+    const current = workspaceRef.current;
+    if (current.view.canvases.length <= 1) {
+      return;
+    }
+    const index = current.view.canvases.findIndex((canvas) => canvas.id === canvasId);
+    if (index < 0) {
+      return;
+    }
+    const nextActive =
+      current.view.canvases[index - 1] ?? current.view.canvases[index + 1];
+    updateWorkspace(
+      (workspace) => ({
+        ...workspace,
+        view: {
+          ...workspace.view,
+          activeCanvasId: nextActive.id,
+          canvases: workspace.view.canvases.filter((canvas) => canvas.id !== canvasId),
+        },
+      }),
+      { flushImmediately: true, recordHistory: true },
+    );
+    setPendingWorkspaceDeletion(null);
+    setEditingNodeId(null);
   }
 
   function toggleReferenceFilter(nodeId: string) {
@@ -4676,6 +4927,7 @@ function App({
             <button
               className="nav-item"
               data-active={activeView === id}
+              data-testid={`${id}-navigation`}
               disabled={pendingWorkspaceReplacement !== null}
               key={id}
               onClick={() => setActiveView(id)}
@@ -4725,6 +4977,86 @@ function App({
             pendingWorkspaceReplacement === null &&
             documentImportPreview === null && (
             <div className="workspace-actions">
+              {activeView === "canvas" && (
+                <div className="canvas-picker" data-testid="canvas-picker">
+                  {canvasNameEditing ? (
+                    <label className="canvas-name-field">
+                      <span className="visually-hidden">{t("canvases.name")}</span>
+                      <input
+                        aria-label={t("canvases.name")}
+                        autoFocus
+                        data-testid="canvas-name"
+                        maxLength={128}
+                        onBlur={commitCanvasName}
+                        onChange={(event) => setCanvasNameDraft(event.target.value)}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter") {
+                            event.currentTarget.blur();
+                          } else if (event.key === "Escape") {
+                            setCanvasNameDraft(activeCanvas.name);
+                            setCanvasNameEditing(false);
+                          }
+                        }}
+                        value={canvasNameDraft}
+                      />
+                    </label>
+                  ) : (
+                    <label>
+                      <span className="visually-hidden">{t("canvases.select")}</span>
+                      <select
+                        aria-label={t("canvases.select")}
+                        data-testid="canvas-select"
+                        onChange={(event) => switchCanvas(event.target.value)}
+                        value={activeCanvas.id}
+                      >
+                        {workspace.view.canvases.map((canvas) => (
+                          <option key={canvas.id} value={canvas.id}>
+                            {canvas.name}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  )}
+                  <button
+                    aria-label={t("canvases.name")}
+                    className="icon-button"
+                    onClick={() => setCanvasNameEditing(true)}
+                    title={t("canvases.name")}
+                    type="button"
+                  >
+                    <Pencil aria-hidden="true" size={14} />
+                  </button>
+                  <button
+                    aria-label={t("canvases.create")}
+                    className="icon-button"
+                    data-testid="canvas-create"
+                    disabled={
+                      workspace.view.canvases.length >= maximumWorkspaceCanvasCount
+                    }
+                    onClick={createCanvas}
+                    title={t("canvases.create")}
+                    type="button"
+                  >
+                    <Plus aria-hidden="true" size={15} />
+                  </button>
+                  <button
+                    aria-label={t("canvases.delete")}
+                    className="icon-button danger-icon-button"
+                    data-testid="canvas-delete"
+                    disabled={workspace.view.canvases.length <= 1}
+                    onClick={() =>
+                      setPendingWorkspaceDeletion({
+                        kind: "canvas",
+                        canvasId: activeCanvas.id,
+                      })
+                    }
+                    title={t("canvases.delete")}
+                    type="button"
+                  >
+                    <Trash2 aria-hidden="true" size={15} />
+                  </button>
+                </div>
+              )}
               <div className="node-search-control">
                 <label className="search-scope-picker">
                   <span className="visually-hidden">{t("search.scopeLabel")}</span>
@@ -4854,7 +5186,14 @@ function App({
                 <span>{t("filters.unnamedOnly")}</span>
               </label>
               <span className="item-count">
-                {hasActiveNodeFilter
+                {activeView === "canvas" && hasActiveNodeFilter
+                  ? t("workspace.filteredItemCount", {
+                      count: canvasFilteredNodeIds.size,
+                      total: canvasNodes.length,
+                    })
+                  : activeView === "canvas"
+                    ? t("workspace.itemCount", { count: canvasNodes.length })
+                    : hasActiveNodeFilter
                   ? t("workspace.filteredItemCount", {
                       count: filteredNodes.length,
                       total: workspace.nodes.length,
@@ -4893,6 +5232,8 @@ function App({
                 before: t("extensions.proposal.before"),
                 after: t("extensions.proposal.after"),
                 overlay: t("backup.preview.overlay"),
+                canvas: t("backup.preview.canvas"),
+                unplaced: t("backup.preview.unplaced"),
                 cancel: t("actions.cancel"),
                 confirm: t("extensions.proposal.apply"),
                 identical: t("extensions.proposal.identical"),
@@ -4926,6 +5267,8 @@ function App({
                 before: t("documentImport.previewBefore"),
                 after: t("documentImport.previewAfter"),
                 overlay: t("backup.preview.overlay"),
+                canvas: t("backup.preview.canvas"),
+                unplaced: t("backup.preview.unplaced"),
                 cancel: t("actions.cancel"),
                 confirm: t("documentImport.confirm"),
                 identical: t("backup.preview.identical"),
@@ -4957,6 +5300,8 @@ function App({
                 before: t("backup.preview.before"),
                 after: t("backup.preview.after"),
                 overlay: t("backup.preview.overlay"),
+                canvas: t("backup.preview.canvas"),
+                unplaced: t("backup.preview.unplaced"),
                 cancel: t("actions.cancel"),
                 confirm: t("backup.confirmReplace"),
                 identical: t("backup.preview.identical"),
@@ -6421,8 +6766,8 @@ function App({
                 cancel: t("actions.cancel"),
                 confirmDeleteNode: (count) =>
                   count === 1
-                    ? t("actions.confirmDeleteNode")
-                    : t("actions.confirmDeleteNodes"),
+                    ? t("canvases.confirmRemoveNode")
+                    : t("canvases.confirmRemoveNodes"),
                 createNode: t("actions.newNode"),
                 codeCopy: contentEnhancementLabels.code.copy,
                 codeLanguages: contentEnhancementLabels.code.languages,
@@ -6464,15 +6809,15 @@ function App({
                 totpMasked: contentEnhancementLabels.totp.masked,
                 totpRemaining: contentEnhancementLabels.totp.remaining,
                 editNode: t("actions.editNode"),
-                deleteNode: t("actions.deleteNode"),
+                deleteNode: t("canvases.removeNode"),
                 deleteNodeBody: (names) =>
                   names.length === 1
-                    ? t("deleteNode.body", { name: names[0] })
-                    : t("deleteNode.bodyMultiple", { count: names.length }),
+                    ? t("canvases.removeNodeBody", { name: names[0] })
+                    : t("canvases.removeNodesBody", { count: names.length }),
                 deleteNodeTitle: (count) =>
                   count === 1
-                    ? t("deleteNode.title")
-                    : t("deleteNode.titleMultiple", { count }),
+                    ? t("canvases.removeNodeTitle")
+                    : t("canvases.removeNodesTitle", { count }),
                 empty: t("empty.canvas"),
                 noMatches: t("empty.search"),
                 filterByNode: t("filters.filterByNode"),
@@ -6547,14 +6892,14 @@ function App({
                 undo: t("actions.undo"),
                 unnamed: t("nodes.unnamed"),
               }}
-              layout={workspace.layout}
+              layout={activeCanvas.layout}
               contentProcessorByNodeId={workspace.view.contentProcessorByNodeId}
               extensionMetadata={workspace.view.extensionMetadata}
               extensionBaseRevision={extensionWorkspaceRevisionRef.current}
               contentProcessorOptions={contentProcessorOptions}
               contentMarkerOptions={contentMarkerOptions}
               nameConflictNodeIds={nameConflictNodeIds}
-              nodes={workspace.nodes}
+              nodes={canvasNodes}
               onAnalyzeNodes={enqueueSmartReferenceNodes}
               onCreateNode={createNode}
               onCreateReferencedNode={createReferencedNode}
@@ -6567,7 +6912,7 @@ function App({
               }
               nodeFiltersActive={hasActiveNodeFilter}
               onClearNodeFilters={clearNodeFilters}
-              onDeleteNodes={deleteNodes}
+              onDeleteNodes={removeNodesFromActiveCanvas}
               onEditNode={editNode}
               onLayoutChange={updateLayout}
               onNodeCommit={commitNode}
@@ -6584,8 +6929,8 @@ function App({
               onUndo={undoWorkspace}
               onViewportChange={updateViewport}
               referenceFilterNodeIds={referenceFilterNodeIds}
-              references={workspace.references}
-              filteredNodeIds={filteredNodeIds}
+              references={canvasReferences}
+              filteredNodeIds={canvasFilteredNodeIds}
               unmatchedNodeOpacity={unmatchedNodeOpacity}
               pointSelection={
                 documentImportPlacementSelecting
@@ -6597,7 +6942,7 @@ function App({
                     }
                   : null
               }
-              viewport={workspace.viewport}
+              viewport={activeCanvas.viewport}
             />
           ) : (
             <section className="node-list-view" aria-live="polite">
@@ -6614,12 +6959,13 @@ function App({
                         ? undefined
                         : workspace.view.extensionMetadata[extensionId];
                     return (
-                      <button
-                        className="node-list-row"
-                        key={node.id}
-                        onClick={() => editNode(node.id)}
-                        type="button"
-                      >
+                      <div className="node-list-row-shell" key={node.id}>
+                        <button
+                          className="node-list-row"
+                          data-testid="node-list-row"
+                          onClick={() => editNode(node.id)}
+                          type="button"
+                        >
                         <strong data-unnamed={isUnnamedNode(node)}>
                           {node.name ?? t("nodes.unnamed")}
                         </strong>
@@ -6650,7 +6996,27 @@ function App({
                           processorId={processorId}
                           variant="list"
                         />
-                      </button>
+                        </button>
+                        <button
+                          aria-label={t("nodes.deletePermanently", {
+                            name: node.name ?? t("nodes.unnamed"),
+                          })}
+                          className="node-list-delete-button"
+                          data-testid="node-delete-permanently"
+                          onClick={() =>
+                            setPendingWorkspaceDeletion({
+                              kind: "nodes",
+                              nodeIds: [node.id],
+                            })
+                          }
+                          title={t("nodes.deletePermanently", {
+                            name: node.name ?? t("nodes.unnamed"),
+                          })}
+                          type="button"
+                        >
+                          <Trash2 aria-hidden="true" size={15} />
+                        </button>
+                      </div>
                     );
                   })}
                 </div>
@@ -6660,6 +7026,58 @@ function App({
 
         </div>
       </main>
+
+      {pendingWorkspaceDeletion !== null && (
+        <div className="modal-backdrop" role="presentation">
+          <section
+            aria-labelledby="workspace-deletion-dialog-title"
+            aria-modal="true"
+            className="confirmation-dialog"
+            role="dialog"
+          >
+            <h2 id="workspace-deletion-dialog-title">
+              {pendingWorkspaceDeletion.kind === "canvas"
+                ? t("canvases.deleteTitle")
+                : t("nodes.permanentDeleteTitle", {
+                    count: pendingWorkspaceDeletion.nodeIds.length,
+                  })}
+            </h2>
+            <p>
+              {pendingWorkspaceDeletion.kind === "canvas"
+                ? t("canvases.deleteDescription", { name: activeCanvas.name })
+                : t("nodes.permanentDeleteDescription", {
+                    count: pendingWorkspaceDeletion.nodeIds.length,
+                  })}
+            </p>
+            <div className="confirmation-dialog-actions">
+              <button
+                className="secondary-button"
+                onClick={() => setPendingWorkspaceDeletion(null)}
+                type="button"
+              >
+                {t("actions.cancel")}
+              </button>
+              <button
+                className="danger-button"
+                data-testid="workspace-deletion-confirm"
+                onClick={() => {
+                  if (pendingWorkspaceDeletion.kind === "canvas") {
+                    deleteCanvas(pendingWorkspaceDeletion.canvasId);
+                  } else {
+                    permanentlyDeleteNodes(pendingWorkspaceDeletion.nodeIds);
+                    setPendingWorkspaceDeletion(null);
+                  }
+                }}
+                type="button"
+              >
+                {pendingWorkspaceDeletion.kind === "canvas"
+                  ? t("canvases.deleteConfirm")
+                  : t("nodes.permanentDeleteConfirm")}
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
 
       {localEmbeddingTaskRunning && !localLlmTaskRunning && (
         <div className="smart-reference-progress" role="status">

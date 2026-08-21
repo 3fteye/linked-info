@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import type { WorkspaceSnapshot } from "./workspaceData";
+import {
+  defaultCanvasId,
+  type WorkspaceSnapshot,
+} from "./workspaceData";
 import type {
   LegacyWorkspaceSource,
   WorkspaceFileBridge,
@@ -15,10 +18,20 @@ const nodeId = "11111111-1111-4111-8111-111111111111";
 function validWorkspace(name = "OpenAI"): WorkspaceSnapshot {
   return {
     nodes: [{ id: nodeId, name, content: null }],
-    layout: [{ nodeId, x: 10, y: 20 }],
     references: [],
-    viewport: null,
-    view: { contentProcessorByNodeId: {}, extensionMetadata: {} },
+    view: {
+      activeCanvasId: defaultCanvasId,
+      canvases: [
+        {
+          id: defaultCanvasId,
+          name: "Main",
+          layout: [{ nodeId, x: 10, y: 20 }],
+          viewport: null,
+        },
+      ],
+      contentProcessorByNodeId: {},
+      extensionMetadata: {},
+    },
   };
 }
 
@@ -69,7 +82,7 @@ describe("createTauriWorkspacePersistence", () => {
 
     expect(await persistence.load()).toEqual({ status: "ready", workspace });
     expect(JSON.parse(bridge.files.get("primary") ?? "null")).toEqual({
-      version: 3,
+      version: 4,
       ...workspace,
     });
     expect(legacy.removed).toEqual(["primary"]);
@@ -80,7 +93,7 @@ describe("createTauriWorkspacePersistence", () => {
     const legacy = new MemoryLegacySource();
     const fileWorkspace = validWorkspace("File");
     const browserWorkspace = validWorkspace("Browser");
-    bridge.files.set("primary", JSON.stringify({ version: 1, ...fileWorkspace }));
+    bridge.files.set("primary", JSON.stringify({ version: 4, ...fileWorkspace }));
     legacy.values.set("primary", { status: "ready", workspace: browserWorkspace });
     const persistence = createTauriWorkspacePersistence(bridge, legacy);
 
@@ -133,9 +146,11 @@ describe("createTauriWorkspacePersistence", () => {
     expect([...bridge.files.keys()]).toEqual(["primary", "recovery"]);
     expect(legacy.removed).toEqual(["primary", "recovery"]);
 
-    await expect(
-      persistence.save({ ...workspace, layout: [] }),
-    ).rejects.toThrow("refusing to persist an invalid workspace snapshot");
+    const invalid = structuredClone(workspace);
+    invalid.view.canvases = [];
+    await expect(persistence.save(invalid)).rejects.toThrow(
+      "refusing to persist an invalid workspace snapshot",
+    );
   });
 
   it("serializes writes so an older snapshot cannot finish after a newer one", async () => {
@@ -405,7 +420,7 @@ describe("createTauriWorkspacePersistence", () => {
     await persistence.save(before);
 
     const result = await persistence.runExclusiveTransaction(async () => {
-      bridge.files.set("primary", JSON.stringify({ version: 3, ...restored }));
+      bridge.files.set("primary", JSON.stringify({ version: 4, ...restored }));
       return { status: "committed" as const };
     });
 
@@ -458,7 +473,7 @@ describe("createTauriWorkspacePersistence", () => {
     const first = persistence.runExclusiveTransaction(async () => {
       signalFirstStarted();
       await firstBlocked;
-      bridge.files.set("primary", JSON.stringify({ version: 3, ...restored }));
+      bridge.files.set("primary", JSON.stringify({ version: 4, ...restored }));
       return { status: "committed" as const };
     });
     await firstStarted;

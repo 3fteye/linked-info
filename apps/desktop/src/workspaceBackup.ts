@@ -1,12 +1,13 @@
 import {
   migrateWorkspaceSnapshotV1,
   migrateWorkspaceSnapshotV2,
+  migrateWorkspaceSnapshotV3,
   parseWorkspaceSnapshot,
   type WorkspaceSnapshot,
 } from "./workspaceData";
 
 const exportFormat = "linked-info-workspace";
-const exportVersion = 3;
+const exportVersion = 4;
 
 export type WorkspaceImportFailure =
   | "invalidJson"
@@ -61,6 +62,7 @@ export function parseWorkspaceExport(text: string): WorkspaceImportResult {
   if (
     document.version !== 1 &&
     document.version !== 2 &&
+    document.version !== 3 &&
     document.version !== exportVersion
   ) {
     return { ok: false, reason: "unsupportedVersion" };
@@ -77,6 +79,8 @@ export function parseWorkspaceExport(text: string): WorkspaceImportResult {
       ? migrateWorkspaceSnapshotV1(document.workspace)
       : document.version === 2
         ? migrateWorkspaceSnapshotV2(document.workspace)
+        : document.version === 3
+          ? migrateWorkspaceSnapshotV3(document.workspace)
         : parseWorkspaceSnapshot(document.workspace);
   if (workspace === null) {
     return { ok: false, reason: "invalidWorkspace" };

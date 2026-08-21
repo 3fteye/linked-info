@@ -3,7 +3,12 @@ import {
   localWorkspacePersistence,
   parseStoredWorkspaceText,
 } from "./workspaceStore";
-import type { WorkspaceSnapshot } from "./workspaceData";
+import {
+  activeWorkspaceCanvas,
+  defaultCanvasId,
+  emptyWorkspace,
+  type WorkspaceSnapshot,
+} from "./workspaceData";
 
 const workspaceKey = "linked-info.workspace.v1";
 const recoveryKey = "linked-info.workspace.recovery.v1";
@@ -40,10 +45,30 @@ class MemoryStorage implements Storage {
 function validWorkspace(): WorkspaceSnapshot {
   return {
     nodes: [{ id: nodeId, name: "OpenAI", content: null }],
-    layout: [{ nodeId, x: 10, y: 20 }],
     references: [],
-    viewport: { x: 12, y: 34, zoom: 0.8 },
-    view: { contentProcessorByNodeId: {}, extensionMetadata: {} },
+    view: {
+      activeCanvasId: defaultCanvasId,
+      canvases: [
+        {
+          id: defaultCanvasId,
+          name: "Main",
+          layout: [{ nodeId, x: 10, y: 20 }],
+          viewport: { x: 12, y: 34, zoom: 0.8 },
+        },
+      ],
+      contentProcessorByNodeId: {},
+      extensionMetadata: {},
+    },
+  };
+}
+
+function legacyWorkspace(workspace: WorkspaceSnapshot) {
+  const canvas = activeWorkspaceCanvas(workspace);
+  return {
+    nodes: workspace.nodes,
+    layout: canvas.layout,
+    references: workspace.references,
+    viewport: canvas.viewport,
   };
 }
 
@@ -55,22 +80,10 @@ describe("localWorkspacePersistence", () => {
   it("distinguishes missing data from a valid empty workspace", async () => {
     expect(await localWorkspacePersistence.load()).toEqual({ status: "missing" });
 
-    await localWorkspacePersistence.save({
-      nodes: [],
-      layout: [],
-      references: [],
-      viewport: null,
-      view: { contentProcessorByNodeId: {}, extensionMetadata: {} },
-    });
+    await localWorkspacePersistence.save(emptyWorkspace());
     expect(await localWorkspacePersistence.load()).toEqual({
       status: "ready",
-      workspace: {
-        nodes: [],
-        layout: [],
-        references: [],
-        viewport: null,
-        view: { contentProcessorByNodeId: {}, extensionMetadata: {} },
-      },
+      workspace: emptyWorkspace(),
     });
   });
 
@@ -85,11 +98,10 @@ describe("localWorkspacePersistence", () => {
     });
   });
 
-  it("migrates version 1 storage through the complete version 3 view", () => {
+  it("migrates version 1 storage through the complete version 4 view", () => {
     const workspace = validWorkspace();
-    const { view: _view, ...versionOne } = workspace;
     const result = parseStoredWorkspaceText(
-      JSON.stringify({ version: 1, ...versionOne }),
+      JSON.stringify({ version: 1, ...legacyWorkspace(workspace) }),
     );
 
     expect(result).toEqual({ status: "ready", workspace });
@@ -97,12 +109,11 @@ describe("localWorkspacePersistence", () => {
 
   it("migrates version 2 storage by adding an empty extension namespace", () => {
     const workspace = validWorkspace();
-    const { extensionMetadata: _metadata, ...versionTwoView } = workspace.view;
     const result = parseStoredWorkspaceText(
       JSON.stringify({
         version: 2,
-        ...workspace,
-        view: versionTwoView,
+        ...legacyWorkspace(workspace),
+        view: { contentProcessorByNodeId: {} },
       }),
     );
 
@@ -121,7 +132,7 @@ describe("localWorkspacePersistence", () => {
   });
 
   it("preserves an unsupported local format version for recovery", async () => {
-    const raw = JSON.stringify({ version: 4, ...validWorkspace() });
+    const raw = JSON.stringify({ version: 5, ...validWorkspace() });
     localStorage.setItem(workspaceKey, raw);
 
     expect(await localWorkspacePersistence.load()).toEqual({
@@ -152,7 +163,8 @@ describe("localWorkspacePersistence", () => {
     const valid = validWorkspace();
     await localWorkspacePersistence.save(valid);
     const original = localStorage.getItem(workspaceKey);
-    const invalid = { ...valid, layout: [] };
+    const invalid = structuredClone(valid);
+    invalid.view.canvases = [];
 
     await expect(localWorkspacePersistence.save(invalid)).rejects.toThrow(
       "refusing to persist an invalid workspace snapshot",

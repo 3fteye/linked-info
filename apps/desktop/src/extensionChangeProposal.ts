@@ -6,9 +6,11 @@ import type {
   NodeHandle,
 } from "./builtinExtensionHost";
 import {
+  activeWorkspaceCanvas,
   normalizeNodeName,
   parseWorkspaceSnapshot,
   persistedNodeNameFromDraft,
+  updateWorkspaceCanvas,
   type InformationNode,
   type NodeReference,
   type WorkspaceSnapshot,
@@ -159,7 +161,9 @@ function createdNodePosition(
   currentNodeId: string,
   index: number,
 ): { x: number; y: number } {
-  const anchor = workspace.layout.find((layout) => layout.nodeId === currentNodeId) ?? {
+  const anchor = activeWorkspaceCanvas(workspace).layout.find(
+    (layout) => layout.nodeId === currentNodeId,
+  ) ?? {
     x: 80,
     y: 80,
   };
@@ -223,8 +227,9 @@ export function prepareExtensionChangeProposal(
       content: operation.content.length === 0 ? null : operation.content,
     })),
   ];
+  const activeCanvas = activeWorkspaceCanvas(workspace);
   const layout = [
-    ...workspace.layout,
+    ...activeCanvas.layout,
     ...createOperations.map((operation, index) => ({
       nodeId: createdNodeIds.get(operation.temporaryId)!,
       ...createdNodePosition(workspace, context.currentNodeId, index),
@@ -264,8 +269,12 @@ export function prepareExtensionChangeProposal(
   const candidate: WorkspaceSnapshot = {
     ...workspace,
     nodes,
-    layout,
     references,
+    view: updateWorkspaceCanvas(
+      workspace.view,
+      activeCanvas.id,
+      (canvas) => ({ ...canvas, layout }),
+    ),
   };
   const validated = parseWorkspaceSnapshot(candidate);
   if (validated === null) {

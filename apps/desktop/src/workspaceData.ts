@@ -27,7 +27,19 @@ export interface CanvasViewport {
   zoom: number;
 }
 
+export interface WorkspaceCanvas {
+  id: string;
+  name: string;
+  layout: NodeLayout[];
+  viewport: CanvasViewport | null;
+}
+
+export const defaultCanvasId = "00000000-0000-4000-8000-000000000001";
+export const defaultCanvasName = "Main";
+
 export interface WorkspaceViewMetadata {
+  activeCanvasId: string;
+  canvases: WorkspaceCanvas[];
   contentProcessorByNodeId: Record<string, string>;
   extensionMetadata: Record<string, WorkspaceExtensionMetadata>;
 }
@@ -53,9 +65,7 @@ export interface WorkspaceExtensionMetadata {
 
 export interface WorkspaceSnapshot {
   nodes: InformationNode[];
-  layout: NodeLayout[];
   references: NodeReference[];
-  viewport: CanvasViewport | null;
   view: WorkspaceViewMetadata;
 }
 
@@ -74,9 +84,12 @@ const maximumNodeExtensionMetadataBytes = 16 * 1024;
 const maximumWorkspaceExtensionMetadataBytes = 64 * 1024;
 const maximumSingleExtensionMetadataBytes = 4 * 1024 * 1024;
 const maximumTotalExtensionMetadataBytes = 16 * 1024 * 1024;
+export const maximumWorkspaceCanvasCount = 256;
+const maximumCanvasNameCharacters = 128;
+const maximumTotalCanvasPlacements = 1_000_000;
 const extensionMetadataUtf8Encoder = new TextEncoder();
 const invalidExtensionMetadataValue = Symbol("invalidExtensionMetadataValue");
-type WorkspaceSnapshotVersion = 1 | 2 | 3;
+type WorkspaceSnapshotVersion = 1 | 2 | 3 | 4;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -252,11 +265,54 @@ function parseWorkspaceExtensionMetadata(
 export function emptyWorkspace(): WorkspaceSnapshot {
   return {
     nodes: [],
-    layout: [],
     references: [],
-    viewport: null,
-    view: { contentProcessorByNodeId: {}, extensionMetadata: {} },
+    view: {
+      activeCanvasId: defaultCanvasId,
+      canvases: [
+        {
+          id: defaultCanvasId,
+          name: defaultCanvasName,
+          layout: [],
+          viewport: null,
+        },
+      ],
+      contentProcessorByNodeId: {},
+      extensionMetadata: {},
+    },
   };
+}
+
+export function activeWorkspaceCanvas(
+  workspace: WorkspaceSnapshot,
+): WorkspaceCanvas {
+  const canvas = workspace.view.canvases.find(
+    (item) => item.id === workspace.view.activeCanvasId,
+  );
+  if (canvas !== undefined) {
+    return canvas;
+  }
+  const fallback = workspace.view.canvases[0];
+  if (fallback === undefined) {
+    throw new Error("Workspace must contain at least one canvas.");
+  }
+  return fallback;
+}
+
+export function updateWorkspaceCanvas(
+  view: WorkspaceViewMetadata,
+  canvasId: string,
+  updater: (canvas: WorkspaceCanvas) => WorkspaceCanvas,
+): WorkspaceViewMetadata {
+  let changed = false;
+  const canvases = view.canvases.map((canvas) => {
+    if (canvas.id !== canvasId) {
+      return canvas;
+    }
+    const next = updater(canvas);
+    changed = changed || next !== canvas;
+    return next;
+  });
+  return changed ? { ...view, canvases } : view;
 }
 
 export function normalizeNodeName(name: string): string {
@@ -424,73 +480,33 @@ export function updateNodeLayoutSizeOverrides(
   return changed ? next : layout;
 }
 
-function parseWorkspaceSnapshotValue(
-  value: unknown,
-  version: WorkspaceSnapshotVersion,
-): WorkspaceSnapshot | null {
-  if (
-    !isRecord(value) ||
-    !Array.isArray(value.nodes) ||
-    !Array.isArray(value.layout) ||
-    !Array.isArray(value.references)
-  ) {
+function parseCanvasViewport(value: unknown): CanvasViewport | null | undefined {
+  if (value === null || value === undefined) {
     return null;
   }
-
-  let viewport: CanvasViewport | null = null;
-  if (value.viewport !== undefined && value.viewport !== null) {
-    if (
-      !isRecord(value.viewport) ||
-      !isFiniteNumber(value.viewport.x) ||
-      !isFiniteNumber(value.viewport.y) ||
-      !isFiniteNumber(value.viewport.zoom) ||
-      value.viewport.zoom <= 0
-    ) {
-      return null;
-    }
-    viewport = {
-      x: value.viewport.x,
-      y: value.viewport.y,
-      zoom: value.viewport.zoom,
-    };
+  if (
+    !isRecord(value) ||
+    !isFiniteNumber(value.x) ||
+    !isFiniteNumber(value.y) ||
+    !isFiniteNumber(value.zoom) ||
+    value.zoom <= 0
+  ) {
+    return undefined;
   }
+  return { x: value.x, y: value.y, zoom: value.zoom };
+}
 
-  const nodes: InformationNode[] = [];
-  const nodeIds = new Set<string>();
-  const normalizedNames = new Set<string>();
-  for (const candidate of value.nodes) {
-    if (
-      !isRecord(candidate) ||
-      (candidate.name !== null && typeof candidate.name !== "string") ||
-      (candidate.content !== null && typeof candidate.content !== "string")
-    ) {
-      return null;
-    }
-
-    const id = canonicalNodeId(candidate.id);
-    if (id === null || nodeIds.has(id)) {
-      return null;
-    }
-
-    const name = candidate.name === null ? null : candidate.name.trim();
-    if (name !== null) {
-      const normalizedName = normalizeNodeName(name);
-      if (normalizedName.length === 0 || normalizedNames.has(normalizedName)) {
-        return null;
-      }
-      normalizedNames.add(normalizedName);
-    }
-
-    nodeIds.add(id);
-    nodes.push({ id, name, content: candidate.content });
-  }
-
-  if (value.layout.length !== nodes.length) {
+function parseNodeLayout(
+  value: unknown,
+  nodeIds: ReadonlySet<string>,
+  requireEveryNode: boolean,
+): NodeLayout[] | null {
+  if (!Array.isArray(value) || (requireEveryNode && value.length !== nodeIds.size)) {
     return null;
   }
   const layout: NodeLayout[] = [];
   const layoutNodeIds = new Set<string>();
-  for (const candidate of value.layout) {
+  for (const candidate of value) {
     if (!isRecord(candidate)) {
       return null;
     }
@@ -535,6 +551,60 @@ function parseWorkspaceSnapshotValue(
       ...(height === undefined ? {} : { height }),
     });
   }
+  return layout;
+}
+
+function parseWorkspaceSnapshotValue(
+  value: unknown,
+  version: WorkspaceSnapshotVersion,
+): WorkspaceSnapshot | null {
+  if (
+    !isRecord(value) ||
+    !Array.isArray(value.nodes) ||
+    !Array.isArray(value.references)
+  ) {
+    return null;
+  }
+  const allowedKeys = new Set(
+    version === 4
+      ? ["nodes", "references", "view", "version"]
+      : version === 1
+        ? ["nodes", "layout", "references", "viewport", "version"]
+        : ["nodes", "layout", "references", "viewport", "view", "version"],
+  );
+  if (Object.keys(value).some((key) => !allowedKeys.has(key))) {
+    return null;
+  }
+
+  const nodes: InformationNode[] = [];
+  const nodeIds = new Set<string>();
+  const normalizedNames = new Set<string>();
+  for (const candidate of value.nodes) {
+    if (
+      !isRecord(candidate) ||
+      (candidate.name !== null && typeof candidate.name !== "string") ||
+      (candidate.content !== null && typeof candidate.content !== "string")
+    ) {
+      return null;
+    }
+
+    const id = canonicalNodeId(candidate.id);
+    if (id === null || nodeIds.has(id)) {
+      return null;
+    }
+
+    const name = candidate.name === null ? null : candidate.name.trim();
+    if (name !== null) {
+      const normalizedName = normalizeNodeName(name);
+      if (normalizedName.length === 0 || normalizedNames.has(normalizedName)) {
+        return null;
+      }
+      normalizedNames.add(normalizedName);
+    }
+
+    nodeIds.add(id);
+    nodes.push({ id, name, content: candidate.content });
+  }
 
   const references: NodeReference[] = [];
   const referenceKeys = new Set<string>();
@@ -562,13 +632,86 @@ function parseWorkspaceSnapshotValue(
 
   let contentProcessorByNodeId: Record<string, string> = {};
   let extensionMetadata: Record<string, WorkspaceExtensionMetadata> = {};
+  let canvases: WorkspaceCanvas[];
+  let activeCanvasId: string;
+  if (version === 4) {
+    if (
+      !isRecord(value.view) ||
+      Array.isArray(value.view) ||
+      Object.keys(value.view).length !== 4 ||
+      !Array.isArray(value.view.canvases) ||
+      value.view.canvases.length === 0 ||
+      value.view.canvases.length > maximumWorkspaceCanvasCount
+    ) {
+      return null;
+    }
+    const parsedCanvases: WorkspaceCanvas[] = [];
+    const canvasIds = new Set<string>();
+    const normalizedCanvasNames = new Set<string>();
+    let totalPlacements = 0;
+    for (const candidate of value.view.canvases) {
+      if (
+        !isRecord(candidate) ||
+        Object.keys(candidate).length !== 4 ||
+        typeof candidate.name !== "string"
+      ) {
+        return null;
+      }
+      const id = canonicalNodeId(candidate.id);
+      const name = candidate.name.trim();
+      const normalizedName = name.toLowerCase();
+      const layout = parseNodeLayout(candidate.layout, nodeIds, false);
+      const viewport = parseCanvasViewport(candidate.viewport);
+      if (
+        id === null ||
+        canvasIds.has(id) ||
+        name.length === 0 ||
+        [...name].length > maximumCanvasNameCharacters ||
+        normalizedCanvasNames.has(normalizedName) ||
+        layout === null ||
+        viewport === undefined
+      ) {
+        return null;
+      }
+      totalPlacements += layout.length;
+      if (totalPlacements > maximumTotalCanvasPlacements) {
+        return null;
+      }
+      canvasIds.add(id);
+      normalizedCanvasNames.add(normalizedName);
+      parsedCanvases.push({ id, name, layout, viewport });
+    }
+    const parsedActiveCanvasId = canonicalNodeId(value.view.activeCanvasId);
+    if (parsedActiveCanvasId === null || !canvasIds.has(parsedActiveCanvasId)) {
+      return null;
+    }
+    canvases = parsedCanvases;
+    activeCanvasId = parsedActiveCanvasId;
+  } else {
+    const layout = parseNodeLayout(value.layout, nodeIds, true);
+    const viewport = parseCanvasViewport(value.viewport);
+    if (layout === null || viewport === undefined) {
+      return null;
+    }
+    canvases = [
+      {
+        id: defaultCanvasId,
+        name: defaultCanvasName,
+        layout,
+        viewport,
+      },
+    ];
+    activeCanvasId = defaultCanvasId;
+  }
+
   if (version !== 1 && value.view !== undefined) {
     if (
       !isRecord(value.view) ||
       Array.isArray(value.view) ||
       !isRecord(value.view.contentProcessorByNodeId) ||
       Array.isArray(value.view.contentProcessorByNodeId) ||
-      Object.keys(value.view).length !== (version === 2 ? 1 : 2) ||
+      Object.keys(value.view).length !==
+        (version === 2 ? 1 : version === 3 ? 2 : 4) ||
       (version === 2 &&
         Object.prototype.hasOwnProperty.call(value.view, "extensionMetadata"))
     ) {
@@ -591,7 +734,7 @@ function parseWorkspaceSnapshotValue(
       }
       contentProcessorByNodeId[nodeId] = processorId;
     }
-    if (version === 3) {
+    if (version === 3 || version === 4) {
       const parsedExtensionMetadata = parseWorkspaceExtensionMetadata(
         value.view.extensionMetadata,
         nodeIds,
@@ -607,15 +750,18 @@ function parseWorkspaceSnapshotValue(
 
   return {
     nodes,
-    layout,
     references,
-    viewport,
-    view: { contentProcessorByNodeId, extensionMetadata },
+    view: {
+      activeCanvasId,
+      canvases,
+      contentProcessorByNodeId,
+      extensionMetadata,
+    },
   };
 }
 
 export function parseWorkspaceSnapshot(value: unknown): WorkspaceSnapshot | null {
-  return parseWorkspaceSnapshotValue(value, 3);
+  return parseWorkspaceSnapshotValue(value, 4);
 }
 
 export function migrateWorkspaceSnapshotV1(
@@ -630,6 +776,12 @@ export function migrateWorkspaceSnapshotV2(
   return parseWorkspaceSnapshotValue(value, 2);
 }
 
+export function migrateWorkspaceSnapshotV3(
+  value: unknown,
+): WorkspaceSnapshot | null {
+  return parseWorkspaceSnapshotValue(value, 3);
+}
+
 export function removeNodesFromWorkspaceView(
   view: WorkspaceViewMetadata,
   deletedNodeIds: ReadonlySet<string>,
@@ -638,6 +790,17 @@ export function removeNodesFromWorkspaceView(
     ([nodeId]) => !deletedNodeIds.has(nodeId),
   );
   let extensionMetadataChanged = false;
+  let canvasesChanged = false;
+  const canvases = view.canvases.map((canvas) => {
+    const layout = canvas.layout.filter(
+      (item) => !deletedNodeIds.has(item.nodeId),
+    );
+    if (layout.length !== canvas.layout.length) {
+      canvasesChanged = true;
+      return { ...canvas, layout };
+    }
+    return canvas;
+  });
   const extensionMetadata = Object.fromEntries(
     Object.entries(view.extensionMetadata).map(([extensionId, metadata]) => {
       const byNodeId = Object.fromEntries(
@@ -654,11 +817,14 @@ export function removeNodesFromWorkspaceView(
   );
   if (
     entries.length === Object.keys(view.contentProcessorByNodeId).length &&
+    !canvasesChanged &&
     !extensionMetadataChanged
   ) {
     return view;
   }
   return {
+    ...view,
+    canvases,
     contentProcessorByNodeId: Object.fromEntries(entries),
     extensionMetadata,
   };

@@ -24,13 +24,23 @@ describe("managed extension frontend boundary", () => {
           { id: sourceId, name: "Source", content: fullContent },
           { id: targetId, name: "Target", content: null },
         ],
-        layout: [
-          { nodeId: sourceId, x: 0, y: 0 },
-          { nodeId: targetId, x: 300, y: 0 },
-        ],
         references: [{ sourceNodeId: sourceId, targetNodeId: targetId }],
-        viewport: null,
-        view: { contentProcessorByNodeId: {}, extensionMetadata: {} },
+        view: {
+          activeCanvasId: "00000000-0000-4000-8000-000000000001",
+          canvases: [
+            {
+              id: "00000000-0000-4000-8000-000000000001",
+              name: "Main",
+              layout: [
+                { nodeId: sourceId, x: 0, y: 0 },
+                { nodeId: targetId, x: 300, y: 0 },
+              ],
+              viewport: null,
+            },
+          ],
+          contentProcessorByNodeId: {},
+          extensionMetadata: {},
+        },
       },
       sourceId,
     );

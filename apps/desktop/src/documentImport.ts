@@ -1,4 +1,9 @@
-import { normalizeNodeName, type WorkspaceSnapshot } from "./workspaceData";
+import {
+  activeWorkspaceCanvas,
+  normalizeNodeName,
+  updateWorkspaceCanvas,
+  type WorkspaceSnapshot,
+} from "./workspaceData";
 import type { LocalLlmModelId } from "./localLlmModels";
 
 export const maximumDocumentImportCharacters = 120_000;
@@ -382,8 +387,9 @@ export function buildDocumentImportWorkspace(
 
   const startX = placement.x;
   const startY = placement.y;
+  const activeCanvas = activeWorkspaceCanvas(base);
   const layout = [
-    ...base.layout,
+    ...activeCanvas.layout,
     { nodeId: sourceNodeId, x: startX, y: startY },
     ...newCandidates.map(({ candidate }, index) => ({
       nodeId: candidate.id,
@@ -420,8 +426,12 @@ export function buildDocumentImportWorkspace(
     workspace: {
       ...base,
       nodes,
-      layout,
       references,
+      view: updateWorkspaceCanvas(
+        base.view,
+        activeCanvas.id,
+        (canvas) => ({ ...canvas, layout }),
+      ),
     },
     addedNodeCount: newCandidates.length + 1,
     matchedNodeCount: resolved.length - newCandidates.length,
