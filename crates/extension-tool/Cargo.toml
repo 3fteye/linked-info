@@ -1,0 +1,23 @@
+[package]
+name = "linked-info-extension-tool"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Build, sign, validate, and locally test Linked Info extensions"
+
+[dependencies]
+ed25519-dalek.workspace = true
+linked-info-extension-contracts = { path = "../extension-contracts" }
+linked-info-extension-host = { path = "../extension-host" }
+rand_core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+wit-component.workspace = true
+zip.workspace = true
+
+[dev-dependencies]
+linked-info-extension-sdk = { path = "../extension-sdk" }
+wit-component = { workspace = true, features = ["dummy-module"] }
+wit-parser.workspace = true

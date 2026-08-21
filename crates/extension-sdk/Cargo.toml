@@ -1,0 +1,9 @@
+[package]
+name = "linked-info-extension-sdk"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Rust guest SDK for constrained Linked Info node extensions"
+
+[dependencies]
+wit-bindgen = "0.57.1"

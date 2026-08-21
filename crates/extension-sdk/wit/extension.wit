@@ -1,0 +1,156 @@
+package linked-info:extension@1.0.0;
+
+interface guest {
+  type node-handle = u64;
+
+  record node-snapshot {
+    handle: node-handle,
+    name: option<string>,
+    content: option<string>,
+    direct-outgoing: list<node-handle>,
+    direct-incoming: list<node-handle>,
+  }
+
+  record render-request {
+    processor-id: string,
+    node: node-snapshot,
+    node-metadata-json: option<string>,
+    workspace-metadata-json: option<string>,
+    monotonic-time-ms: option<u64>,
+  }
+
+  record text-element {
+    text: string,
+  }
+
+  record code-element {
+    language: string,
+    source: string,
+  }
+
+  record key-value-item {
+    key: string,
+    value: string,
+  }
+
+  record key-value-element {
+    items: list<key-value-item>,
+  }
+
+  record table-element {
+    columns: list<string>,
+    rows: list<list<string>>,
+  }
+
+  enum badge-tone {
+    neutral,
+    positive,
+    warning,
+    critical,
+  }
+
+  record badge-element {
+    text: string,
+    tone: badge-tone,
+  }
+
+  record button-element {
+    action-id: string,
+  }
+
+  record select-option {
+    value: string,
+    label-key: string,
+  }
+
+  record select-element {
+    action-id: string,
+    label-key: string,
+    selected: option<string>,
+    options: list<select-option>,
+  }
+
+  variant presentation-element {
+    text(text-element),
+    code(code-element),
+    key-value(key-value-element),
+    table(table-element),
+    badge(badge-element),
+    divider,
+    button(button-element),
+    select(select-element),
+  }
+
+  record presentation {
+    elements: list<presentation-element>,
+  }
+
+  variant proposal-endpoint {
+    existing(node-handle),
+    created(string),
+  }
+
+  variant string-patch {
+    unchanged,
+    set(string),
+  }
+
+  record create-node-operation {
+    temporary-id: string,
+    name: string,
+    content: string,
+  }
+
+  record update-current-node-operation {
+    name: string-patch,
+    content: string-patch,
+  }
+
+  record reference-operation {
+    source: proposal-endpoint,
+    target: proposal-endpoint,
+  }
+
+  variant change-operation {
+    create-node(create-node-operation),
+    update-current-node(update-current-node-operation),
+    create-reference(reference-operation),
+    remove-reference(reference-operation),
+  }
+
+  record change-proposal {
+    base-revision: u64,
+    title-key: string,
+    operations: list<change-operation>,
+  }
+
+  record action-request {
+    action-id: string,
+    nodes: list<node-snapshot>,
+    node-metadata-json: option<string>,
+    workspace-metadata-json: option<string>,
+    input-value: option<string>,
+    monotonic-time-ms: option<u64>,
+    base-revision: u64,
+  }
+
+  record action-result {
+    presentation: option<presentation>,
+    node-metadata-json: option<string>,
+    workspace-metadata-json: option<string>,
+    proposal: option<change-proposal>,
+  }
+
+  record metadata-migration-request {
+    from-version: u32,
+    to-version: u32,
+    metadata-json: string,
+  }
+  render: func(request: render-request) -> result<presentation, string>;
+  invoke: func(request: action-request) -> result<action-result, string>;
+  migrate-metadata: func(request: metadata-migration-request) -> result<string, string>;
+}
+
+world node-extension {
+  export guest;
+}

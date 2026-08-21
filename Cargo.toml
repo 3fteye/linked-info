@@ -10,6 +10,8 @@ members = [
     "crates/extension-contracts",
     "crates/extension-host-protocol",
     "crates/extension-host",
+    "crates/extension-sdk",
+    "crates/extension-tool",
     "crates/storage-d1",
     "crates/storage-memory",
     "crates/storage-port",
@@ -22,8 +24,9 @@ license = "Apache-2.0"
 
 [workspace.dependencies]
 chrono = { version = "0.4", features = ["serde"] }
-ed25519-dalek = { version = "2.2", default-features = false, features = ["std"] }
+ed25519-dalek = { version = "2.2", default-features = false, features = ["std", "rand_core"] }
 regex = "1"
+rand_core = { version = "0.6", features = ["getrandom"] }
 semver = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -33,6 +36,7 @@ utoipa = { version = "5", features = ["uuid"] }
 uuid = { version = "1", features = ["serde", "v4", "js"] }
 wasmparser = "0.256"
 wit-component = "0.256"
+wit-bindgen = "0.57.1"
 wit-parser = "0.256"
 wasmtime = { version = "47.0.3", default-features = false, features = ["anyhow", "component-model", "cranelift", "runtime", "std"] }
 wasmprinter = "0.256"

@@ -201,7 +201,7 @@ signature.ed25519
 - [WebAssembly Component Model 与 WIT](https://component-model.bytecodealliance.org/design/wit.html)
 - [WIT world 的导入/导出边界](https://component-model.bytecodealliance.org/design/worlds.html)
 
-第一份官方 SDK 只支持 Rust，并提供 WIT 绑定、模板、打包、签名和本地测试命令。WIT 契约保持语言中立；JavaScript、Python、Go 等 SDK 只有经过仓库 CI 的真实示例验证后才列为正式支持，不能仅凭工具链能够生成 Wasm 就宣称兼容。
+第一份官方 SDK 只支持 Rust，并提供 WIT 绑定、模板、打包、签名和本地测试命令，具体使用边界见 [Rust 扩展 SDK 使用说明](extension-sdk.md)。WIT 契约保持语言中立；JavaScript、Python、Go 等 SDK 只有经过仓库 CI 的真实示例验证后才列为正式支持，不能仅凭工具链能够生成 Wasm 就宣称兼容。
 
 ## 9. 工作区与数据生命周期
 
