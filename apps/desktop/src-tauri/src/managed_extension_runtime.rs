@@ -270,6 +270,14 @@ fn prepare_runtime(
         generation,
         registration.allow_unsigned_development,
     )?;
+    if let Err(error) = crate::extension_manager::ensure_managed_extension_runtime_registration(
+        app,
+        manager,
+        &registration,
+    ) {
+        runtime.stop(extension_id);
+        return Err(error);
+    }
     Ok(registration)
 }
 

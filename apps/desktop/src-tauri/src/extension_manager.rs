@@ -2,7 +2,10 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{
+        Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -34,6 +37,7 @@ const METADATA_MIGRATION_TIMEOUT: Duration = Duration::from_secs(30);
 pub struct ExtensionManagerState {
     prepared: Mutex<BTreeMap<String, PreparedExtensionInstall>>,
     lifecycle: Mutex<()>,
+    authorization_generation: AtomicU64,
 }
 
 #[derive(Clone)]
@@ -141,9 +145,11 @@ pub struct InstalledExtensionView {
 #[derive(Clone)]
 pub(crate) struct ManagedExtensionRuntimeRegistration {
     pub extension_id: String,
+    pub package_sha256: String,
     pub package_path: PathBuf,
     pub package: ValidatedExtensionPackage,
     pub allow_unsigned_development: bool,
+    pub authorization_generation: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -404,10 +410,36 @@ pub(crate) fn managed_extension_runtime_registration(
     let package = validate_installed_package(&root, extension_id, record)?;
     Ok(ManagedExtensionRuntimeRegistration {
         extension_id: extension_id.to_owned(),
+        package_sha256: record.package_sha256.clone(),
         package_path: package_path(&root, &record.package_sha256)?,
         allow_unsigned_development: !record.signed,
         package,
+        authorization_generation: manager.authorization_generation.load(Ordering::Acquire),
     })
+}
+
+pub(crate) fn ensure_managed_extension_runtime_registration(
+    app: &tauri::AppHandle,
+    manager: &ExtensionManagerState,
+    registration: &ManagedExtensionRuntimeRegistration,
+) -> Result<(), String> {
+    let _lifecycle = manager
+        .lifecycle
+        .lock()
+        .map_err(|_| "extension_manager_state_unavailable".to_owned())?;
+    if manager.authorization_generation.load(Ordering::Acquire)
+        != registration.authorization_generation
+    {
+        return Err("extension_runtime_authorization_revoked".to_owned());
+    }
+    let root = extension_root(app)?;
+    let registry = read_registry(&root)?;
+    registry
+        .extensions
+        .get(&registration.extension_id)
+        .filter(|record| record.enabled && record.package_sha256 == registration.package_sha256)
+        .map(|_| ())
+        .ok_or_else(|| "extension_runtime_authorization_revoked".to_owned())
 }
 
 fn recovered_record_for_schema(
@@ -959,6 +991,9 @@ pub fn commit_extension_install(
         .extensions
         .insert(prepared.package.manifest.id.clone(), next_record);
     write_registry(&root, &registry)?;
+    manager
+        .authorization_generation
+        .fetch_add(1, Ordering::AcqRel);
     if existing.is_some() {
         runtime.stop(&prepared.package.manifest.id);
     }
@@ -1018,6 +1053,9 @@ pub fn recover_pending_extension_upgrades(
     }
     crate::workspace_file::ensure_workspace_access(&app, &vault, permit)?;
     write_registry(&root, &registry)?;
+    manager
+        .authorization_generation
+        .fetch_add(1, Ordering::AcqRel);
 
     let journal_cleaned =
         write_pending_upgrades(&root, &PendingExtensionUpgrades::default()).is_ok();
@@ -1089,6 +1127,9 @@ pub fn set_extension_enabled(
     record.enabled = enabled;
     crate::workspace_file::ensure_workspace_access(&app, &vault, permit)?;
     write_registry(&root, &registry)?;
+    manager
+        .authorization_generation
+        .fetch_add(1, Ordering::AcqRel);
     if !enabled {
         runtime.stop(&extension_id);
     }
@@ -1122,6 +1163,9 @@ pub fn uninstall_extension(
         .ok_or_else(|| "extension_not_installed".to_owned())?;
     crate::workspace_file::ensure_workspace_access(&app, &vault, permit)?;
     write_registry(&root, &registry)?;
+    manager
+        .authorization_generation
+        .fetch_add(1, Ordering::AcqRel);
     runtime.stop(&extension_id);
     if !registry
         .extensions
