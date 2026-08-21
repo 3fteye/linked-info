@@ -398,12 +398,6 @@ pub struct WorkspaceAccessPermit {
     generation: u64,
 }
 
-impl WorkspaceAccessPermit {
-    pub(crate) const fn generation(self) -> u64 {
-        self.generation
-    }
-}
-
 struct SensitiveAuthorization {
     operation: SensitiveOperation,
     permit: WorkspaceAccessPermit,

@@ -591,6 +591,9 @@ pub async fn migrate_prepared_extension_metadata(
 ) -> Result<ExtensionMetadataMigrationPreview, String> {
     let vault = app.state::<crate::workspace_file::WorkspaceVaultState>();
     let permit = crate::workspace_file::begin_workspace_access(&app, &vault)?;
+    let generation = vault
+        .access_generation()
+        .load(std::sync::atomic::Ordering::Acquire);
     let prepared = app
         .state::<ExtensionManagerState>()
         .prepared
@@ -636,7 +639,7 @@ pub async fn migrate_prepared_extension_metadata(
             &task_prepared,
             &task_existing,
             &old_package,
-            permit.generation(),
+            generation,
             metadata,
         )
     })
