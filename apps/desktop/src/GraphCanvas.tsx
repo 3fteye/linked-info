@@ -263,6 +263,7 @@ interface CanvasSelectionGesture {
 interface GraphLabels {
   addToCanvas: string;
   analyzingNode: string;
+  canvasMemberships: string;
   cancel: string;
   confirmDeleteNode: (count: number) => string;
   createNode: string;
@@ -387,6 +388,7 @@ interface GraphCanvasProps {
     onSelect: (position: { x: number; y: number }) => void;
   } | null;
   onAnalyzeNodes: (nodeIds: string[]) => void;
+  onBrowseNodeCanvases: (nodeId: string) => void;
   onCreateNode: (position: { x: number; y: number }) => void;
   onCreateReferencedNode: (
     sourceNodeId: string,
@@ -483,6 +485,7 @@ export function InformationNodeCard({
   const contentInputRef = useRef<HTMLTextAreaElement>(null);
   const contentMarkerNoteInputRef = useRef<HTMLInputElement>(null);
   const contentKeyboardSelectionRef = useRef(false);
+  const referenceFilterClickTimerRef = useRef<number | null>(null);
   const processorSelectRef = useRef<HTMLSelectElement>(null);
   const processorFocusTransferRef = useRef(false);
   const [draft, setDraft] = useState(() => nodeEditorDraft(data.name, data.content));
@@ -493,6 +496,44 @@ export function InformationNodeCard({
   const [bodyOverflowing, setBodyOverflowing] = useState(false);
   const [resizing, setResizing] = useState(false);
   const wasEditingRef = useRef(data.editing);
+
+  const handleReferenceFilterClick = (
+    event: ReactMouseEvent<HTMLButtonElement>,
+    nodeId: string,
+  ) => {
+    event.stopPropagation();
+    if (referenceFilterClickTimerRef.current !== null) {
+      window.clearTimeout(referenceFilterClickTimerRef.current);
+    }
+    referenceFilterClickTimerRef.current = window.setTimeout(() => {
+      referenceFilterClickTimerRef.current = null;
+      data.onToggleReferenceFilter(nodeId);
+    }, 260);
+  };
+
+  const handleReferenceFilterDoubleClick = (
+    event: ReactMouseEvent<HTMLButtonElement>,
+    nodeId: string,
+    active: boolean,
+  ) => {
+    event.stopPropagation();
+    if (referenceFilterClickTimerRef.current !== null) {
+      window.clearTimeout(referenceFilterClickTimerRef.current);
+      referenceFilterClickTimerRef.current = null;
+    }
+    if (active) {
+      data.onToggleReferenceFilter(nodeId);
+    }
+  };
+
+  useEffect(
+    () => () => {
+      if (referenceFilterClickTimerRef.current !== null) {
+        window.clearTimeout(referenceFilterClickTimerRef.current);
+      }
+    },
+    [],
+  );
 
   useEffect(() => {
     const blocked =
@@ -859,10 +900,10 @@ export function InformationNodeCard({
           aria-pressed={data.filterActive}
           className="nodrag nowheel graph-node-filter-button"
           data-active={data.filterActive}
-          onClick={(event) => {
-            event.stopPropagation();
-            data.onToggleReferenceFilter(id);
-          }}
+          onClick={(event) => handleReferenceFilterClick(event, id)}
+          onDoubleClick={(event) =>
+            handleReferenceFilterDoubleClick(event, id, data.filterActive)
+          }
           onPointerDown={(event) => event.stopPropagation()}
           title={data.filterActive ? data.removeNodeFilterLabel : data.filterByNodeLabel}
           type="button"
@@ -1097,10 +1138,16 @@ export function InformationNodeCard({
                 <button
                   aria-pressed={target.filterActive}
                   className="graph-node-reference-filter"
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    data.onToggleReferenceFilter(target.id);
-                  }}
+                  onClick={(event) =>
+                    handleReferenceFilterClick(event, target.id)
+                  }
+                  onDoubleClick={(event) =>
+                    handleReferenceFilterDoubleClick(
+                      event,
+                      target.id,
+                      target.filterActive,
+                    )
+                  }
                   onPointerDown={(event) => event.stopPropagation()}
                   title={
                     target.filterActive
@@ -1299,6 +1346,7 @@ export default function GraphCanvas({
   labels,
   pointSelection = null,
   onAnalyzeNodes,
+  onBrowseNodeCanvases,
   onCreateNode,
   onCreateReferencedNode,
   onCopySecret,
@@ -4200,6 +4248,17 @@ export default function GraphCanvas({
                     <span>{labels.copySecret}</span>
                   </button>
                 )}
+              <button
+                data-testid="browse-node-canvases-context-action"
+                onClick={() => {
+                  onBrowseNodeCanvases(contextMenu.nodeId);
+                  setContextMenu(null);
+                }}
+                type="button"
+              >
+                <Crosshair size={16} />
+                <span>{labels.canvasMemberships}</span>
+              </button>
               <button
                 data-testid="copy-nodes-context-action"
                 onClick={() => {

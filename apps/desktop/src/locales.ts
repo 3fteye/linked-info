@@ -53,6 +53,11 @@ export const resources = {
         targetCanvas: "目标画布",
         addToAnotherConfirm: "添加并前往",
         moveToAnotherConfirm: "移动并前往",
+        membershipsAction: "所在画布…",
+        membershipsTitle: "节点所在画布",
+        membershipsDescription: "“{{name}}”在以下画布中具有位置。选择一个画布即可前往并聚焦。",
+        currentCanvas: "当前画布",
+        goToCanvas: "前往",
       },
       actions: {
         cancel: "取消",
@@ -112,6 +117,11 @@ export const resources = {
           name: "搜索名称",
         },
         scopeLabel: "搜索范围",
+        locationScopeLabel: "搜索位置范围",
+        locations: {
+          canvas: "当前画布",
+          workspace: "整个工作区",
+        },
         scopes: {
           both: "两者",
           content: "内容",
@@ -119,9 +129,12 @@ export const resources = {
         },
         unmatchedOpacity: "未匹配",
         unmatchedOpacityHint: "调整未匹配节点与引用线的透明度；0% 表示隐藏。",
-        navigationLabel: "当前画布搜索结果",
+        navigationLabel: "搜索结果",
         navigationIndex: "{{current}} / {{total}}",
         navigationHint: "↑/↓ 选择，Enter 聚焦",
+        focusOnCanvas: "在画布“{{canvas}}”中聚焦",
+        unplaced: "未加入任何画布",
+        openedUnplacedNode: "该节点没有画布位置，已在全局节点列表中定位。",
       },
       canvasShortcuts: {
         items: {
@@ -962,6 +975,11 @@ export const resources = {
         targetCanvas: "Target canvas",
         addToAnotherConfirm: "Add and open",
         moveToAnotherConfirm: "Move and open",
+        membershipsAction: "Canvas locations…",
+        membershipsTitle: "Canvas locations",
+        membershipsDescription: "“{{name}}” has a placement on the following canvases. Choose one to open and focus it.",
+        currentCanvas: "Current canvas",
+        goToCanvas: "Open",
       },
       actions: {
         cancel: "Cancel",
@@ -1022,6 +1040,11 @@ export const resources = {
           name: "Search names",
         },
         scopeLabel: "Search scope",
+        locationScopeLabel: "Search location scope",
+        locations: {
+          canvas: "Current canvas",
+          workspace: "Entire workspace",
+        },
         scopes: {
           both: "Both",
           content: "Content",
@@ -1030,9 +1053,12 @@ export const resources = {
         unmatchedOpacity: "Unmatched",
         unmatchedOpacityHint:
           "Adjust the opacity of unmatched nodes and references; 0% hides them.",
-        navigationLabel: "Search results on the current canvas",
+        navigationLabel: "Search results",
         navigationIndex: "{{current}} / {{total}}",
         navigationHint: "↑/↓ select, Enter focuses",
+        focusOnCanvas: "Focus on canvas “{{canvas}}”",
+        unplaced: "Not placed on any canvas",
+        openedUnplacedNode: "This node has no canvas placement. It was focused in the global node list.",
       },
       canvasShortcuts: {
         items: {

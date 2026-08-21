@@ -590,7 +590,7 @@ h1 {
   z-index: 35;
   top: calc(100% + 6px);
   left: 0;
-  width: min(360px, 80vw);
+  width: min(440px, 84vw);
   overflow: hidden;
   border: 1px solid #ccd7cf;
   border-radius: 8px;
@@ -622,19 +622,12 @@ h1 {
 }
 
 .node-search-result {
-  display: grid;
-  grid-template-columns: 28px minmax(0, 1fr);
-  align-items: center;
   width: 100%;
   min-height: 34px;
-  padding: 5px 8px;
-  gap: 8px;
-  border: 0;
+  padding: 3px;
   border-radius: 5px;
   color: #273029;
   background: transparent;
-  text-align: left;
-  cursor: pointer;
 }
 
 .node-search-result:hover,
@@ -642,14 +635,30 @@ h1 {
   background: #e7f1eb;
 }
 
-.node-search-result > span {
+.node-search-result-main {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  align-items: center;
+  width: 100%;
+  min-height: 30px;
+  padding: 3px 5px;
+  gap: 8px;
+  border: 0;
+  border-radius: 4px;
+  color: inherit;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.node-search-result-main > span {
   color: #7a837c;
   font-size: 11px;
   font-variant-numeric: tabular-nums;
   text-align: right;
 }
 
-.node-search-result > strong {
+.node-search-result-main > strong {
   overflow: hidden;
   font-size: 12px;
   font-weight: 600;
@@ -657,6 +666,53 @@ h1 {
   white-space: nowrap;
 }
 
+.node-search-result-memberships {
+  display: flex;
+  min-width: 0;
+  padding: 1px 5px 4px 41px;
+  overflow-x: auto;
+  gap: 4px;
+  scrollbar-width: thin;
+}
+
+.node-search-result-memberships button,
+.node-search-result-memberships > span {
+  max-width: 160px;
+  min-height: 21px;
+  overflow: hidden;
+  padding: 1px 7px;
+  border: 1px solid #c7d8cd;
+  border-radius: 999px;
+  color: #35634a;
+  background: #f2f7f4;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+
+.node-search-result-memberships button {
+  cursor: pointer;
+}
+
+.node-search-result-memberships button:hover {
+  border-color: #7ca18b;
+  background: #dfede4;
+}
+
+.node-search-result-memberships button[data-current="true"] {
+  border-color: #57906f;
+  background: #dcece2;
+  box-shadow: inset 0 0 0 1px rgb(56 125 86 / 12%);
+}
+
+.node-search-result-memberships > span {
+  color: #7b6550;
+  border-color: #ded3c6;
+  background: #faf6f1;
+}
+
+.search-location-picker,
 .search-scope-picker {
   display: flex;
   align-items: center;
@@ -669,6 +725,17 @@ h1 {
   background: #f2f6f3;
 }
 
+.search-location-picker {
+  border-right: 0;
+  border-radius: 6px 0 0 6px;
+}
+
+.node-search-control[data-has-location-scope="true"] .search-scope-picker {
+  margin-left: -1px;
+  border-radius: 0;
+}
+
+.search-location-picker:focus-within,
 .search-scope-picker:focus-within {
   position: relative;
   z-index: 1;
@@ -676,6 +743,7 @@ h1 {
   box-shadow: 0 0 0 2px rgb(44 125 88 / 12%);
 }
 
+.search-location-picker select,
 .search-scope-picker select {
   height: 100%;
   padding: 0 18px 0 0;
@@ -685,6 +753,10 @@ h1 {
   background: transparent;
   font-size: 12px;
   font-weight: 600;
+}
+
+.search-location-picker select {
+  max-width: 96px;
 }
 
 .search-field {
@@ -2357,6 +2429,17 @@ h1 {
   white-space: nowrap;
 }
 
+.node-list-identity {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.node-list-row .node-list-canvas-summary {
+  color: #7a847c;
+  font-size: 10px;
+}
+
 .node-list-row strong {
   font-size: 13px;
   font-weight: 650;
@@ -3844,6 +3927,51 @@ h1 {
   background: #fff;
 }
 
+.canvas-membership-dialog {
+  width: min(470px, calc(100vw - 32px));
+}
+
+.canvas-membership-list {
+  display: grid;
+  max-height: min(360px, 55vh);
+  margin-top: 16px;
+  overflow-y: auto;
+  gap: 6px;
+}
+
+.canvas-membership-item {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) auto;
+  align-items: center;
+  width: 100%;
+  min-height: 42px;
+  padding: 7px 10px;
+  gap: 8px;
+  border: 1px solid #d4ddd6;
+  border-radius: 6px;
+  color: #344039;
+  background: #f8faf8;
+  text-align: left;
+  cursor: pointer;
+}
+
+.canvas-membership-item:hover,
+.canvas-membership-item[data-current="true"] {
+  border-color: #8fb09c;
+  background: #eaf3ed;
+}
+
+.canvas-membership-item strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.canvas-membership-item span {
+  color: #617068;
+  font-size: 11px;
+}
+
 :root[data-theme="starry-dark"] .node-search-results,
 :root[data-theme="starry-dark"] .canvas-transfer-target select {
   color: #e6ede8;
@@ -3870,8 +3998,38 @@ h1 {
   background: #31473a;
 }
 
-:root[data-theme="starry-dark"] .node-search-result > span {
+:root[data-theme="starry-dark"] .node-search-result-main > span {
   color: #9aaaa0;
+}
+
+:root[data-theme="starry-dark"] .node-search-result-memberships button {
+  color: #b3d8c1;
+  border-color: #486253;
+  background: #293a30;
+}
+
+:root[data-theme="starry-dark"] .node-search-result-memberships button[data-current="true"] {
+  color: #d4f0df;
+  border-color: #66967a;
+  background: #314a3b;
+}
+
+:root[data-theme="starry-dark"] .node-search-result-memberships > span {
+  color: #d2b99e;
+  border-color: #5d5144;
+  background: #382f27;
+}
+
+:root[data-theme="starry-dark"] .canvas-membership-item {
+  color: #dce6f5;
+  border-color: #35445c;
+  background: #162137;
+}
+
+:root[data-theme="starry-dark"] .canvas-membership-item:hover,
+:root[data-theme="starry-dark"] .canvas-membership-item[data-current="true"] {
+  border-color: #5578ba;
+  background: #1d2c49;
 }
 
 .smart-arrangement-dialog {
