@@ -53,6 +53,16 @@ import {
 import DocumentImportDialog from "./DocumentImportDialog";
 import ExtensionSettings from "./ExtensionSettings";
 import {
+  commitExtensionInstall,
+  migratePreparedExtensionMetadata,
+  type ExtensionInstallPreview,
+  type InstalledExtension,
+} from "./extensionManager";
+import {
+  finishWorkspaceExtensionMetadataMigration,
+  prepareWorkspaceExtensionMetadataMigration,
+} from "./extensionInstallLifecycle";
+import {
   buildDocumentImportWorkspace,
   mergeDocumentImportCandidates,
   parseExternalDocumentImportFile,
@@ -92,6 +102,7 @@ import {
   normalizeNodeName,
   parseStoredWorkspaceText,
   persistedNodeNameFromDraft,
+  replaceWorkspaceExtensionMetadata,
   removeNodesFromWorkspaceView,
   updateNodeExtensionMetadata,
   type CanvasViewport,
@@ -2967,6 +2978,133 @@ function App({
     );
   }
 
+  async function installManagedExtension(
+    preview: ExtensionInstallPreview,
+  ): Promise<InstalledExtension[]> {
+    if (workspaceMutationBlockedRef.current) {
+      throw new Error("workspace_mutation_blocked");
+    }
+    workspaceMutationBlockedRef.current = true;
+    if (workspaceSaveTimerRef.current !== null) {
+      window.clearTimeout(workspaceSaveTimerRef.current);
+      workspaceSaveTimerRef.current = null;
+    }
+    const current = workspaceRef.current;
+    let next = current;
+    let metadataMigrationId: string | null = null;
+    let migratedWorkspacePersisted = false;
+    try {
+      await persistence.save(current);
+      if (preview.metadataMigrationRequired) {
+        const preparedMetadata = prepareWorkspaceExtensionMetadataMigration(
+          current.view.extensionMetadata[preview.id],
+        );
+        const migration = await migratePreparedExtensionMetadata(
+          preview,
+          preparedMetadata.input,
+        );
+        metadataMigrationId = migration.metadataMigrationId;
+        const migratedMetadata = finishWorkspaceExtensionMetadataMigration(
+          preparedMetadata,
+          migration,
+        );
+        const view = replaceWorkspaceExtensionMetadata(
+          current.view,
+          current.nodes,
+          preview.id,
+          migratedMetadata,
+        );
+        if (view === null) {
+          throw new Error("extension_metadata_migration_result_invalid");
+        }
+        next = view === current.view ? current : { ...current, view };
+        if (next !== current) {
+          pendingWorkspaceCommitRef.current = next;
+          await persistence.save(next);
+          migratedWorkspacePersisted = true;
+        }
+      }
+
+      let installed: InstalledExtension[];
+      try {
+        installed = await commitExtensionInstall(
+          preview,
+          true,
+          metadataMigrationId,
+        );
+      } catch (error) {
+        if (migratedWorkspacePersisted) {
+          try {
+            await persistence.save(current);
+          } catch {
+            throw new Error("extension_metadata_migration_rollback_failed");
+          }
+        }
+        throw error;
+      }
+
+      if (next !== current) {
+        workspaceChangedInSessionRef.current = true;
+        automaticOffsiteRevisionRef.current += 1;
+        extensionWorkspaceRevisionRef.current += 1;
+        workspaceRef.current = next;
+        setWorkspace(next);
+      }
+      if (preview.metadataMigrationRequired) {
+        clearHistory();
+        showAppNotice(t("extensions.manager.migrationCompleted"));
+      } else {
+        showAppNotice(t("extensions.manager.installCompleted"));
+      }
+      return installed;
+    } finally {
+      pendingWorkspaceCommitRef.current = null;
+      workspaceMutationBlockedRef.current = false;
+    }
+  }
+
+  async function clearManagedExtensionMetadata(extensionId: string): Promise<void> {
+    if (workspaceMutationBlockedRef.current) {
+      throw new Error("workspace_mutation_blocked");
+    }
+    const current = workspaceRef.current;
+    const view = replaceWorkspaceExtensionMetadata(
+      current.view,
+      current.nodes,
+      extensionId,
+      null,
+    );
+    if (view === null) {
+      throw new Error("extension_metadata_clear_invalid");
+    }
+    if (view === current.view) {
+      return;
+    }
+    const next = { ...current, view };
+    workspaceMutationBlockedRef.current = true;
+    if (workspaceSaveTimerRef.current !== null) {
+      window.clearTimeout(workspaceSaveTimerRef.current);
+      workspaceSaveTimerRef.current = null;
+    }
+    pendingWorkspaceCommitRef.current = next;
+    try {
+      await persistence.save(next);
+      recordHistory(captureWorkspaceHistory(current), captureWorkspaceHistory(next));
+      workspaceChangedInSessionRef.current = true;
+      automaticOffsiteRevisionRef.current += 1;
+      extensionWorkspaceRevisionRef.current += 1;
+      workspaceRef.current = next;
+      setWorkspace(next);
+      showAppNotice(t("extensions.manager.metadataCleared"), {
+        label: t("actions.undo"),
+        run: undoWorkspace,
+      });
+    } finally {
+      pendingWorkspaceCommitRef.current = null;
+      workspaceMutationBlockedRef.current = false;
+    }
+  }
+
   function prepareExtensionActionWorkspace(
     current: WorkspaceSnapshot,
     nodeId: string,
@@ -5323,7 +5461,13 @@ function App({
                 id="settings-panel-extensions"
                 role="tabpanel"
               >
-                {activeSettingsTab === "extensions" && <ExtensionSettings />}
+                {activeSettingsTab === "extensions" && (
+                  <ExtensionSettings
+                    extensionMetadata={workspace.view.extensionMetadata}
+                    onClearMetadata={clearManagedExtensionMetadata}
+                    onInstall={installManagedExtension}
+                  />
+                )}
               </section>
               <section
                 aria-labelledby="settings-tab-dataSecurity"

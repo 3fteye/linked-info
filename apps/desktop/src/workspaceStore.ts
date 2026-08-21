@@ -15,6 +15,7 @@ export {
   moveNodeLayoutToFront,
   normalizeNodeName,
   persistedNodeNameFromDraft,
+  replaceWorkspaceExtensionMetadata,
   removeNodesFromWorkspaceView,
   updateNodeLayoutDimensions,
   updateNodeLayoutSizeOverrides,

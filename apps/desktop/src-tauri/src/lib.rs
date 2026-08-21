@@ -91,6 +91,7 @@ pub fn run() {
             extension_manager::choose_extension_install,
             extension_manager::commit_extension_install,
             extension_manager::inspect_installed_extensions,
+            extension_manager::migrate_prepared_extension_metadata,
             extension_manager::set_extension_enabled,
             extension_manager::uninstall_extension,
             llm::cancel_local_llm_download,

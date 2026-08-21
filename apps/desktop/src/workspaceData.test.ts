@@ -4,6 +4,7 @@ import {
   moveNodeLayoutToFront,
   parseWorkspaceSnapshot,
   persistedNodeNameFromDraft,
+  replaceWorkspaceExtensionMetadata,
   removeNodesFromWorkspaceView,
   updateNodeExtensionMetadata,
   updateNodeLayoutDimensions,
@@ -313,6 +314,59 @@ describe("updateNodeExtensionMetadata", () => {
         1,
         "33333333-3333-4333-8333-333333333333",
         { indentSize: 4 },
+      ),
+    ).toBeNull();
+  });
+});
+
+describe("replaceWorkspaceExtensionMetadata", () => {
+  it("atomically replaces or clears exactly one validated namespace", () => {
+    const workspace = validWorkspace();
+    workspace.view.extensionMetadata["dev.example.preview"] = {
+      schemaVersion: 1,
+      workspace: { theme: "light" },
+      byNodeId: { [accountId]: { collapsed: false } },
+    };
+
+    const replaced = replaceWorkspaceExtensionMetadata(
+      workspace.view,
+      workspace.nodes,
+      "dev.example.preview",
+      {
+        schemaVersion: 2,
+        workspace: { theme: "dark" },
+        byNodeId: { [accountId]: { collapsed: true } },
+      },
+    );
+    expect(replaced?.extensionMetadata["dev.example.preview"]).toEqual({
+      schemaVersion: 2,
+      workspace: { theme: "dark" },
+      byNodeId: { [accountId]: { collapsed: true } },
+    });
+    expect(
+      replaceWorkspaceExtensionMetadata(
+        replaced!,
+        workspace.nodes,
+        "dev.example.preview",
+        null,
+      )?.extensionMetadata,
+    ).toEqual({});
+  });
+
+  it("rejects migrated metadata that points at a missing node", () => {
+    const workspace = validWorkspace();
+    expect(
+      replaceWorkspaceExtensionMetadata(
+        workspace.view,
+        workspace.nodes,
+        "dev.example.preview",
+        {
+          schemaVersion: 2,
+          workspace: {},
+          byNodeId: {
+            "33333333-3333-4333-8333-333333333333": { collapsed: true },
+          },
+        },
       ),
     ).toBeNull();
   });

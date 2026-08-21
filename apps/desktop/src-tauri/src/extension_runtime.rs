@@ -192,6 +192,7 @@ impl ExtensionRuntimeState {
     pub(crate) fn start(
         &self,
         app: &tauri::AppHandle,
+        runtime_key: &str,
         expected_extension_id: &str,
         package_path: &Path,
         generation: u64,
@@ -313,7 +314,7 @@ impl ExtensionRuntimeState {
             entry.terminate();
             return Err("extension_runtime_generation_revoked".to_owned());
         }
-        if let Some(previous) = hosts.insert(expected_extension_id.to_owned(), entry) {
+        if let Some(previous) = hosts.insert(runtime_key.to_owned(), entry) {
             previous.terminate();
         }
         Ok(())

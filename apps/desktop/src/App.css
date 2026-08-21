@@ -2365,6 +2365,28 @@ h1 {
   font-size: 11px;
 }
 
+.extension-manager-preserved {
+  display: grid;
+  gap: 8px;
+  padding-top: 4px;
+}
+
+.extension-manager-preserved h3,
+.extension-manager-preserved p {
+  margin: 0;
+}
+
+.extension-manager-preserved h3 {
+  color: #2f3731;
+  font-size: 13px;
+}
+
+.extension-manager-preserved > p {
+  color: #667169;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .extension-install-dialog {
   width: min(620px, 100%);
 }
@@ -5061,8 +5083,15 @@ h1 {
 
 :root[data-theme="starry-dark"] .settings-group-heading p,
 :root[data-theme="starry-dark"] .setting-label-copy small,
-:root[data-theme="starry-dark"] .embedding-model-note span {
+:root[data-theme="starry-dark"] .embedding-model-note span,
+:root[data-theme="starry-dark"] .extension-manager-list span,
+:root[data-theme="starry-dark"] .extension-manager-list small,
+:root[data-theme="starry-dark"] .extension-manager-preserved > p {
   color: #8c9bb2;
+}
+
+:root[data-theme="starry-dark"] .extension-manager-preserved h3 {
+  color: #dce6f5;
 }
 
 :root[data-theme="starry-dark"] .setting-label > svg {

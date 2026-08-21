@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { ExtensionCapability } from "./builtinExtensionHost";
+import type { ExtensionMetadataPayload } from "./workspaceStore";
 
 export const extensionManagerAvailable =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -51,6 +52,17 @@ export interface InstalledExtension {
   defaultLocale: string | null;
 }
 
+export interface ExtensionMetadataMigrationInput {
+  schemaVersion: number;
+  workspace: ExtensionMetadataPayload;
+  nodes: ExtensionMetadataPayload[];
+}
+
+export interface ExtensionMetadataMigrationPreview {
+  metadataMigrationId: string;
+  metadata: ExtensionMetadataMigrationInput | null;
+}
+
 export function chooseExtensionInstall(
   allowUnsignedDevelopment: boolean,
 ): Promise<ExtensionInstallPreview | null> {
@@ -60,11 +72,23 @@ export function chooseExtensionInstall(
 export function commitExtensionInstall(
   preview: ExtensionInstallPreview,
   enabled: boolean,
+  metadataMigrationId: string | null = null,
 ): Promise<InstalledExtension[]> {
   return invoke("commit_extension_install", {
     preparedInstallId: preview.preparedInstallId,
     grantedCapabilities: preview.capabilities,
     enabled,
+    metadataMigrationId,
+  });
+}
+
+export function migratePreparedExtensionMetadata(
+  preview: ExtensionInstallPreview,
+  metadata: ExtensionMetadataMigrationInput | null,
+): Promise<ExtensionMetadataMigrationPreview> {
+  return invoke("migrate_prepared_extension_metadata", {
+    preparedInstallId: preview.preparedInstallId,
+    metadata,
   });
 }
 

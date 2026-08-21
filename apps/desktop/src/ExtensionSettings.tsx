@@ -1,10 +1,9 @@
-import { AlertTriangle, PackagePlus, Puzzle, Trash2 } from "lucide-react";
+import { AlertTriangle, Eraser, PackagePlus, Puzzle, Trash2 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { ExtensionCapability } from "./builtinExtensionHost";
 import {
   chooseExtensionInstall,
-  commitExtensionInstall,
   inspectInstalledExtensions,
   setExtensionEnabled,
   uninstallExtension,
@@ -12,6 +11,7 @@ import {
   type ExtensionInstallPreview,
   type InstalledExtension,
 } from "./extensionManager";
+import type { WorkspaceExtensionMetadata } from "./workspaceStore";
 
 const capabilityKeys: Record<ExtensionCapability, string> = {
   "node.read.name": "extensions.manager.capabilities.nodeReadName",
@@ -29,7 +29,17 @@ function errorReason(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-export default function ExtensionSettings() {
+interface ExtensionSettingsProps {
+  extensionMetadata: Readonly<Record<string, WorkspaceExtensionMetadata>>;
+  onClearMetadata: (extensionId: string) => Promise<void>;
+  onInstall: (preview: ExtensionInstallPreview) => Promise<InstalledExtension[]>;
+}
+
+export default function ExtensionSettings({
+  extensionMetadata,
+  onClearMetadata,
+  onInstall,
+}: ExtensionSettingsProps) {
   const { t } = useTranslation();
   const [installed, setInstalled] = useState<InstalledExtension[]>([]);
   const [preview, setPreview] = useState<ExtensionInstallPreview | null>(null);
@@ -37,6 +47,9 @@ export default function ExtensionSettings() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirmUninstallId, setConfirmUninstallId] = useState<string | null>(null);
+  const [confirmClearMetadataId, setConfirmClearMetadataId] = useState<
+    string | null
+  >(null);
 
   useEffect(() => {
     if (!extensionManagerAvailable) return;
@@ -55,6 +68,17 @@ export default function ExtensionSettings() {
       preview.capabilities.every((capability) => approved.has(capability)),
     [approved, preview],
   );
+  const installedIds = useMemo(
+    () => new Set(installed.map((item) => item.id)),
+    [installed],
+  );
+  const preservedMetadata = useMemo(
+    () =>
+      Object.entries(extensionMetadata).filter(
+        ([extensionId]) => !installedIds.has(extensionId),
+      ),
+    [extensionMetadata, installedIds],
+  );
 
   async function choose(allowUnsignedDevelopment: boolean) {
     if (busy) return;
@@ -72,13 +96,30 @@ export default function ExtensionSettings() {
   }
 
   async function install() {
-    if (preview === null || !allApproved || preview.metadataMigrationRequired) return;
+    if (preview === null || !allApproved) return;
     setBusy(true);
     setError(null);
     try {
-      setInstalled(await commitExtensionInstall(preview, true));
+      setInstalled(await onInstall(preview));
       setPreview(null);
       setApproved(new Set());
+    } catch (reason) {
+      setError(errorReason(reason));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function clearMetadata(extensionId: string) {
+    if (confirmClearMetadataId !== extensionId) {
+      setConfirmClearMetadataId(extensionId);
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await onClearMetadata(extensionId);
+      setConfirmClearMetadataId(null);
     } catch (reason) {
       setError(errorReason(reason));
     } finally {
@@ -154,11 +195,56 @@ export default function ExtensionSettings() {
                   <Trash2 aria-hidden="true" size={14} />
                   {confirmUninstallId === item.id ? t("extensions.manager.confirmUninstall") : t("extensions.manager.uninstall")}
                 </button>
+                {extensionMetadata[item.id] !== undefined && (
+                  <button
+                    className="danger-button"
+                    disabled={busy}
+                    onClick={() => void clearMetadata(item.id)}
+                    type="button"
+                  >
+                    <Eraser aria-hidden="true" size={14} />
+                    {confirmClearMetadataId === item.id
+                      ? t("extensions.manager.confirmClearMetadata")
+                      : t("extensions.manager.clearMetadata")}
+                  </button>
+                )}
               </div>
             </article>
           ))}
         </div>
       ))}
+      {preservedMetadata.length > 0 && (
+        <section className="extension-manager-preserved">
+          <h3>{t("extensions.manager.preservedMetadataTitle")}</h3>
+          <p>{t("extensions.manager.preservedMetadataDescription")}</p>
+          <div className="extension-manager-list">
+            {preservedMetadata.map(([extensionId, metadata]) => (
+              <article key={extensionId}>
+                <div>
+                  <strong>{extensionId}</strong>
+                  <span>
+                    {t("extensions.manager.metadataSummary", {
+                      count: Object.keys(metadata.byNodeId).length,
+                      version: metadata.schemaVersion,
+                    })}
+                  </span>
+                </div>
+                <button
+                  className="danger-button"
+                  disabled={busy}
+                  onClick={() => void clearMetadata(extensionId)}
+                  type="button"
+                >
+                  <Eraser aria-hidden="true" size={14} />
+                  {confirmClearMetadataId === extensionId
+                    ? t("extensions.manager.confirmClearMetadata")
+                    : t("extensions.manager.clearMetadata")}
+                </button>
+              </article>
+            ))}
+          </div>
+        </section>
+      )}
       {preview !== null && (
         <div className="modal-backdrop" role="presentation">
           <section aria-modal="true" className="confirmation-dialog extension-install-dialog" role="dialog">
@@ -183,7 +269,7 @@ export default function ExtensionSettings() {
             </fieldset>
             <div className="dialog-actions">
               <button className="secondary-button" disabled={busy} onClick={() => setPreview(null)} type="button">{t("actions.cancel")}</button>
-              <button className="primary-button" disabled={busy || !allApproved || preview.metadataMigrationRequired} onClick={() => void install()} type="button">{t("extensions.manager.installAndEnable")}</button>
+              <button className="primary-button" disabled={busy || !allApproved} onClick={() => void install()} type="button">{t("extensions.manager.installAndEnable")}</button>
             </div>
           </section>
         </div>

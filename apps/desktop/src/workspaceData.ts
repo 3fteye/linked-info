@@ -670,6 +670,33 @@ function extensionMetadataPayloadIsEmpty(
   return Object.keys(payload).length === 0;
 }
 
+export function replaceWorkspaceExtensionMetadata(
+  view: WorkspaceViewMetadata,
+  nodes: readonly InformationNode[],
+  extensionId: string,
+  metadata: WorkspaceExtensionMetadata | null,
+): WorkspaceViewMetadata | null {
+  const nextExtensionMetadata = { ...view.extensionMetadata };
+  if (metadata === null) {
+    if (!(extensionId in nextExtensionMetadata)) {
+      return view;
+    }
+    delete nextExtensionMetadata[extensionId];
+  } else {
+    nextExtensionMetadata[extensionId] = metadata;
+  }
+  const parsed = parseWorkspaceExtensionMetadata(
+    nextExtensionMetadata,
+    new Set(nodes.map((node) => node.id)),
+  );
+  return parsed === null
+    ? null
+    : {
+        ...view,
+        extensionMetadata: parsed,
+      };
+}
+
 export function updateNodeExtensionMetadata(
   view: WorkspaceViewMetadata,
   nodes: readonly InformationNode[],
