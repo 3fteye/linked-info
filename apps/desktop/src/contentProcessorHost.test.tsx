@@ -118,24 +118,20 @@ describe("NodeContentHost", () => {
           },
         };
       }
-      if (command === "invoke_managed_extension_action") {
-        return {
-          extensionId: installed.id,
-          metadataSchemaVersion: 1,
-          handleNodeIds: {
-            "1": "11111111-1111-4111-8111-111111111111",
-          },
-          result: {
-            presentation: null,
-            nodeMetadata: { remembered: true },
-            workspaceMetadata: null,
-            proposal: null,
-          },
-        };
-      }
       throw new Error(`unexpected command: ${command}`);
     });
     const onMetadata = vi.fn();
+    const onManagedAction = vi.fn().mockResolvedValue({
+      extensionId: installed.id,
+      metadataSchemaVersion: 1,
+      handleNodeIds: new Map([
+        [1n, "11111111-1111-4111-8111-111111111111"],
+      ]),
+      presentation: null,
+      nodeMetadata: { remembered: true },
+      workspaceMetadata: null,
+      proposal: null,
+    });
 
     await act(async () => {
       root.render(
@@ -145,6 +141,7 @@ describe("NodeContentHost", () => {
           nodeId="11111111-1111-4111-8111-111111111111"
           nodeName="Managed node"
           onExtensionMetadataChange={onMetadata}
+          onManagedExtensionAction={onManagedAction}
           processorId="dev.example.preview.preview"
           variant="canvas"
         />,

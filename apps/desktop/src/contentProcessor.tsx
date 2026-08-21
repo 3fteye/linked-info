@@ -3,6 +3,7 @@ import {
   lazy,
   Suspense,
   useEffect,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
@@ -37,7 +38,6 @@ import { builtInExtensionHost } from "./builtinExtensions";
 import { ExtensionPresentationHost } from "./extensionPresentation";
 import type { ExtensionMetadataPayload } from "./workspaceData";
 import {
-  invokeManagedExtensionAction,
   managedExtensionRegistry,
   renderManagedExtensionProcessor,
   type ManagedExtensionProcessorRegistration,
@@ -200,6 +200,15 @@ export interface ContentEnhancementLabels {
   totp: TotpContentLabels;
 }
 
+export type ManagedExtensionActionInvoker = (
+  extensionId: string,
+  actionId: string,
+  nodeId: string,
+  metadata: BuiltInExtensionMetadataInput | null,
+  inputValue: string | null,
+  baseRevision: number,
+) => Promise<BuiltInExtensionActionHostResult>;
+
 function boundedCanvasContentPreview(
   text: string | null,
   maximumCharacters: number,
@@ -275,6 +284,7 @@ interface NodeContentHostProps {
     workspaceMetadata: ExtensionMetadataPayload | null,
   ) => void;
   onExtensionProposal?: (result: BuiltInExtensionActionHostResult) => void;
+  onManagedExtensionAction?: ManagedExtensionActionInvoker;
   nodeId?: string;
   nodeName?: string | null;
   directIncomingNodeIds?: readonly string[];
@@ -362,6 +372,7 @@ interface ManagedExtensionContentProps {
     workspaceMetadata: ExtensionMetadataPayload | null,
   ) => void;
   onExtensionProposal?: (result: BuiltInExtensionActionHostResult) => void;
+  onManagedExtensionAction?: ManagedExtensionActionInvoker;
   registration: ManagedExtensionProcessorRegistration;
   sourceTruncated: boolean;
   variant: "canvas" | "list";
@@ -384,6 +395,7 @@ function ManagedExtensionContent({
   onCopySecret,
   onExtensionMetadataChange,
   onExtensionProposal,
+  onManagedExtensionAction,
   registration,
   sourceTruncated,
   variant,
@@ -394,6 +406,7 @@ function ManagedExtensionContent({
     useState<ExtensionPresentationV1 | null>(null);
   const [failed, setFailed] = useState(false);
   const [actionBusy, setActionBusy] = useState(false);
+  const generationRef = useRef(0);
   const node = {
     id: nodeId,
     name: nodeName,
@@ -401,27 +414,36 @@ function ManagedExtensionContent({
     directIncomingNodeIds: [...directIncomingNodeIds],
     directOutgoingNodeIds: [...directOutgoingNodeIds],
   };
+  const directIncomingKey = directIncomingNodeIds.join("\u0000");
+  const directOutgoingKey = directOutgoingNodeIds.join("\u0000");
 
   useEffect(() => {
+    const generation = generationRef.current + 1;
+    generationRef.current = generation;
     let active = true;
     setRenderResult(null);
     setActionPresentation(null);
     setFailed(false);
     void renderManagedExtensionProcessor(registration, node, extensionMetadata)
       .then((result) => {
-        if (active) setRenderResult(result);
+        if (active && generationRef.current === generation) setRenderResult(result);
       })
       .catch(() => {
-        if (active) setFailed(true);
+        if (active && generationRef.current === generation) setFailed(true);
       });
     return () => {
       active = false;
+      if (generationRef.current === generation) {
+        generationRef.current += 1;
+      }
     };
   }, [
     content,
-    directIncomingNodeIds,
-    directOutgoingNodeIds,
-    extensionMetadata,
+    directIncomingKey,
+    directOutgoingKey,
+    extensionMetadata?.node,
+    extensionMetadata?.schemaVersion,
+    extensionMetadata?.workspace,
     nodeId,
     nodeName,
     registration,
@@ -475,19 +497,25 @@ function ManagedExtensionContent({
             ) ?? enhancementLabels.extension.resolve(key),
         }}
         onAction={
-          variant === "list" || actionBusy
+          variant === "list" ||
+          actionBusy ||
+          onManagedExtensionAction === undefined ||
+          (onExtensionMetadataChange === undefined &&
+            onExtensionProposal === undefined)
             ? undefined
             : (actionId, inputValue) => {
+                const generation = generationRef.current;
                 setActionBusy(true);
-                void invokeManagedExtensionAction(
+                void onManagedExtensionAction(
                   registration.extensionId,
                   actionId,
-                  [node],
+                  nodeId,
                   extensionMetadata,
                   inputValue,
                   extensionBaseRevision,
                 )
                   .then((result) => {
+                    if (generationRef.current !== generation) return;
                     if (result.proposal !== null) {
                       onExtensionProposal?.(result);
                     } else if (
@@ -503,8 +531,12 @@ function ManagedExtensionContent({
                     }
                     setActionPresentation(result.presentation);
                   })
-                  .catch(() => setFailed(true))
-                  .finally(() => setActionBusy(false));
+                  .catch(() => {
+                    if (generationRef.current === generation) setFailed(true);
+                  })
+                  .finally(() => {
+                    if (generationRef.current === generation) setActionBusy(false);
+                  });
               }
         }
         presentation={presentation}
@@ -529,6 +561,7 @@ export function NodeContentHost({
   onCopySecret,
   onExtensionMetadataChange,
   onExtensionProposal,
+  onManagedExtensionAction,
   nodeId,
   nodeName = null,
   directIncomingNodeIds = [],
@@ -557,6 +590,7 @@ export function NodeContentHost({
         onCopySecret={onCopySecret}
         onExtensionMetadataChange={onExtensionMetadataChange}
         onExtensionProposal={onExtensionProposal}
+        onManagedExtensionAction={onManagedExtensionAction}
         registration={managedProcessor}
         sourceTruncated={sourceTruncated}
         variant={variant}

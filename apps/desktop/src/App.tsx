@@ -64,7 +64,11 @@ import {
   finishWorkspaceExtensionMetadataMigration,
   prepareWorkspaceExtensionMetadataMigration,
 } from "./extensionInstallLifecycle";
-import { managedExtensionRegistry } from "./managedExtensions";
+import {
+  invokeManagedExtensionAction,
+  managedExtensionRegistry,
+  type ManagedExtensionNodeInput,
+} from "./managedExtensions";
 import {
   buildDocumentImportWorkspace,
   mergeDocumentImportCandidates,
@@ -84,7 +88,10 @@ import {
   contentProcessorRegistry,
 } from "./contentProcessor";
 import { builtInJsonInspectorProcessorId } from "./builtinJsonInspector";
-import type { BuiltInExtensionActionHostResult } from "./builtinExtensionHost";
+import type {
+  BuiltInExtensionActionHostResult,
+  BuiltInExtensionMetadataInput,
+} from "./builtinExtensionHost";
 import {
   ExtensionChangeProposalError,
   prepareExtensionChangeProposal,
@@ -3239,6 +3246,40 @@ function App({
       error.reason === "stale-revision"
       ? t("extensions.proposal.outdated")
       : t("extensions.proposal.invalid");
+  }
+
+  async function invokeManagedNodeExtensionAction(
+    extensionId: string,
+    actionId: string,
+    nodeId: string,
+    metadata: BuiltInExtensionMetadataInput | null,
+    inputValue: string | null,
+    baseRevision: number,
+  ): Promise<BuiltInExtensionActionHostResult> {
+    const current = workspaceRef.current;
+    const node = current.nodes.find((candidate) => candidate.id === nodeId);
+    if (node === undefined) {
+      throw new Error("extension_runtime_snapshot_stale");
+    }
+    const input: ManagedExtensionNodeInput = {
+      id: node.id,
+      name: node.name,
+      content: node.content,
+      directOutgoingNodeIds: current.references
+        .filter((reference) => reference.sourceNodeId === nodeId)
+        .map((reference) => reference.targetNodeId),
+      directIncomingNodeIds: current.references
+        .filter((reference) => reference.targetNodeId === nodeId)
+        .map((reference) => reference.sourceNodeId),
+    };
+    return invokeManagedExtensionAction(
+      extensionId,
+      actionId,
+      [input],
+      metadata,
+      inputValue,
+      baseRevision,
+    );
   }
 
   function openExtensionProposal(
@@ -6545,6 +6586,7 @@ function App({
               onNodeContentProcessorChange={updateNodeContentProcessor}
               onNodeExtensionMetadataChange={applyNodeExtensionMetadata}
               onNodeExtensionProposal={openExtensionProposal}
+              onManagedExtensionAction={invokeManagedNodeExtensionAction}
               onNodeBringToFront={bringNodeToFront}
               onNodeNameChange={updateNodeName}
               onReferencesChange={updateReferences}

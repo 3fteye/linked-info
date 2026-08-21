@@ -94,6 +94,7 @@ import {
   contentProcessorExtensionId,
   contentProcessorUsesCodePresentation,
   type ContentEnhancementLabels,
+  type ManagedExtensionActionInvoker,
 } from "./contentProcessor";
 import type {
   BuiltInExtensionActionHostResult,
@@ -204,6 +205,7 @@ interface InformationNodeData extends Record<string, unknown> {
     nodeId: string,
     result: BuiltInExtensionActionHostResult,
   ) => void;
+  onManagedExtensionAction: ManagedExtensionActionInvoker;
   onEditorCommitBlockedChange: (nodeId: string, blocked: boolean) => void;
   onRemoveReference: (sourceNodeId: string, targetNodeId: string) => void;
   onCopyCodeSource: ((containsSensitive: boolean) => Promise<void>) | null;
@@ -401,6 +403,7 @@ interface GraphCanvasProps {
     nodeId: string,
     result: BuiltInExtensionActionHostResult,
   ) => void;
+  onManagedExtensionAction: ManagedExtensionActionInvoker;
   onNodeBringToFront: (nodeId: string) => void;
   onNodeNameChange: (nodeId: string, name: string) => boolean;
   onReferencesChange: (references: NodeReference[]) => void;
@@ -1056,6 +1059,7 @@ export function InformationNodeCard({
             )
           }
           onExtensionProposal={(result) => data.onExtensionProposal(id, result)}
+          onManagedExtensionAction={data.onManagedExtensionAction}
           processorId={data.contentProcessorId}
           sourceTruncated={data.contentTruncated}
           variant="canvas"
@@ -1286,6 +1290,7 @@ export default function GraphCanvas({
   onNodeContentProcessorChange,
   onNodeExtensionMetadataChange,
   onNodeExtensionProposal = () => undefined,
+  onManagedExtensionAction,
   onNodeBringToFront,
   onNodeNameChange,
   onReferencesChange,
@@ -2531,6 +2536,7 @@ export default function GraphCanvas({
             onContentProcessorChange: onNodeContentProcessorChange,
             onExtensionMetadataChange: onNodeExtensionMetadataChange,
             onExtensionProposal: onNodeExtensionProposal,
+            onManagedExtensionAction,
             onEditorCommitBlockedChange: updateEditorCommitBlocked,
             onRemoveReference: removeReference,
             onCopyCodeSource:
@@ -2575,6 +2581,7 @@ export default function GraphCanvas({
     onNodeContentProcessorChange,
     onNodeExtensionMetadataChange,
     onNodeExtensionProposal,
+    onManagedExtensionAction,
     onCopySecret,
     onNodeNameChange,
     openIncomingReferenceBrowser,

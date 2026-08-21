@@ -12,6 +12,7 @@ use linked_info_extension_host_protocol::{
     ExtensionHostErrorCode, ExtensionHostRequestV1, ExtensionHostResponseV1,
 };
 use serde::{Deserialize, Serialize};
+use tauri::Manager;
 
 const PASSIVE_TIMEOUT: Duration = Duration::from_millis(500);
 const ACTIVE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -272,17 +273,16 @@ fn prepare_runtime(
     Ok(registration)
 }
 
-#[tauri::command]
-pub fn render_managed_extension_processor(
+fn render_managed_extension_processor_blocking(
     app: tauri::AppHandle,
-    manager: tauri::State<'_, crate::extension_manager::ExtensionManagerState>,
-    runtime: tauri::State<'_, crate::extension_runtime::ExtensionRuntimeState>,
-    vault: tauri::State<'_, crate::workspace_file::WorkspaceVaultState>,
     extension_id: String,
     processor_id: String,
     node: ManagedExtensionNodeInput,
     metadata: Option<ManagedExtensionMetadataInput>,
 ) -> Result<ManagedExtensionRenderResult, String> {
+    let manager = app.state::<crate::extension_manager::ExtensionManagerState>();
+    let runtime = app.state::<crate::extension_runtime::ExtensionRuntimeState>();
+    let vault = app.state::<crate::workspace_file::WorkspaceVaultState>();
     let permit = crate::workspace_file::begin_workspace_access(&app, &vault)?;
     let generation = vault
         .access_generation()
@@ -343,11 +343,22 @@ pub fn render_managed_extension_processor(
 }
 
 #[tauri::command]
-pub fn invoke_managed_extension_action(
+pub async fn render_managed_extension_processor(
     app: tauri::AppHandle,
-    manager: tauri::State<'_, crate::extension_manager::ExtensionManagerState>,
-    runtime: tauri::State<'_, crate::extension_runtime::ExtensionRuntimeState>,
-    vault: tauri::State<'_, crate::workspace_file::WorkspaceVaultState>,
+    extension_id: String,
+    processor_id: String,
+    node: ManagedExtensionNodeInput,
+    metadata: Option<ManagedExtensionMetadataInput>,
+) -> Result<ManagedExtensionRenderResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        render_managed_extension_processor_blocking(app, extension_id, processor_id, node, metadata)
+    })
+    .await
+    .map_err(|_| "extension_runtime_task_failed".to_owned())?
+}
+
+fn invoke_managed_extension_action_blocking(
+    app: tauri::AppHandle,
     extension_id: String,
     action_id: String,
     nodes: Vec<ManagedExtensionNodeInput>,
@@ -355,6 +366,9 @@ pub fn invoke_managed_extension_action(
     input_value: Option<String>,
     base_revision: u64,
 ) -> Result<ManagedExtensionActionResult, String> {
+    let manager = app.state::<crate::extension_manager::ExtensionManagerState>();
+    let runtime = app.state::<crate::extension_runtime::ExtensionRuntimeState>();
+    let vault = app.state::<crate::workspace_file::WorkspaceVaultState>();
     let permit = crate::workspace_file::begin_workspace_access(&app, &vault)?;
     let generation = vault
         .access_generation()
@@ -409,6 +423,31 @@ pub fn invoke_managed_extension_action(
         ExtensionHostResponseV1::Error { code, .. } => Err(host_error(code)),
         _ => Err("extension_runtime_protocol_unavailable".to_owned()),
     }
+}
+
+#[tauri::command]
+pub async fn invoke_managed_extension_action(
+    app: tauri::AppHandle,
+    extension_id: String,
+    action_id: String,
+    nodes: Vec<ManagedExtensionNodeInput>,
+    metadata: Option<ManagedExtensionMetadataInput>,
+    input_value: Option<String>,
+    base_revision: u64,
+) -> Result<ManagedExtensionActionResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        invoke_managed_extension_action_blocking(
+            app,
+            extension_id,
+            action_id,
+            nodes,
+            metadata,
+            input_value,
+            base_revision,
+        )
+    })
+    .await
+    .map_err(|_| "extension_runtime_task_failed".to_owned())?
 }
 
 #[cfg(test)]
