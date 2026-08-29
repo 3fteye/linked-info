@@ -3883,7 +3883,7 @@ fn validate_workspace_snapshot(value: &serde_json::Value, version: u64) -> io::R
             "viewport",
             "view",
         ],
-        CURRENT_WORKSPACE_STORAGE_VERSION => &["version", "nodes", "references", "view"],
+        4 | CURRENT_WORKSPACE_STORAGE_VERSION => &["version", "nodes", "references", "view"],
         _ => return Err(invalid_workspace_data("workspace version is unsupported")),
     };
     if workspace
@@ -4093,9 +4093,7 @@ fn validate_workspace_snapshot(value: &serde_json::Value, version: u64) -> io::R
                                 .expect("validated bookmark canvas id field"),
                         )
                         .ok_or_else(|| {
-                            invalid_workspace_data(
-                                "workspace canvas bookmark canvas id is invalid",
-                            )
+                            invalid_workspace_data("workspace canvas bookmark canvas id is invalid")
                         })?;
                         let name = bookmark
                             .get("name")
@@ -4117,20 +4115,15 @@ fn validate_workspace_snapshot(value: &serde_json::Value, version: u64) -> io::R
                                 "workspace canvas bookmark identity is invalid",
                             ));
                         }
-                        finite_json_number(bookmark.get("x"))
-                            .ok_or_else(|| {
-                                invalid_workspace_data("workspace canvas bookmark x must be finite")
-                            })?;
-                        finite_json_number(bookmark.get("y"))
-                            .ok_or_else(|| {
-                                invalid_workspace_data("workspace canvas bookmark y must be finite")
-                            })?;
-                        let zoom = finite_json_number(bookmark.get("zoom"))
-                            .ok_or_else(|| {
-                                invalid_workspace_data(
-                                    "workspace canvas bookmark zoom must be finite",
-                                )
-                            })?;
+                        finite_json_number(bookmark.get("x")).ok_or_else(|| {
+                            invalid_workspace_data("workspace canvas bookmark x must be finite")
+                        })?;
+                        finite_json_number(bookmark.get("y")).ok_or_else(|| {
+                            invalid_workspace_data("workspace canvas bookmark y must be finite")
+                        })?;
+                        let zoom = finite_json_number(bookmark.get("zoom")).ok_or_else(|| {
+                            invalid_workspace_data("workspace canvas bookmark zoom must be finite")
+                        })?;
                         if zoom <= 0.0 {
                             return Err(invalid_workspace_data(
                                 "workspace canvas bookmark zoom must be positive",
