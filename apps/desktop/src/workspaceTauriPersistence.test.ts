@@ -82,8 +82,9 @@ describe("createTauriWorkspacePersistence", () => {
 
     expect(await persistence.load()).toEqual({ status: "ready", workspace });
     expect(JSON.parse(bridge.files.get("primary") ?? "null")).toEqual({
-      version: 4,
+      version: 5,
       ...workspace,
+      view: { ...workspace.view, bookmarks: [] },
     });
     expect(legacy.removed).toEqual(["primary"]);
   });
@@ -99,7 +100,7 @@ describe("createTauriWorkspacePersistence", () => {
 
     expect(await persistence.load()).toEqual({
       status: "ready",
-      workspace: fileWorkspace,
+      workspace: { ...fileWorkspace, view: { ...fileWorkspace.view, bookmarks: [] } },
     });
     expect(legacy.removed).toEqual([]);
   });
@@ -428,7 +429,10 @@ describe("createTauriWorkspacePersistence", () => {
     await expect(persistence.save(before)).rejects.toThrow(
       "workspace_persistence_reload_required",
     );
-    expect(await persistence.load()).toEqual({ status: "ready", workspace: restored });
+    expect(await persistence.load()).toEqual({
+      status: "ready",
+      workspace: { ...restored, view: { ...restored.view, bookmarks: [] } },
+    });
     await expect(persistence.save(restored)).resolves.toBeUndefined();
   });
 
@@ -492,7 +496,10 @@ describe("createTauriWorkspacePersistence", () => {
     await expect(persistence.save(before)).rejects.toThrow(
       "workspace_persistence_reload_required",
     );
-    expect(await persistence.load()).toEqual({ status: "ready", workspace: restored });
+    expect(await persistence.load()).toEqual({
+      status: "ready",
+      workspace: { ...restored, view: { ...restored.view, bookmarks: [] } },
+    });
     await expect(persistence.save(restored)).resolves.toBeUndefined();
   });
 });

@@ -9,6 +9,7 @@ import {
 import {
   AlertTriangle,
   ArchiveRestore,
+  Bookmark,
   BrainCircuit,
   Cloud,
   Clock3,
@@ -121,6 +122,7 @@ import {
 import { supportedLanguages, type SupportedLanguage } from "./locales";
 import {
   activeWorkspaceCanvas,
+  maximumCanvasBookmarkCount,
   emptyWorkspace,
   isNodeNameAvailable,
   isUnnamedNode,
@@ -134,6 +136,7 @@ import {
   updateNodeExtensionMetadata,
   updateWorkspaceCanvas,
   type CanvasViewport,
+  type CanvasBookmark,
   type ExtensionMetadataPayload,
   type InformationNode,
   type NodeLayout,
@@ -541,6 +544,11 @@ function App({
   const [referenceFilterNodeIds, setReferenceFilterNodeIds] = useState<string[]>([]);
   const [canvasNameDraft, setCanvasNameDraft] = useState("");
   const [canvasNameEditing, setCanvasNameEditing] = useState(false);
+  const [canvasBookmarksOpen, setCanvasBookmarksOpen] = useState(false);
+  const [canvasBookmarkName, setCanvasBookmarkName] = useState("");
+  const [canvasBookmarkEditingId, setCanvasBookmarkEditingId] = useState<
+    string | null
+  >(null);
   const [pendingWorkspaceDeletion, setPendingWorkspaceDeletion] =
     useState<PendingWorkspaceDeletion | null>(null);
   const [canvasPlacementClipboard, setCanvasPlacementClipboard] =
@@ -805,6 +813,33 @@ function App({
     window.addEventListener("keydown", focusNodeSearch, true);
     return () => window.removeEventListener("keydown", focusNodeSearch, true);
   }, []);
+
+  useEffect(() => {
+    if (!canvasBookmarksOpen) {
+      return;
+    }
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setCanvasBookmarksOpen(false);
+        setCanvasBookmarkEditingId(null);
+      }
+    };
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      if (
+        event.target instanceof Element &&
+        event.target.closest(".canvas-bookmark-control") === null
+      ) {
+        setCanvasBookmarksOpen(false);
+        setCanvasBookmarkEditingId(null);
+      }
+    };
+    window.addEventListener("keydown", closeOnEscape, true);
+    window.addEventListener("pointerdown", closeOnOutsidePointer, true);
+    return () => {
+      window.removeEventListener("keydown", closeOnEscape, true);
+      window.removeEventListener("pointerdown", closeOnOutsidePointer, true);
+    };
+  }, [canvasBookmarksOpen]);
 
   function dismissAppNotice() {
     if (appNoticeTimerRef.current !== null) {
@@ -1479,6 +1514,16 @@ function App({
   const activeCanvas = useMemo(
     () => activeWorkspaceCanvas(workspace),
     [workspace],
+  );
+  const canvasBookmarks = useMemo(
+    () =>
+      [...(workspace.view.bookmarks ?? [])].sort((left, right) =>
+        left.name.localeCompare(right.name, activeLanguage, {
+          numeric: true,
+          sensitivity: "base",
+        }),
+      ),
+    [activeLanguage, workspace.view.bookmarks],
   );
   const activeCanvasNodeIds = useMemo(
     () => new Set(activeCanvas.layout.map((item) => item.nodeId)),
@@ -3704,6 +3749,170 @@ function App({
     editBaselineRef.current = null;
   }
 
+  function nextCanvasBookmarkName(bookmarks: readonly CanvasBookmark[]): string {
+    const names = new Set(bookmarks.map((bookmark) => normalizeNodeName(bookmark.name)));
+    let index = bookmarks.length + 1;
+    let candidate = t("canvases.bookmarkGeneratedName", { index });
+    while (names.has(normalizeNodeName(candidate))) {
+      index += 1;
+      candidate = t("canvases.bookmarkGeneratedName", { index });
+    }
+    return candidate;
+  }
+
+  function saveCanvasBookmark() {
+    const current = workspaceRef.current;
+    const bookmarks = current.view.bookmarks ?? [];
+    if (bookmarks.length >= maximumCanvasBookmarkCount) {
+      showAppNotice(
+        t("canvases.bookmarkMaximumReached", {
+          count: maximumCanvasBookmarkCount,
+        }),
+      );
+      return;
+    }
+    const name = canvasBookmarkName.trim() || nextCanvasBookmarkName(bookmarks);
+    if (
+      [...name].length > 128 ||
+      bookmarks.some(
+        (bookmark) => normalizeNodeName(bookmark.name) === normalizeNodeName(name),
+      )
+    ) {
+      showAppNotice(t("canvases.bookmarkNameInvalid"));
+      return;
+    }
+    const canvas = activeWorkspaceCanvas(current);
+    const viewport = canvas.viewport ?? { x: 0, y: 0, zoom: 1 };
+    const bookmark: CanvasBookmark = {
+      id: crypto.randomUUID(),
+      name,
+      canvasId: canvas.id,
+      x: viewport.x,
+      y: viewport.y,
+      zoom: viewport.zoom,
+    };
+    updateWorkspace(
+      (workspace) => ({
+        ...workspace,
+        view: {
+          ...workspace.view,
+          bookmarks: [...(workspace.view.bookmarks ?? []), bookmark],
+        },
+      }),
+      { flushImmediately: true, recordHistory: true },
+    );
+    setCanvasBookmarkName("");
+    showAppNotice(t("canvases.bookmarkSaved", { name }));
+  }
+
+  function updateCanvasBookmark(bookmarkId: string) {
+    const current = workspaceRef.current;
+    const bookmarks = current.view.bookmarks ?? [];
+    const bookmark = bookmarks.find((item) => item.id === bookmarkId);
+    if (bookmark === undefined) {
+      return;
+    }
+    const canvas = current.view.canvases.find((item) => item.id === bookmark.canvasId);
+    if (canvas === undefined) {
+      return;
+    }
+    const viewport = canvas.viewport ?? { x: 0, y: 0, zoom: 1 };
+    updateWorkspace(
+      (workspace) => ({
+        ...workspace,
+        view: {
+          ...workspace.view,
+          bookmarks: (workspace.view.bookmarks ?? []).map((item) =>
+            item.id === bookmarkId
+              ? { ...item, x: viewport.x, y: viewport.y, zoom: viewport.zoom }
+              : item,
+          ),
+        },
+      }),
+      { flushImmediately: true, recordHistory: true },
+    );
+    showAppNotice(t("canvases.bookmarkUpdated", { name: bookmark.name }));
+  }
+
+  function renameCanvasBookmark(bookmarkId: string, rawName: string) {
+    const name = rawName.trim();
+    const bookmarks = workspaceRef.current.view.bookmarks ?? [];
+    if (
+      name.length === 0 ||
+      [...name].length > 128 ||
+      bookmarks.some(
+        (bookmark) =>
+          bookmark.id !== bookmarkId &&
+          normalizeNodeName(bookmark.name) === normalizeNodeName(name),
+      )
+    ) {
+      showAppNotice(t("canvases.bookmarkNameInvalid"));
+      return;
+    }
+    updateWorkspace(
+      (workspace) => ({
+        ...workspace,
+        view: {
+          ...workspace.view,
+          bookmarks: (workspace.view.bookmarks ?? []).map((bookmark) =>
+            bookmark.id === bookmarkId ? { ...bookmark, name } : bookmark,
+          ),
+        },
+      }),
+      { flushImmediately: true, recordHistory: true },
+    );
+  }
+
+  function deleteCanvasBookmark(bookmarkId: string) {
+    const bookmark = (workspaceRef.current.view.bookmarks ?? []).find(
+      (item) => item.id === bookmarkId,
+    );
+    if (bookmark === undefined) {
+      return;
+    }
+    updateWorkspace(
+      (workspace) => ({
+        ...workspace,
+        view: {
+          ...workspace.view,
+          bookmarks: (workspace.view.bookmarks ?? []).filter(
+            (item) => item.id !== bookmarkId,
+          ),
+        },
+      }),
+      { flushImmediately: true, recordHistory: true },
+    );
+    showAppNotice(t("canvases.bookmarkDeleted", { name: bookmark.name }));
+  }
+
+  function jumpToCanvasBookmark(bookmark: CanvasBookmark) {
+    const current = workspaceRef.current;
+    if (!current.view.canvases.some((canvas) => canvas.id === bookmark.canvasId)) {
+      showAppNotice(t("canvases.bookmarkTargetMissing"));
+      return;
+    }
+    updateWorkspace(
+      (workspace) => ({
+        ...workspace,
+        view: updateWorkspaceCanvas(
+          {
+            ...workspace.view,
+            activeCanvasId: bookmark.canvasId,
+          },
+          bookmark.canvasId,
+          (canvas) => ({
+            ...canvas,
+            viewport: { x: bookmark.x, y: bookmark.y, zoom: bookmark.zoom },
+          }),
+        ),
+      }),
+      { flushImmediately: true, affectsOffsiteBackup: false },
+    );
+    setCanvasBookmarksOpen(false);
+    setEditingNodeId(null);
+    editBaselineRef.current = null;
+  }
+
   function requestCanvasFocus(nodeIds: readonly string[]) {
     const uniqueNodeIds = [...new Set(nodeIds)];
     if (uniqueNodeIds.length === 0) {
@@ -4002,6 +4211,9 @@ function App({
           ...workspace.view,
           activeCanvasId: nextActive.id,
           canvases: workspace.view.canvases.filter((canvas) => canvas.id !== canvasId),
+          bookmarks: (workspace.view.bookmarks ?? []).filter(
+            (bookmark) => bookmark.canvasId !== canvasId,
+          ),
         },
       }),
       { flushImmediately: true, recordHistory: true },
@@ -5394,6 +5606,162 @@ function App({
                   >
                     <Trash2 aria-hidden="true" size={15} />
                   </button>
+                </div>
+              )}
+              {activeView === "canvas" && (
+                <div className="canvas-bookmark-control">
+                  <button
+                    aria-expanded={canvasBookmarksOpen}
+                    aria-label={t("canvases.bookmarks")}
+                    className="secondary-button canvas-bookmark-toggle"
+                    data-testid="canvas-bookmarks-toggle"
+                    onClick={() => setCanvasBookmarksOpen((current) => !current)}
+                    title={t("canvases.bookmarks")}
+                    type="button"
+                  >
+                    <Bookmark aria-hidden="true" size={15} />
+                    <span>{canvasBookmarks.length}</span>
+                  </button>
+                  {canvasBookmarksOpen && (
+                    <div
+                      aria-label={t("canvases.bookmarks")}
+                      className="canvas-bookmark-popover"
+                      data-testid="canvas-bookmarks-popover"
+                      role="dialog"
+                    >
+                      <div className="canvas-bookmark-create">
+                        <input
+                          aria-label={t("canvases.bookmarkName")}
+                          data-testid="canvas-bookmark-name"
+                          maxLength={128}
+                          onChange={(event) => setCanvasBookmarkName(event.target.value)}
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter") {
+                              event.preventDefault();
+                              saveCanvasBookmark();
+                            }
+                          }}
+                          placeholder={t("canvases.bookmarkNamePlaceholder")}
+                          value={canvasBookmarkName}
+                        />
+                        <button
+                          aria-label={t("canvases.saveBookmark")}
+                          className="icon-button"
+                          data-testid="canvas-bookmark-save"
+                          onClick={saveCanvasBookmark}
+                          title={t("canvases.saveBookmark")}
+                          type="button"
+                        >
+                          <Bookmark aria-hidden="true" size={15} />
+                        </button>
+                      </div>
+                      {canvasBookmarks.length === 0 ? (
+                        <p className="canvas-bookmark-empty">
+                          {t("canvases.noBookmarks")}
+                        </p>
+                      ) : (
+                        <div className="canvas-bookmark-list">
+                          {canvasBookmarks.map((bookmark) => {
+                            const canvas = workspace.view.canvases.find(
+                              (item) => item.id === bookmark.canvasId,
+                            );
+                            const editing = canvasBookmarkEditingId === bookmark.id;
+                            return (
+                              <div
+                                className="canvas-bookmark-item"
+                                data-testid="canvas-bookmark-item"
+                                key={bookmark.id}
+                              >
+                                {editing ? (
+                                  <input
+                                    autoFocus
+                                    aria-label={t("canvases.bookmarkName")}
+                                    className="canvas-bookmark-rename-input"
+                                    onChange={(event) =>
+                                      setCanvasBookmarkName(event.target.value)
+                                    }
+                                    onKeyDown={(event) => {
+                                      if (event.key === "Enter") {
+                                        event.preventDefault();
+                                        renameCanvasBookmark(
+                                          bookmark.id,
+                                          canvasBookmarkName,
+                                        );
+                                        setCanvasBookmarkEditingId(null);
+                                      } else if (event.key === "Escape") {
+                                        setCanvasBookmarkEditingId(null);
+                                      }
+                                    }}
+                                    value={canvasBookmarkName}
+                                  />
+                                ) : (
+                                  <button
+                                    className="canvas-bookmark-jump"
+                                    data-testid="canvas-bookmark-jump"
+                                    onClick={() => jumpToCanvasBookmark(bookmark)}
+                                    type="button"
+                                  >
+                                    <strong>{bookmark.name}</strong>
+                                    <span>
+                                      {canvas?.name ??
+                                        t("canvases.bookmarkTargetMissing")}
+                                    </span>
+                                  </button>
+                                )}
+                                <div className="canvas-bookmark-actions">
+                                  <button
+                                    aria-label={t("canvases.renameBookmark", {
+                                      name: bookmark.name,
+                                    })}
+                                    className="icon-button"
+                                    data-testid="canvas-bookmark-rename"
+                                    onClick={() => {
+                                      setCanvasBookmarkName(bookmark.name);
+                                      setCanvasBookmarkEditingId(bookmark.id);
+                                    }}
+                                    title={t("canvases.renameBookmark", {
+                                      name: bookmark.name,
+                                    })}
+                                    type="button"
+                                  >
+                                    <Pencil aria-hidden="true" size={13} />
+                                  </button>
+                                  <button
+                                    aria-label={t("canvases.updateBookmark", {
+                                      name: bookmark.name,
+                                    })}
+                                    className="icon-button"
+                                    data-testid="canvas-bookmark-update"
+                                    onClick={() => updateCanvasBookmark(bookmark.id)}
+                                    title={t("canvases.updateBookmark", {
+                                      name: bookmark.name,
+                                    })}
+                                    type="button"
+                                  >
+                                    <RefreshCw aria-hidden="true" size={13} />
+                                  </button>
+                                  <button
+                                    aria-label={t("canvases.deleteBookmark", {
+                                      name: bookmark.name,
+                                    })}
+                                    className="icon-button danger-icon-button"
+                                    data-testid="canvas-bookmark-delete"
+                                    onClick={() => deleteCanvasBookmark(bookmark.id)}
+                                    title={t("canvases.deleteBookmark", {
+                                      name: bookmark.name,
+                                    })}
+                                    type="button"
+                                  >
+                                    <Trash2 aria-hidden="true" size={13} />
+                                  </button>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
               )}
               <div

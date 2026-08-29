@@ -274,7 +274,8 @@ export function compareWorkspaces(
     !jsonValuesEqual(
       current.view.canvases.map(({ id, name }) => ({ id, name })),
       replacement.view.canvases.map(({ id, name }) => ({ id, name })),
-    );
+    ) ||
+    !jsonValuesEqual(current.view.bookmarks ?? [], replacement.view.bookmarks ?? []);
   const identical =
     addedNodes === 0 &&
     removedNodes === 0 &&

@@ -2,6 +2,7 @@ import {
   migrateWorkspaceSnapshotV1,
   migrateWorkspaceSnapshotV2,
   migrateWorkspaceSnapshotV3,
+  migrateWorkspaceSnapshotV4,
   parseWorkspaceSnapshot,
   type WorkspaceSnapshot,
 } from "./workspaceData";
@@ -13,6 +14,7 @@ export {
   emptyWorkspace,
   isNodeNameAvailable,
   isUnnamedNode,
+  maximumCanvasBookmarkCount,
   maximumManualNodeDimension,
   maximumWorkspaceCanvasCount,
   minimumManualNodeHeight,
@@ -28,6 +30,7 @@ export {
   updateWorkspaceCanvas,
   updateNodeExtensionMetadata,
   type CanvasViewport,
+  type CanvasBookmark,
   type InformationNode,
   type NodeLayout,
   type NodeLayoutSizeOverrideUpdate,
@@ -62,7 +65,7 @@ export type WorkspaceStorageSlot = "primary" | "recovery";
 
 const workspaceStorageKey = "linked-info.workspace.v1";
 const workspaceRecoveryStorageKey = "linked-info.workspace.recovery.v1";
-export const currentWorkspaceStorageVersion = 4;
+export const currentWorkspaceStorageVersion = 5;
 
 function storageKey(slot: WorkspaceStorageSlot): string {
   return slot === "primary" ? workspaceStorageKey : workspaceRecoveryStorageKey;
@@ -87,6 +90,8 @@ export function parseStoredWorkspaceText(raw: string): WorkspaceLoadResult {
         ? migrateWorkspaceSnapshotV2(stored)
         : stored.version === 3
           ? migrateWorkspaceSnapshotV3(stored)
+          : stored.version === 4
+            ? migrateWorkspaceSnapshotV4(stored)
         : stored.version === currentWorkspaceStorageVersion
           ? parseWorkspaceSnapshot(stored)
           : null;
@@ -100,7 +105,14 @@ export function serializeStoredWorkspace(workspace: WorkspaceSnapshot): string {
   if (validated === null) {
     throw new Error("refusing to persist an invalid workspace snapshot");
   }
-  return JSON.stringify({ version: currentWorkspaceStorageVersion, ...validated });
+  return JSON.stringify({
+    version: currentWorkspaceStorageVersion,
+    ...validated,
+    view: {
+      ...validated.view,
+      bookmarks: validated.view.bookmarks ?? [],
+    },
+  });
 }
 
 export function loadLegacyBrowserWorkspace(

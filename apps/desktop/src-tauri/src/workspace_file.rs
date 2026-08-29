@@ -42,7 +42,7 @@ const RECOVERY_SWAP_RECOVERY_FILE_NAME: &str = "workspace.recovery.v1.json";
 const ENCRYPTED_WORKSPACE_FORMAT: &str = "linked-info-encrypted-workspace";
 const ENCRYPTED_EXPORT_FORMAT: &str = "linked-info-encrypted-workspace-export";
 const WORKSPACE_EXPORT_FORMAT: &str = "linked-info-workspace";
-const CURRENT_WORKSPACE_STORAGE_VERSION: u64 = 4;
+const CURRENT_WORKSPACE_STORAGE_VERSION: u64 = 5;
 const VAULT_FORMAT: &str = "linked-info-workspace-vault";
 const DATA_KEY_ROTATION_FORMAT: &str = "linked-info-data-key-rotation";
 const RECOVERY_SWAP_FORMAT: &str = "linked-info-recovery-swap";
@@ -66,6 +66,8 @@ const MAXIMUM_SINGLE_EXTENSION_METADATA_BYTES: usize = 4 * 1024 * 1024;
 const MAXIMUM_TOTAL_EXTENSION_METADATA_BYTES: usize = 16 * 1024 * 1024;
 const MAXIMUM_CANVAS_COUNT: usize = 256;
 const MAXIMUM_CANVAS_NAME_CHARACTERS: usize = 128;
+const MAXIMUM_CANVAS_BOOKMARK_COUNT: usize = 4_096;
+const MAXIMUM_CANVAS_BOOKMARK_NAME_CHARACTERS: usize = 128;
 const MAXIMUM_TOTAL_CANVAS_PLACEMENTS: usize = 1_000_000;
 const DEFAULT_CANVAS_ID: &str = "00000000-0000-4000-8000-000000000001";
 const DEFAULT_CANVAS_NAME: &str = "Main";
@@ -3932,7 +3934,7 @@ fn validate_workspace_snapshot(value: &serde_json::Value, version: u64) -> io::R
         }
     }
 
-    if version < CURRENT_WORKSPACE_STORAGE_VERSION {
+    if version < 4 {
         validate_workspace_layout(workspace.get("layout"), &node_ids, true)?;
         validate_workspace_viewport(workspace.get("viewport"))?;
     }
@@ -3972,7 +3974,8 @@ fn validate_workspace_snapshot(value: &serde_json::Value, version: u64) -> io::R
             let expected_fields = match version {
                 2 => 1,
                 3 => 2,
-                CURRENT_WORKSPACE_STORAGE_VERSION => 4,
+                4 => 4,
+                CURRENT_WORKSPACE_STORAGE_VERSION => 5,
                 _ => 0,
             };
             if view.len() != expected_fields
@@ -3980,7 +3983,7 @@ fn validate_workspace_snapshot(value: &serde_json::Value, version: u64) -> io::R
             {
                 return Err(invalid_workspace_data("workspace view metadata is invalid"));
             }
-            if version == CURRENT_WORKSPACE_STORAGE_VERSION {
+            if version >= 4 {
                 let canvases = view
                     .get("canvases")
                     .and_then(serde_json::Value::as_array)
@@ -4052,6 +4055,89 @@ fn validate_workspace_snapshot(value: &serde_json::Value, version: u64) -> io::R
                         "workspace active canvas does not exist",
                     ));
                 }
+                if version == CURRENT_WORKSPACE_STORAGE_VERSION {
+                    let bookmarks = view
+                        .get("bookmarks")
+                        .and_then(serde_json::Value::as_array)
+                        .filter(|bookmarks| bookmarks.len() <= MAXIMUM_CANVAS_BOOKMARK_COUNT)
+                        .ok_or_else(|| {
+                            invalid_workspace_data("workspace canvas bookmarks are invalid")
+                        })?;
+                    let mut bookmark_ids = HashSet::with_capacity(bookmarks.len());
+                    let mut bookmark_names = HashSet::with_capacity(bookmarks.len());
+                    for bookmark in bookmarks {
+                        let bookmark = bookmark.as_object().ok_or_else(|| {
+                            invalid_workspace_data("workspace canvas bookmark must be an object")
+                        })?;
+                        if bookmark.len() != 6
+                            || !bookmark.contains_key("id")
+                            || !bookmark.contains_key("name")
+                            || !bookmark.contains_key("canvasId")
+                            || !bookmark.contains_key("x")
+                            || !bookmark.contains_key("y")
+                            || !bookmark.contains_key("zoom")
+                        {
+                            return Err(invalid_workspace_data(
+                                "workspace canvas bookmark is invalid",
+                            ));
+                        }
+                        let id = canonical_workspace_node_id(
+                            bookmark.get("id").expect("validated bookmark id field"),
+                        )
+                        .ok_or_else(|| {
+                            invalid_workspace_data("workspace canvas bookmark id is invalid")
+                        })?;
+                        let canvas_id = canonical_workspace_node_id(
+                            bookmark
+                                .get("canvasId")
+                                .expect("validated bookmark canvas id field"),
+                        )
+                        .ok_or_else(|| {
+                            invalid_workspace_data(
+                                "workspace canvas bookmark canvas id is invalid",
+                            )
+                        })?;
+                        let name = bookmark
+                            .get("name")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::trim)
+                            .filter(|name| {
+                                !name.is_empty()
+                                    && name.chars().count()
+                                        <= MAXIMUM_CANVAS_BOOKMARK_NAME_CHARACTERS
+                            })
+                            .ok_or_else(|| {
+                                invalid_workspace_data("workspace canvas bookmark name is invalid")
+                            })?;
+                        if !canvas_ids.contains(&canvas_id)
+                            || !bookmark_ids.insert(id)
+                            || !bookmark_names.insert(name.to_lowercase())
+                        {
+                            return Err(invalid_workspace_data(
+                                "workspace canvas bookmark identity is invalid",
+                            ));
+                        }
+                        finite_json_number(bookmark.get("x"))
+                            .ok_or_else(|| {
+                                invalid_workspace_data("workspace canvas bookmark x must be finite")
+                            })?;
+                        finite_json_number(bookmark.get("y"))
+                            .ok_or_else(|| {
+                                invalid_workspace_data("workspace canvas bookmark y must be finite")
+                            })?;
+                        let zoom = finite_json_number(bookmark.get("zoom"))
+                            .ok_or_else(|| {
+                                invalid_workspace_data(
+                                    "workspace canvas bookmark zoom must be finite",
+                                )
+                            })?;
+                        if zoom <= 0.0 {
+                            return Err(invalid_workspace_data(
+                                "workspace canvas bookmark zoom must be positive",
+                            ));
+                        }
+                    }
+                }
             }
             let processors = view
                 .get("contentProcessorByNodeId")
@@ -4102,11 +4188,19 @@ fn validate_storage_envelope(contents: &str) -> io::Result<()> {
     normalize_storage_envelope(contents).map(|_| ())
 }
 
-fn migrate_workspace_object_to_v4(
+fn migrate_workspace_object_to_v5(
     workspace: &mut serde_json::Map<String, serde_json::Value>,
     version: u64,
 ) -> io::Result<()> {
     if version == CURRENT_WORKSPACE_STORAGE_VERSION {
+        return Ok(());
+    }
+    if version == 4 {
+        workspace
+            .get_mut("view")
+            .and_then(serde_json::Value::as_object_mut)
+            .ok_or_else(|| invalid_workspace_data("workspace view metadata is invalid"))?
+            .insert("bookmarks".to_owned(), serde_json::json!([]));
         return Ok(());
     }
     if version == 1 {
@@ -4147,6 +4241,7 @@ fn migrate_workspace_object_to_v4(
             "viewport": viewport
         }]),
     );
+    view.insert("bookmarks".to_owned(), serde_json::json!([]));
     Ok(())
 }
 
@@ -4156,7 +4251,7 @@ fn normalize_storage_envelope(contents: &str) -> io::Result<String> {
     let version = value.get("version").and_then(serde_json::Value::as_u64);
     if !matches!(
         version,
-        Some(1) | Some(2) | Some(3) | Some(CURRENT_WORKSPACE_STORAGE_VERSION)
+        Some(1) | Some(2) | Some(3) | Some(4) | Some(CURRENT_WORKSPACE_STORAGE_VERSION)
     ) {
         return Err(invalid_workspace_data(
             "workspace storage envelope version is unsupported",
@@ -4164,7 +4259,7 @@ fn normalize_storage_envelope(contents: &str) -> io::Result<String> {
     }
     let version = version.expect("validated workspace storage version");
     validate_workspace_snapshot(&value, version)?;
-    migrate_workspace_object_to_v4(
+    migrate_workspace_object_to_v5(
         value
             .as_object_mut()
             .ok_or_else(|| invalid_workspace_data("workspace snapshot must be an object"))?,
@@ -4183,7 +4278,7 @@ fn workspace_storage_from_export(contents: &str) -> io::Result<String> {
     if document.get("format").and_then(serde_json::Value::as_str) != Some(WORKSPACE_EXPORT_FORMAT)
         || !matches!(
             document.get("version").and_then(serde_json::Value::as_u64),
-            Some(1) | Some(2) | Some(3) | Some(CURRENT_WORKSPACE_STORAGE_VERSION)
+            Some(1) | Some(2) | Some(3) | Some(4) | Some(CURRENT_WORKSPACE_STORAGE_VERSION)
         )
         || document
             .get("exportedAt")
@@ -4206,7 +4301,7 @@ fn workspace_storage_from_export(contents: &str) -> io::Result<String> {
         .as_object()
         .cloned()
         .ok_or_else(|| invalid_workspace_data("workspace export payload must be an object"))?;
-    migrate_workspace_object_to_v4(&mut storage, export_version)?;
+    migrate_workspace_object_to_v5(&mut storage, export_version)?;
     storage.insert(
         "version".to_owned(),
         serde_json::Value::from(CURRENT_WORKSPACE_STORAGE_VERSION),
@@ -4372,7 +4467,8 @@ mod tests {
                     "viewport": null
                 }],
                 "contentProcessorByNodeId": {},
-                "extensionMetadata": {}
+                "extensionMetadata": {},
+                "bookmarks": []
             }
         })
         .to_string()

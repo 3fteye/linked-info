@@ -72,6 +72,34 @@
       }
     },
     {
+      "name": "v4-migrates-to-v5-with-empty-bookmarks",
+      "valid": true,
+      "storage": {
+        "version": 4,
+        "nodes": [
+          {
+            "id": "11111111-1111-4111-8111-111111111111",
+            "name": "Account",
+            "content": null
+          }
+        ],
+        "references": [],
+        "view": {
+          "activeCanvasId": "00000000-0000-4000-8000-000000000001",
+          "canvases": [
+            {
+              "id": "00000000-0000-4000-8000-000000000001",
+              "name": "Main",
+              "layout": [],
+              "viewport": null
+            }
+          ],
+          "contentProcessorByNodeId": {},
+          "extensionMetadata": {}
+        }
+      }
+    },
+    {
       "name": "valid-v3-with-unknown-extension-metadata",
       "valid": true,
       "storage": {
@@ -420,6 +448,82 @@
           ],
           "contentProcessorByNodeId": {},
           "extensionMetadata": {}
+        }
+      }
+    },
+    {
+      "name": "valid-v5-position-bookmark",
+      "valid": true,
+      "storage": {
+        "version": 5,
+        "nodes": [
+          {
+            "id": "11111111-1111-4111-8111-111111111111",
+            "name": "Account",
+            "content": null
+          }
+        ],
+        "references": [],
+        "view": {
+          "activeCanvasId": "00000000-0000-4000-8000-000000000001",
+          "canvases": [
+            {
+              "id": "00000000-0000-4000-8000-000000000001",
+              "name": "Main",
+              "layout": [
+                {
+                  "nodeId": "11111111-1111-4111-8111-111111111111",
+                  "x": 10,
+                  "y": 20
+                }
+              ],
+              "viewport": null
+            }
+          ],
+          "contentProcessorByNodeId": {},
+          "extensionMetadata": {},
+          "bookmarks": [
+            {
+              "id": "22222222-2222-4222-8222-222222222222",
+              "name": "Account focus",
+              "canvasId": "00000000-0000-4000-8000-000000000001",
+              "x": -120,
+              "y": 80,
+              "zoom": 1.5
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "v5-dangling-bookmark-canvas",
+      "valid": false,
+      "storage": {
+        "version": 5,
+        "nodes": [],
+        "references": [],
+        "view": {
+          "activeCanvasId": "00000000-0000-4000-8000-000000000001",
+          "canvases": [
+            {
+              "id": "00000000-0000-4000-8000-000000000001",
+              "name": "Main",
+              "layout": [],
+              "viewport": null
+            }
+          ],
+          "contentProcessorByNodeId": {},
+          "extensionMetadata": {},
+          "bookmarks": [
+            {
+              "id": "22222222-2222-4222-8222-222222222222",
+              "name": "Dangling",
+              "canvasId": "33333333-3333-4333-8333-333333333333",
+              "x": 0,
+              "y": 0,
+              "zoom": 1
+            }
+          ]
         }
       }
     }

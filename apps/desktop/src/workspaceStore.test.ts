@@ -98,7 +98,7 @@ describe("localWorkspacePersistence", () => {
     });
   });
 
-  it("migrates version 1 storage through the complete version 4 view", () => {
+  it("migrates version 1 storage through the complete version 5 view", () => {
     const workspace = validWorkspace();
     const result = parseStoredWorkspaceText(
       JSON.stringify({ version: 1, ...legacyWorkspace(workspace) }),
@@ -132,7 +132,7 @@ describe("localWorkspacePersistence", () => {
   });
 
   it("preserves an unsupported local format version for recovery", async () => {
-    const raw = JSON.stringify({ version: 5, ...validWorkspace() });
+    const raw = JSON.stringify({ version: 6, ...validWorkspace() });
     localStorage.setItem(workspaceKey, raw);
 
     expect(await localWorkspacePersistence.load()).toEqual({

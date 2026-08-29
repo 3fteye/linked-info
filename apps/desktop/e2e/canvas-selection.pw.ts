@@ -606,7 +606,7 @@ test("the built-in JSON adapter persists one undoable namespaced preference", as
   await expect
     .poll(() => storedWorkspace(page))
     .toMatchObject({
-      version: 4,
+      version: 5,
       view: {
         contentProcessorByNodeId: { [jsonNode.id]: processorId },
         extensionMetadata: {
@@ -1507,6 +1507,12 @@ test("multiple canvases share nodes while keeping placements independent", async
   expect(secondCanvasId).not.toBe(firstCanvasId);
   await expect(node(page, syntheticNode.id)).toHaveCount(0);
 
+  await page.getByTestId("canvas-bookmarks-toggle").click();
+  const secondCanvasBookmarks = page.getByTestId("canvas-bookmarks-popover");
+  await secondCanvasBookmarks.getByTestId("canvas-bookmark-name").fill("Second canvas focus");
+  await secondCanvasBookmarks.getByTestId("canvas-bookmark-save").click();
+  await expect(secondCanvasBookmarks.getByTestId("canvas-bookmark-item")).toHaveCount(1);
+
   await canvasSelect.selectOption(firstCanvasId);
   await expect(node(page, syntheticNode.id)).toBeVisible();
   await canvasSelect.selectOption(secondCanvasId);
@@ -1525,6 +1531,9 @@ test("multiple canvases share nodes while keeping placements independent", async
   await page.getByTestId("workspace-deletion-confirm").click();
   await expect(canvasSelect.locator("option")).toHaveCount(1);
   await expect(node(page, syntheticNode.id)).toBeVisible();
+  await expect
+    .poll(async () => (await storedWorkspace(page))?.view?.bookmarks ?? [])
+    .toEqual([]);
 
   await page.getByTestId("nodes-navigation").click();
   await page.getByTestId("node-delete-permanently").click();
@@ -1589,6 +1598,55 @@ test("selected placements can be copied and moved between canvases", async ({
   await page.getByTestId("canvas-transfer-confirm").click();
   await expect(canvasSelect).toHaveValue(secondCanvasId);
   await expect(node(page, nodes[0].id)).toBeVisible();
+});
+
+test("position bookmarks restore a canvas viewport and survive workspace persistence", async ({
+  page,
+}) => {
+  await openSyntheticWorkspace(page, gridNodes(2, 1));
+  const canvasSelect = page.getByTestId("canvas-select");
+  const mainCanvasId = await canvasSelect.inputValue();
+
+  await page.getByTestId("canvas-bookmarks-toggle").click();
+  const popover = page.getByTestId("canvas-bookmarks-popover");
+  await expect(popover).toBeVisible();
+  await popover.getByTestId("canvas-bookmark-name").fill("Important area");
+  await popover.getByTestId("canvas-bookmark-save").click();
+  await expect(popover.getByTestId("canvas-bookmark-item")).toHaveCount(1);
+  await expect(popover.getByTestId("canvas-bookmark-jump")).toContainText(
+    "Important area",
+  );
+
+  await page.getByTestId("canvas-create").click();
+  const secondCanvasId = await canvasSelect.inputValue();
+  expect(secondCanvasId).not.toBe(mainCanvasId);
+  await page.getByTestId("canvas-bookmarks-toggle").click();
+  await expect(page.getByTestId("canvas-bookmarks-popover")).toBeVisible();
+  await popover.getByTestId("canvas-bookmark-jump").click();
+  await expect(canvasSelect).toHaveValue(mainCanvasId);
+
+  await page.getByTestId("canvas-bookmarks-toggle").click();
+  await page.getByTestId("canvas-bookmark-rename").click();
+  const renameInput = page.locator(".canvas-bookmark-rename-input");
+  await renameInput.fill("Renamed area");
+  await renameInput.press("Enter");
+  await expect(page.getByTestId("canvas-bookmark-jump")).toContainText(
+    "Renamed area",
+  );
+
+  await page.getByTestId("canvas-bookmark-update").click();
+  await page.reload();
+  await expect(page.getByTestId("graph-canvas")).toBeVisible();
+  await page.getByTestId("canvas-bookmarks-toggle").click();
+  await expect(page.getByTestId("canvas-bookmark-jump")).toContainText(
+    "Renamed area",
+  );
+
+  await page.getByTestId("canvas-bookmark-delete").click();
+  await expect(page.getByTestId("canvas-bookmark-item")).toHaveCount(0);
+  await expect
+    .poll(async () => (await storedWorkspace(page))?.view?.bookmarks ?? [])
+    .toEqual([]);
 });
 
 test("document import requires and records an explicit canvas position", async ({
