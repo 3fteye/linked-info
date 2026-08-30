@@ -624,9 +624,7 @@ impl S3BackupTarget {
                     .await
                 {
                     Ok(visible) => visible,
-                    Err(
-                        BackupTargetError::InvalidRequest | BackupTargetError::InvalidResponse,
-                    ) => {
+                    Err(BackupTargetError::InvalidRequest | BackupTargetError::InvalidResponse) => {
                         return Ok(BackupDeleteOutcome::Unverified { removed_versions });
                     }
                     Err(error) => return Err(error),
@@ -729,9 +727,7 @@ impl S3BackupTarget {
                     .await
                 {
                     Ok(visible) => visible,
-                    Err(
-                        BackupTargetError::InvalidRequest | BackupTargetError::InvalidResponse,
-                    ) => {
+                    Err(BackupTargetError::InvalidRequest | BackupTargetError::InvalidResponse) => {
                         return Ok(BackupPurgeOutcome::Unverified { removed_versions });
                     }
                     Err(error) => return Err(error),
@@ -1258,6 +1254,7 @@ mod tests {
                         }
                         Err(error) => panic!("scripted S3 server failed to accept: {error}"),
                     };
+                    stream.set_nonblocking(false).unwrap();
                     stream
                         .set_read_timeout(Some(Duration::from_secs(2)))
                         .unwrap();
