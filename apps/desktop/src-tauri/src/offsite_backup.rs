@@ -490,11 +490,8 @@ pub async fn update_offsite_backup_retention_settings(
     let config_lock = Arc::clone(&state.config_lock);
     let summary = tauri::async_runtime::spawn_blocking(move || {
         let vault_state_for_write = app_for_write.state::<WorkspaceVaultState>();
-        let _guard = acquire_authorized_config_mutation(
-            &config_lock,
-            &vault_state_for_write,
-            permit,
-        )?;
+        let _guard =
+            acquire_authorized_config_mutation(&config_lock, &vault_state_for_write, permit)?;
         let path = config_path(&app_for_write)?;
         let mut config = read_config_for_mutation(&path)?;
         let target = config
@@ -771,11 +768,8 @@ pub async fn configure_s3_backup_target(
     };
     let write_result = tauri::async_runtime::spawn_blocking(move || {
         let vault_state_for_write = app_for_write.state::<WorkspaceVaultState>();
-        let _guard = acquire_authorized_config_mutation(
-            &config_lock,
-            &vault_state_for_write,
-            permit,
-        )?;
+        let _guard =
+            acquire_authorized_config_mutation(&config_lock, &vault_state_for_write, permit)?;
         let path = config_path(&app_for_write)?;
         let mut config = read_config_for_mutation(&path)?;
         if config.targets.len() >= MAXIMUM_TARGETS
@@ -884,11 +878,8 @@ pub async fn update_s3_backup_target(
     let previous_credential_id = previous.credential_id.clone();
     let write_result = tauri::async_runtime::spawn_blocking(move || {
         let vault_state_for_write = app_for_write.state::<WorkspaceVaultState>();
-        let _guard = acquire_authorized_config_mutation(
-            &config_lock,
-            &vault_state_for_write,
-            permit,
-        )?;
+        let _guard =
+            acquire_authorized_config_mutation(&config_lock, &vault_state_for_write, permit)?;
         let path = config_path(&app_for_write)?;
         let mut config = read_config_for_mutation(&path)?;
         let index = config
@@ -983,14 +974,9 @@ pub async fn remove_offsite_backup_target(
         .consume_sensitive_authorization(SensitiveOperation::BackupTargetChange, &authorization)?;
     let target = find_target(&app, &backup_state, target_id).await?;
     ensure_workspace_access(&app, &vault_state, Some(permit))?;
-    let cleanup = remove_target_config_and_credential(
-        &app,
-        &backup_state,
-        &target,
-        target_id,
-        permit,
-    )
-    .await?;
+    let cleanup =
+        remove_target_config_and_credential(&app, &backup_state, &target, target_id, permit)
+            .await?;
     // The target is already absent from the authenticated configuration.
     Ok(committed_target_removal_outcome(cleanup))
 }
@@ -1074,14 +1060,9 @@ pub async fn delete_all_offsite_backups_and_remove_target(
         }
     };
     ensure_workspace_access(&app, &vault_state, Some(permit))?;
-    let cleanup = remove_target_config_and_credential(
-        &app,
-        &backup_state,
-        &config,
-        target_id,
-        permit,
-    )
-    .await?;
+    let cleanup =
+        remove_target_config_and_credential(&app, &backup_state, &config, target_id, permit)
+            .await?;
     Ok(DeleteAllOffsiteBackupsOutcome {
         deleted_version_count,
         target_removed: true,
@@ -1328,11 +1309,8 @@ async fn remove_target_config_and_credential(
     let expected_credential_id = target.credential_id.clone();
     let write_result = tauri::async_runtime::spawn_blocking(move || {
         let vault_state_for_write = app_for_write.state::<WorkspaceVaultState>();
-        let _guard = acquire_authorized_config_mutation(
-            &config_lock,
-            &vault_state_for_write,
-            permit,
-        )?;
+        let _guard =
+            acquire_authorized_config_mutation(&config_lock, &vault_state_for_write, permit)?;
         let path = config_path(&app_for_write)?;
         let mut config = read_config_for_mutation(&path)?;
         let current = config
@@ -2698,8 +2676,7 @@ mod tests {
         let worker_writes = Arc::clone(&writes);
         let worker = std::thread::spawn(move || {
             ready_sender.send(()).unwrap();
-            let _guard =
-                acquire_authorized_config_mutation(&worker_lock, &worker_state, permit)?;
+            let _guard = acquire_authorized_config_mutation(&worker_lock, &worker_state, permit)?;
             for counter in worker_writes.iter() {
                 counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             }
