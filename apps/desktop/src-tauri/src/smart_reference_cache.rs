@@ -718,11 +718,14 @@ mod tests {
         let expected_generation = state.generation.load(Ordering::Acquire);
         let lock = Arc::clone(&state.operation_lock);
         let generation = state.generation();
-        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
-        let worker_barrier = Arc::clone(&barrier);
+        let started = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let release = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let worker_started = Arc::clone(&started);
+        let worker_release = Arc::clone(&release);
         let worker = std::thread::spawn(move || {
             let _guard = lock.lock().unwrap();
-            worker_barrier.wait();
+            worker_started.wait();
+            worker_release.wait();
             cache_operation_is_current(
                 expected_generation,
                 generation.load(Ordering::Acquire),
@@ -730,8 +733,9 @@ mod tests {
             )
         });
 
-        barrier.wait();
+        started.wait();
         state.invalidate_for_purge().unwrap();
+        release.wait();
         assert!(!worker.join().unwrap());
     }
 
