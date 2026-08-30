@@ -4,6 +4,10 @@
 
 实现前先阅读 [DEVELOPMENT.md](DEVELOPMENT.md) 中与改动范围对应的架构说明；产品决策和当前阶段以 [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) 为准。
 
+## 提交、发布与云端审查
+
+任何 AI、agent、编辑器助手或自动化工具在被要求暂存、提交、推送、创建或更新 PR、起草或改写 commit message、审查 staged changes、选择提交拆分点、处理云端 Review，或修复历史 commit message 时，必须完整读取并执行 [.agents/skills/linked-info-commit-discipline/SKILL.md](.agents/skills/linked-info-commit-discipline/SKILL.md)。
+
 ## Code Review Rules
 
 ### 数据兼容性

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Linked Info Commit Discipline"
+  short_description: "约束提交并按风险触发 GitHub PR Review"
+  default_prompt: "使用 $linked-info-commit-discipline 审查 D:\\soft\\memory 的 staged changes，提交后立即推送任务分支并创建或更新 Draft PR，再按 owner 已批准的有序 GitHub 身份根据本次提交与累计 PR 风险触发所需 Review。"
