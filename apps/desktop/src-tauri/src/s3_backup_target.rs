@@ -618,7 +618,24 @@ impl S3BackupTarget {
                 Err(error) => return Err(error),
             };
             if objects.is_empty() {
-                return Ok(BackupDeleteOutcome::Deleted { removed_versions });
+                let prefix = self.snapshot_directory(id);
+                let visible = match self
+                    .has_visible_objects_with_guard(&prefix, operation_guard)
+                    .await
+                {
+                    Ok(visible) => visible,
+                    Err(
+                        BackupTargetError::InvalidRequest | BackupTargetError::InvalidResponse,
+                    ) => {
+                        return Ok(BackupDeleteOutcome::Unverified { removed_versions });
+                    }
+                    Err(error) => return Err(error),
+                };
+                return Ok(if visible {
+                    BackupDeleteOutcome::Unverified { removed_versions }
+                } else {
+                    BackupDeleteOutcome::Deleted { removed_versions }
+                });
             }
         }
 
@@ -707,7 +724,23 @@ impl S3BackupTarget {
             }
             .map_err(|_| BackupTargetError::InvalidResponse)?;
             if objects.is_empty() {
-                return Ok(BackupPurgeOutcome::Deleted { removed_versions });
+                let visible = match self
+                    .has_visible_objects_with_guard(&snapshots_prefix, operation_guard)
+                    .await
+                {
+                    Ok(visible) => visible,
+                    Err(
+                        BackupTargetError::InvalidRequest | BackupTargetError::InvalidResponse,
+                    ) => {
+                        return Ok(BackupPurgeOutcome::Unverified { removed_versions });
+                    }
+                    Err(error) => return Err(error),
+                };
+                return Ok(if visible {
+                    BackupPurgeOutcome::Unverified { removed_versions }
+                } else {
+                    BackupPurgeOutcome::Deleted { removed_versions }
+                });
             }
         }
 
@@ -1185,7 +1218,107 @@ async fn read_limited_response(
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicBool, Ordering},
+        },
+        thread::{self, JoinHandle},
+        time::Duration,
+    };
+
     use super::*;
+
+    struct ScriptedS3Server {
+        endpoint: String,
+        requests: Arc<Mutex<Vec<String>>>,
+        stopped: Arc<AtomicBool>,
+        thread: Option<JoinHandle<()>>,
+    }
+
+    impl ScriptedS3Server {
+        fn start(responses: Vec<(u16, String)>) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let endpoint = format!("http://{}/", listener.local_addr().unwrap());
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let stopped = Arc::new(AtomicBool::new(false));
+            let server_requests = Arc::clone(&requests);
+            let server_stopped = Arc::clone(&stopped);
+            let thread = thread::spawn(move || {
+                let mut response_index = 0;
+                while response_index < responses.len() && !server_stopped.load(Ordering::SeqCst) {
+                    let (mut stream, _) = match listener.accept() {
+                        Ok(connection) => connection,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            thread::sleep(Duration::from_millis(1));
+                            continue;
+                        }
+                        Err(error) => panic!("scripted S3 server failed to accept: {error}"),
+                    };
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(2)))
+                        .unwrap();
+                    let mut request = Vec::new();
+                    loop {
+                        let mut chunk = [0; 1024];
+                        let read = stream.read(&mut chunk).unwrap();
+                        if read == 0 {
+                            break;
+                        }
+                        request.extend_from_slice(&chunk[..read]);
+                        if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                    let request_line = String::from_utf8_lossy(&request)
+                        .lines()
+                        .next()
+                        .unwrap()
+                        .to_owned();
+                    server_requests.lock().unwrap().push(request_line);
+
+                    let (status, body) = &responses[response_index];
+                    let reason = match status {
+                        200 => "OK",
+                        204 => "No Content",
+                        _ => panic!("unsupported scripted status {status}"),
+                    };
+                    let response = format!(
+                        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len(),
+                    );
+                    stream.write_all(response.as_bytes()).unwrap();
+                    stream.flush().unwrap();
+                    response_index += 1;
+                }
+            });
+            Self {
+                endpoint,
+                requests,
+                stopped,
+                thread: Some(thread),
+            }
+        }
+
+        fn finish(mut self) -> Vec<String> {
+            self.stopped.store(true, Ordering::SeqCst);
+            self.thread.take().unwrap().join().unwrap();
+            let requests = self.requests.lock().unwrap().clone();
+            requests
+        }
+    }
+
+    impl Drop for ScriptedS3Server {
+        fn drop(&mut self) {
+            self.stopped.store(true, Ordering::SeqCst);
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+        }
+    }
 
     fn credentials() -> S3Credentials {
         S3Credentials {
@@ -1193,6 +1326,101 @@ mod tests {
             secret_access_key: "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY".to_owned(),
             session_token: None,
         }
+    }
+
+    fn http_test_target(endpoint: &str) -> S3BackupTarget {
+        S3BackupTarget {
+            client: Client::builder()
+                .redirect(Policy::none())
+                .no_proxy()
+                .timeout(Duration::from_secs(2))
+                .build()
+                .unwrap(),
+            endpoint: Url::parse(endpoint).unwrap(),
+            region: "us-east-1".to_owned(),
+            bucket: "backup-bucket".to_owned(),
+            prefix: "linked-info/v1".to_owned(),
+            credentials: credentials(),
+        }
+    }
+
+    fn visible_object_after_version_deletion_script(id: Uuid) -> Vec<(u16, String)> {
+        let key = format!(
+            "linked-info/v1/snapshots/{id}/00000000000000000042-{sha}{OBJECT_SUFFIX}",
+            sha = "e".repeat(64),
+        );
+        vec![
+            (
+                200,
+                format!(
+                    r#"<ListVersionsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+                      <IsTruncated>false</IsTruncated>
+                      <Version><Key>{key}</Key><VersionId>version-1</VersionId></Version>
+                    </ListVersionsResult>"#,
+                ),
+            ),
+            (204, String::new()),
+            (
+                200,
+                r#"<ListVersionsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+                  <IsTruncated>false</IsTruncated>
+                </ListVersionsResult>"#
+                    .to_owned(),
+            ),
+            (
+                200,
+                format!(
+                    r#"<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+                      <IsTruncated>false</IsTruncated>
+                      <Contents><Key>{key}</Key><Size>7</Size></Contents>
+                    </ListBucketResult>"#,
+                ),
+            ),
+        ]
+    }
+
+    #[test]
+    fn final_snapshot_version_check_rejects_a_still_visible_object() {
+        let id = Uuid::new_v4();
+        let server = ScriptedS3Server::start(visible_object_after_version_deletion_script(id));
+        let target = http_test_target(&server.endpoint);
+
+        let result = tauri::async_runtime::block_on(target.delete_snapshot_with_verification(id));
+        let requests = server.finish();
+
+        assert_eq!(
+            result.unwrap(),
+            BackupDeleteOutcome::Unverified {
+                removed_versions: 1,
+            }
+        );
+        assert_eq!(requests.len(), 4);
+        assert!(requests[0].contains("versions="));
+        assert!(requests[1].starts_with("DELETE "));
+        assert!(requests[2].contains("versions="));
+        assert!(requests[3].contains("list-type=2"));
+    }
+
+    #[test]
+    fn final_purge_version_check_rejects_a_still_visible_object() {
+        let id = Uuid::new_v4();
+        let server = ScriptedS3Server::start(visible_object_after_version_deletion_script(id));
+        let target = http_test_target(&server.endpoint);
+
+        let result = tauri::async_runtime::block_on(target.purge_snapshots_with_verification());
+        let requests = server.finish();
+
+        assert_eq!(
+            result.unwrap(),
+            BackupPurgeOutcome::Unverified {
+                removed_versions: 1,
+            }
+        );
+        assert_eq!(requests.len(), 4);
+        assert!(requests[0].contains("versions="));
+        assert!(requests[1].starts_with("DELETE "));
+        assert!(requests[2].contains("versions="));
+        assert!(requests[3].contains("list-type=2"));
     }
 
     #[test]
