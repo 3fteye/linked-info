@@ -80,6 +80,17 @@ export interface DeleteAllOffsiteBackupsOutcome {
   error: string | null;
 }
 
+export type DeleteOffsiteBackupWarning =
+  | "offsite_backup_snapshot_deleted_proof_update_failed"
+  | null;
+
+export interface DeleteOffsiteBackupOutcome {
+  snapshotDeleted: true;
+  /** True only when the invalidated proof state was persisted locally. */
+  restoreDrillProofInvalidated: boolean;
+  error: DeleteOffsiteBackupWarning;
+}
+
 export type CommittedConfigWarning =
   | "offsite_backup_credential_cleanup_pending"
   | "offsite_backup_config_transaction_cleanup_pending"
@@ -123,7 +134,7 @@ export interface OffsiteBackupService {
     targetId: string,
     snapshotId: string,
     authorization: string,
-  ): Promise<void>;
+  ): Promise<DeleteOffsiteBackupOutcome>;
   deleteAllAndRemoveTarget(
     targetId: string,
     confirmationName: string,
@@ -195,7 +206,7 @@ export const tauriOffsiteBackupService: OffsiteBackupService = {
     );
   },
   deleteSnapshot(targetId, snapshotId, authorization) {
-    return invoke<void>("delete_offsite_backup", {
+    return invoke<DeleteOffsiteBackupOutcome>("delete_offsite_backup", {
       targetId,
       snapshotId,
       authorization,

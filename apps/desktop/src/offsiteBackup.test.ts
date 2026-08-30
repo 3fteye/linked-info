@@ -132,4 +132,26 @@ describe("tauriOffsiteBackupService", () => {
       ),
     ).resolves.toEqual(outcome);
   });
+
+  it("returns committed snapshot deletion with a local proof warning", async () => {
+    const outcome = {
+      snapshotDeleted: true as const,
+      restoreDrillProofInvalidated: false,
+      error: "offsite_backup_snapshot_deleted_proof_update_failed" as const,
+    };
+    invokeMock.mockResolvedValue(outcome);
+
+    await expect(
+      tauriOffsiteBackupService.deleteSnapshot(
+        "target-1",
+        "snapshot-1",
+        "one-time-authorization",
+      ),
+    ).resolves.toBe(outcome);
+    expect(invokeMock).toHaveBeenCalledWith("delete_offsite_backup", {
+      targetId: "target-1",
+      snapshotId: "snapshot-1",
+      authorization: "one-time-authorization",
+    });
+  });
 });

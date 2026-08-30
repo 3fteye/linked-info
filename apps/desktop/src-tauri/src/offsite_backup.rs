@@ -303,6 +303,15 @@ pub struct DeleteAllOffsiteBackupsOutcome {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct DeleteOffsiteBackupOutcome {
+    snapshot_deleted: bool,
+    /// True only when the invalidated proof state was persisted locally.
+    restore_drill_proof_invalidated: bool,
+    error: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RemoveOffsiteBackupTargetOutcome {
     target_removed: bool,
     error: Option<String>,
@@ -438,6 +447,19 @@ fn committed_delete_all_outcome(
     }
 }
 
+fn committed_snapshot_deletion_outcome(
+    was_restore_drill_proof: bool,
+    proof_update: Result<(), String>,
+) -> DeleteOffsiteBackupOutcome {
+    let proof_update_succeeded = proof_update.is_ok();
+    DeleteOffsiteBackupOutcome {
+        snapshot_deleted: true,
+        restore_drill_proof_invalidated: was_restore_drill_proof && proof_update_succeeded,
+        error: (was_restore_drill_proof && !proof_update_succeeded)
+            .then(|| "offsite_backup_snapshot_deleted_proof_update_failed".to_owned()),
+    }
+}
+
 fn default_automatic_interval_hours() -> u32 {
     DEFAULT_AUTOMATIC_INTERVAL_HOURS
 }
@@ -537,6 +559,7 @@ pub async fn update_offsite_backup_retention_settings(
     max_age_days: u32,
     authorization: String,
 ) -> Result<BackupTargetSummary, String> {
+    let _claim = TargetOperationClaim::acquire(&state, target_id)?;
     let permit = vault_state.consume_sensitive_authorization(
         SensitiveOperation::BackupRetentionChange,
         &authorization,
@@ -625,27 +648,23 @@ pub async fn run_due_automatic_offsite_backups(
         .targets
         .into_iter()
         .filter(|target| automatic_backup_due(target, now))
-        .filter(|target| claim_automatic_upload(&state, target.id))
+        .filter_map(|target| {
+            TargetOperationClaim::acquire(&state, target.id)
+                .ok()
+                .map(|claim| (target, claim))
+        })
         .collect::<Vec<_>>();
     if candidates.is_empty() {
         ensure_workspace_access(&app, &vault_state, permit)?;
         return Ok(Vec::new());
     }
 
-    let encrypted = match encrypt_offsite_workspace_snapshot(&app, &vault_state, contents).await {
-        Ok(encrypted) => encrypted,
-        Err(error) => {
-            for candidate in &candidates {
-                release_automatic_upload(&state, candidate.id);
-            }
-            return Err(error);
-        }
-    };
+    let encrypted = encrypt_offsite_workspace_snapshot(&app, &vault_state, contents).await?;
     ensure_workspace_access(&app, &vault_state, permit)?;
     let snapshot = BackupSnapshot::new(Uuid::new_v4(), now, encrypted.into_bytes())
         .map_err(|_| "offsite_backup_invalid_snapshot".to_owned())?;
     let mut outcomes = Vec::with_capacity(candidates.len());
-    for candidate in candidates {
+    for (candidate, _claim) in candidates {
         let result = run_automatic_upload(
             &app,
             &state,
@@ -655,7 +674,6 @@ pub async fn run_due_automatic_offsite_backups(
             snapshot.clone(),
         )
         .await;
-        release_automatic_upload(&state, candidate.id);
         outcomes.push(result);
     }
     ensure_workspace_access(&app, &vault_state, permit)?;
@@ -1042,7 +1060,7 @@ pub async fn delete_offsite_backup(
     target_id: Uuid,
     snapshot_id: Uuid,
     authorization: String,
-) -> Result<(), String> {
+) -> Result<DeleteOffsiteBackupOutcome, String> {
     let _claim = TargetOperationClaim::acquire(&backup_state, target_id)?;
     let permit = vault_state.consume_sensitive_authorization(
         SensitiveOperation::BackupSnapshotDelete,
@@ -1065,16 +1083,20 @@ pub async fn delete_offsite_backup(
             return Err("offsite_backup_snapshot_delete_unverified".to_owned());
         }
     }
-    ensure_workspace_access(&app, &vault_state, Some(permit))?;
-    update_target_status(&app, &backup_state, target_id, move |config| {
-        if config.last_restore_test_snapshot_id == Some(snapshot_id) {
-            config.last_restore_test_snapshot_id = None;
-            config.last_restore_test_at_ms = None;
-        }
+    let was_restore_drill_proof = config.last_restore_test_snapshot_id == Some(snapshot_id);
+    let proof_update = if was_restore_drill_proof {
+        update_target_status(&app, &backup_state, target_id, move |config| {
+            record_snapshot_deleted(config, snapshot_id);
+            Ok(())
+        })
+        .await
+    } else {
         Ok(())
-    })
-    .await?;
-    ensure_workspace_access(&app, &vault_state, Some(permit))
+    };
+    Ok(committed_snapshot_deletion_outcome(
+        was_restore_drill_proof,
+        proof_update,
+    ))
 }
 
 #[tauri::command]
@@ -1238,6 +1260,7 @@ pub async fn test_offsite_backup_restore(
     snapshot_id: Uuid,
     password: String,
 ) -> Result<BackupTargetSummary, String> {
+    let _claim = TargetOperationClaim::acquire(&backup_state, target_id)?;
     let permit = begin_workspace_access(&app, &vault_state)?
         .ok_or_else(|| "workspace_vault_not_configured".to_owned())?;
     let config = find_target(&app, &backup_state, target_id).await?;
@@ -1456,6 +1479,14 @@ fn reset_remote_target_status(target: &mut BackupTargetConfig) {
     target.last_retention_error = None;
 }
 
+fn record_snapshot_deleted(target: &mut BackupTargetConfig, snapshot_id: Uuid) {
+    if target.last_restore_test_snapshot_id == Some(snapshot_id) {
+        target.last_restore_test_at_ms = None;
+        target.last_restore_test_snapshot_id = None;
+        target.retention_enabled = false;
+    }
+}
+
 fn remote_target_location_changed(
     target: &BackupTargetConfig,
     endpoint: &str,
@@ -1467,20 +1498,6 @@ fn remote_target_location_changed(
         || target.region.as_deref() != Some(region)
         || target.bucket.as_deref() != Some(bucket)
         || target.prefix.as_deref() != Some(prefix)
-}
-
-fn claim_automatic_upload(state: &OffsiteBackupState, target_id: Uuid) -> bool {
-    state
-        .automatic_uploads
-        .lock()
-        .map(|mut uploads| uploads.insert(target_id))
-        .unwrap_or(false)
-}
-
-fn release_automatic_upload(state: &OffsiteBackupState, target_id: Uuid) {
-    if let Ok(mut uploads) = state.automatic_uploads.lock() {
-        uploads.remove(&target_id);
-    }
 }
 
 async fn run_automatic_upload(
@@ -1580,6 +1597,7 @@ async fn run_retention_cleanup(
             ensure_workspace_access(app, vault_state, permit)
         })
         .await?;
+        ensure_retention_proof_present(&config, &snapshots)?;
         let now = current_time_milliseconds()?;
         let candidates = retention_candidates(&config, snapshots, now);
         for snapshot in candidates {
@@ -1646,6 +1664,22 @@ fn retention_candidates(
         })
         .map(|(_, snapshot)| snapshot)
         .collect()
+}
+
+fn ensure_retention_proof_present(
+    config: &BackupTargetConfig,
+    snapshots: &[BackupSnapshotMetadata],
+) -> Result<(), String> {
+    ensure_retention_enable_allowed(config, true)?;
+    if config.last_restore_test_snapshot_id.is_some_and(|proof_id| {
+        snapshots
+            .iter()
+            .any(|snapshot| snapshot.id == proof_id)
+    }) {
+        Ok(())
+    } else {
+        Err("offsite_backup_retention_requires_new_restore_drill".to_owned())
+    }
 }
 
 async fn read_config_locked(
@@ -2187,8 +2221,13 @@ fn ensure_retention_enable_allowed(
     enabled: bool,
 ) -> Result<(), String> {
     if enabled
-        && target.last_restore_test_at_ms.is_some()
-        && target.last_restore_test_snapshot_id.is_none()
+        && !matches!(
+            (
+                target.last_restore_test_at_ms,
+                target.last_restore_test_snapshot_id,
+            ),
+            (Some(_), Some(_))
+        )
     {
         Err("offsite_backup_retention_requires_new_restore_drill".to_owned())
     } else {
@@ -2447,6 +2486,28 @@ mod tests {
     }
 
     #[test]
+    fn committed_snapshot_deletion_keeps_remote_success_when_proof_update_fails() {
+        let ordinary = committed_snapshot_deletion_outcome(false, Ok(()));
+        assert!(ordinary.snapshot_deleted);
+        assert!(!ordinary.restore_drill_proof_invalidated);
+        assert_eq!(ordinary.error, None);
+
+        let proof_updated = committed_snapshot_deletion_outcome(true, Ok(()));
+        assert!(proof_updated.snapshot_deleted);
+        assert!(proof_updated.restore_drill_proof_invalidated);
+        assert_eq!(proof_updated.error, None);
+
+        let proof_update_failed =
+            committed_snapshot_deletion_outcome(true, Err("injected write failure".to_owned()));
+        assert!(proof_update_failed.snapshot_deleted);
+        assert!(!proof_update_failed.restore_drill_proof_invalidated);
+        assert_eq!(
+            proof_update_failed.error.as_deref(),
+            Some("offsite_backup_snapshot_deleted_proof_update_failed")
+        );
+    }
+
+    #[test]
     fn credential_cleanup_classifies_post_commit_keyring_failures() {
         assert_eq!(
             classify_target_credential_cleanup(false, || Ok(())),
@@ -2560,6 +2621,23 @@ mod tests {
     }
 
     #[test]
+    fn target_operation_claim_blocks_the_same_target_until_drop() {
+        let state = OffsiteBackupState::default();
+        let target_id = Uuid::new_v4();
+        let claim = TargetOperationClaim::acquire(&state, target_id).unwrap();
+
+        assert_eq!(
+            TargetOperationClaim::acquire(&state, target_id)
+                .err()
+                .as_deref(),
+            Some("offsite_backup_target_busy")
+        );
+        assert!(TargetOperationClaim::acquire(&state, Uuid::new_v4()).is_ok());
+        drop(claim);
+        assert!(TargetOperationClaim::acquire(&state, target_id).is_ok());
+    }
+
+    #[test]
     fn authenticated_config_rejects_tampered_endpoints() {
         let key = [7_u8; CONFIG_AUTH_KEY_BYTES];
         let config = OffsiteBackupConfig {
@@ -2587,10 +2665,18 @@ mod tests {
     }
 
     #[test]
-    fn restore_drill_without_snapshot_id_requires_revalidation_before_retention_is_enabled() {
+    fn legacy_restore_drill_without_snapshot_id_requires_revalidation_before_retention_is_enabled()
+    {
         let mut target = s3_target("linked-info/v1");
         target.last_restore_test_at_ms = Some(42);
 
+        assert!(
+            validate_config(&OffsiteBackupConfig {
+                targets: vec![target.clone()],
+                ..OffsiteBackupConfig::default()
+            })
+            .is_ok()
+        );
         assert_eq!(ensure_retention_enable_allowed(&target, false), Ok(()));
         assert_eq!(
             ensure_retention_enable_allowed(&target, true),
@@ -2691,6 +2777,30 @@ mod tests {
         assert!(!target.retention_enabled);
         assert_eq!(target.last_retention_cleanup_at_ms, None);
         assert_eq!(target.last_retention_error, None);
+        assert_eq!(ensure_retention_enable_allowed(&target, false), Ok(()));
+        assert_eq!(
+            ensure_retention_enable_allowed(&target, true),
+            Err("offsite_backup_retention_requires_new_restore_drill".to_owned())
+        );
+    }
+
+    #[test]
+    fn deleting_the_restore_tested_snapshot_clears_proof_and_disables_retention() {
+        let proof_id = Uuid::new_v4();
+        let mut target = s3_target("linked-info/v1");
+        target.last_restore_test_at_ms = Some(12);
+        target.last_restore_test_snapshot_id = Some(proof_id);
+        target.retention_enabled = true;
+
+        record_snapshot_deleted(&mut target, Uuid::new_v4());
+        assert_eq!(target.last_restore_test_at_ms, Some(12));
+        assert_eq!(target.last_restore_test_snapshot_id, Some(proof_id));
+        assert!(target.retention_enabled);
+
+        record_snapshot_deleted(&mut target, proof_id);
+        assert_eq!(target.last_restore_test_at_ms, None);
+        assert_eq!(target.last_restore_test_snapshot_id, None);
+        assert!(!target.retention_enabled);
     }
 
     #[test]
@@ -2758,6 +2868,24 @@ mod tests {
                 .map(|snapshot| snapshot.id)
                 .collect::<Vec<_>>(),
             vec![old]
+        );
+    }
+
+    #[test]
+    fn retention_requires_the_bound_proof_snapshot_in_the_complete_remote_listing() {
+        let now = 200 * 24 * 60 * 60 * 1_000;
+        let proof_id = Uuid::new_v4();
+        let mut target = s3_target("linked-info/v1");
+        target.last_restore_test_at_ms = Some(now - 1);
+        target.last_restore_test_snapshot_id = Some(proof_id);
+
+        assert_eq!(
+            ensure_retention_proof_present(&target, &[snapshot(Uuid::new_v4(), now)]),
+            Err("offsite_backup_retention_requires_new_restore_drill".to_owned())
+        );
+        assert_eq!(
+            ensure_retention_proof_present(&target, &[snapshot(proof_id, now - 1)]),
+            Ok(())
         );
     }
 

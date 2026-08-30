@@ -2125,14 +2125,82 @@ function App({
         ) {
           const action = pendingOffsiteSensitiveAction;
           if (action.kind === "deleteSnapshot") {
-            await offsiteBackup.deleteSnapshot(
+            const result = await offsiteBackup.deleteSnapshot(
               action.targetId,
               action.snapshotId,
               authorization,
             );
-            setOffsitePage(await offsiteBackup.list(action.targetId));
-            setOffsiteTargets(await offsiteBackup.inspectTargets());
-            showAppNotice(t("offsiteBackup.snapshotDeleted"));
+            setOffsitePage((page) =>
+              page === null
+                ? null
+                : {
+                    ...page,
+                    items: page.items.filter(
+                      (snapshot) => snapshot.id !== action.snapshotId,
+                    ),
+                  },
+            );
+            if (result.restoreDrillProofInvalidated) {
+              setOffsiteTargets((targets) =>
+                targets.map((target) =>
+                  target.id === action.targetId
+                    ? {
+                        ...target,
+                        lastRestoreTestAtMs: null,
+                        retentionEnabled: false,
+                      }
+                    : target,
+                ),
+              );
+            }
+            const [pageRefresh, targetsRefresh] = await Promise.allSettled([
+              offsiteBackup.list(action.targetId),
+              offsiteBackup.inspectTargets(),
+            ]);
+            if (pageRefresh.status === "fulfilled") {
+              setOffsitePage({
+                ...pageRefresh.value,
+                items: pageRefresh.value.items.filter(
+                  (snapshot) => snapshot.id !== action.snapshotId,
+                ),
+              });
+            }
+            if (targetsRefresh.status === "fulfilled") {
+              setOffsiteTargets(
+                result.restoreDrillProofInvalidated
+                  ? targetsRefresh.value.map((target) =>
+                      target.id === action.targetId
+                        ? {
+                            ...target,
+                            lastRestoreTestAtMs: null,
+                            retentionEnabled: false,
+                          }
+                        : target,
+                    )
+                  : targetsRefresh.value,
+              );
+            }
+            const refreshFailure =
+              pageRefresh.status === "rejected"
+                ? pageRefresh.reason
+                : targetsRefresh.status === "rejected"
+                  ? targetsRefresh.reason
+                  : null;
+            if (refreshFailure !== null) {
+              setOffsiteMessage(
+                t("offsiteBackup.errors.refreshAfterDelete", {
+                  reason: localizedOffsiteError(errorReason(refreshFailure), t),
+                }),
+              );
+            }
+            showAppNotice(
+              result.error ===
+                "offsite_backup_snapshot_deleted_proof_update_failed"
+                ? t("offsiteBackup.snapshotDeletedProofUpdateFailed")
+                : result.restoreDrillProofInvalidated
+                  ? t("offsiteBackup.snapshotDeletedProofInvalidated")
+                  : t("offsiteBackup.snapshotDeleted"),
+            );
           } else if (action.kind === "removeTarget") {
             const result = await offsiteBackup.removeTarget(
               action.targetId,
