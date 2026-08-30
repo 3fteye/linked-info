@@ -448,10 +448,7 @@ impl WorkspaceVaultState {
 
     fn lock_data_key_for_transition(
         &self,
-    ) -> Result<
-        std::sync::MutexGuard<'_, Option<Zeroizing<[u8; DATA_KEY_BYTES]>>>,
-        String,
-    > {
+    ) -> Result<std::sync::MutexGuard<'_, Option<Zeroizing<[u8; DATA_KEY_BYTES]>>>, String> {
         match self.data_key.lock() {
             Ok(slot) => Ok(slot),
             Err(_) => {
