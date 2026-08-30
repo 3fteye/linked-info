@@ -3841,10 +3841,7 @@ function App({
     if (bookmark === undefined) {
       return;
     }
-    const canvas = current.view.canvases.find((item) => item.id === bookmark.canvasId);
-    if (canvas === undefined) {
-      return;
-    }
+    const canvas = activeWorkspaceCanvas(current);
     const viewport = canvas.viewport ?? { x: 0, y: 0, zoom: 1 };
     updateWorkspace(
       (workspace) => ({
@@ -3853,7 +3850,13 @@ function App({
           ...workspace.view,
           bookmarks: (workspace.view.bookmarks ?? []).map((item) =>
             item.id === bookmarkId
-              ? { ...item, x: viewport.x, y: viewport.y, zoom: viewport.zoom }
+              ? {
+                  ...item,
+                  canvasId: canvas.id,
+                  x: viewport.x,
+                  y: viewport.y,
+                  zoom: viewport.zoom,
+                }
               : item,
           ),
         },

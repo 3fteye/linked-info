@@ -28,6 +28,12 @@ interface SyntheticCanvas {
   viewport?: SyntheticViewport | null;
 }
 
+interface SyntheticBookmark extends SyntheticViewport {
+  canvasId: string;
+  id: string;
+  name: string;
+}
+
 const workspaceStorageKey = "linked-info.workspace.v1";
 const workspaceRecoveryStorageKey = "linked-info.workspace.recovery.v1";
 
@@ -113,9 +119,16 @@ async function openSyntheticMultiCanvasWorkspace(
   nodes: SyntheticNode[],
   canvases: SyntheticCanvas[],
   activeCanvasId: string,
+  bookmarks: SyntheticBookmark[] = [],
 ) {
   await page.addInitScript(
-    ({ storageKey, syntheticActiveCanvasId, syntheticCanvases, syntheticNodes }) => {
+    ({
+      storageKey,
+      syntheticActiveCanvasId,
+      syntheticBookmarks,
+      syntheticCanvases,
+      syntheticNodes,
+    }) => {
       const seedMarker = `${storageKey}.playwright-multi-canvas-seeded`;
       if (sessionStorage.getItem(seedMarker) === "true") {
         return;
@@ -125,7 +138,7 @@ async function openSyntheticMultiCanvasWorkspace(
       localStorage.setItem(
         storageKey,
         JSON.stringify({
-          version: 4,
+          version: 5,
           nodes: syntheticNodes.map((node) => ({
             id: node.id,
             name: node.name,
@@ -152,6 +165,7 @@ async function openSyntheticMultiCanvasWorkspace(
               }),
               viewport: canvas.viewport ?? null,
             })),
+            bookmarks: syntheticBookmarks,
             contentProcessorByNodeId: {},
             extensionMetadata: {},
           },
@@ -162,6 +176,7 @@ async function openSyntheticMultiCanvasWorkspace(
     {
       storageKey: workspaceStorageKey,
       syntheticActiveCanvasId: activeCanvasId,
+      syntheticBookmarks: bookmarks,
       syntheticCanvases: canvases,
       syntheticNodes: nodes,
     },
@@ -1647,6 +1662,60 @@ test("position bookmarks restore a canvas viewport and survive workspace persist
   await expect
     .poll(async () => (await storedWorkspace(page))?.view?.bookmarks ?? [])
     .toEqual([]);
+});
+
+test("updating a bookmark from another canvas uses the active canvas viewport", async ({
+  page,
+}) => {
+  const [syntheticNode] = gridNodes(1, 1);
+  const firstCanvasId = syntheticId(421);
+  const secondCanvasId = syntheticId(422);
+  const bookmarkId = syntheticId(423);
+  const activeViewport = { x: -240, y: 160, zoom: 1.35 };
+  await openSyntheticMultiCanvasWorkspace(
+    page,
+    [syntheticNode],
+    [
+      {
+        id: firstCanvasId,
+        name: "First",
+        nodeIds: [syntheticNode.id],
+        viewport: { x: 100, y: 80, zoom: 0.8 },
+      },
+      {
+        id: secondCanvasId,
+        name: "Second",
+        nodeIds: [syntheticNode.id],
+        viewport: activeViewport,
+      },
+    ],
+    secondCanvasId,
+    [
+      {
+        id: bookmarkId,
+        name: "Transfer focus",
+        canvasId: firstCanvasId,
+        x: 100,
+        y: 80,
+        zoom: 0.8,
+      },
+    ],
+  );
+  await expect(page.getByTestId("canvas-select")).toHaveValue(secondCanvasId);
+
+  await page.getByTestId("canvas-bookmarks-toggle").click();
+  const popover = page.getByTestId("canvas-bookmarks-popover");
+  await expect(popover.getByTestId("canvas-bookmark-item")).toHaveCount(1);
+  await popover.getByTestId("canvas-bookmark-update").click();
+
+  await expect
+    .poll(async () => (await storedWorkspace(page))?.view?.bookmarks?.[0])
+    .toEqual({
+      id: bookmarkId,
+      name: "Transfer focus",
+      canvasId: secondCanvasId,
+      ...activeViewport,
+    });
 });
 
 test("document import requires and records an explicit canvas position", async ({

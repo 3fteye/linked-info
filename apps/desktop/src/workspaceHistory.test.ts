@@ -113,6 +113,36 @@ describe("workspace history", () => {
     ).toEqual(after.view.bookmarks);
   });
 
+  it("undoes the first bookmark when the source workspace omitted bookmarks", () => {
+    const before = captureWorkspaceHistory(workspace());
+    const afterWorkspace = structuredClone(workspace());
+    afterWorkspace.view.bookmarks = [
+      {
+        id: "22222222-2222-4222-8222-222222222222",
+        name: "First focus",
+        canvasId: defaultCanvasId,
+        x: 40,
+        y: 50,
+        zoom: 1.1,
+      },
+    ];
+    const after = captureWorkspaceHistory(afterWorkspace);
+
+    expect(before.view.bookmarks).toEqual([]);
+    const timeline = appendWorkspaceHistory(
+      emptyWorkspaceHistoryTimeline(),
+      before,
+      after,
+      100,
+    );
+    const undone = stepWorkspaceHistoryBackward(timeline);
+
+    expect(undone?.state.view.bookmarks).toEqual([]);
+    expect(
+      restoreWorkspaceHistory(undone!.state, afterWorkspace.view).view.bookmarks,
+    ).toEqual([]);
+  });
+
   it("keeps unknown extension metadata inside the same undo transaction", () => {
     const before = captureWorkspaceHistory(workspace());
     const after = structuredClone(before);

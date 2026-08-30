@@ -43,9 +43,7 @@ export function captureWorkspaceHistory(
       canvases: workspace.view.canvases,
       contentProcessorByNodeId: workspace.view.contentProcessorByNodeId,
       extensionMetadata: workspace.view.extensionMetadata,
-      ...(workspace.view.bookmarks === undefined
-        ? {}
-        : { bookmarks: workspace.view.bookmarks }),
+      bookmarks: workspace.view.bookmarks ?? [],
     },
   };
 }
