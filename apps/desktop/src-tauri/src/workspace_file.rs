@@ -1377,16 +1377,22 @@ pub async fn rotate_workspace_data_key(
     // Revoke plaintext authority before touching any derived-data cleanup. A
     // cache purge may block on SQLite; it must not leave the old session live
     // while the rotation transaction is getting ready.
-    let extension_runtime = app.state::<crate::extension_runtime::ExtensionRuntimeState>();
-    extension_runtime.revoke_all(state.next_access_generation().unwrap_or(u64::MAX));
-    let revoke_result = state.revoke_access();
-    extension_runtime.revoke_all(state.access_generation().load(Ordering::Acquire));
-    let _ = app.emit(
-        WORKSPACE_LOCKED_EVENT,
-        "workspace_data_key_rotation_started",
+    let revoke_result = run_workspace_lock_transition(
+        || {
+            let extension_runtime =
+                app.state::<crate::extension_runtime::ExtensionRuntimeState>();
+            extension_runtime.revoke_all(state.next_access_generation().unwrap_or(u64::MAX));
+            let revoke_result = state.revoke_access();
+            extension_runtime.revoke_all(state.access_generation().load(Ordering::Acquire));
+            let _ = app.emit(
+                WORKSPACE_LOCKED_EVENT,
+                "workspace_data_key_rotation_started",
+            );
+            revoke_result
+        },
+        || crate::secret_clipboard::clear_active(&app),
+        || cleanup_locked_workspace(&app),
     );
-    cleanup_locked_workspace(&app);
-    crate::secret_clipboard::clear_active(&app);
     let purge_result =
         crate::smart_reference_cache::purge(&app, &smart_reference_cache_state).await;
     let preparation_result = revoke_result.map(|_| ()).and(purge_result);
@@ -2244,11 +2250,23 @@ pub fn cleanup_locked_workspace(app: &AppHandle) {
     app.state::<crate::llm::LlmState>().shutdown();
 }
 
+pub(crate) fn run_workspace_lock_transition<T>(
+    revoke: impl FnOnce() -> T,
+    clear_secret_clipboard: impl FnOnce(),
+    cleanup_plaintext_runtimes: impl FnOnce(),
+) -> T {
+    let result = revoke();
+    clear_secret_clipboard();
+    cleanup_plaintext_runtimes();
+    result
+}
+
 pub fn lock_workspace_runtime(app: &AppHandle, reason: &str) -> bool {
-    let was_unlocked = revoke_workspace_access(app, reason);
-    cleanup_locked_workspace(app);
-    crate::secret_clipboard::clear_active(app);
-    was_unlocked
+    run_workspace_lock_transition(
+        || revoke_workspace_access(app, reason),
+        || crate::secret_clipboard::clear_active(app),
+        || cleanup_locked_workspace(app),
+    )
 }
 
 fn emit_terminal_lock_event_if_needed(event_already_emitted: bool, emit: impl FnOnce()) {
@@ -4596,7 +4614,7 @@ fn sync_parent_directory(_parent: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicBool, AtomicUsize};
 
@@ -4952,6 +4970,30 @@ mod tests {
             "workspace_vault_session_expired"
         );
         assert!(!state.shutdown());
+    }
+
+    #[test]
+    fn workspace_lock_transition_clears_secret_clipboard_before_runtime_cleanup() {
+        let order = RefCell::new(Vec::new());
+
+        let result = run_workspace_lock_transition(
+            || {
+                order.borrow_mut().push("revoke");
+                "revoked"
+            },
+            || order.borrow_mut().push("clear_secret_clipboard"),
+            || order.borrow_mut().push("cleanup_plaintext_runtimes"),
+        );
+
+        assert_eq!(result, "revoked");
+        assert_eq!(
+            order.into_inner(),
+            [
+                "revoke",
+                "clear_secret_clipboard",
+                "cleanup_plaintext_runtimes"
+            ]
+        );
     }
 
     #[test]
