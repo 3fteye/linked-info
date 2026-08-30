@@ -913,10 +913,7 @@ pub async fn update_s3_backup_target(
         } else {
             config.targets[index] = updated.clone();
             write_config(&path, &config)?;
-            Ok((
-                target_summary(&updated)?,
-                TargetCredentialCleanup::Complete,
-            ))
+            Ok((target_summary(&updated)?, TargetCredentialCleanup::Complete))
         }
     })
     .await
@@ -2314,10 +2311,8 @@ mod tests {
         );
 
         let target = target_summary(&s3_target("linked-info/v1")).unwrap();
-        let update = committed_target_update_outcome(
-            target.clone(),
-            TargetCredentialCleanup::Pending,
-        );
+        let update =
+            committed_target_update_outcome(target.clone(), TargetCredentialCleanup::Pending);
         assert_eq!(update.target.id, target.id);
         assert_eq!(
             update.error.as_deref(),
