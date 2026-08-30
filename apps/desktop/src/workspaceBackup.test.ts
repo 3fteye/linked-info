@@ -79,6 +79,20 @@ describe("workspace backup", () => {
     expect(parsed).toMatchObject({ ok: true, workspace });
   });
 
+  it("rejects version 5 exports that omit the required bookmarks field", () => {
+    const envelope = JSON.parse(
+      serializeWorkspaceExport(workspaceWithBookmark()),
+    ) as {
+      workspace: { view: { bookmarks?: unknown[] } };
+    };
+    delete envelope.workspace.view.bookmarks;
+
+    expect(parseWorkspaceExport(JSON.stringify(envelope))).toEqual({
+      ok: false,
+      reason: "invalidWorkspace",
+    });
+  });
+
   it("migrates version 4 exports without inventing position bookmarks", () => {
     const workspace = validWorkspace();
     const result = parseWorkspaceExport(

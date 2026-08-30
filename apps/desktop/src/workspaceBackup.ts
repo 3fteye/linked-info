@@ -81,6 +81,17 @@ export function parseWorkspaceExport(text: string): WorkspaceImportResult {
   ) {
     return { ok: false, reason: "invalidFormat" };
   }
+  if (
+    document.version === exportVersion &&
+    (!isRecord(document.workspace) ||
+      !isRecord(document.workspace.view) ||
+      !Object.prototype.hasOwnProperty.call(
+        document.workspace.view,
+        "bookmarks",
+      ))
+  ) {
+    return { ok: false, reason: "invalidWorkspace" };
+  }
 
   const workspace =
     document.version === 1
