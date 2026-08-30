@@ -294,6 +294,61 @@ pub struct DeleteAllOffsiteBackupsOutcome {
     error: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoveOffsiteBackupTargetOutcome {
+    target_removed: bool,
+    error: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateS3BackupTargetOutcome {
+    target: BackupTargetSummary,
+    error: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TargetCredentialCleanup {
+    Complete,
+    Pending,
+}
+
+fn credential_cleanup_warning(cleanup: TargetCredentialCleanup) -> Option<String> {
+    (cleanup == TargetCredentialCleanup::Pending)
+        .then(|| "offsite_backup_credential_cleanup_pending".to_owned())
+}
+
+fn classify_target_credential_cleanup(
+    credential_referenced_elsewhere: bool,
+    delete_stale_credential: impl FnOnce() -> Result<(), String>,
+) -> TargetCredentialCleanup {
+    if credential_referenced_elsewhere || delete_stale_credential().is_ok() {
+        TargetCredentialCleanup::Complete
+    } else {
+        TargetCredentialCleanup::Pending
+    }
+}
+
+fn committed_target_removal_outcome(
+    cleanup: TargetCredentialCleanup,
+) -> RemoveOffsiteBackupTargetOutcome {
+    RemoveOffsiteBackupTargetOutcome {
+        target_removed: true,
+        error: credential_cleanup_warning(cleanup),
+    }
+}
+
+fn committed_target_update_outcome(
+    target: BackupTargetSummary,
+    cleanup: TargetCredentialCleanup,
+) -> UpdateS3BackupTargetOutcome {
+    UpdateS3BackupTargetOutcome {
+        target,
+        error: credential_cleanup_warning(cleanup),
+    }
+}
+
 fn default_automatic_interval_hours() -> u32 {
     DEFAULT_AUTOMATIC_INTERVAL_HOURS
 }
@@ -708,7 +763,8 @@ pub async fn configure_s3_backup_target(
     .await
     .map_err(|error| error.to_string())?;
     write_result?;
-    ensure_workspace_access(&app, &vault_state, Some(permit))?;
+    // Configuration is committed. A concurrent lock must not turn this into a
+    // false pre-commit error; the returned summary contains no credentials.
     Ok(summary)
 }
 
@@ -730,7 +786,7 @@ pub async fn update_s3_backup_target(
     secret_access_key: String,
     session_token: Option<String>,
     authorization: String,
-) -> Result<BackupTargetSummary, String> {
+) -> Result<UpdateS3BackupTargetOutcome, String> {
     let _claim = TargetOperationClaim::acquire(&backup_state, target_id)?;
     let permit = vault_state
         .consume_sensitive_authorization(SensitiveOperation::BackupTargetChange, &authorization)?;
@@ -843,26 +899,32 @@ pub async fn update_s3_backup_target(
             config.targets[index] = updated.clone();
             write_config_unchecked(&path, &config)?;
 
-            let referenced_elsewhere =
-                config_references_credential(&config, target_id, &previous_credential_id);
-            if !referenced_elsewhere && delete_credential(&previous_credential_id).is_err() {
+            let cleanup = classify_target_credential_cleanup(
+                config_references_credential(&config, target_id, &previous_credential_id),
+                || delete_credential(&previous_credential_id),
+            );
+            if cleanup == TargetCredentialCleanup::Pending {
                 // The new configuration is committed. Keep the journal so a
                 // later read can retry deleting the old keyring entry.
-                return Err("offsite_backup_credential_cleanup_pending".to_owned());
+                return Ok((target_summary(&updated)?, cleanup));
             }
             let _ = clear_config_transaction(&transaction_path);
-            Ok(target_summary(&updated)?)
+            Ok((target_summary(&updated)?, cleanup))
         } else {
             config.targets[index] = updated.clone();
             write_config(&path, &config)?;
-            Ok(target_summary(&updated)?)
+            Ok((
+                target_summary(&updated)?,
+                TargetCredentialCleanup::Complete,
+            ))
         }
     })
     .await
     .map_err(|error| error.to_string())?;
-    let summary = write_result?;
-    ensure_workspace_access(&app, &vault_state, Some(permit))?;
-    Ok(summary)
+    let (summary, cleanup) = write_result?;
+    // The updated configuration is authoritative even if the session locks
+    // after the commit point. Never report it as an uncommitted failure.
+    Ok(committed_target_update_outcome(summary, cleanup))
 }
 
 #[tauri::command]
@@ -872,14 +934,16 @@ pub async fn remove_offsite_backup_target(
     vault_state: tauri::State<'_, WorkspaceVaultState>,
     target_id: Uuid,
     authorization: String,
-) -> Result<(), String> {
+) -> Result<RemoveOffsiteBackupTargetOutcome, String> {
     let _claim = TargetOperationClaim::acquire(&backup_state, target_id)?;
     let permit = vault_state
         .consume_sensitive_authorization(SensitiveOperation::BackupTargetChange, &authorization)?;
     let target = find_target(&app, &backup_state, target_id).await?;
     ensure_workspace_access(&app, &vault_state, Some(permit))?;
-    remove_target_config_and_credential(&app, &backup_state, &target, target_id).await?;
-    ensure_workspace_access(&app, &vault_state, Some(permit))
+    let cleanup =
+        remove_target_config_and_credential(&app, &backup_state, &target, target_id).await?;
+    // The target is already absent from the authenticated configuration.
+    Ok(committed_target_removal_outcome(cleanup))
 }
 
 #[tauri::command]
@@ -962,22 +1026,11 @@ pub async fn delete_all_offsite_backups_and_remove_target(
     };
     ensure_workspace_access(&app, &vault_state, Some(permit))?;
     let cleanup =
-        remove_target_config_and_credential(&app, &backup_state, &config, target_id).await;
-    ensure_workspace_access(&app, &vault_state, Some(permit))?;
-    if let Err(error) = cleanup {
-        if error == "offsite_backup_credential_cleanup_pending" {
-            return Ok(DeleteAllOffsiteBackupsOutcome {
-                deleted_version_count,
-                target_removed: true,
-                error: Some(error),
-            });
-        }
-        return Err(error);
-    }
+        remove_target_config_and_credential(&app, &backup_state, &config, target_id).await?;
     Ok(DeleteAllOffsiteBackupsOutcome {
         deleted_version_count,
         target_removed: true,
-        error: None,
+        error: credential_cleanup_warning(cleanup),
     })
 }
 
@@ -1213,7 +1266,7 @@ async fn remove_target_config_and_credential(
     state: &OffsiteBackupState,
     target: &BackupTargetConfig,
     target_id: Uuid,
-) -> Result<(), String> {
+) -> Result<TargetCredentialCleanup, String> {
     let app_for_write = app.clone();
     let config_lock = Arc::clone(&state.config_lock);
     let expected_credential_id = target.credential_id.clone();
@@ -1246,15 +1299,17 @@ async fn remove_target_config_and_credential(
         write_config_transaction(&transaction_path, &transaction)?;
         config.targets.retain(|item| item.id != target_id);
         write_config_unchecked(&path, &config)?;
-        let credential_referenced_elsewhere =
-            config_references_credential(&config, target_id, &current.credential_id);
-        if !credential_referenced_elsewhere && delete_credential(&current.credential_id).is_err() {
+        let cleanup = classify_target_credential_cleanup(
+            config_references_credential(&config, target_id, &current.credential_id),
+            || delete_credential(&current.credential_id),
+        );
+        if cleanup == TargetCredentialCleanup::Pending {
             // Removal of the target is already committed. Keep the journal
             // and let a later read retry keyring cleanup.
-            return Err("offsite_backup_credential_cleanup_pending".to_owned());
+            return Ok(cleanup);
         }
         let _ = clear_config_transaction(&transaction_path);
-        Ok(())
+        Ok(cleanup)
     })
     .await
     .map_err(|error| error.to_string())?;
@@ -1739,8 +1794,10 @@ fn credential_cleanup_is_complete(
     // A credential still used by another target is not stale.  Treating it as
     // already cleaned lets recovery discard the journal without deleting a
     // credential that remains in active use.
-    config_references_credential(config, excluded_target_id, credential_id)
-        || delete_credential(credential_id).is_ok()
+    classify_target_credential_cleanup(
+        config_references_credential(config, excluded_target_id, credential_id),
+        || delete_credential(credential_id),
+    ) == TargetCredentialCleanup::Complete
 }
 
 fn recover_config_transaction(
@@ -2241,6 +2298,53 @@ mod tests {
             target.id,
             &target.credential_id,
         ));
+    }
+
+    #[test]
+    fn committed_target_outcomes_keep_cleanup_failure_as_a_warning() {
+        let complete = committed_target_removal_outcome(TargetCredentialCleanup::Complete);
+        let pending = committed_target_removal_outcome(TargetCredentialCleanup::Pending);
+
+        assert!(complete.target_removed);
+        assert_eq!(complete.error, None);
+        assert!(pending.target_removed);
+        assert_eq!(
+            pending.error.as_deref(),
+            Some("offsite_backup_credential_cleanup_pending")
+        );
+
+        let target = target_summary(&s3_target("linked-info/v1")).unwrap();
+        let update = committed_target_update_outcome(
+            target.clone(),
+            TargetCredentialCleanup::Pending,
+        );
+        assert_eq!(update.target.id, target.id);
+        assert_eq!(
+            update.error.as_deref(),
+            Some("offsite_backup_credential_cleanup_pending")
+        );
+    }
+
+    #[test]
+    fn credential_cleanup_classifies_post_commit_keyring_failures() {
+        assert_eq!(
+            classify_target_credential_cleanup(false, || Ok(())),
+            TargetCredentialCleanup::Complete
+        );
+        assert_eq!(
+            classify_target_credential_cleanup(false, || Err("keyring unavailable".to_owned())),
+            TargetCredentialCleanup::Pending
+        );
+
+        let delete_called = std::cell::Cell::new(false);
+        assert_eq!(
+            classify_target_credential_cleanup(true, || {
+                delete_called.set(true);
+                Err("shared credential must not be deleted".to_owned())
+            }),
+            TargetCredentialCleanup::Complete
+        );
+        assert!(!delete_called.get());
     }
 
     fn s3_target(prefix: &str) -> BackupTargetConfig {

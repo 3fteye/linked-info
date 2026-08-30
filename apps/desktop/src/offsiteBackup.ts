@@ -80,6 +80,20 @@ export interface DeleteAllOffsiteBackupsOutcome {
   error: string | null;
 }
 
+export type CredentialCleanupWarning =
+  | "offsite_backup_credential_cleanup_pending"
+  | null;
+
+export interface RemoveOffsiteBackupTargetOutcome {
+  targetRemoved: true;
+  error: CredentialCleanupWarning;
+}
+
+export interface UpdateS3BackupTargetOutcome {
+  target: OffsiteBackupTarget;
+  error: CredentialCleanupWarning;
+}
+
 export interface OffsiteBackupService {
   readonly available: boolean;
   inspectTargets(): Promise<OffsiteBackupTarget[]>;
@@ -94,8 +108,11 @@ export interface OffsiteBackupService {
     s3Provider: S3ProviderTemplate;
     replaceCredentials: boolean;
     authorization: string;
-  }): Promise<OffsiteBackupTarget>;
-  removeTarget(targetId: string, authorization: string): Promise<void>;
+  }): Promise<UpdateS3BackupTargetOutcome>;
+  removeTarget(
+    targetId: string,
+    authorization: string,
+  ): Promise<RemoveOffsiteBackupTargetOutcome>;
   deleteSnapshot(
     targetId: string,
     snapshotId: string,
@@ -157,13 +174,16 @@ export const tauriOffsiteBackupService: OffsiteBackupService = {
     return invoke<OffsiteBackupTarget>("configure_s3_backup_target", input);
   },
   updateS3Target(input) {
-    return invoke<OffsiteBackupTarget>("update_s3_backup_target", input);
+    return invoke<UpdateS3BackupTargetOutcome>("update_s3_backup_target", input);
   },
   removeTarget(targetId, authorization) {
-    return invoke<void>("remove_offsite_backup_target", {
-      targetId,
-      authorization,
-    });
+    return invoke<RemoveOffsiteBackupTargetOutcome>(
+      "remove_offsite_backup_target",
+      {
+        targetId,
+        authorization,
+      },
+    );
   },
   deleteSnapshot(targetId, snapshotId, authorization) {
     return invoke<void>("delete_offsite_backup", {

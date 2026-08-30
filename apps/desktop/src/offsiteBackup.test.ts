@@ -17,7 +17,8 @@ describe("tauriOffsiteBackupService", () => {
 
   it("updates an existing target without changing its identity", async () => {
     const updated = { id: "target-1", name: "Backblaze B2" };
-    invokeMock.mockResolvedValue(updated);
+    const outcome = { target: updated, error: null };
+    invokeMock.mockResolvedValue(outcome);
     const input = {
       targetId: "target-1",
       name: "Backblaze B2",
@@ -34,14 +35,17 @@ describe("tauriOffsiteBackupService", () => {
     };
 
     await expect(tauriOffsiteBackupService.updateS3Target(input)).resolves.toBe(
-      updated,
+      outcome,
     );
     expect(invokeMock).toHaveBeenCalledOnce();
     expect(invokeMock).toHaveBeenCalledWith("update_s3_backup_target", input);
   });
 
   it("can update non-secret settings while retaining stored credentials", async () => {
-    invokeMock.mockResolvedValue({ id: "target-1" });
+    invokeMock.mockResolvedValue({
+      target: { id: "target-1" },
+      error: null,
+    });
     const input = {
       targetId: "target-1",
       name: "Renamed target",
@@ -57,8 +61,32 @@ describe("tauriOffsiteBackupService", () => {
       authorization: "one-time-authorization",
     };
 
-    await tauriOffsiteBackupService.updateS3Target(input);
+    await expect(
+      tauriOffsiteBackupService.updateS3Target(input),
+    ).resolves.toEqual({
+      target: { id: "target-1" },
+      error: null,
+    });
 
     expect(invokeMock).toHaveBeenCalledWith("update_s3_backup_target", input);
+  });
+
+  it("returns a committed target-removal warning without rejecting", async () => {
+    const outcome = {
+      targetRemoved: true,
+      error: "offsite_backup_credential_cleanup_pending",
+    };
+    invokeMock.mockResolvedValue(outcome);
+
+    await expect(
+      tauriOffsiteBackupService.removeTarget(
+        "target-1",
+        "one-time-authorization",
+      ),
+    ).resolves.toEqual(outcome);
+    expect(invokeMock).toHaveBeenCalledWith("remove_offsite_backup_target", {
+      targetId: "target-1",
+      authorization: "one-time-authorization",
+    });
   });
 });

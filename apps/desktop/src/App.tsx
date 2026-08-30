@@ -2073,14 +2073,19 @@ function App({
             sessionToken: pendingBackupTarget.sessionToken,
             authorization,
           };
-          const configured =
-            pendingBackupTarget.targetId === null
-              ? await offsiteBackup.configureS3Target(targetInput)
-              : await offsiteBackup.updateS3Target({
-                  ...targetInput,
-                  targetId: pendingBackupTarget.targetId,
-                  replaceCredentials: pendingBackupTarget.replaceCredentials,
-                });
+          let configured: OffsiteBackupTarget;
+          let updateError: string | null = null;
+          if (pendingBackupTarget.targetId === null) {
+            configured = await offsiteBackup.configureS3Target(targetInput);
+          } else {
+            const updateResult = await offsiteBackup.updateS3Target({
+              ...targetInput,
+              targetId: pendingBackupTarget.targetId,
+              replaceCredentials: pendingBackupTarget.replaceCredentials,
+            });
+            configured = updateResult.target;
+            updateError = updateResult.error;
+          }
           setOffsiteTargets((targets) =>
             pendingBackupTarget.targetId === null
               ? [...targets, configured]
@@ -2094,7 +2099,9 @@ function App({
           showAppNotice(
             pendingBackupTarget.targetId === null
               ? t("offsiteBackup.targetConnected")
-              : t("offsiteBackup.targetUpdated"),
+              : updateError === "offsite_backup_credential_cleanup_pending"
+                ? t("offsiteBackup.targetUpdatedCleanupPending")
+                : t("offsiteBackup.targetUpdated"),
           );
         } else if (
           securityDialog === "offsiteSensitive" &&
@@ -2111,15 +2118,26 @@ function App({
             setOffsiteTargets(await offsiteBackup.inspectTargets());
             showAppNotice(t("offsiteBackup.snapshotDeleted"));
           } else if (action.kind === "removeTarget") {
-            await offsiteBackup.removeTarget(action.targetId, authorization);
-            const targets = await offsiteBackup.inspectTargets();
-            setOffsiteTargets(targets);
-            setSelectedOffsiteTargetId(targets[0]?.id ?? null);
+            const result = await offsiteBackup.removeTarget(
+              action.targetId,
+              authorization,
+            );
+            const remainingTargets = offsiteTargets.filter(
+              (target) => target.id !== action.targetId,
+            );
+            setOffsiteTargets((targets) =>
+              targets.filter((target) => target.id !== action.targetId),
+            );
+            setSelectedOffsiteTargetId(remainingTargets[0]?.id ?? null);
             setOffsitePage(null);
             if (editingOffsiteTargetId === action.targetId) {
               cancelOffsiteTargetEdit();
             }
-            showAppNotice(t("offsiteBackup.targetRemoved"));
+            showAppNotice(
+              result.error === "offsite_backup_credential_cleanup_pending"
+                ? t("offsiteBackup.targetRemovedCleanupPending")
+                : t("offsiteBackup.targetRemoved"),
+            );
           } else if (action.kind === "destroyTarget") {
             const result = await offsiteBackup.deleteAllAndRemoveTarget(
               action.targetId,
@@ -2137,9 +2155,13 @@ function App({
                 }),
               );
             } else {
-              const targets = await offsiteBackup.inspectTargets();
-              setOffsiteTargets(targets);
-              setSelectedOffsiteTargetId(targets[0]?.id ?? null);
+              const remainingTargets = offsiteTargets.filter(
+                (target) => target.id !== action.targetId,
+              );
+              setOffsiteTargets((targets) =>
+                targets.filter((target) => target.id !== action.targetId),
+              );
+              setSelectedOffsiteTargetId(remainingTargets[0]?.id ?? null);
               setOffsitePage(null);
               if (editingOffsiteTargetId === action.targetId) {
                 cancelOffsiteTargetEdit();
