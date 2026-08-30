@@ -1671,11 +1671,10 @@ fn ensure_retention_proof_present(
     snapshots: &[BackupSnapshotMetadata],
 ) -> Result<(), String> {
     ensure_retention_enable_allowed(config, true)?;
-    if config.last_restore_test_snapshot_id.is_some_and(|proof_id| {
-        snapshots
-            .iter()
-            .any(|snapshot| snapshot.id == proof_id)
-    }) {
+    if config
+        .last_restore_test_snapshot_id
+        .is_some_and(|proof_id| snapshots.iter().any(|snapshot| snapshot.id == proof_id))
+    {
         Ok(())
     } else {
         Err("offsite_backup_retention_requires_new_restore_drill".to_owned())
