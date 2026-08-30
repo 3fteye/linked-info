@@ -1003,10 +1003,7 @@ pub async fn update_s3_backup_target(
             config.targets[index] = updated.clone();
             vault_state_for_write.ensure_access_permit(permit)?;
             write_config(&path, &config)?;
-            Ok((
-                target_summary(&updated)?,
-                CommittedConfigCleanup::Complete,
-            ))
+            Ok((target_summary(&updated)?, CommittedConfigCleanup::Complete))
         }
     })
     .await
@@ -2433,10 +2430,8 @@ mod tests {
             Some("offsite_backup_config_transaction_cleanup_pending")
         );
 
-        let update_credential_pending = committed_target_update_outcome(
-            target,
-            CommittedConfigCleanup::CredentialPending,
-        );
+        let update_credential_pending =
+            committed_target_update_outcome(target, CommittedConfigCleanup::CredentialPending);
         assert_eq!(
             update_credential_pending.error.as_deref(),
             Some("offsite_backup_credential_cleanup_pending")
