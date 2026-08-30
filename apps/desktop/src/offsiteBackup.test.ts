@@ -41,6 +41,34 @@ describe("tauriOffsiteBackupService", () => {
     expect(invokeMock).toHaveBeenCalledWith("update_s3_backup_target", input);
   });
 
+  it("returns a committed target-creation warning without rejecting", async () => {
+    const outcome = {
+      target: { id: "target-1", name: "Cloudflare R2" },
+      error: "offsite_backup_config_transaction_cleanup_pending",
+    };
+    invokeMock.mockResolvedValue(outcome);
+    const input = {
+      name: "Cloudflare R2",
+      endpoint: "https://example.r2.cloudflarestorage.com",
+      s3Provider: "cloudflareR2" as const,
+      region: "auto",
+      bucket: "linked-info-backup",
+      prefix: "linked-info/v1",
+      accessKeyId: "access-key-id",
+      secretAccessKey: "secret-access-key",
+      sessionToken: null,
+      authorization: "one-time-authorization",
+    };
+
+    await expect(
+      tauriOffsiteBackupService.configureS3Target(input),
+    ).resolves.toBe(outcome);
+    expect(invokeMock).toHaveBeenCalledWith(
+      "configure_s3_backup_target",
+      input,
+    );
+  });
+
   it("can update non-secret settings while retaining stored credentials", async () => {
     invokeMock.mockResolvedValue({
       target: { id: "target-1" },
@@ -88,5 +116,20 @@ describe("tauriOffsiteBackupService", () => {
       targetId: "target-1",
       authorization: "one-time-authorization",
     });
+  });
+
+  it("returns a committed transaction-cleanup warning without rejecting", async () => {
+    const outcome = {
+      targetRemoved: true,
+      error: "offsite_backup_config_transaction_cleanup_pending",
+    };
+    invokeMock.mockResolvedValue(outcome);
+
+    await expect(
+      tauriOffsiteBackupService.removeTarget(
+        "target-1",
+        "one-time-authorization",
+      ),
+    ).resolves.toEqual(outcome);
   });
 });

@@ -80,18 +80,24 @@ export interface DeleteAllOffsiteBackupsOutcome {
   error: string | null;
 }
 
-export type CredentialCleanupWarning =
+export type CommittedConfigWarning =
   | "offsite_backup_credential_cleanup_pending"
+  | "offsite_backup_config_transaction_cleanup_pending"
   | null;
 
 export interface RemoveOffsiteBackupTargetOutcome {
   targetRemoved: true;
-  error: CredentialCleanupWarning;
+  error: CommittedConfigWarning;
+}
+
+export interface ConfigureS3BackupTargetOutcome {
+  target: OffsiteBackupTarget;
+  error: CommittedConfigWarning;
 }
 
 export interface UpdateS3BackupTargetOutcome {
   target: OffsiteBackupTarget;
-  error: CredentialCleanupWarning;
+  error: CommittedConfigWarning;
 }
 
 export interface OffsiteBackupService {
@@ -101,7 +107,7 @@ export interface OffsiteBackupService {
     name: string;
     s3Provider: S3ProviderTemplate;
     authorization: string;
-  }): Promise<OffsiteBackupTarget>;
+  }): Promise<ConfigureS3BackupTargetOutcome>;
   updateS3Target(input: Omit<S3BackupConnection, "provider"> & {
     targetId: string;
     name: string;
@@ -171,7 +177,10 @@ export const tauriOffsiteBackupService: OffsiteBackupService = {
     return invoke<OffsiteBackupTarget[]>("inspect_offsite_backup_targets");
   },
   configureS3Target(input) {
-    return invoke<OffsiteBackupTarget>("configure_s3_backup_target", input);
+    return invoke<ConfigureS3BackupTargetOutcome>(
+      "configure_s3_backup_target",
+      input,
+    );
   },
   updateS3Target(input) {
     return invoke<UpdateS3BackupTargetOutcome>("update_s3_backup_target", input);

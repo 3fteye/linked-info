@@ -2079,9 +2079,12 @@ function App({
             authorization,
           };
           let configured: OffsiteBackupTarget;
-          let updateError: string | null = null;
+          let configurationWarning: string | null = null;
           if (pendingBackupTarget.targetId === null) {
-            configured = await offsiteBackup.configureS3Target(targetInput);
+            const configureResult =
+              await offsiteBackup.configureS3Target(targetInput);
+            configured = configureResult.target;
+            configurationWarning = configureResult.error;
           } else {
             const updateResult = await offsiteBackup.updateS3Target({
               ...targetInput,
@@ -2089,7 +2092,7 @@ function App({
               replaceCredentials: pendingBackupTarget.replaceCredentials,
             });
             configured = updateResult.target;
-            updateError = updateResult.error;
+            configurationWarning = updateResult.error;
           }
           setOffsiteTargets((targets) =>
             pendingBackupTarget.targetId === null
@@ -2101,12 +2104,20 @@ function App({
           setSelectedOffsiteTargetId(configured.id);
           setOffsitePage(null);
           resetOffsiteTargetForm();
-          showAppNotice(
+          const configuredNotice =
             pendingBackupTarget.targetId === null
               ? t("offsiteBackup.targetConnected")
-              : updateError === "offsite_backup_credential_cleanup_pending"
+              : configurationWarning ===
+                  "offsite_backup_credential_cleanup_pending"
                 ? t("offsiteBackup.targetUpdatedCleanupPending")
-                : t("offsiteBackup.targetUpdated"),
+                : t("offsiteBackup.targetUpdated");
+          showAppNotice(
+            configurationWarning ===
+              "offsite_backup_config_transaction_cleanup_pending"
+              ? t("offsiteBackup.targetTransactionCleanupPending", {
+                  result: configuredNotice,
+                })
+              : configuredNotice,
           );
         } else if (
           securityDialog === "offsiteSensitive" &&
@@ -2138,10 +2149,17 @@ function App({
             if (editingOffsiteTargetId === action.targetId) {
               cancelOffsiteTargetEdit();
             }
+            const removedNotice = t("offsiteBackup.targetRemoved");
             showAppNotice(
-              result.error === "offsite_backup_credential_cleanup_pending"
-                ? t("offsiteBackup.targetRemovedCleanupPending")
-                : t("offsiteBackup.targetRemoved"),
+              result.error ===
+                "offsite_backup_config_transaction_cleanup_pending"
+                ? t("offsiteBackup.targetTransactionCleanupPending", {
+                    result: removedNotice,
+                  })
+                : result.error ===
+                    "offsite_backup_credential_cleanup_pending"
+                  ? t("offsiteBackup.targetRemovedCleanupPending")
+                  : removedNotice,
             );
           } else if (action.kind === "destroyTarget") {
             const result = await offsiteBackup.deleteAllAndRemoveTarget(
@@ -2171,12 +2189,19 @@ function App({
               if (editingOffsiteTargetId === action.targetId) {
                 cancelOffsiteTargetEdit();
               }
+              const destroyedNotice = t("offsiteBackup.targetDestroyed", {
+                count: result.deletedVersionCount,
+              });
               showAppNotice(
-                result.error === "offsite_backup_credential_cleanup_pending"
-                  ? t("offsiteBackup.targetDestroyedCleanupPending")
-                  : t("offsiteBackup.targetDestroyed", {
-                      count: result.deletedVersionCount,
-                    }),
+                result.error ===
+                  "offsite_backup_config_transaction_cleanup_pending"
+                  ? t("offsiteBackup.targetTransactionCleanupPending", {
+                      result: destroyedNotice,
+                    })
+                  : result.error ===
+                      "offsite_backup_credential_cleanup_pending"
+                    ? t("offsiteBackup.targetDestroyedCleanupPending")
+                    : destroyedNotice,
               );
             }
           } else {
