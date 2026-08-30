@@ -349,9 +349,7 @@ fn classify_committed_create_credential(
     }
 }
 
-fn committed_create_transaction_can_clear(
-    credential: Result<Zeroizing<String>, String>,
-) -> bool {
+fn committed_create_transaction_can_clear(credential: Result<Zeroizing<String>, String>) -> bool {
     matches!(
         classify_committed_create_credential(credential),
         CommittedCreateCredentialState::Present | CommittedCreateCredentialState::Missing
