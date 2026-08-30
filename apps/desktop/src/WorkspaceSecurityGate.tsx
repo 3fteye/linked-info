@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import {
   AlertTriangle,
   Fingerprint,
@@ -36,34 +36,49 @@ export default function WorkspaceSecurityGate({
   const [busy, setBusy] = useState(false);
   const [recoveryRequired, setRecoveryRequired] = useState(false);
   const [retryGeneration, setRetryGeneration] = useState(0);
+  const lockLatchedRef = useRef(false);
+  const statusProbeGenerationRef = useRef(0);
   const updateStatusFromWorkspace = useCallback(
     (next: WorkspaceSecurityStatus) => {
-      setStatus((current) =>
-        current?.locked === true && !next.locked ? current : next,
-      );
+      if (next.locked) {
+        lockLatchedRef.current = true;
+      }
+      setStatus((current) => {
+        if (lockLatchedRef.current && !next.locked) {
+          return current ?? { ...next, locked: true };
+        }
+        return next;
+      });
     },
     [],
   );
 
   useEffect(() => {
     let active = true;
+    const probeGeneration = statusProbeGenerationRef.current;
     setError(null);
     void security
       .inspect()
       .then((next) => {
-        if (active) {
-          setStatus(next);
+        if (
+          active &&
+          statusProbeGenerationRef.current === probeGeneration
+        ) {
+          updateStatusFromWorkspace(next);
         }
       })
       .catch((reason) => {
-        if (active) {
+        if (
+          active &&
+          statusProbeGenerationRef.current === probeGeneration
+        ) {
           setError(errorReason(reason));
         }
       });
     return () => {
       active = false;
     };
-  }, [retryGeneration, security]);
+  }, [retryGeneration, security, updateStatusFromWorkspace]);
 
   useEffect(() => {
     let active = true;
@@ -73,6 +88,9 @@ export default function WorkspaceSecurityGate({
         if (!active) {
           return;
         }
+        lockLatchedRef.current = true;
+        const probeGeneration = statusProbeGenerationRef.current + 1;
+        statusProbeGenerationRef.current = probeGeneration;
         if (
           reason === "workspace_password_change_recovery_required" ||
           reason === "workspace_restore_recovery_required" ||
@@ -101,11 +119,24 @@ export default function WorkspaceSecurityGate({
             ? reason
             : null,
         );
-        void security.inspect().then((next) => {
-          if (active) {
-            setStatus(next);
-          }
-        });
+        void security
+          .inspect()
+          .then((next) => {
+            if (
+              active &&
+              statusProbeGenerationRef.current === probeGeneration
+            ) {
+              updateStatusFromWorkspace(next);
+            }
+          })
+          .catch((error) => {
+            if (
+              active &&
+              statusProbeGenerationRef.current === probeGeneration
+            ) {
+              setError(errorReason(error));
+            }
+          });
       })
       .then((dispose) => {
         if (active) {
@@ -123,7 +154,7 @@ export default function WorkspaceSecurityGate({
       active = false;
       unsubscribe?.();
     };
-  }, [security, t]);
+  }, [security, t, updateStatusFromWorkspace]);
 
   useEffect(() => {
     if (status?.encrypted !== true || status.locked) {
@@ -151,40 +182,49 @@ export default function WorkspaceSecurityGate({
     };
   }, [security, status?.encrypted, status?.locked]);
 
-  async function unlock() {
-    if (busy || password.length === 0) {
-      return;
-    }
+  async function performUnlock(
+    request: () => Promise<WorkspaceSecurityStatus>,
+    clearPassword: boolean,
+  ) {
+    const attemptGeneration = statusProbeGenerationRef.current + 1;
+    statusProbeGenerationRef.current = attemptGeneration;
     setBusy(true);
     setError(null);
     setNotice(null);
     try {
-      const next = await security.unlock(password);
-      setPassword("");
+      const next = await request();
+      if (statusProbeGenerationRef.current !== attemptGeneration) {
+        return;
+      }
+      if (clearPassword) {
+        setPassword("");
+      }
+      lockLatchedRef.current = next.locked;
       setStatus(next);
     } catch (reason) {
-      setError(errorReason(reason));
+      if (statusProbeGenerationRef.current === attemptGeneration) {
+        setError(errorReason(reason));
+      }
     } finally {
       setBusy(false);
     }
+  }
+
+  async function unlock() {
+    if (busy || password.length === 0) {
+      return;
+    }
+    await performUnlock(() => security.unlock(password), true);
   }
 
   async function unlockWithSystem() {
     if (busy) {
       return;
     }
-    setBusy(true);
-    setError(null);
-    setNotice(null);
-    try {
-      setStatus(
-        await security.unlockWithSystem(t("security.systemUnlockPrompt")),
-      );
-    } catch (reason) {
-      setError(errorReason(reason));
-    } finally {
-      setBusy(false);
-    }
+    await performUnlock(
+      () => security.unlockWithSystem(t("security.systemUnlockPrompt")),
+      false,
+    );
   }
 
   if (recoveryRequired) {

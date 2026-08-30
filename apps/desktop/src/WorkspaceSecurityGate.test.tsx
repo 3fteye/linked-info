@@ -17,10 +17,14 @@ const unlocked: WorkspaceSecurityStatus = {
   idleTimeoutMinutes: 15,
 };
 
+const locked: WorkspaceSecurityStatus = { ...unlocked, locked: true };
+
 function security(listenerRef: { current: ((reason: string) => void) | null }) {
   return {
     available: true,
     inspect: vi.fn(async () => unlocked),
+    unlock: vi.fn(async () => unlocked),
+    unlockWithSystem: vi.fn(async () => unlocked),
     subscribeLocked: vi.fn(async (listener: (reason: string) => void) => {
       listenerRef.current = listener;
       return () => {
@@ -145,6 +149,99 @@ describe("WorkspaceSecurityGate", () => {
         | ((status: WorkspaceSecurityStatus) => void)
         | null;
       update?.(unlocked);
+    });
+
+    expect(container.querySelector('[data-testid="secret-content"]')).toBeNull();
+    expect(container.querySelector("#workspace-unlock-password")).not.toBeNull();
+  });
+
+  it("keeps content unmounted while a rotation start becomes a terminal failure", async () => {
+    const listenerRef = { current: null as ((reason: string) => void) | null };
+    const workspaceSecurity = security(listenerRef);
+    let resolveStartedInspection!: (status: WorkspaceSecurityStatus) => void;
+    const startedInspection = new Promise<WorkspaceSecurityStatus>((resolve) => {
+      resolveStartedInspection = resolve;
+    });
+    vi.mocked(workspaceSecurity.inspect)
+      .mockResolvedValueOnce(unlocked)
+      .mockReturnValueOnce(startedInspection)
+      .mockResolvedValue({ ...unlocked, locked: true });
+    await act(async () => {
+      root.render(
+        <WorkspaceSecurityGate security={workspaceSecurity}>
+          {() => <div data-testid="secret-content">secret</div>}
+        </WorkspaceSecurityGate>,
+      );
+    });
+
+    act(() => {
+      listenerRef.current?.("workspace_data_key_rotation_started");
+    });
+    expect(container.querySelector('[data-testid="secret-content"]')).toBeNull();
+
+    await act(async () => {
+      listenerRef.current?.("workspace_data_key_rotation_failed");
+      await Promise.resolve();
+    });
+    expect(container.querySelector('[data-testid="secret-content"]')).toBeNull();
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain(
+      "plaintext access was revoked",
+    );
+
+    await act(async () => {
+      resolveStartedInspection(unlocked);
+      await startedInspection;
+    });
+    expect(container.querySelector('[data-testid="secret-content"]')).toBeNull();
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain(
+      "plaintext access was revoked",
+    );
+  });
+
+  it("discards an unlock result superseded by a newer lock event", async () => {
+    const listenerRef = { current: null as ((reason: string) => void) | null };
+    const workspaceSecurity = security(listenerRef);
+    let resolveUnlock!: (status: WorkspaceSecurityStatus) => void;
+    const pendingUnlock = new Promise<WorkspaceSecurityStatus>((resolve) => {
+      resolveUnlock = resolve;
+    });
+    vi.mocked(workspaceSecurity.inspect).mockResolvedValue(locked);
+    vi.mocked(workspaceSecurity.unlock).mockReturnValueOnce(pendingUnlock);
+    await act(async () => {
+      root.render(
+        <WorkspaceSecurityGate security={workspaceSecurity}>
+          {() => <div data-testid="secret-content">secret</div>}
+        </WorkspaceSecurityGate>,
+      );
+    });
+
+    const input = container.querySelector<HTMLInputElement>(
+      "#workspace-unlock-password",
+    )!;
+    act(() => {
+      const setter = Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        "value",
+      )?.set;
+      setter?.call(input, "correct horse battery staple");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    act(() => {
+      container
+        .querySelector<HTMLFormElement>(".security-unlock-form")!
+        .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
+    expect(workspaceSecurity.unlock).toHaveBeenCalledWith(
+      "correct horse battery staple",
+    );
+
+    await act(async () => {
+      listenerRef.current?.("windows_session_locked");
+      await Promise.resolve();
+    });
+    await act(async () => {
+      resolveUnlock(unlocked);
+      await pendingUnlock;
     });
 
     expect(container.querySelector('[data-testid="secret-content"]')).toBeNull();

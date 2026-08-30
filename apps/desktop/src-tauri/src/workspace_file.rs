@@ -1335,6 +1335,24 @@ pub async fn change_workspace_password(
     })
 }
 
+fn finish_data_key_rotation(
+    result: Result<DataKeyRotationCompletion, String>,
+    emit: impl FnOnce(&'static str),
+) -> Result<(), String> {
+    let reason = match &result {
+        Ok(DataKeyRotationCompletion::Complete) => "workspace_data_key_rotated",
+        Ok(DataKeyRotationCompletion::CleanupPending) => {
+            "workspace_data_key_rotated_cleanup_pending"
+        }
+        Ok(DataKeyRotationCompletion::CleanupSkipped) => {
+            "workspace_data_key_rotated_cleanup_skipped"
+        }
+        Err(_) => "workspace_data_key_rotation_failed",
+    };
+    emit(reason);
+    result.map(|_| ())
+}
+
 #[tauri::command]
 pub async fn rotate_workspace_data_key(
     app: AppHandle,
@@ -1361,34 +1379,32 @@ pub async fn rotate_workspace_data_key(
     // while the rotation transaction is getting ready.
     let extension_runtime = app.state::<crate::extension_runtime::ExtensionRuntimeState>();
     extension_runtime.revoke_all(state.next_access_generation().unwrap_or(u64::MAX));
-    state.revoke_access()?;
+    let revoke_result = state.revoke_access();
     extension_runtime.revoke_all(state.access_generation().load(Ordering::Acquire));
+    let _ = app.emit(
+        WORKSPACE_LOCKED_EVENT,
+        "workspace_data_key_rotation_started",
+    );
     cleanup_locked_workspace(&app);
     crate::secret_clipboard::clear_active(&app);
-    crate::smart_reference_cache::purge(&app, &smart_reference_cache_state).await?;
-    let rotation_result = tauri::async_runtime::spawn_blocking(move || {
-        let _guard = operation_lock
-            .lock()
-            .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
-        recover_pending_workspace_transactions(&store, provider.as_ref())?;
-        rotate_encrypted_store(&store, &previous_data_key, &password, provider.as_ref())
-    })
-    .await
-    .map_err(|error| error.to_string())
-    .and_then(|result| result);
-
-    let event_reason = match &rotation_result {
-        Ok(DataKeyRotationCompletion::Complete) => "workspace_data_key_rotated",
-        Ok(DataKeyRotationCompletion::CleanupPending) => {
-            "workspace_data_key_rotated_cleanup_pending"
-        }
-        Ok(DataKeyRotationCompletion::CleanupSkipped) => {
-            "workspace_data_key_rotated_cleanup_skipped"
-        }
-        Err(_) => "workspace_data_key_rotation_failed",
+    let purge_result = crate::smart_reference_cache::purge(&app, &smart_reference_cache_state).await;
+    let preparation_result = revoke_result.map(|_| ()).and(purge_result);
+    let rotation_result = match preparation_result {
+        Ok(()) => tauri::async_runtime::spawn_blocking(move || {
+            let _guard = operation_lock
+                .lock()
+                .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
+            recover_pending_workspace_transactions(&store, provider.as_ref())?;
+            rotate_encrypted_store(&store, &previous_data_key, &password, provider.as_ref())
+        })
+        .await
+        .map_err(|error| error.to_string())
+        .and_then(|result| result),
+        Err(error) => Err(error),
     };
-    let _ = app.emit(WORKSPACE_LOCKED_EVENT, event_reason);
-    rotation_result.map(|_| ())
+    finish_data_key_rotation(rotation_result, |reason| {
+        let _ = app.emit(WORKSPACE_LOCKED_EVENT, reason);
+    })
 }
 
 #[tauri::command]
@@ -5012,6 +5028,41 @@ mod tests {
         emit_terminal_lock_event_if_needed(true, || emitted.set(true));
 
         assert!(!emitted.get());
+    }
+
+    #[test]
+    fn data_key_rotation_always_emits_one_terminal_outcome() {
+        let cases = [
+            (
+                DataKeyRotationCompletion::Complete,
+                "workspace_data_key_rotated",
+            ),
+            (
+                DataKeyRotationCompletion::CleanupPending,
+                "workspace_data_key_rotated_cleanup_pending",
+            ),
+            (
+                DataKeyRotationCompletion::CleanupSkipped,
+                "workspace_data_key_rotated_cleanup_skipped",
+            ),
+        ];
+        for (completion, expected_reason) in cases {
+            let emitted = Cell::new(None);
+            assert_eq!(
+                finish_data_key_rotation(Ok(completion), |reason| emitted.set(Some(reason))),
+                Ok(())
+            );
+            assert_eq!(emitted.get(), Some(expected_reason));
+        }
+
+        let emitted = Cell::new(None);
+        assert_eq!(
+            finish_data_key_rotation(Err("cache purge failed".to_owned()), |reason| {
+                emitted.set(Some(reason));
+            }),
+            Err("cache purge failed".to_owned())
+        );
+        assert_eq!(emitted.get(), Some("workspace_data_key_rotation_failed"));
     }
 
     #[test]
