@@ -358,8 +358,8 @@ mod tests {
     fn target_trait_is_object_safe() {
         fn accept_target(target: &dyn BackupTarget) {
             let _ = target.delete_capability();
-            let _ = target.delete_with_verification(Uuid::nil());
-            let _ = target.purge_with_verification();
+            drop(target.delete_with_verification(Uuid::nil()));
+            drop(target.purge_with_verification());
         }
 
         let _ = accept_target;
