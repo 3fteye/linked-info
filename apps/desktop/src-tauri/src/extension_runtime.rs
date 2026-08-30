@@ -2,7 +2,7 @@ use std::{
     collections::BTreeMap,
     io::{self, BufRead, BufReader, BufWriter, Write},
     path::{Path, PathBuf},
-    process::{Child, ChildStdin, Command, Stdio},
+    process::{Child, Command, Stdio},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -27,21 +27,25 @@ const EXTENSION_HOST_PROCESS_MEMORY_BYTES: usize = 512 * 1024 * 1024;
 
 struct ExtensionHostConnection {
     child: Child,
-    input: BufWriter<ChildStdin>,
+    input: Box<dyn Write + Send>,
     responses: mpsc::Receiver<ExtensionHostResponseV1>,
     reader_thread: Option<thread::JoinHandle<()>>,
 }
 
+fn prepare_request_frame(request: &ExtensionHostRequestV1) -> Result<Vec<u8>, String> {
+    let mut encoded = serde_json::to_vec(request)
+        .map_err(|_| "extension_runtime_protocol_unavailable".to_owned())?;
+    if encoded.len() > MAXIMUM_EXTENSION_HOST_REQUEST_BYTES {
+        return Err("extension_runtime_request_invalid".to_owned());
+    }
+    encoded.push(b'\n');
+    Ok(encoded)
+}
+
 impl ExtensionHostConnection {
-    fn write_request(&mut self, request: &ExtensionHostRequestV1) -> Result<(), String> {
-        let encoded = serde_json::to_vec(request)
-            .map_err(|_| "extension_runtime_protocol_unavailable".to_owned())?;
-        if encoded.len() > MAXIMUM_EXTENSION_HOST_REQUEST_BYTES {
-            return Err("extension_runtime_request_invalid".to_owned());
-        }
+    fn write_request_frame(&mut self, frame: &[u8]) -> Result<(), String> {
         self.input
-            .write_all(&encoded)
-            .and_then(|()| self.input.write_all(b"\n"))
+            .write_all(frame)
             .and_then(|()| self.input.flush())
             .map_err(|_| "extension_runtime_protocol_unavailable".to_owned())
     }
@@ -81,7 +85,8 @@ impl ExtensionHostConnection {
         timeout: Duration,
         guard: impl FnMut() -> bool,
     ) -> Result<ExtensionHostResponseV1, String> {
-        self.write_request(request)?;
+        let frame = prepare_request_frame(request)?;
+        self.write_request_frame(&frame)?;
         self.receive_response_with_guard(timeout, guard)
     }
 }
@@ -208,8 +213,8 @@ impl ExtensionHostEntry {
 pub struct ExtensionRuntimeState {
     hosts: Mutex<BTreeMap<String, Arc<ExtensionHostEntry>>>,
     start_lock: Mutex<()>,
-    // Orders generation validation with request bytes entering the host pipe.
-    // It is never held while waiting for guest execution.
+    // Orders host publication and request admission with generation revocation.
+    // It never covers untrusted pipe I/O or guest execution.
     request_gate: Mutex<()>,
     generation: AtomicU64,
     next_request_id: AtomicU64,
@@ -436,7 +441,7 @@ impl ExtensionRuntimeState {
         });
         let mut connection = ExtensionHostConnection {
             child,
-            input: BufWriter::new(input),
+            input: Box::new(BufWriter::new(input)),
             responses: receiver,
             reader_thread: Some(reader_thread),
         };
@@ -552,6 +557,28 @@ impl ExtensionRuntimeState {
         Ok(())
     }
 
+    fn with_request_admission<T>(
+        &self,
+        host_generation: u64,
+        request_generation: u64,
+        access_generation: Option<&AtomicU64>,
+        operation: impl FnOnce() -> Result<T, String>,
+    ) -> Result<T, String> {
+        {
+            // This is the request linearization point. The following operation
+            // may block on an untrusted child, so revoke must not wait for it.
+            let _gate = self
+                .request_gate
+                .lock()
+                .map_err(|_| "extension_runtime_state_unavailable".to_owned())?;
+            self.ensure_generation_current(request_generation, access_generation)?;
+            if host_generation != request_generation {
+                return Err("extension_runtime_generation_revoked".to_owned());
+            }
+        }
+        operation()
+    }
+
     pub(crate) fn request(
         &self,
         extension_id: &str,
@@ -596,20 +623,15 @@ impl ExtensionRuntimeState {
             .connection
             .lock()
             .map_err(|_| "extension_runtime_state_unavailable".to_owned())?;
+        sanitize_request_content(&mut request);
         let response = (|| {
-            // The gate covers only validation, sanitization, and the pipe write;
-            // waiting for guest code happens after it is released.
-            let _gate = self
-                .request_gate
-                .lock()
-                .map_err(|_| "extension_runtime_state_unavailable".to_owned())?;
-            self.ensure_generation_current(request_generation, access_generation)?;
-            if host.generation != request_generation {
-                return Err("extension_runtime_generation_revoked".to_owned());
-            }
-            sanitize_request_content(&mut request);
-            connection.write_request(&request)?;
-            drop(_gate);
+            let frame = prepare_request_frame(&request)?;
+            self.with_request_admission(
+                host.generation,
+                request_generation,
+                access_generation,
+                || connection.write_request_frame(&frame),
+            )?;
             connection.receive_response_with_guard(timeout, || {
                 self.ensure_generation_current(request_generation, access_generation)
                     .is_ok()
@@ -886,6 +908,134 @@ mod tests {
     }
 
     #[cfg(windows)]
+    struct GateWriter<W> {
+        inner: W,
+        entered: Option<mpsc::SyncSender<()>>,
+        release: mpsc::Receiver<()>,
+    }
+
+    #[cfg(windows)]
+    impl<W: Write> Write for GateWriter<W> {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            if let Some(entered) = self.entered.take() {
+                entered
+                    .send(())
+                    .map_err(|_| io::Error::other("write observer unavailable"))?;
+                self.release
+                    .recv()
+                    .map_err(|_| io::Error::other("write release unavailable"))?;
+            }
+            self.inner.write(buffer)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.inner.flush()
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn revoke_detaches_and_terminates_host_while_request_pipe_write_is_blocked() {
+        let mut child = Command::new("cmd")
+            .args(["/C", "ping -n 30 127.0.0.1 > nul"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let input = child.stdin.take().unwrap();
+        let job = assign_child_to_kill_on_close_job(&child).unwrap();
+        let (response_sender, response_receiver) = mpsc::sync_channel(1);
+        let (write_entered_sender, write_entered_receiver) = mpsc::sync_channel(1);
+        let (release_write_sender, release_write_receiver) = mpsc::sync_channel(1);
+        let entry = Arc::new(ExtensionHostEntry {
+            connection: Mutex::new(ExtensionHostConnection {
+                child,
+                input: Box::new(GateWriter {
+                    inner: BufWriter::new(input),
+                    entered: Some(write_entered_sender),
+                    release: release_write_receiver,
+                }),
+                responses: response_receiver,
+                reader_thread: None,
+            }),
+            termination: ExtensionHostTermination::new(job),
+            generation: 7,
+        });
+        let state = Arc::new(ExtensionRuntimeState::default());
+        state.generation.store(7, Ordering::Release);
+        state
+            .hosts
+            .lock()
+            .unwrap()
+            .insert("test.extension".to_owned(), Arc::clone(&entry));
+        let request = ExtensionHostRequestV1::Render {
+            request_id: 1,
+            generation: 7,
+            request: ExtensionRenderRequestV1 {
+                processor_id: "inspect".to_owned(),
+                node: NodeSnapshotV1 {
+                    handle: NodeHandle(1),
+                    name: Some("Synthetic node".to_owned()),
+                    content: Some("Synthetic content".to_owned()),
+                    direct_outgoing: Vec::new(),
+                    direct_incoming: Vec::new(),
+                },
+                node_metadata_json: None,
+                workspace_metadata_json: None,
+                monotonic_time_ms: None,
+            },
+        };
+        let request_state = Arc::clone(&state);
+        let requester = thread::spawn(move || {
+            request_state.request("test.extension", request, Duration::from_secs(5))
+        });
+        let write_entered = write_entered_receiver.recv_timeout(Duration::from_secs(5));
+
+        let revoke_state = Arc::clone(&state);
+        let (revoke_finished_sender, revoke_finished_receiver) = mpsc::sync_channel(1);
+        let revoker = thread::spawn(move || {
+            revoke_state.revoke_all(8);
+            revoke_finished_sender.send(()).unwrap();
+        });
+        let revoke_finished = revoke_finished_receiver.recv_timeout(Duration::from_secs(5));
+        let state_while_write_blocked = if revoke_finished.is_ok() {
+            Some((
+                state.generation.load(Ordering::Acquire),
+                state.hosts.lock().unwrap().is_empty(),
+                entry.termination.terminated.load(Ordering::Acquire),
+            ))
+        } else {
+            None
+        };
+
+        let _ = release_write_sender.send(());
+        drop(response_sender);
+        let request_result = requester.join().unwrap();
+        revoker.join().unwrap();
+        let _child_status = entry.connection.lock().unwrap().child.wait().unwrap();
+
+        assert!(
+            write_entered.is_ok(),
+            "request did not reach the controlled extension pipe write"
+        );
+        assert!(
+            revoke_finished.is_ok(),
+            "revoke waited for the blocked extension pipe write"
+        );
+        assert_eq!(state_while_write_blocked, Some((8, true, true)));
+        assert!(
+            matches!(
+                &request_result,
+                Err(error)
+                    if error == "extension_runtime_protocol_unavailable"
+                        || error == "extension_runtime_generation_revoked"
+            ),
+            "unexpected request result after revoke: {request_result:?}"
+        );
+    }
+
+    #[cfg(windows)]
     #[test]
     fn termination_does_not_wait_for_the_connection_mutex() {
         let mut child = Command::new("cmd")
@@ -901,7 +1051,7 @@ mod tests {
         let entry = Arc::new(ExtensionHostEntry {
             connection: Mutex::new(ExtensionHostConnection {
                 child,
-                input: BufWriter::new(input),
+                input: Box::new(BufWriter::new(input)),
                 responses: receiver,
                 reader_thread: None,
             }),

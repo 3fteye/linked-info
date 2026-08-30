@@ -2227,9 +2227,9 @@ pub(crate) fn ensure_access_generation(
 pub fn revoke_workspace_access(app: &AppHandle, reason: &str) -> bool {
     let state = app.state::<WorkspaceVaultState>();
     let extension_runtime = app.state::<crate::extension_runtime::ExtensionRuntimeState>();
-    // Advance the runtime boundary before clearing the vault key. Requests
-    // already holding an old permit are then rejected before they can write
-    // another payload into an extension pipe.
+    // Advance the runtime admission boundary and terminate detached hosts before
+    // clearing the vault key. New requests fail admission; previously admitted
+    // pipe I/O can only target the old host that revoke terminates independently.
     extension_runtime.revoke_all(state.next_access_generation().unwrap_or(u64::MAX));
     let was_unlocked = state.shutdown();
     extension_runtime.revoke_all(state.access_generation().load(Ordering::Acquire));
