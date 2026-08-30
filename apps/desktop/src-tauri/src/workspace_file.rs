@@ -2009,6 +2009,24 @@ pub async fn cancel_workspace_restore(
     }
 }
 
+fn take_prepared_workspace_restore(
+    state: &WorkspaceVaultState,
+    restore_id: uuid::Uuid,
+) -> Result<PreparedWorkspaceRestore, String> {
+    let mut pending = state
+        .prepared_restore
+        .lock()
+        .map_err(|_| "workspace_restore_state_unavailable".to_owned())?;
+    if pending.as_ref().is_none_or(|restore| {
+        restore.id != restore_id || restore.expires_at_milliseconds < now_milliseconds_lossy()
+    }) {
+        return Err("workspace_restore_not_prepared".to_owned());
+    }
+    pending
+        .take()
+        .ok_or_else(|| "workspace_restore_not_prepared".to_owned())
+}
+
 #[tauri::command]
 pub async fn commit_workspace_restore(
     app: AppHandle,
@@ -2021,26 +2039,17 @@ pub async fn commit_workspace_restore(
     system_unlock_state: tauri::State<'_, SystemUnlockState>,
     restore_id: uuid::Uuid,
 ) -> Result<WorkspaceSecurityTransactionResult, String> {
+    // Take the prepared payload before ordinary locking. `shutdown()` clears
+    // the in-memory preparation as part of its normal lock semantics; keeping
+    // this one verified payload in a local variable lets the explicit restore
+    // confirmation complete without weakening ordinary lock behavior.
+    let prepared = take_prepared_workspace_restore(&state, restore_id)?;
     // A restore replaces the entire confidentiality boundary. Revoke the
     // current session before any cleanup that can fail; only a committed new
     // vault below may establish a fresh authorization.
     lock_workspace_runtime(&app, "workspace_restore_commit");
     crate::vector_cache::purge_for_encryption(&app, &vector_cache_state).await?;
     crate::smart_reference_cache::purge(&app, &smart_reference_cache_state).await?;
-    let prepared = {
-        let mut pending = state
-            .prepared_restore
-            .lock()
-            .map_err(|_| "workspace_restore_state_unavailable".to_owned())?;
-        if pending.as_ref().is_none_or(|restore| {
-            restore.id != restore_id || restore.expires_at_milliseconds < now_milliseconds_lossy()
-        }) {
-            return Err("workspace_restore_not_prepared".to_owned());
-        }
-        pending
-            .take()
-            .ok_or_else(|| "workspace_restore_not_prepared".to_owned())?
-    };
     let store = workspace_store(&app).map_err(|error| error.to_string())?;
     let store_for_install = store.clone();
     let operation_lock = Arc::clone(&state.operation_lock);
@@ -4905,6 +4914,48 @@ mod tests {
             "workspace_vault_session_expired"
         );
         assert!(!state.shutdown());
+    }
+
+    #[test]
+    fn taking_prepared_restore_validates_id_without_consuming_it() {
+        let state = WorkspaceVaultState::default();
+        let restore_id = uuid::Uuid::new_v4();
+        *state.prepared_restore.lock().unwrap() = Some(PreparedWorkspaceRestore {
+            id: restore_id,
+            expires_at_milliseconds: u64::MAX,
+            envelope: EncryptedExportEnvelope {
+                format: String::new(),
+                version: 0,
+                kdf: KdfEnvelope {
+                    algorithm: String::new(),
+                    memory_kib: 0,
+                    iterations: 0,
+                    parallelism: 0,
+                    salt: String::new(),
+                },
+                wrapped_data_key: CipherEnvelope {
+                    algorithm: String::new(),
+                    nonce: String::new(),
+                    ciphertext: String::new(),
+                },
+                payload: CipherEnvelope {
+                    algorithm: String::new(),
+                    nonce: String::new(),
+                    ciphertext: String::new(),
+                },
+            },
+            data_key: Zeroizing::new([11; DATA_KEY_BYTES]),
+        });
+
+        assert!(matches!(
+            take_prepared_workspace_restore(&state, uuid::Uuid::new_v4()),
+            Err(error) if error == "workspace_restore_not_prepared"
+        ));
+        assert!(state.prepared_restore.lock().unwrap().is_some());
+
+        let taken = take_prepared_workspace_restore(&state, restore_id).unwrap();
+        assert_eq!(taken.id, restore_id);
+        assert!(state.prepared_restore.lock().unwrap().is_none());
     }
 
     #[test]
