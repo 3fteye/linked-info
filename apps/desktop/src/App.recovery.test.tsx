@@ -501,4 +501,63 @@ describe("App recovery transaction boundary", () => {
     expect(primary.view.canvases[0].layout).toHaveLength(1);
     expect(primary.view.canvases[1].layout).toHaveLength(0);
   });
+
+  it("does not reuse a completed bookmark rename as the next bookmark name", async () => {
+    let primary = workspace(currentNodeId, "Global node");
+    primary.view.bookmarks = [
+      {
+        id: "33333333-3333-4333-8333-333333333333",
+        name: "Existing bookmark",
+        canvasId: primary.view.activeCanvasId,
+        x: 0,
+        y: 0,
+        zoom: 1,
+      },
+    ];
+    const persistence: WorkspacePersistence = {
+      async load() {
+        return { status: "ready", workspace: primary };
+      },
+      async loadRecovery() {
+        return { status: "missing" };
+      },
+      async preserveForRecovery() {},
+      runExclusiveTransaction(transaction) {
+        return transaction();
+      },
+      async save(next) {
+        primary = next;
+      },
+      async swapWithRecovery() {
+        throw new Error("swap is not used in this test");
+      },
+    };
+
+    await renderApp({
+      persistence,
+      security: unavailableWorkspaceSecurity,
+      updateStatus: () => {},
+    });
+    await click("canvas-bookmarks-toggle");
+    await click("canvas-bookmark-rename");
+    const renameInput = document.querySelector<HTMLInputElement>(
+      ".canvas-bookmark-rename-input",
+    );
+    expect(renameInput?.value).toBe("Existing bookmark");
+
+    await act(async () => {
+      renameInput?.dispatchEvent(
+        new KeyboardEvent("keydown", { bubbles: true, key: "Enter" }),
+      );
+      await Promise.resolve();
+    });
+
+    const createInput = (await find("canvas-bookmark-name")) as HTMLInputElement;
+    expect(createInput.value).toBe("");
+    await click("canvas-bookmark-save");
+
+    expect(primary.view.bookmarks).toHaveLength(2);
+    expect(primary.view.bookmarks?.[0].name).toBe("Existing bookmark");
+    expect(primary.view.bookmarks?.[1].name).not.toBe("Existing bookmark");
+  });
 });

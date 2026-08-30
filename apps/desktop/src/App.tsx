@@ -566,6 +566,8 @@ function App({
   const [canvasNameEditing, setCanvasNameEditing] = useState(false);
   const [canvasBookmarksOpen, setCanvasBookmarksOpen] = useState(false);
   const [canvasBookmarkName, setCanvasBookmarkName] = useState("");
+  const [canvasBookmarkRenameDraft, setCanvasBookmarkRenameDraft] =
+    useState("");
   const [canvasBookmarkEditingId, setCanvasBookmarkEditingId] = useState<
     string | null
   >(null);
@@ -842,6 +844,7 @@ function App({
       if (event.key === "Escape") {
         setCanvasBookmarksOpen(false);
         setCanvasBookmarkEditingId(null);
+        setCanvasBookmarkRenameDraft("");
       }
     };
     const closeOnOutsidePointer = (event: PointerEvent) => {
@@ -851,6 +854,7 @@ function App({
       ) {
         setCanvasBookmarksOpen(false);
         setCanvasBookmarkEditingId(null);
+        setCanvasBookmarkRenameDraft("");
       }
     };
     window.addEventListener("keydown", closeOnEscape, true);
@@ -3857,6 +3861,11 @@ function App({
     showAppNotice(t("canvases.bookmarkSaved", { name }));
   }
 
+  function finishCanvasBookmarkRename() {
+    setCanvasBookmarkEditingId(null);
+    setCanvasBookmarkRenameDraft("");
+  }
+
   function updateCanvasBookmark(bookmarkId: string) {
     const current = workspaceRef.current;
     const bookmarks = current.view.bookmarks ?? [];
@@ -3964,6 +3973,7 @@ function App({
       { flushImmediately: true, affectsOffsiteBackup: false },
     );
     setCanvasBookmarksOpen(false);
+    finishCanvasBookmarkRename();
     setEditingNodeId(null);
     editBaselineRef.current = null;
   }
@@ -5684,7 +5694,12 @@ function App({
                     aria-label={t("canvases.bookmarks")}
                     className="secondary-button canvas-bookmark-toggle"
                     data-testid="canvas-bookmarks-toggle"
-                    onClick={() => setCanvasBookmarksOpen((current) => !current)}
+                    onClick={() => {
+                      if (canvasBookmarksOpen) {
+                        finishCanvasBookmarkRename();
+                      }
+                      setCanvasBookmarksOpen((current) => !current);
+                    }}
                     title={t("canvases.bookmarks")}
                     type="button"
                   >
@@ -5747,21 +5762,24 @@ function App({
                                     aria-label={t("canvases.bookmarkName")}
                                     className="canvas-bookmark-rename-input"
                                     onChange={(event) =>
-                                      setCanvasBookmarkName(event.target.value)
+                                      setCanvasBookmarkRenameDraft(
+                                        event.target.value,
+                                      )
                                     }
+                                    onBlur={finishCanvasBookmarkRename}
                                     onKeyDown={(event) => {
                                       if (event.key === "Enter") {
                                         event.preventDefault();
                                         renameCanvasBookmark(
                                           bookmark.id,
-                                          canvasBookmarkName,
+                                          canvasBookmarkRenameDraft,
                                         );
-                                        setCanvasBookmarkEditingId(null);
+                                        finishCanvasBookmarkRename();
                                       } else if (event.key === "Escape") {
-                                        setCanvasBookmarkEditingId(null);
+                                        finishCanvasBookmarkRename();
                                       }
                                     }}
-                                    value={canvasBookmarkName}
+                                    value={canvasBookmarkRenameDraft}
                                   />
                                 ) : (
                                   <button
@@ -5785,7 +5803,7 @@ function App({
                                     className="icon-button"
                                     data-testid="canvas-bookmark-rename"
                                     onClick={() => {
-                                      setCanvasBookmarkName(bookmark.name);
+                                      setCanvasBookmarkRenameDraft(bookmark.name);
                                       setCanvasBookmarkEditingId(bookmark.id);
                                     }}
                                     title={t("canvases.renameBookmark", {
