@@ -1379,8 +1379,7 @@ pub async fn rotate_workspace_data_key(
     // while the rotation transaction is getting ready.
     let revoke_result = run_workspace_lock_transition(
         || {
-            let extension_runtime =
-                app.state::<crate::extension_runtime::ExtensionRuntimeState>();
+            let extension_runtime = app.state::<crate::extension_runtime::ExtensionRuntimeState>();
             extension_runtime.revoke_all(state.next_access_generation().unwrap_or(u64::MAX));
             let revoke_result = state.revoke_access();
             extension_runtime.revoke_all(state.access_generation().load(Ordering::Acquire));
