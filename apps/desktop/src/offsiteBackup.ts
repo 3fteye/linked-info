@@ -74,7 +74,8 @@ export interface AutomaticBackupOutcome {
 }
 
 export interface DeleteAllOffsiteBackupsOutcome {
-  deletedCount: number;
+  /** Number of object-version and delete-marker records removed remotely. */
+  deletedVersionCount: number;
   targetRemoved: boolean;
   error: string | null;
 }

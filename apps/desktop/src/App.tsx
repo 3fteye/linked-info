@@ -354,6 +354,25 @@ function errorReason(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+const offsiteErrorTranslationKeys: Record<string, string> = {
+  offsite_backup_credential_cleanup_pending:
+    "offsiteBackup.errors.credentialCleanupPending",
+  offsite_backup_config_transaction_pending:
+    "offsiteBackup.errors.transactionPending",
+  offsite_backup_purge_unverified: "offsiteBackup.errors.purgeUnverified",
+  offsite_backup_snapshot_delete_unverified:
+    "offsiteBackup.errors.snapshotDeleteUnverified",
+  offsite_backup_target_changed: "offsiteBackup.errors.targetChanged",
+};
+
+function localizedOffsiteError(
+  reason: string,
+  translate: (key: string) => string,
+): string {
+  const key = offsiteErrorTranslationKeys[reason];
+  return key === undefined ? reason : translate(key);
+}
+
 function formatByteCount(bytes: number): string {
   if (bytes < 1024) {
     return `${bytes} B`;
@@ -1343,7 +1362,9 @@ function App({
       .catch((error) => {
         if (active) {
           setOffsiteMessage(
-            t("offsiteBackup.errors.inspect", { reason: errorReason(error) }),
+            t("offsiteBackup.errors.inspect", {
+              reason: localizedOffsiteError(errorReason(error), t),
+            }),
           );
         }
       });
@@ -1394,7 +1415,9 @@ function App({
       .catch((error) => {
         if (active) {
           setOffsiteMessage(
-            t("offsiteBackup.errors.list", { reason: errorReason(error) }),
+            t("offsiteBackup.errors.list", {
+              reason: localizedOffsiteError(errorReason(error), t),
+            }),
           );
         }
       });
@@ -2106,8 +2129,11 @@ function App({
             if (!result.targetRemoved) {
               setOffsiteMessage(
                 t("offsiteBackup.errors.destroyPartial", {
-                  count: result.deletedCount,
-                  reason: result.error ?? "offsite_backup_unknown_error",
+                  count: result.deletedVersionCount,
+                  reason: localizedOffsiteError(
+                    result.error ?? "offsite_backup_unknown_error",
+                    t,
+                  ),
                 }),
               );
             } else {
@@ -2119,9 +2145,11 @@ function App({
                 cancelOffsiteTargetEdit();
               }
               showAppNotice(
-                t("offsiteBackup.targetDestroyed", {
-                  count: result.deletedCount,
-                }),
+                result.error === "offsite_backup_credential_cleanup_pending"
+                  ? t("offsiteBackup.targetDestroyedCleanupPending")
+                  : t("offsiteBackup.targetDestroyed", {
+                      count: result.deletedVersionCount,
+                    }),
               );
             }
           } else {
@@ -2161,6 +2189,7 @@ function App({
       setSecurityPasswordConfirmation("");
     } catch (error) {
       const reason = errorReason(error);
+      const displayReason = localizedOffsiteError(reason, t);
       setSecurityMessage(
         reason === "workspace_vault_password_blocked"
           ? t("security.passwordBlocked")
@@ -2168,7 +2197,7 @@ function App({
             ? t("security.passwordRateLimited")
             : reason === "offsite_backup_retention_requires_new_restore_drill"
               ? t("offsiteBackup.errors.retentionRequiresRestoreDrill")
-            : t("security.operationFailed", { reason }),
+            : t("security.operationFailed", { reason: displayReason }),
       );
       try {
         updateWorkspaceSecurityStatus(await workspaceSecurity.inspect());
@@ -4721,7 +4750,9 @@ function App({
       offsiteRecoveryConnectionRef.current = null;
       setOffsiteRecoveryPage(null);
       setOffsiteMessage(
-        t("offsiteBackup.errors.list", { reason: errorReason(error) }),
+        t("offsiteBackup.errors.list", {
+          reason: localizedOffsiteError(errorReason(error), t),
+        }),
       );
     } finally {
       setOffsiteBusy(false);
@@ -4755,7 +4786,9 @@ function App({
       setEncryptedImportError(null);
     } catch (error) {
       setOffsiteMessage(
-        t("offsiteBackup.errors.download", { reason: errorReason(error) }),
+        t("offsiteBackup.errors.download", {
+          reason: localizedOffsiteError(errorReason(error), t),
+        }),
       );
     } finally {
       setOffsiteBusy(false);
@@ -4777,7 +4810,9 @@ function App({
       setOffsitePage(page);
     } catch (error) {
       setOffsiteMessage(
-        t("offsiteBackup.errors.list", { reason: errorReason(error) }),
+        t("offsiteBackup.errors.list", {
+          reason: localizedOffsiteError(errorReason(error), t),
+        }),
       );
     } finally {
       setOffsiteBusy(false);
@@ -4861,7 +4896,7 @@ function App({
     } catch (error) {
       setOffsiteMessage(
         t("offsiteBackup.errors.automaticSettings", {
-          reason: errorReason(error),
+          reason: localizedOffsiteError(errorReason(error), t),
         }),
       );
     } finally {
@@ -4888,7 +4923,9 @@ function App({
       showAppNotice(t("offsiteBackup.uploadSuccess"));
     } catch (error) {
       setOffsiteMessage(
-        t("offsiteBackup.errors.upload", { reason: errorReason(error) }),
+        t("offsiteBackup.errors.upload", {
+          reason: localizedOffsiteError(errorReason(error), t),
+        }),
       );
     } finally {
       setOffsiteBusy(false);
@@ -4914,7 +4951,9 @@ function App({
       );
     } catch (error) {
       setOffsiteMessage(
-        t("offsiteBackup.errors.verify", { reason: errorReason(error) }),
+        t("offsiteBackup.errors.verify", {
+          reason: localizedOffsiteError(errorReason(error), t),
+        }),
       );
     } finally {
       setOffsiteBusy(false);
@@ -4979,7 +5018,9 @@ function App({
                 ? t("offsiteBackup.errors.snapshotKeyMismatch")
                 : reason === "workspace_restore_snapshot_wrap_inconsistent"
                   ? t("offsiteBackup.errors.snapshotWrapInconsistent")
-          : t("offsiteBackup.errors.restoreDrill", { reason }),
+          : t("offsiteBackup.errors.restoreDrill", {
+              reason: localizedOffsiteError(reason, t),
+            }),
       );
     } finally {
       setOffsiteBusy(false);
@@ -5008,7 +5049,9 @@ function App({
       setEncryptedImportError(null);
     } catch (error) {
       setOffsiteMessage(
-        t("offsiteBackup.errors.download", { reason: errorReason(error) }),
+        t("offsiteBackup.errors.download", {
+          reason: localizedOffsiteError(errorReason(error), t),
+        }),
       );
     } finally {
       setOffsiteBusy(false);

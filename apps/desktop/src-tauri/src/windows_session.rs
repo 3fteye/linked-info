@@ -47,13 +47,14 @@ unsafe extern "system" fn session_notification_proc(
         let app = unsafe { &*(context as *const SessionNotificationContext) }
             .app
             .clone();
-        let was_unlocked = crate::workspace_file::revoke_workspace_access(&app, reason);
+        crate::workspace_file::revoke_workspace_access(&app, reason);
         crate::secret_clipboard::clear_active(&app);
-        if was_unlocked {
-            tauri::async_runtime::spawn(async move {
-                crate::workspace_file::cleanup_locked_workspace(&app);
-            });
-        }
+        // Cleanup is idempotent and must also run when access-generation
+        // exhaustion makes the revoke helper unable to report `was_unlocked`.
+        // The authorization has already been revoked synchronously above.
+        tauri::async_runtime::spawn(async move {
+            crate::workspace_file::cleanup_locked_workspace(&app);
+        });
     }
 
     if message == WM_NCDESTROY {

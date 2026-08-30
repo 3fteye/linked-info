@@ -240,6 +240,14 @@ pub struct PreparedWorkspaceRestorePreview {
 enum DataKeyRotationPhase {
     Preparing,
     Ready,
+    CommittedCleanupPending,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DataKeyRotationCompletion {
+    Complete,
+    CleanupPending,
+    CleanupSkipped,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -405,6 +413,22 @@ pub struct WorkspaceAccessPermit {
     generation: u64,
 }
 
+impl WorkspaceAccessPermit {
+    /// Returns the authorization generation captured when this permit was issued.
+    ///
+    /// Callers that perform work outside the vault must keep using this value;
+    /// reading the current generation later can accidentally turn a revoked
+    /// operation into a fresh authorization.
+    pub(crate) const fn generation(self) -> u64 {
+        self.generation
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn for_test(generation: u64) -> Self {
+        Self { generation }
+    }
+}
+
 struct SensitiveAuthorization {
     operation: SensitiveOperation,
     permit: WorkspaceAccessPermit,
@@ -423,7 +447,11 @@ impl WorkspaceVaultState {
     }
 
     fn replace_data_key(&self, key: [u8; DATA_KEY_BYTES]) -> Result<(), String> {
-        self.access_generation.fetch_add(1, Ordering::AcqRel);
+        self.access_generation
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                current.checked_add(1)
+            })
+            .map_err(|_| "workspace_vault_access_generation_exhausted".to_owned())?;
         let mut slot = self
             .data_key
             .lock()
@@ -442,7 +470,11 @@ impl WorkspaceVaultState {
     }
 
     fn revoke_access(&self) -> Result<bool, String> {
-        self.access_generation.fetch_add(1, Ordering::AcqRel);
+        let generation =
+            self.access_generation
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                    current.checked_add(1)
+                });
         let mut slot = self
             .data_key
             .lock()
@@ -452,7 +484,9 @@ impl WorkspaceVaultState {
         if let Ok(mut authorization) = self.sensitive_authorization.lock() {
             *authorization = None;
         }
-        Ok(was_unlocked)
+        generation
+            .map(|_| was_unlocked)
+            .map_err(|_| "workspace_vault_access_generation_exhausted".to_owned())
     }
 
     fn is_unlocked(&self) -> Result<bool, String> {
@@ -463,16 +497,31 @@ impl WorkspaceVaultState {
     }
 
     fn access_permit(&self) -> Result<WorkspaceAccessPermit, String> {
+        let generation = self.access_generation.load(Ordering::Acquire);
+        if generation == u64::MAX {
+            return Err("workspace_vault_access_generation_exhausted".to_owned());
+        }
         if !self.is_unlocked()? {
             return Err("workspace_vault_locked".to_owned());
         }
-        Ok(WorkspaceAccessPermit {
-            generation: self.access_generation.load(Ordering::Acquire),
-        })
+        // Read the generation on both sides of the unlocked check. If a lock
+        // advanced it while the permit was being issued, refuse the permit
+        // instead of accidentally adopting the post-lock generation.
+        if self.access_generation.load(Ordering::Acquire) != generation {
+            return Err("workspace_vault_session_expired".to_owned());
+        }
+        Ok(WorkspaceAccessPermit { generation })
     }
 
     pub(crate) fn access_generation(&self) -> Arc<AtomicU64> {
         Arc::clone(&self.access_generation)
+    }
+
+    pub(crate) fn next_access_generation(&self) -> Result<u64, String> {
+        self.access_generation
+            .load(Ordering::Acquire)
+            .checked_add(1)
+            .ok_or_else(|| "workspace_vault_access_generation_exhausted".to_owned())
     }
 
     pub(crate) fn encrypt_derived_cache_payload(
@@ -502,7 +551,8 @@ impl WorkspaceVaultState {
     }
 
     pub fn ensure_access_permit(&self, permit: WorkspaceAccessPermit) -> Result<(), String> {
-        if self.access_generation.load(Ordering::Acquire) != permit.generation
+        if permit.generation == u64::MAX
+            || self.access_generation.load(Ordering::Acquire) != permit.generation
             || !self.is_unlocked()?
         {
             return Err("workspace_vault_session_expired".to_owned());
@@ -1152,15 +1202,20 @@ pub async fn enable_workspace_encryption(
     app: AppHandle,
     state: tauri::State<'_, WorkspaceVaultState>,
     vector_cache_state: tauri::State<'_, crate::vector_cache::VectorCacheState>,
-    embedding_state: tauri::State<'_, crate::embedding::EmbeddingState>,
-    llm_state: tauri::State<'_, crate::llm::LlmState>,
+    smart_reference_cache_state: tauri::State<
+        '_,
+        crate::smart_reference_cache::SmartReferenceCacheState,
+    >,
     system_unlock_state: tauri::State<'_, SystemUnlockState>,
     password: String,
 ) -> Result<WorkspaceSecurityStatus, String> {
     validate_new_password(&password)?;
-    app.state::<crate::extension_runtime::ExtensionRuntimeState>()
-        .shutdown();
+    // Encryption changes the confidentiality boundary. Revoke the current
+    // session before any cleanup that can fail; only the committed migration
+    // below may establish a fresh authorization.
+    lock_workspace_runtime(&app, "workspace_encryption_enable");
     crate::vector_cache::purge_for_encryption(&app, &vector_cache_state).await?;
+    crate::smart_reference_cache::purge(&app, &smart_reference_cache_state).await?;
     let store = workspace_store(&app).map_err(|error| error.to_string())?;
     let operation_lock = Arc::clone(&state.operation_lock);
     let password = Zeroizing::new(password);
@@ -1177,9 +1232,13 @@ pub async fn enable_workspace_encryption(
     .await
     .map_err(|error| error.to_string())??;
     state.replace_data_key(data_key)?;
-    crate::vector_cache::purge_for_encryption(&app, &vector_cache_state).await?;
-    let _ = embedding_state.shutdown();
-    llm_state.shutdown();
+    if let Err(error) = crate::vector_cache::purge_for_encryption(&app, &vector_cache_state).await {
+        // The encrypted vault is already committed.  If the final derived
+        // cache purge cannot advance its generation, fail closed rather than
+        // returning an unlocked session with an uncertain cache boundary.
+        lock_workspace_runtime_with_terminal_event(&app, "workspace_encryption_cache_purge_failed");
+        return Err(error);
+    }
     Ok(WorkspaceSecurityStatus {
         encrypted: true,
         locked: false,
@@ -1276,12 +1335,16 @@ pub async fn rotate_workspace_data_key(
     let provider = system_unlock_state.provider();
     let password = Zeroizing::new(password);
 
-    crate::smart_reference_cache::purge(&app, &smart_reference_cache_state).await?;
+    // Revoke plaintext authority before touching any derived-data cleanup. A
+    // cache purge may block on SQLite; it must not leave the old session live
+    // while the rotation transaction is getting ready.
+    let extension_runtime = app.state::<crate::extension_runtime::ExtensionRuntimeState>();
+    extension_runtime.revoke_all(state.next_access_generation().unwrap_or(u64::MAX));
     state.revoke_access()?;
-    app.state::<crate::extension_runtime::ExtensionRuntimeState>()
-        .revoke_all(state.access_generation().load(Ordering::Acquire));
+    extension_runtime.revoke_all(state.access_generation().load(Ordering::Acquire));
     cleanup_locked_workspace(&app);
     crate::secret_clipboard::clear_active(&app);
+    crate::smart_reference_cache::purge(&app, &smart_reference_cache_state).await?;
     let rotation_result = tauri::async_runtime::spawn_blocking(move || {
         let _guard = operation_lock
             .lock()
@@ -1293,13 +1356,18 @@ pub async fn rotate_workspace_data_key(
     .map_err(|error| error.to_string())
     .and_then(|result| result);
 
-    let event_reason = if rotation_result.is_ok() {
-        "workspace_data_key_rotated"
-    } else {
-        "workspace_data_key_rotation_failed"
+    let event_reason = match &rotation_result {
+        Ok(DataKeyRotationCompletion::Complete) => "workspace_data_key_rotated",
+        Ok(DataKeyRotationCompletion::CleanupPending) => {
+            "workspace_data_key_rotated_cleanup_pending"
+        }
+        Ok(DataKeyRotationCompletion::CleanupSkipped) => {
+            "workspace_data_key_rotated_cleanup_skipped"
+        }
+        Err(_) => "workspace_data_key_rotation_failed",
     };
     let _ = app.emit(WORKSPACE_LOCKED_EVENT, event_reason);
-    rotation_result
+    rotation_result.map(|_| ())
 }
 
 #[tauri::command]
@@ -1569,6 +1637,7 @@ fn clear_recovery_data_from_store(store: &WorkspaceFileStore) -> Result<(), Stri
 pub async fn destroy_workspace(
     app: AppHandle,
     state: tauri::State<'_, WorkspaceVaultState>,
+    vector_cache_state: tauri::State<'_, crate::vector_cache::VectorCacheState>,
     smart_reference_cache_state: tauri::State<
         '_,
         crate::smart_reference_cache::SmartReferenceCacheState,
@@ -1578,8 +1647,11 @@ pub async fn destroy_workspace(
 ) -> Result<(), String> {
     let _permit = state
         .consume_sensitive_authorization(SensitiveOperation::DestroyWorkspace, &authorization)?;
-    crate::smart_reference_cache::purge(&app, &smart_reference_cache_state).await?;
+    // Revoke plaintext authority before any cleanup that can fail.  A failed
+    // cache deletion must never leave a re-authenticated session unlocked.
     lock_workspace_runtime(&app, "workspace_destroy");
+    crate::vector_cache::purge_for_encryption(&app, &vector_cache_state).await?;
+    crate::smart_reference_cache::purge(&app, &smart_reference_cache_state).await?;
 
     let store = workspace_store(&app).map_err(|error| error.to_string())?;
     let operation_lock = Arc::clone(&state.operation_lock);
@@ -1946,13 +2018,13 @@ pub async fn commit_workspace_restore(
         '_,
         crate::smart_reference_cache::SmartReferenceCacheState,
     >,
-    embedding_state: tauri::State<'_, crate::embedding::EmbeddingState>,
-    llm_state: tauri::State<'_, crate::llm::LlmState>,
     system_unlock_state: tauri::State<'_, SystemUnlockState>,
     restore_id: uuid::Uuid,
 ) -> Result<WorkspaceSecurityTransactionResult, String> {
-    app.state::<crate::extension_runtime::ExtensionRuntimeState>()
-        .shutdown();
+    // A restore replaces the entire confidentiality boundary. Revoke the
+    // current session before any cleanup that can fail; only a committed new
+    // vault below may establish a fresh authorization.
+    lock_workspace_runtime(&app, "workspace_restore_commit");
     crate::vector_cache::purge_for_encryption(&app, &vector_cache_state).await?;
     crate::smart_reference_cache::purge(&app, &smart_reference_cache_state).await?;
     let prepared = {
@@ -2039,8 +2111,6 @@ pub async fn commit_workspace_restore(
         lock_workspace_runtime_with_terminal_event(&app, "workspace_restore_committed_locked");
         return Ok(locked_result());
     }
-    let _ = embedding_state.shutdown();
-    llm_state.shutdown();
     Ok(WorkspaceSecurityTransactionResult {
         status: WorkspaceSecurityTransactionStatus::Committed,
         security_status: Some(WorkspaceSecurityStatus {
@@ -2096,7 +2166,12 @@ pub(crate) fn ensure_access_generation(
     permit: Option<WorkspaceAccessPermit>,
 ) -> Result<(), String> {
     match permit {
-        Some(permit) if access_generation.load(Ordering::Acquire) == permit.generation => Ok(()),
+        Some(permit)
+            if permit.generation != u64::MAX
+                && access_generation.load(Ordering::Acquire) == permit.generation =>
+        {
+            Ok(())
+        }
         Some(_) => Err("workspace_vault_session_expired".to_owned()),
         None => Ok(()),
     }
@@ -2104,9 +2179,13 @@ pub(crate) fn ensure_access_generation(
 
 pub fn revoke_workspace_access(app: &AppHandle, reason: &str) -> bool {
     let state = app.state::<WorkspaceVaultState>();
+    let extension_runtime = app.state::<crate::extension_runtime::ExtensionRuntimeState>();
+    // Advance the runtime boundary before clearing the vault key. Requests
+    // already holding an old permit are then rejected before they can write
+    // another payload into an extension pipe.
+    extension_runtime.revoke_all(state.next_access_generation().unwrap_or(u64::MAX));
     let was_unlocked = state.shutdown();
-    app.state::<crate::extension_runtime::ExtensionRuntimeState>()
-        .revoke_all(state.access_generation().load(Ordering::Acquire));
+    extension_runtime.revoke_all(state.access_generation().load(Ordering::Acquire));
     if was_unlocked {
         let _ = app.emit(WORKSPACE_LOCKED_EVENT, reason);
     }
@@ -3096,9 +3175,47 @@ fn recover_pending_migration(store: &WorkspaceFileStore) -> Result<(), String> {
     recover_pending_encryption_migration(store)?;
     finish_pending_workspace_recovery_swap(store)?;
     if store.data_key_rotation_directory().exists() {
-        return Err("workspace_vault_data_key_rotation_recovery_required".to_owned());
+        let Some(manifest) = read_data_key_rotation_manifest(store)? else {
+            return Err("workspace_vault_data_key_rotation_recovery_required".to_owned());
+        };
+        match manifest.phase {
+            DataKeyRotationPhase::CommittedCleanupPending => {}
+            DataKeyRotationPhase::Ready => {
+                // The vault write is the rotation commit point. If the cleanup
+                // phase marker was lost after that write, the byte-for-byte
+                // match is the only durable evidence available without the key.
+                if !data_key_rotation_vault_was_committed(store)? {
+                    return Err("workspace_vault_data_key_rotation_recovery_required".to_owned());
+                }
+                let mut committed_manifest = manifest;
+                committed_manifest.phase = DataKeyRotationPhase::CommittedCleanupPending;
+                // The vault is already authoritative at this point.  A
+                // transient failure while recording the post-commit cleanup
+                // phase must not lock out the new vault; the next recovery
+                // pass will compare the same durable commit point and retry
+                // the marker and cleanup.
+                let _ = write_data_key_rotation_manifest(store, &committed_manifest);
+            }
+            DataKeyRotationPhase::Preparing => {
+                return Err("workspace_vault_data_key_rotation_recovery_required".to_owned());
+            }
+        }
     }
     Ok(())
+}
+
+fn data_key_rotation_vault_was_committed(store: &WorkspaceFileStore) -> Result<bool, String> {
+    let pending = match fs::read(store.data_key_rotation_vault_path()) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.to_string()),
+    };
+    let current = match fs::read(store.vault_path()) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.to_string()),
+    };
+    Ok(current == pending)
 }
 
 fn recover_before_prepared_restore(store: &WorkspaceFileStore) -> bool {
@@ -3234,7 +3351,12 @@ fn finish_pending_data_key_rotation(
     store: &WorkspaceFileStore,
     provider: &dyn SystemUnlockProvider,
     manifest: &DataKeyRotationManifest,
-) -> Result<(), String> {
+) -> Result<DataKeyRotationCompletion, String> {
+    if manifest.phase == DataKeyRotationPhase::CommittedCleanupPending {
+        return Ok(finish_committed_data_key_rotation_cleanup(
+            store, provider, manifest,
+        ));
+    }
     if manifest.phase != DataKeyRotationPhase::Ready {
         return Err("workspace_vault_data_key_rotation_not_ready".to_owned());
     }
@@ -3268,11 +3390,43 @@ fn finish_pending_data_key_rotation(
     write_atomically(&store.vault_path(), &pending_vault).map_err(|error| error.to_string())?;
     sync_parent_directory(&store.base_directory).map_err(|error| error.to_string())?;
 
-    if let Some(credential) = manifest.previous_system_credential.as_ref()
-        && credential.provider == provider.provider_id()
-    {
-        provider.delete(&credential.credential_id)?;
+    let mut cleanup_manifest = manifest.clone();
+    cleanup_manifest.phase = DataKeyRotationPhase::CommittedCleanupPending;
+    if write_data_key_rotation_manifest(store, &cleanup_manifest).is_err() {
+        return Ok(DataKeyRotationCompletion::CleanupPending);
     }
+    Ok(finish_committed_data_key_rotation_cleanup(
+        store,
+        provider,
+        &cleanup_manifest,
+    ))
+}
+
+fn finish_committed_data_key_rotation_cleanup(
+    store: &WorkspaceFileStore,
+    provider: &dyn SystemUnlockProvider,
+    manifest: &DataKeyRotationManifest,
+) -> DataKeyRotationCompletion {
+    if let Some(credential) = manifest.previous_system_credential.as_ref() {
+        if credential.provider != provider.provider_id() {
+            // A workspace can be resumed on another OS. Never pass a foreign
+            // provider's identifier to the local keyring; the committed vault
+            // is already authoritative, so discard only the redundant local
+            // rotation copies and let the old device clean its own credential.
+            return remove_committed_rotation_artifacts(store)
+                .map(|_| DataKeyRotationCompletion::CleanupSkipped)
+                .unwrap_or(DataKeyRotationCompletion::CleanupPending);
+        }
+        if provider.delete(&credential.credential_id).is_err() {
+            return DataKeyRotationCompletion::CleanupPending;
+        }
+    }
+    remove_committed_rotation_artifacts(store)
+        .map(|_| DataKeyRotationCompletion::Complete)
+        .unwrap_or(DataKeyRotationCompletion::CleanupPending)
+}
+
+fn remove_committed_rotation_artifacts(store: &WorkspaceFileStore) -> Result<(), String> {
     remove_data_key_rotation_directory(store)?;
     sync_parent_directory(&store.base_directory).map_err(|error| error.to_string())
 }
@@ -3289,7 +3443,9 @@ fn recover_pending_data_key_rotation(
     };
     match manifest.phase {
         DataKeyRotationPhase::Preparing => abort_pending_data_key_rotation(store, provider),
-        DataKeyRotationPhase::Ready => finish_pending_data_key_rotation(store, provider, &manifest),
+        DataKeyRotationPhase::Ready | DataKeyRotationPhase::CommittedCleanupPending => {
+            finish_pending_data_key_rotation(store, provider, &manifest).map(|_| ())
+        }
     }
 }
 
@@ -3300,6 +3456,9 @@ fn prepare_data_key_rotation(
     password: &str,
     provider: &dyn SystemUnlockProvider,
 ) -> Result<(), String> {
+    if store.data_key_rotation_directory().exists() {
+        return Err("workspace_vault_data_key_rotation_recovery_required".to_owned());
+    }
     let previous_metadata = store
         .read_vault_metadata()?
         .ok_or_else(|| "workspace_vault_not_configured".to_owned())?;
@@ -3440,7 +3599,7 @@ fn rotate_encrypted_store(
     previous_data_key: &[u8; DATA_KEY_BYTES],
     password: &str,
     provider: &dyn SystemUnlockProvider,
-) -> Result<(), String> {
+) -> Result<DataKeyRotationCompletion, String> {
     if !store.encryption_configured() {
         return Err("workspace_vault_not_configured".to_owned());
     }
@@ -4392,6 +4551,7 @@ mod tests {
     use super::*;
     use std::cell::Cell;
     use std::collections::HashMap;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
 
     #[derive(Default)]
     struct FakeSystemUnlockProvider {
@@ -4426,6 +4586,81 @@ mod tests {
 
         fn delete(&self, credential_id: &str) -> Result<(), String> {
             self.secrets.lock().unwrap().remove(credential_id);
+            Ok(())
+        }
+    }
+
+    struct DeleteFailingSystemUnlockProvider {
+        inner: FakeSystemUnlockProvider,
+        fail_delete: AtomicBool,
+    }
+
+    impl Default for DeleteFailingSystemUnlockProvider {
+        fn default() -> Self {
+            Self {
+                inner: FakeSystemUnlockProvider::default(),
+                fail_delete: AtomicBool::new(true),
+            }
+        }
+    }
+
+    impl SystemUnlockProvider for DeleteFailingSystemUnlockProvider {
+        fn provider_id(&self) -> &'static str {
+            self.inner.provider_id()
+        }
+
+        fn available(&self) -> bool {
+            self.inner.available()
+        }
+
+        fn store(&self, credential_id: &str, secret: &[u8]) -> Result<(), String> {
+            self.inner.store(credential_id, secret)
+        }
+
+        fn load(&self, credential_id: &str) -> Result<Vec<u8>, String> {
+            self.inner.load(credential_id)
+        }
+
+        fn delete(&self, credential_id: &str) -> Result<(), String> {
+            if self.fail_delete.load(Ordering::Acquire) {
+                Err("system_unlock_delete_failed".to_owned())
+            } else {
+                self.inner.delete(credential_id)
+            }
+        }
+    }
+
+    struct ForeignSystemUnlockProvider {
+        delete_calls: AtomicUsize,
+    }
+
+    impl Default for ForeignSystemUnlockProvider {
+        fn default() -> Self {
+            Self {
+                delete_calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl SystemUnlockProvider for ForeignSystemUnlockProvider {
+        fn provider_id(&self) -> &'static str {
+            "foreign-system-store"
+        }
+
+        fn available(&self) -> bool {
+            true
+        }
+
+        fn store(&self, _credential_id: &str, _secret: &[u8]) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn load(&self, _credential_id: &str) -> Result<Vec<u8>, String> {
+            Err("system_unlock_credential_missing".to_owned())
+        }
+
+        fn delete(&self, _credential_id: &str) -> Result<(), String> {
+            self.delete_calls.fetch_add(1, Ordering::AcqRel);
             Ok(())
         }
     }
@@ -4730,6 +4965,29 @@ mod tests {
         assert!(state.should_idle_lock());
         state.set_idle_timeout(None);
         assert!(!state.should_idle_lock());
+    }
+
+    #[test]
+    fn access_generation_exhaustion_fails_closed_without_wrapping() {
+        let state = WorkspaceVaultState::default();
+        state.replace_data_key([3; DATA_KEY_BYTES]).unwrap();
+        state.access_generation.store(u64::MAX, Ordering::Release);
+
+        assert_eq!(
+            state.next_access_generation(),
+            Err("workspace_vault_access_generation_exhausted".to_owned())
+        );
+        assert_eq!(
+            state.revoke_access(),
+            Err("workspace_vault_access_generation_exhausted".to_owned())
+        );
+        assert_eq!(state.access_generation.load(Ordering::Acquire), u64::MAX);
+        assert!(!state.is_unlocked().unwrap());
+        assert_eq!(
+            state.replace_data_key([4; DATA_KEY_BYTES]),
+            Err("workspace_vault_access_generation_exhausted".to_owned())
+        );
+        assert!(!state.is_unlocked().unwrap());
     }
 
     #[test]
@@ -5414,6 +5672,126 @@ mod tests {
     }
 
     #[test]
+    fn committed_data_key_rotation_remains_unlockable_when_old_credential_cleanup_fails() {
+        let directory = test_directory();
+        let store = WorkspaceFileStore::new(directory.clone());
+        let provider = DeleteFailingSystemUnlockProvider::default();
+        store
+            .write_plaintext(WorkspaceFileSlot::Primary, &workspace("cleanup-pending"))
+            .unwrap();
+        let previous_key = migrate_plaintext_store(&store, "correct horse battery").unwrap();
+        let previous_credential_id = "previous-cleanup-pending-credential";
+        let previous_device_key = random_array::<DATA_KEY_BYTES>().unwrap();
+        provider
+            .store(previous_credential_id, &previous_device_key)
+            .unwrap();
+        let mut metadata = store.read_vault_metadata().unwrap().unwrap();
+        metadata.system_unlock = Some(
+            create_system_unlock_envelope(
+                provider.provider_id(),
+                previous_credential_id,
+                &previous_key,
+                &previous_device_key,
+            )
+            .unwrap(),
+        );
+        write_atomically(&store.vault_path(), &serde_json::to_vec(&metadata).unwrap()).unwrap();
+
+        assert_eq!(
+            rotate_encrypted_store(
+                &store,
+                &previous_key,
+                "replacement master password",
+                &provider,
+            )
+            .unwrap(),
+            DataKeyRotationCompletion::CleanupPending
+        );
+        let next_metadata = store.read_vault_metadata().unwrap().unwrap();
+        assert_eq!(
+            unwrap_data_key(&next_metadata, "replacement master password")
+                .unwrap()
+                .len(),
+            DATA_KEY_BYTES
+        );
+        assert!(store.data_key_rotation_directory().exists());
+
+        recover_pending_workspace_transactions(&store, &provider).unwrap();
+        assert!(store.data_key_rotation_directory().exists());
+
+        provider.fail_delete.store(false, Ordering::Release);
+        recover_pending_workspace_transactions(&store, &provider).unwrap();
+        assert!(!store.data_key_rotation_directory().exists());
+        assert_eq!(
+            provider.load(previous_credential_id).unwrap_err(),
+            "system_unlock_credential_missing"
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn committed_rotation_on_another_provider_discards_redundant_copies_without_foreign_delete() {
+        let directory = test_directory();
+        let store = WorkspaceFileStore::new(directory.clone());
+        let original_provider = FakeSystemUnlockProvider::default();
+        store
+            .write_plaintext(WorkspaceFileSlot::Primary, &workspace("cross-platform"))
+            .unwrap();
+        let previous_key = migrate_plaintext_store(&store, "correct horse battery").unwrap();
+        let previous_credential_id = "cross-platform-previous-credential";
+        let previous_device_key = random_array::<DATA_KEY_BYTES>().unwrap();
+        original_provider
+            .store(previous_credential_id, &previous_device_key)
+            .unwrap();
+        let mut metadata = store.read_vault_metadata().unwrap().unwrap();
+        metadata.system_unlock = Some(
+            create_system_unlock_envelope(
+                original_provider.provider_id(),
+                previous_credential_id,
+                &previous_key,
+                &previous_device_key,
+            )
+            .unwrap(),
+        );
+        write_atomically(&store.vault_path(), &serde_json::to_vec(&metadata).unwrap()).unwrap();
+        let next_key = random_array::<DATA_KEY_BYTES>().unwrap();
+        prepare_data_key_rotation(
+            &store,
+            &previous_key,
+            &next_key,
+            "replacement master password",
+            &original_provider,
+        )
+        .unwrap();
+        let manifest = read_data_key_rotation_manifest(&store).unwrap().unwrap();
+        let foreign_provider = ForeignSystemUnlockProvider::default();
+
+        assert_eq!(
+            finish_pending_data_key_rotation(&store, &foreign_provider, &manifest),
+            Ok(DataKeyRotationCompletion::CleanupSkipped)
+        );
+        assert_eq!(
+            foreign_provider.delete_calls.load(Ordering::Acquire),
+            0,
+            "a provider must never receive a credential id from another provider"
+        );
+        assert!(
+            !store.data_key_rotation_directory().exists(),
+            "a committed rotation must not block later operations on another OS"
+        );
+        assert_eq!(
+            unwrap_data_key(
+                &store.read_vault_metadata().unwrap().unwrap(),
+                "replacement master password",
+            )
+            .unwrap(),
+            next_key
+        );
+        assert!(original_provider.load(previous_credential_id).is_ok());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn restart_finishes_a_ready_data_key_rotation() {
         let directory = test_directory();
         let store = WorkspaceFileStore::new(directory.clone());
@@ -5465,6 +5843,92 @@ mod tests {
             Some(recovery)
         );
         assert!(!store.data_key_rotation_directory().exists());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn recovery_promotes_ready_rotation_after_vault_commit() {
+        let directory = test_directory();
+        let store = WorkspaceFileStore::new(directory.clone());
+        let provider = FakeSystemUnlockProvider::default();
+        store
+            .write_plaintext(
+                WorkspaceFileSlot::Primary,
+                &workspace("rotation-commit-marker"),
+            )
+            .unwrap();
+        let previous_key = migrate_plaintext_store(&store, "correct horse battery").unwrap();
+        let next_key = random_array::<DATA_KEY_BYTES>().unwrap();
+        prepare_data_key_rotation(
+            &store,
+            &previous_key,
+            &next_key,
+            "replacement master password",
+            &provider,
+        )
+        .unwrap();
+
+        // Simulate a crash after the vault commit but before the cleanup
+        // manifest could be advanced from Ready.
+        let pending_vault = pending_rotation_file(&store.data_key_rotation_vault_path()).unwrap();
+        write_atomically(&store.vault_path(), &pending_vault).unwrap();
+
+        recover_pending_migration(&store).unwrap();
+
+        assert_eq!(
+            read_data_key_rotation_manifest(&store)
+                .unwrap()
+                .unwrap()
+                .phase,
+            DataKeyRotationPhase::CommittedCleanupPending
+        );
+        recover_pending_workspace_transactions(&store, &provider).unwrap();
+        assert!(!store.data_key_rotation_directory().exists());
+        assert_eq!(
+            unwrap_data_key(
+                &store.read_vault_metadata().unwrap().unwrap(),
+                "replacement master password",
+            )
+            .unwrap(),
+            next_key
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn recovery_keeps_uncommitted_ready_rotation_blocked() {
+        let directory = test_directory();
+        let store = WorkspaceFileStore::new(directory.clone());
+        let provider = FakeSystemUnlockProvider::default();
+        store
+            .write_plaintext(
+                WorkspaceFileSlot::Primary,
+                &workspace("rotation-not-committed"),
+            )
+            .unwrap();
+        let previous_key = migrate_plaintext_store(&store, "correct horse battery").unwrap();
+        let next_key = random_array::<DATA_KEY_BYTES>().unwrap();
+        prepare_data_key_rotation(
+            &store,
+            &previous_key,
+            &next_key,
+            "replacement master password",
+            &provider,
+        )
+        .unwrap();
+
+        assert_eq!(
+            recover_pending_migration(&store).unwrap_err(),
+            "workspace_vault_data_key_rotation_recovery_required"
+        );
+        assert_eq!(
+            read_data_key_rotation_manifest(&store)
+                .unwrap()
+                .unwrap()
+                .phase,
+            DataKeyRotationPhase::Ready
+        );
+        abort_pending_data_key_rotation(&store, &provider).unwrap();
         fs::remove_dir_all(directory).unwrap();
     }
 

@@ -1,6 +1,9 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    sync::OnceLock,
+    sync::{
+        OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -250,26 +253,50 @@ fn host_error(code: ExtensionHostErrorCode) -> String {
     format!("extension_runtime_host_{code}")
 }
 
+fn runtime_generation_for_permit(
+    access_generation: &AtomicU64,
+    permit: Option<crate::workspace_file::WorkspaceAccessPermit>,
+) -> Result<u64, String> {
+    let generation = permit.map_or_else(
+        || access_generation.load(Ordering::Acquire),
+        crate::workspace_file::WorkspaceAccessPermit::generation,
+    );
+    crate::workspace_file::ensure_access_generation(access_generation, permit)?;
+    Ok(generation)
+}
+
 fn prepare_runtime(
     app: &tauri::AppHandle,
     manager: &crate::extension_manager::ExtensionManagerState,
     runtime: &crate::extension_runtime::ExtensionRuntimeState,
     extension_id: &str,
     generation: u64,
+    access_generation: &AtomicU64,
+    vault: &crate::workspace_file::WorkspaceVaultState,
+    permit: Option<crate::workspace_file::WorkspaceAccessPermit>,
 ) -> Result<crate::extension_manager::ManagedExtensionRuntimeRegistration, String> {
+    crate::workspace_file::ensure_workspace_access(app, vault, permit)?;
     let registration = crate::extension_manager::managed_extension_runtime_registration(
         app,
         manager,
         extension_id,
     )?;
-    runtime.ensure_started(
+    crate::workspace_file::ensure_workspace_access(app, vault, permit)?;
+    runtime.ensure_started_for_access_generation(
         app,
         extension_id,
         &registration.extension_id,
         &registration.package_path,
         generation,
+        access_generation,
         registration.allow_unsigned_development,
     )?;
+    // A lock may race with startup.  Do not leave a host that completed its
+    // handshake after its caller's permit was revoked.
+    if let Err(error) = crate::workspace_file::ensure_workspace_access(app, vault, permit) {
+        runtime.stop(extension_id);
+        return Err(error);
+    }
     if let Err(error) = crate::extension_manager::ensure_managed_extension_runtime_registration(
         app,
         manager,
@@ -292,10 +319,18 @@ fn render_managed_extension_processor_blocking(
     let runtime = app.state::<crate::extension_runtime::ExtensionRuntimeState>();
     let vault = app.state::<crate::workspace_file::WorkspaceVaultState>();
     let permit = crate::workspace_file::begin_workspace_access(&app, &vault)?;
-    let generation = vault
-        .access_generation()
-        .load(std::sync::atomic::Ordering::Acquire);
-    let registration = prepare_runtime(&app, &manager, &runtime, &extension_id, generation)?;
+    let access_generation = vault.access_generation();
+    let generation = runtime_generation_for_permit(&access_generation, permit)?;
+    let registration = prepare_runtime(
+        &app,
+        &manager,
+        &runtime,
+        &extension_id,
+        generation,
+        &access_generation,
+        &vault,
+        permit,
+    )?;
     if !registration
         .package
         .manifest
@@ -306,17 +341,20 @@ fn render_managed_extension_processor_blocking(
     {
         return Err("extension_runtime_processor_unknown".to_owned());
     }
+    crate::workspace_file::ensure_workspace_access(&app, &vault, permit)?;
     let prepared = prepare_snapshots(
         std::slice::from_ref(&node),
         &registration.package.manifest.capabilities,
         true,
     )?;
+    crate::workspace_file::ensure_workspace_access(&app, &vault, permit)?;
     let (node_metadata_json, workspace_metadata_json) = metadata_json(
         metadata.as_ref(),
         registration.package.manifest.metadata_schema_version,
         &registration.package.manifest.capabilities,
     )?;
-    let response = runtime.request(
+    crate::workspace_file::ensure_workspace_access(&app, &vault, permit)?;
+    let response = runtime.request_for_access_generation(
         &extension_id,
         ExtensionHostRequestV1::Render {
             request_id: runtime.next_request_id(),
@@ -334,6 +372,7 @@ fn render_managed_extension_processor_blocking(
             },
         },
         PASSIVE_TIMEOUT,
+        &access_generation,
     )?;
     crate::workspace_file::ensure_workspace_access(&app, &vault, permit)?;
     match response {
@@ -378,10 +417,18 @@ fn invoke_managed_extension_action_blocking(
     let runtime = app.state::<crate::extension_runtime::ExtensionRuntimeState>();
     let vault = app.state::<crate::workspace_file::WorkspaceVaultState>();
     let permit = crate::workspace_file::begin_workspace_access(&app, &vault)?;
-    let generation = vault
-        .access_generation()
-        .load(std::sync::atomic::Ordering::Acquire);
-    let registration = prepare_runtime(&app, &manager, &runtime, &extension_id, generation)?;
+    let access_generation = vault.access_generation();
+    let generation = runtime_generation_for_permit(&access_generation, permit)?;
+    let registration = prepare_runtime(
+        &app,
+        &manager,
+        &runtime,
+        &extension_id,
+        generation,
+        &access_generation,
+        &vault,
+        permit,
+    )?;
     if !registration
         .package
         .manifest
@@ -392,14 +439,17 @@ fn invoke_managed_extension_action_blocking(
     {
         return Err("extension_runtime_action_unknown".to_owned());
     }
+    crate::workspace_file::ensure_workspace_access(&app, &vault, permit)?;
     let prepared = prepare_snapshots(&nodes, &registration.package.manifest.capabilities, false)?;
+    crate::workspace_file::ensure_workspace_access(&app, &vault, permit)?;
     let metadata = (nodes.len() == 1).then_some(metadata).flatten();
     let (node_metadata_json, workspace_metadata_json) = metadata_json(
         metadata.as_ref(),
         registration.package.manifest.metadata_schema_version,
         &registration.package.manifest.capabilities,
     )?;
-    let response = runtime.request(
+    crate::workspace_file::ensure_workspace_access(&app, &vault, permit)?;
+    let response = runtime.request_for_access_generation(
         &extension_id,
         ExtensionHostRequestV1::Invoke {
             request_id: runtime.next_request_id(),
@@ -415,6 +465,7 @@ fn invoke_managed_extension_action_blocking(
             },
         },
         ACTIVE_TIMEOUT,
+        &access_generation,
     )?;
     crate::workspace_file::ensure_workspace_access(&app, &vault, permit)?;
     match response {
@@ -460,7 +511,40 @@ pub async fn invoke_managed_extension_action(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Barrier};
+
     use super::*;
+
+    #[test]
+    fn revoked_permit_cannot_adopt_a_later_generation() {
+        let access_generation = Arc::new(AtomicU64::new(7));
+        let permit = Some(crate::workspace_file::WorkspaceAccessPermit::for_test(7));
+        let captured_barrier = Arc::new(Barrier::new(2));
+        let revoked_barrier = Arc::new(Barrier::new(2));
+        let worker_generation = Arc::clone(&access_generation);
+        let worker_captured_barrier = Arc::clone(&captured_barrier);
+        let worker_revoked_barrier = Arc::clone(&revoked_barrier);
+        let worker = std::thread::spawn(move || {
+            let captured = runtime_generation_for_permit(&worker_generation, permit).unwrap();
+            worker_captured_barrier.wait();
+            worker_revoked_barrier.wait();
+            (
+                captured,
+                runtime_generation_for_permit(&worker_generation, permit),
+            )
+        });
+
+        captured_barrier.wait();
+        access_generation.store(8, Ordering::Release);
+        revoked_barrier.wait();
+        let (captured, after_revoke) = worker.join().unwrap();
+
+        assert_eq!(captured, 7);
+        assert_eq!(
+            after_revoke,
+            Err("workspace_vault_session_expired".to_owned())
+        );
+    }
 
     #[test]
     fn snapshots_strip_secret_payloads_and_never_expose_node_ids() {

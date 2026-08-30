@@ -27,6 +27,7 @@ fn exit_application(
 ) {
     // Revoke plaintext authority before waiting for any model or extension
     // process cleanup. Application exit is not an exception to lock ordering.
+    extension_runtime_state.revoke_all(vault_state.next_access_generation().unwrap_or(u64::MAX));
     vault_state.shutdown();
     extension_runtime_state.shutdown();
     let _ = embedding_state.shutdown();

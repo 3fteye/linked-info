@@ -4,7 +4,10 @@ use std::{
     error::Error,
     fs, io,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tauri::{AppHandle, Manager};
@@ -21,6 +24,31 @@ type StoreResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 #[derive(Default)]
 pub struct VectorCacheState {
     operation_lock: Arc<Mutex<()>>,
+    generation: Arc<AtomicU64>,
+}
+
+impl VectorCacheState {
+    fn generation(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.generation)
+    }
+
+    pub(crate) fn invalidate_for_encryption(&self) -> Result<(), String> {
+        let mut current = self.generation.load(Ordering::Acquire);
+        loop {
+            if current == u64::MAX {
+                return Err("vector cache generation exhausted".to_owned());
+            }
+            match self.generation.compare_exchange(
+                current,
+                current + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Ok(()),
+                Err(observed) => current = observed,
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]
@@ -397,6 +425,14 @@ fn operation_lock(state: &VectorCacheState) -> Arc<Mutex<()>> {
     Arc::clone(&state.operation_lock)
 }
 
+fn cache_write_is_current(
+    expected_generation: u64,
+    current_generation: u64,
+    encrypted: bool,
+) -> bool {
+    expected_generation == current_generation && current_generation != u64::MAX && !encrypted
+}
+
 fn validate_keys(keys: &[VectorCacheKey]) -> Result<(), String> {
     validate_batch_size(keys.len()).map_err(|error| error.to_string())?;
     for key in keys {
@@ -415,6 +451,7 @@ fn validate_entries(entries: &[VectorCacheEntry]) -> Result<(), String> {
 }
 
 pub async fn purge_for_encryption(app: &AppHandle, state: &VectorCacheState) -> Result<(), String> {
+    state.invalidate_for_encryption()?;
     let store = vector_cache_store(app)?;
     let lock = operation_lock(state);
     tauri::async_runtime::spawn_blocking(move || {
@@ -433,16 +470,27 @@ pub async fn read_embedding_vector_cache(
     state: tauri::State<'_, VectorCacheState>,
     keys: Vec<VectorCacheKey>,
 ) -> Result<Vec<Option<Vec<f32>>>, String> {
-    if crate::workspace_file::workspace_encryption_configured(&app) {
+    let encrypted = crate::workspace_file::workspace_encryption_configured(&app);
+    let expected_generation = state.generation.load(Ordering::Acquire);
+    if encrypted {
         validate_keys(&keys)?;
         return Ok(keys.iter().map(|_| None).collect());
     }
     let store = vector_cache_store(&app)?;
     let lock = operation_lock(&state);
+    let generation = state.generation();
+    let app_for_check = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let _guard = lock
             .lock()
             .map_err(|_| "vector cache operation lock is unavailable".to_owned())?;
+        if !cache_write_is_current(
+            expected_generation,
+            generation.load(Ordering::Acquire),
+            crate::workspace_file::workspace_encryption_configured(&app_for_check),
+        ) {
+            return Ok(keys.iter().map(|_| None).collect());
+        }
         store.read(&keys).map_err(|error| error.to_string())
     })
     .await
@@ -455,16 +503,27 @@ pub async fn write_embedding_vector_cache(
     state: tauri::State<'_, VectorCacheState>,
     entries: Vec<VectorCacheEntry>,
 ) -> Result<(), String> {
-    if crate::workspace_file::workspace_encryption_configured(&app) {
+    let encrypted = crate::workspace_file::workspace_encryption_configured(&app);
+    let expected_generation = state.generation.load(Ordering::Acquire);
+    if encrypted {
         validate_entries(&entries)?;
         return Ok(());
     }
     let store = vector_cache_store(&app)?;
     let lock = operation_lock(&state);
+    let generation = state.generation();
+    let app_for_check = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let _guard = lock
             .lock()
             .map_err(|_| "vector cache operation lock is unavailable".to_owned())?;
+        if !cache_write_is_current(
+            expected_generation,
+            generation.load(Ordering::Acquire),
+            crate::workspace_file::workspace_encryption_configured(&app_for_check),
+        ) {
+            return Ok(());
+        }
         store.write(&entries).map_err(|error| error.to_string())
     })
     .await
@@ -588,5 +647,41 @@ mod tests {
     fn rejects_non_hash_keys_and_non_finite_vectors() {
         assert!(validate_key("raw model name", &"b".repeat(64)).is_err());
         assert!(validate_vector(&[f32::NAN]).is_err());
+    }
+
+    #[test]
+    fn stale_cache_generation_is_rejected_after_encryption_transition() {
+        let state = VectorCacheState::default();
+        let expected_generation = state.generation.load(Ordering::Acquire);
+        let lock = Arc::clone(&state.operation_lock);
+        let generation = state.generation();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let worker_barrier = Arc::clone(&barrier);
+        let worker = std::thread::spawn(move || {
+            let _guard = lock.lock().unwrap();
+            worker_barrier.wait();
+            cache_write_is_current(
+                expected_generation,
+                generation.load(Ordering::Acquire),
+                false,
+            )
+        });
+
+        barrier.wait();
+        state.invalidate_for_encryption().unwrap();
+        assert!(!worker.join().unwrap());
+    }
+
+    #[test]
+    fn generation_exhaustion_fails_closed_without_wrapping() {
+        let state = VectorCacheState::default();
+        state.generation.store(u64::MAX, Ordering::Release);
+
+        assert_eq!(
+            state.invalidate_for_encryption(),
+            Err("vector cache generation exhausted".to_owned())
+        );
+        assert_eq!(state.generation.load(Ordering::Acquire), u64::MAX);
+        assert!(!cache_write_is_current(u64::MAX, u64::MAX, false));
     }
 }

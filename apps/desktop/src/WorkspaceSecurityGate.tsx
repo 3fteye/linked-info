@@ -85,7 +85,11 @@ export default function WorkspaceSecurityGate({
         );
         setPassword("");
         setNotice(
-          reason === "workspace_data_key_rotated"
+          reason === "workspace_data_key_rotated_cleanup_pending"
+            ? t("security.rotateSuccessCleanupPending")
+            : reason === "workspace_data_key_rotated_cleanup_skipped"
+              ? t("security.rotateSuccessCleanupSkipped")
+            : reason === "workspace_data_key_rotated"
             ? t("security.rotateSuccessLocked")
             : reason === "workspace_password_changed_locked"
               ? t("security.changeSuccessLocked")

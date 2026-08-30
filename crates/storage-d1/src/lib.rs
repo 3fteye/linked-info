@@ -23,7 +23,13 @@ const DELETE_NODE_REFERENCES_SQL: &str = "DELETE FROM node_references \
      WHERE source_node_id = ? OR target_node_id = ?";
 const DELETE_NODE_SQL: &str = "DELETE FROM nodes WHERE id = ?";
 const ADD_REFERENCE_SQL: &str = "INSERT OR IGNORE INTO node_references \
-     (source_node_id, target_node_id) VALUES (?, ?)";
+     (source_node_id, target_node_id) \
+     SELECT ?, ? \
+     WHERE EXISTS (SELECT 1 FROM nodes WHERE id = ?) \
+       AND EXISTS (SELECT 1 FROM nodes WHERE id = ?)";
+const CHECK_REFERENCE_ENDPOINTS_SQL: &str = "SELECT \
+     EXISTS (SELECT 1 FROM nodes WHERE id = ?) AS source_exists, \
+     EXISTS (SELECT 1 FROM nodes WHERE id = ?) AS target_exists";
 const REMOVE_REFERENCE_SQL: &str = "DELETE FROM node_references \
      WHERE source_node_id = ? AND target_node_id = ?";
 const LIST_REFERRERS_SQL: &str = "SELECT n.id, n.name, n.content \
@@ -58,14 +64,6 @@ impl D1GraphStore {
             .into_iter()
             .map(NodeRow::into_node)
             .collect()
-    }
-
-    async fn require_node(&self, id: NodeId) -> Result<(), D1StoreError> {
-        if self.find_node(id).await?.is_some() {
-            Ok(())
-        } else {
-            Err(D1StoreError::NodeNotFound(id))
-        }
     }
 }
 
@@ -187,21 +185,67 @@ impl GraphStore for D1GraphStore {
     }
 
     async fn add_reference(&self, reference: Reference) -> Result<(), Self::Error> {
-        self.require_node(reference.source_node_id()).await?;
-        self.require_node(reference.target_node_id()).await?;
-
         let source_id = reference.source_node_id().to_string();
         let target_id = reference.target_node_id().to_string();
-        let values = [D1Type::Text(&source_id), D1Type::Text(&target_id)];
-        let result = self
+        // D1 batches execute atomically. The endpoint predicates and the
+        // insert therefore observe one transaction snapshot, avoiding a
+        // check-then-insert window where a concurrent delete could leave a
+        // dangling reference or an ambiguous error.
+        let insert_values = [
+            D1Type::Text(&source_id),
+            D1Type::Text(&target_id),
+            D1Type::Text(&source_id),
+            D1Type::Text(&target_id),
+        ];
+        let endpoint_values = [D1Type::Text(&source_id), D1Type::Text(&target_id)];
+        let insert = self
             .database
             .prepare(ADD_REFERENCE_SQL)
-            .bind_refs(&values)
-            .map_err(D1StoreError::from)?
-            .run()
+            .bind_refs(&insert_values)
+            .map_err(D1StoreError::from)?;
+        let endpoints = self
+            .database
+            .prepare(CHECK_REFERENCE_ENDPOINTS_SQL)
+            .bind_refs(&endpoint_values)
+            .map_err(D1StoreError::from)?;
+        let results = self
+            .database
+            .batch(vec![insert, endpoints])
             .await
             .map_err(D1StoreError::from)?;
-        ensure_success(&result)
+        if results.len() != 2 {
+            return Err(D1StoreError::Operation(format!(
+                "D1 reference batch returned {} results instead of 2",
+                results.len()
+            )));
+        }
+        ensure_success(&results[0])?;
+        ensure_success(&results[1])?;
+
+        let inserted = results[0]
+            .meta()
+            .map_err(D1StoreError::from)?
+            .and_then(|meta| meta.changes)
+            .unwrap_or(0);
+        if inserted > 0 {
+            return Ok(());
+        }
+
+        let endpoint_rows = results[1]
+            .results::<ReferenceEndpointRow>()
+            .map_err(D1StoreError::from)?;
+        let endpoint_row = endpoint_rows.into_iter().next().ok_or_else(|| {
+            D1StoreError::Operation("D1 endpoint check returned no rows".to_owned())
+        })?;
+        if endpoint_row.source_exists == 0 {
+            return Err(D1StoreError::NodeNotFound(reference.source_node_id()));
+        }
+        if endpoint_row.target_exists == 0 {
+            return Err(D1StoreError::NodeNotFound(reference.target_node_id()));
+        }
+        // Both endpoints exist and the insert changed no rows: the reference
+        // was already present, which is intentionally idempotent.
+        Ok(())
     }
 
     async fn list_nodes_referencing(
@@ -265,6 +309,12 @@ struct NodeRow {
     id: String,
     name: Option<String>,
     content: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReferenceEndpointRow {
+    source_exists: i32,
+    target_exists: i32,
 }
 
 impl NodeRow {
@@ -349,5 +399,14 @@ mod tests {
     #[test]
     fn like_search_treats_wildcards_as_text() {
         assert_eq!(escape_like(r"50%_off\\today"), r"50\%\_off\\\\today");
+    }
+
+    #[test]
+    fn reference_insert_checks_both_endpoints_inside_the_statement() {
+        assert!(ADD_REFERENCE_SQL.contains("WHERE EXISTS"));
+        assert!(ADD_REFERENCE_SQL.contains("source_node_id"));
+        assert!(ADD_REFERENCE_SQL.contains("target_node_id"));
+        assert!(CHECK_REFERENCE_ENDPOINTS_SQL.contains("source_exists"));
+        assert!(CHECK_REFERENCE_ENDPOINTS_SQL.contains("target_exists"));
     }
 }

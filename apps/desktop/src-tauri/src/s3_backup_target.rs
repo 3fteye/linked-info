@@ -1,4 +1,3 @@
-use std::str::FromStr;
 use std::time::SystemTime;
 
 use aws_credential_types::Credentials;
@@ -10,8 +9,10 @@ use aws_sigv4::{
     sign::v4,
 };
 use linked_info_backup_port::{
-    BACKUP_CONTENT_TYPE, BackupListPage, BackupSnapshot, BackupSnapshotMetadata, BackupTarget,
+    BACKUP_CONTENT_TYPE, BackupDeleteCapability, BackupDeleteOutcome, BackupListPage,
+    BackupOperationGuard, BackupPurgeOutcome, BackupSnapshot, BackupSnapshotMetadata, BackupTarget,
     BackupTargetCapabilities, BackupTargetError, BackupTargetFuture, BackupVerification,
+    MAX_BACKUP_PAGE_LIMIT,
 };
 use reqwest::{
     Client, Method, StatusCode, Url,
@@ -28,6 +29,9 @@ const MAXIMUM_UPLOAD_BYTES: u64 = 100 * 1024 * 1024;
 const MAXIMUM_LIST_RESPONSE_BYTES: usize = 1024 * 1024;
 const REQUEST_TIMEOUT_SECONDS: u64 = 60;
 const OBJECT_SUFFIX: &str = ".linked-info-backup";
+const MAXIMUM_VERSION_ID_BYTES: usize = 1024;
+const MAXIMUM_VERSIONS_TO_DELETE: usize = 4_096;
+const MAXIMUM_DELETE_PASSES: usize = 3;
 
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub struct S3Credentials {
@@ -43,6 +47,12 @@ pub struct S3BackupTarget {
     bucket: String,
     prefix: String,
     credentials: S3Credentials,
+}
+
+fn check_operation_guard(
+    guard: Option<&dyn BackupOperationGuard>,
+) -> Result<(), BackupTargetError> {
+    guard.map_or(Ok(()), BackupOperationGuard::check)
 }
 
 impl S3BackupTarget {
@@ -143,6 +153,38 @@ impl S3BackupTarget {
                 query.append_pair("continuation-token", cursor);
             }
         }
+        Ok(url)
+    }
+
+    fn versions_url(
+        &self,
+        prefix: &str,
+        key_marker: Option<&str>,
+        version_id_marker: Option<&str>,
+        limit: u16,
+    ) -> Result<Url, BackupTargetError> {
+        let mut url = self.bucket_url()?;
+        {
+            let mut query = url.query_pairs_mut();
+            // An empty value is the canonical S3 query representation for the
+            // ListObjectVersions subresource (`?versions`).
+            query.append_pair("versions", "");
+            query.append_pair("prefix", prefix);
+            query.append_pair("max-keys", &limit.to_string());
+            if let Some(key_marker) = key_marker {
+                query.append_pair("key-marker", key_marker);
+            }
+            if let Some(version_id_marker) = version_id_marker {
+                query.append_pair("version-id-marker", version_id_marker);
+            }
+        }
+        Ok(url)
+    }
+
+    fn versioned_object_url(&self, key: &str, version_id: &str) -> Result<Url, BackupTargetError> {
+        validate_version_id(version_id)?;
+        let mut url = self.object_url(key)?;
+        url.query_pairs_mut().append_pair("versionId", version_id);
         Ok(url)
     }
 
@@ -292,18 +334,53 @@ impl S3BackupTarget {
             .into_iter()
             .filter_map(|object| metadata_from_object(&prefix, &object).ok())
             .collect::<Vec<_>>();
-        items.sort_by(|left, right| right.created_at_ms.cmp(&left.created_at_ms));
+        items.sort_by_key(|item| std::cmp::Reverse(item.created_at_ms));
         let next_cursor = result.next_continuation_token.filter(|cursor| {
             !cursor.is_empty() && cursor.len() <= 2048 && result.is_truncated.unwrap_or(false)
         });
         Ok(BackupListPage { items, next_cursor })
     }
 
+    async fn has_visible_objects_with_guard(
+        &self,
+        prefix: &str,
+        operation_guard: Option<&dyn BackupOperationGuard>,
+    ) -> Result<bool, BackupTargetError> {
+        check_operation_guard(operation_guard)?;
+        let response = require_success(
+            self.execute(
+                Method::GET,
+                self.list_url(prefix, None, MAX_BACKUP_PAGE_LIMIT)?,
+                HeaderMap::new(),
+                Vec::new(),
+            )
+            .await?,
+        )
+        .await?;
+        check_operation_guard(operation_guard)?;
+        let result = parse_list_response(response).await?;
+
+        // This probe deliberately checks raw object presence instead of the
+        // parsed snapshot list. `list_snapshots` filters malformed keys for
+        // ordinary browsing, but a destructive purge must fail closed when an
+        // app-owned key is visible and cannot be parsed as our format.
+        raw_list_indicates_visible_objects(&result)
+    }
+
     async fn lookup_snapshot(
         &self,
         id: Uuid,
     ) -> Result<Option<(String, BackupSnapshotMetadata)>, BackupTargetError> {
+        self.lookup_snapshot_with_guard(id, None).await
+    }
+
+    async fn lookup_snapshot_with_guard(
+        &self,
+        id: Uuid,
+        operation_guard: Option<&dyn BackupOperationGuard>,
+    ) -> Result<Option<(String, BackupSnapshotMetadata)>, BackupTargetError> {
         let prefix = self.snapshot_directory(id);
+        check_operation_guard(operation_guard)?;
         let response = require_success(
             self.execute(
                 Method::GET,
@@ -314,6 +391,7 @@ impl S3BackupTarget {
             .await?,
         )
         .await?;
+        check_operation_guard(operation_guard)?;
         let result = parse_list_response(response).await?;
         let mut matches = result
             .contents
@@ -329,6 +407,311 @@ impl S3BackupTarget {
             return Err(BackupTargetError::InvalidResponse);
         }
         Ok(matches.pop())
+    }
+
+    /// Enumerate every S3 version and delete marker under an application
+    /// prefix. `ListObjectsV2` cannot be used for destructive operations: on a
+    /// versioned bucket it hides historical versions and an object whose
+    /// latest record is a delete marker.
+    async fn list_versions_for_prefix(
+        &self,
+        prefix: &str,
+        operation_guard: Option<&dyn BackupOperationGuard>,
+    ) -> Result<Vec<VersionedObject>, BackupTargetError> {
+        let mut key_marker: Option<String> = None;
+        let mut version_id_marker: Option<String> = None;
+        let mut objects = Vec::new();
+
+        loop {
+            check_operation_guard(operation_guard)?;
+            let response = self
+                .execute(
+                    Method::GET,
+                    self.versions_url(
+                        prefix,
+                        key_marker.as_deref(),
+                        version_id_marker.as_deref(),
+                        MAX_BACKUP_PAGE_LIMIT,
+                    )?,
+                    HeaderMap::new(),
+                    Vec::new(),
+                )
+                .await?;
+            check_operation_guard(operation_guard)?;
+            let response = require_success(response).await?;
+            let page = parse_versions_response(response).await?;
+
+            for version in page.versions {
+                validate_version_id(&version.version_id)?;
+                objects.push(VersionedObject {
+                    key: version.key,
+                    version_id: version.version_id,
+                });
+            }
+            for marker in page.delete_markers {
+                validate_version_id(&marker.version_id)?;
+                objects.push(VersionedObject {
+                    key: marker.key,
+                    version_id: marker.version_id,
+                });
+            }
+            if objects.len() > MAXIMUM_VERSIONS_TO_DELETE {
+                return Err(BackupTargetError::InvalidResponse);
+            }
+
+            let is_truncated = page
+                .is_truncated
+                .ok_or(BackupTargetError::InvalidResponse)?;
+            if !is_truncated {
+                break;
+            }
+
+            let next_key_marker = validate_marker(page.next_key_marker)?;
+            let next_version_id_marker =
+                validate_optional_version_marker(page.next_version_id_marker)?;
+            if next_key_marker.is_none()
+                || (next_key_marker == key_marker && next_version_id_marker == version_id_marker)
+            {
+                // A truncated response without a progressing marker would
+                // make a complete deletion claim impossible and could loop
+                // forever against a broken provider.
+                return Err(BackupTargetError::InvalidResponse);
+            }
+            key_marker = next_key_marker;
+            version_id_marker = next_version_id_marker;
+        }
+
+        objects.sort_by(|left, right| {
+            left.key
+                .cmp(&right.key)
+                .then_with(|| left.version_id.cmp(&right.version_id))
+        });
+        objects
+            .dedup_by(|left, right| left.key == right.key && left.version_id == right.version_id);
+        Ok(objects)
+    }
+
+    fn snapshot_versions_from_objects(
+        &self,
+        id: Uuid,
+        objects: Vec<VersionedObject>,
+    ) -> Result<Vec<VersionedObject>, BackupTargetError> {
+        let snapshots_prefix = format!("{}/snapshots/", self.prefix);
+        objects
+            .into_iter()
+            .map(|object| {
+                let parsed = parse_snapshot_key(&snapshots_prefix, &object.key)?;
+                if parsed.id != id {
+                    return Err(BackupTargetError::InvalidResponse);
+                }
+                Ok(object)
+            })
+            .collect()
+    }
+
+    async fn list_snapshot_versions_with_guard(
+        &self,
+        id: Uuid,
+        operation_guard: Option<&dyn BackupOperationGuard>,
+    ) -> Result<Vec<VersionedObject>, BackupTargetError> {
+        let objects = self
+            .list_versions_for_prefix(&self.snapshot_directory(id), operation_guard)
+            .await?;
+        self.snapshot_versions_from_objects(id, objects)
+    }
+
+    async fn delete_version(
+        &self,
+        object: &VersionedObject,
+        operation_guard: Option<&dyn BackupOperationGuard>,
+    ) -> Result<(), BackupTargetError> {
+        check_operation_guard(operation_guard)?;
+        let response = self
+            .execute(
+                Method::DELETE,
+                self.versioned_object_url(&object.key, &object.version_id)?,
+                HeaderMap::new(),
+                Vec::new(),
+            )
+            .await?;
+        check_operation_guard(operation_guard)?;
+        // Version-specific DELETE is idempotent. A concurrent cleanup may
+        // have removed this exact version after the listing, which is already
+        // the desired state.
+        if response.status() == StatusCode::NOT_FOUND {
+            return Ok(());
+        }
+        require_success(response).await.map(|_| ())
+    }
+
+    async fn delete_snapshot_with_verification(
+        &self,
+        id: Uuid,
+    ) -> Result<BackupDeleteOutcome, BackupTargetError> {
+        self.delete_snapshot_with_verification_guard(id, None).await
+    }
+
+    async fn delete_snapshot_with_verification_guard(
+        &self,
+        id: Uuid,
+        operation_guard: Option<&dyn BackupOperationGuard>,
+    ) -> Result<BackupDeleteOutcome, BackupTargetError> {
+        // Providers that implement ordinary S3 object operations but reject
+        // ListObjectVersions cannot prove that old versions are gone. Do not
+        // issue a current-object DELETE in that case; report an unverified
+        // outcome so the caller can keep the target and its data intact.
+        check_operation_guard(operation_guard)?;
+        let mut objects = match self
+            .list_snapshot_versions_with_guard(id, operation_guard)
+            .await
+        {
+            Ok(objects) => objects,
+            Err(BackupTargetError::InvalidRequest | BackupTargetError::InvalidResponse) => {
+                return Ok(BackupDeleteOutcome::Unverified {
+                    removed_versions: 0,
+                });
+            }
+            Err(error) => return Err(error),
+        };
+        if objects.is_empty() {
+            // A compliant unversioned S3 bucket exposes its `null` version via
+            // ListObjectVersions. If an endpoint instead hides a live object,
+            // refuse to claim it was deleted.
+            let prefix = self.snapshot_directory(id);
+            let visible = match self
+                .has_visible_objects_with_guard(&prefix, operation_guard)
+                .await
+            {
+                Ok(visible) => visible,
+                Err(BackupTargetError::InvalidRequest | BackupTargetError::InvalidResponse) => {
+                    return Ok(BackupDeleteOutcome::Unverified {
+                        removed_versions: 0,
+                    });
+                }
+                Err(error) => return Err(error),
+            };
+            return Ok(if visible {
+                BackupDeleteOutcome::Unverified {
+                    removed_versions: 0,
+                }
+            } else {
+                BackupDeleteOutcome::NotFound
+            });
+        }
+
+        let mut removed_versions = 0u32;
+        for _ in 0..=MAXIMUM_DELETE_PASSES {
+            for object in &objects {
+                self.delete_version(object, operation_guard).await?;
+                removed_versions = removed_versions
+                    .checked_add(1)
+                    .ok_or(BackupTargetError::InvalidResponse)?;
+            }
+            objects = match self
+                .list_snapshot_versions_with_guard(id, operation_guard)
+                .await
+            {
+                Ok(objects) => objects,
+                Err(BackupTargetError::InvalidRequest | BackupTargetError::InvalidResponse) => {
+                    return Ok(BackupDeleteOutcome::Unverified { removed_versions });
+                }
+                Err(error) => return Err(error),
+            };
+            if objects.is_empty() {
+                return Ok(BackupDeleteOutcome::Deleted { removed_versions });
+            }
+        }
+
+        Ok(BackupDeleteOutcome::Unverified { removed_versions })
+    }
+
+    async fn purge_snapshots_with_verification(
+        &self,
+    ) -> Result<BackupPurgeOutcome, BackupTargetError> {
+        self.purge_snapshots_with_verification_guard(None).await
+    }
+
+    async fn purge_snapshots_with_verification_guard(
+        &self,
+        operation_guard: Option<&dyn BackupOperationGuard>,
+    ) -> Result<BackupPurgeOutcome, BackupTargetError> {
+        let snapshots_prefix = format!("{}/snapshots/", self.prefix);
+        check_operation_guard(operation_guard)?;
+        let mut objects = match self
+            .list_versions_for_prefix(&snapshots_prefix, operation_guard)
+            .await
+        {
+            Ok(objects) => objects
+                .into_iter()
+                .map(|object| parse_snapshot_key(&snapshots_prefix, &object.key).map(|_| object))
+                .collect::<Result<Vec<_>, _>>(),
+            Err(BackupTargetError::InvalidRequest | BackupTargetError::InvalidResponse) => {
+                return Ok(BackupPurgeOutcome::Unverified {
+                    removed_versions: 0,
+                });
+            }
+            Err(error) => return Err(error),
+        }
+        .map_err(|_| BackupTargetError::InvalidResponse)?;
+
+        if objects.is_empty() {
+            // A provider that returns an empty version listing while a live
+            // application object is visible cannot support a complete purge.
+            check_operation_guard(operation_guard)?;
+            let visible = match self
+                .has_visible_objects_with_guard(&snapshots_prefix, operation_guard)
+                .await
+            {
+                Ok(visible) => visible,
+                Err(BackupTargetError::InvalidRequest | BackupTargetError::InvalidResponse) => {
+                    return Ok(BackupPurgeOutcome::Unverified {
+                        removed_versions: 0,
+                    });
+                }
+                Err(error) => return Err(error),
+            };
+            check_operation_guard(operation_guard)?;
+            return Ok(if visible {
+                BackupPurgeOutcome::Unverified {
+                    removed_versions: 0,
+                }
+            } else {
+                BackupPurgeOutcome::Deleted {
+                    removed_versions: 0,
+                }
+            });
+        }
+
+        let mut removed_versions = 0u32;
+        for _ in 0..=MAXIMUM_DELETE_PASSES {
+            for object in &objects {
+                self.delete_version(object, operation_guard).await?;
+                removed_versions = removed_versions
+                    .checked_add(1)
+                    .ok_or(BackupTargetError::InvalidResponse)?;
+            }
+            objects = match self
+                .list_versions_for_prefix(&snapshots_prefix, operation_guard)
+                .await
+            {
+                Ok(objects) => objects
+                    .into_iter()
+                    .map(|object| {
+                        parse_snapshot_key(&snapshots_prefix, &object.key).map(|_| object)
+                    })
+                    .collect::<Result<Vec<_>, _>>(),
+                Err(BackupTargetError::InvalidRequest | BackupTargetError::InvalidResponse) => {
+                    return Ok(BackupPurgeOutcome::Unverified { removed_versions });
+                }
+                Err(error) => return Err(error),
+            }
+            .map_err(|_| BackupTargetError::InvalidResponse)?;
+            if objects.is_empty() {
+                return Ok(BackupPurgeOutcome::Deleted { removed_versions });
+            }
+        }
+
+        Ok(BackupPurgeOutcome::Unverified { removed_versions })
     }
 
     async fn download_snapshot(
@@ -366,19 +749,14 @@ impl S3BackupTarget {
     }
 
     async fn delete_snapshot(&self, id: Uuid) -> Result<bool, BackupTargetError> {
-        let Some((key, _)) = self.lookup_snapshot(id).await? else {
-            return Ok(false);
-        };
-        let response = self
-            .execute(
-                Method::DELETE,
-                self.object_url(&key)?,
-                HeaderMap::new(),
-                Vec::new(),
-            )
-            .await?;
-        require_success(response).await?;
-        Ok(true)
+        match self.delete_snapshot_with_verification(id).await? {
+            BackupDeleteOutcome::NotFound => Ok(false),
+            BackupDeleteOutcome::Deleted { .. } => Ok(true),
+            // Keep the legacy bool API conservative. Existing callers that
+            // have not migrated to `delete_with_verification` must not treat
+            // an unverified operation as a successful deletion.
+            BackupDeleteOutcome::Unverified { .. } => Err(BackupTargetError::InvalidResponse),
+        }
     }
 }
 
@@ -388,6 +766,10 @@ impl BackupTarget for S3BackupTarget {
             maximum_upload_bytes: Some(MAXIMUM_UPLOAD_BYTES),
             supports_delete: true,
         }
+    }
+
+    fn delete_capability(&self) -> BackupDeleteCapability {
+        BackupDeleteCapability::AllVersions
     }
 
     fn upload<'a>(
@@ -411,6 +793,40 @@ impl BackupTarget for S3BackupTarget {
 
     fn delete<'a>(&'a self, id: Uuid) -> BackupTargetFuture<'a, bool> {
         Box::pin(async move { self.delete_snapshot(id).await })
+    }
+
+    fn delete_with_verification<'a>(
+        &'a self,
+        id: Uuid,
+    ) -> BackupTargetFuture<'a, BackupDeleteOutcome> {
+        Box::pin(async move { self.delete_snapshot_with_verification(id).await })
+    }
+
+    fn delete_with_verification_guarded<'a>(
+        &'a self,
+        id: Uuid,
+        guard: &'a dyn BackupOperationGuard,
+    ) -> BackupTargetFuture<'a, BackupDeleteOutcome> {
+        Box::pin(async move {
+            guard.check()?;
+            self.delete_snapshot_with_verification_guard(id, Some(guard))
+                .await
+        })
+    }
+
+    fn purge_with_verification<'a>(&'a self) -> BackupTargetFuture<'a, BackupPurgeOutcome> {
+        Box::pin(async move { self.purge_snapshots_with_verification().await })
+    }
+
+    fn purge_with_verification_guarded<'a>(
+        &'a self,
+        guard: &'a dyn BackupOperationGuard,
+    ) -> BackupTargetFuture<'a, BackupPurgeOutcome> {
+        Box::pin(async move {
+            guard.check()?;
+            self.purge_snapshots_with_verification_guard(Some(guard))
+                .await
+        })
     }
 
     fn verify<'a>(&'a self, id: Uuid) -> BackupTargetFuture<'a, BackupVerification> {
@@ -444,6 +860,38 @@ struct ListedObject {
     size: u64,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct ListObjectVersionsResult {
+    #[serde(rename = "Version", default)]
+    versions: Vec<ListedVersion>,
+    #[serde(rename = "DeleteMarker", default)]
+    delete_markers: Vec<ListedDeleteMarker>,
+    next_key_marker: Option<String>,
+    next_version_id_marker: Option<String>,
+    is_truncated: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct ListedVersion {
+    key: String,
+    version_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct ListedDeleteMarker {
+    key: String,
+    version_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct VersionedObject {
+    key: String,
+    version_id: String,
+}
+
 async fn parse_list_response(
     response: reqwest::Response,
 ) -> Result<ListBucketResult, BackupTargetError> {
@@ -451,12 +899,120 @@ async fn parse_list_response(
     quick_xml::de::from_reader(bytes.as_slice()).map_err(|_| BackupTargetError::InvalidResponse)
 }
 
+async fn parse_versions_response(
+    response: reqwest::Response,
+) -> Result<ListObjectVersionsResult, BackupTargetError> {
+    let bytes = read_limited_response(response, MAXIMUM_LIST_RESPONSE_BYTES).await?;
+    ensure_xml_root(&bytes, b"ListVersionsResult")?;
+    quick_xml::de::from_reader(bytes.as_slice()).map_err(|_| BackupTargetError::InvalidResponse)
+}
+
+fn ensure_xml_root(bytes: &[u8], expected_local_name: &[u8]) -> Result<(), BackupTargetError> {
+    let mut reader = quick_xml::Reader::from_reader(bytes);
+    loop {
+        match reader.read_event() {
+            Ok(quick_xml::events::Event::Start(event))
+            | Ok(quick_xml::events::Event::Empty(event)) => {
+                if event.local_name().as_ref() == expected_local_name {
+                    return Ok(());
+                }
+                return Err(BackupTargetError::InvalidResponse);
+            }
+            Ok(quick_xml::events::Event::Eof) | Err(_) => {
+                return Err(BackupTargetError::InvalidResponse);
+            }
+            Ok(_) => {}
+        }
+    }
+}
+
+fn validate_version_id(version_id: &str) -> Result<(), BackupTargetError> {
+    if version_id.is_empty()
+        || version_id.len() > MAXIMUM_VERSION_ID_BYTES
+        || version_id.chars().any(char::is_control)
+    {
+        return Err(BackupTargetError::InvalidResponse);
+    }
+    Ok(())
+}
+
+fn validate_marker(marker: Option<String>) -> Result<Option<String>, BackupTargetError> {
+    let Some(marker) = marker else {
+        return Ok(None);
+    };
+    if marker.is_empty() || marker.len() > 2048 || marker.chars().any(char::is_control) {
+        return Err(BackupTargetError::InvalidResponse);
+    }
+    Ok(Some(marker))
+}
+
+fn validate_optional_version_marker(
+    marker: Option<String>,
+) -> Result<Option<String>, BackupTargetError> {
+    let Some(marker) = marker else {
+        return Ok(None);
+    };
+    // Some S3-compatible implementations serialize an absent marker as an
+    // empty element when pagination crosses to a new key. Treat that form as
+    // absent; actual version records still require a non-empty ID.
+    if marker.is_empty() {
+        return Ok(None);
+    }
+    validate_version_id(&marker)?;
+    Ok(Some(marker))
+}
+
 fn metadata_from_object(
     snapshots_prefix: &str,
     object: &ListedObject,
 ) -> Result<BackupSnapshotMetadata, BackupTargetError> {
-    let relative = object
-        .key
+    let parsed = parse_snapshot_key(snapshots_prefix, &object.key)?;
+    let metadata = BackupSnapshotMetadata {
+        id: parsed.id,
+        created_at_ms: parsed.created_at_ms,
+        size_bytes: object.size,
+        sha256: parsed.sha256,
+    };
+    metadata
+        .validate()
+        .map_err(|_| BackupTargetError::InvalidResponse)?;
+    Ok(metadata)
+}
+
+fn raw_list_indicates_visible_objects(
+    result: &ListBucketResult,
+) -> Result<bool, BackupTargetError> {
+    if !result.contents.is_empty() {
+        return Ok(true);
+    }
+    if result.is_truncated == Some(true) {
+        let cursor = result
+            .next_continuation_token
+            .as_deref()
+            .filter(|cursor| !cursor.is_empty() && cursor.len() <= 2048);
+        return cursor
+            .map(|_| true)
+            .ok_or(BackupTargetError::InvalidResponse);
+    }
+    match result.is_truncated {
+        Some(false) if result.next_continuation_token.is_none() => Ok(false),
+        Some(false) | None => Err(BackupTargetError::InvalidResponse),
+        Some(true) => Err(BackupTargetError::InvalidResponse),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedSnapshotKey {
+    id: Uuid,
+    created_at_ms: u64,
+    sha256: String,
+}
+
+fn parse_snapshot_key(
+    snapshots_prefix: &str,
+    key: &str,
+) -> Result<ParsedSnapshotKey, BackupTargetError> {
+    let relative = key
         .strip_prefix(snapshots_prefix)
         .ok_or(BackupTargetError::InvalidResponse)?;
     let (id, file_name) = relative
@@ -474,18 +1030,17 @@ fn metadata_from_object(
     let (created_at_ms, sha256) = stem
         .split_once('-')
         .ok_or(BackupTargetError::InvalidResponse)?;
-    let metadata = BackupSnapshotMetadata {
+    let parsed = ParsedSnapshotKey {
         id,
         created_at_ms: created_at_ms
             .parse::<u64>()
             .map_err(|_| BackupTargetError::InvalidResponse)?,
-        size_bytes: object.size,
         sha256: sha256.to_owned(),
     };
-    metadata
-        .validate()
-        .map_err(|_| BackupTargetError::InvalidResponse)?;
-    Ok(metadata)
+    if parsed.created_at_ms == 0 || !linked_info_backup_port::is_sha256(&parsed.sha256) {
+        return Err(BackupTargetError::InvalidResponse);
+    }
+    Ok(parsed)
 }
 
 fn validate_endpoint(endpoint: &str) -> Result<Url, BackupTargetError> {
@@ -708,6 +1263,194 @@ mod tests {
             Some("opaque-token")
         );
         assert_eq!(parsed.is_truncated, Some(true));
+    }
+
+    #[test]
+    fn destructive_empty_version_fallback_detects_malformed_raw_objects() {
+        let result = ListBucketResult {
+            contents: vec![ListedObject {
+                key: "linked-info/v1/snapshots/not-a-snapshot".to_owned(),
+                size: 12,
+            }],
+            next_continuation_token: None,
+            is_truncated: Some(false),
+        };
+        assert_eq!(raw_list_indicates_visible_objects(&result), Ok(true));
+    }
+
+    #[test]
+    fn destructive_empty_version_fallback_rejects_invalid_pagination() {
+        let result = ListBucketResult {
+            contents: Vec::new(),
+            next_continuation_token: Some(String::new()),
+            is_truncated: Some(true),
+        };
+        assert_eq!(
+            raw_list_indicates_visible_objects(&result),
+            Err(BackupTargetError::InvalidResponse)
+        );
+    }
+
+    #[test]
+    fn destructive_empty_version_fallback_rejects_missing_truncation_flag() {
+        let result = ListBucketResult {
+            contents: Vec::new(),
+            next_continuation_token: None,
+            is_truncated: None,
+        };
+        assert_eq!(
+            raw_list_indicates_visible_objects(&result),
+            Err(BackupTargetError::InvalidResponse)
+        );
+    }
+
+    #[test]
+    fn version_list_xml_includes_versions_and_delete_markers() {
+        let id = Uuid::new_v4();
+        let key = format!(
+            "linked-info/v1/snapshots/{id}/00000000000000000042-{sha}{OBJECT_SUFFIX}",
+            sha = "c".repeat(64),
+        );
+        let xml = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+            <ListVersionsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+              <IsTruncated>true</IsTruncated>
+              <Version><Key>{key}</Key><VersionId>version-1</VersionId><Size>7</Size></Version>
+              <DeleteMarker><Key>{key}</Key><VersionId>delete-marker-1</VersionId></DeleteMarker>
+              <NextKeyMarker>{key}</NextKeyMarker>
+              <NextVersionIdMarker>delete-marker-1</NextVersionIdMarker>
+            </ListVersionsResult>"#,
+        );
+        let parsed: ListObjectVersionsResult = quick_xml::de::from_str(&xml).unwrap();
+
+        assert_eq!(parsed.versions.len(), 1);
+        assert_eq!(parsed.delete_markers.len(), 1);
+        assert_eq!(parsed.versions[0].key, key);
+        assert_eq!(parsed.versions[0].version_id, "version-1");
+        assert_eq!(parsed.delete_markers[0].version_id, "delete-marker-1");
+        assert_eq!(parsed.is_truncated, Some(true));
+        assert!(parsed.next_key_marker.is_some());
+        assert_eq!(
+            parsed.next_version_id_marker.as_deref(),
+            Some("delete-marker-1")
+        );
+        assert!(ensure_xml_root(xml.as_bytes(), b"ListVersionsResult").is_ok());
+        assert!(ensure_xml_root(xml.as_bytes(), b"ListBucketResult").is_err());
+    }
+
+    #[test]
+    fn versioned_urls_use_s3_version_queries() {
+        let target = S3BackupTarget::new(
+            "https://s3.example.test",
+            "us-east-1",
+            "backup-bucket",
+            "linked-info/v1",
+            credentials(),
+        )
+        .unwrap();
+        let versions_url = target
+            .versions_url(
+                "linked-info/v1/snapshots/",
+                Some("key-marker"),
+                Some("version/marker"),
+                200,
+            )
+            .unwrap();
+        let query = versions_url
+            .query_pairs()
+            .map(|(name, value)| (name.into_owned(), value.into_owned()))
+            .collect::<Vec<_>>();
+        assert!(query.contains(&("versions".to_owned(), String::new())));
+        assert!(query.contains(&("key-marker".to_owned(), "key-marker".to_owned())));
+        assert!(query.contains(&("version-id-marker".to_owned(), "version/marker".to_owned())));
+
+        let object_url = target
+            .versioned_object_url("linked-info/v1/snapshots/id/object", "version/1")
+            .unwrap();
+        assert_eq!(
+            object_url
+                .query_pairs()
+                .next()
+                .map(|(_, value)| value.into_owned()),
+            Some("version/1".to_owned())
+        );
+    }
+
+    #[test]
+    fn malformed_version_ids_are_rejected_before_delete() {
+        assert!(validate_version_id("version-1").is_ok());
+        assert!(validate_version_id("version\n1").is_err());
+        assert!(validate_version_id(&"v".repeat(MAXIMUM_VERSION_ID_BYTES + 1)).is_err());
+        assert_eq!(
+            validate_optional_version_marker(Some(String::new())),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn snapshot_version_filter_does_not_cross_snapshot_or_prefix_boundaries() {
+        let target = S3BackupTarget::new(
+            "https://s3.example.test",
+            "us-east-1",
+            "backup-bucket",
+            "linked-info/v1",
+            credentials(),
+        )
+        .unwrap();
+        let metadata = BackupSnapshotMetadata {
+            id: Uuid::new_v4(),
+            created_at_ms: 42,
+            size_bytes: 7,
+            sha256: "d".repeat(64),
+        };
+        let other_metadata = BackupSnapshotMetadata {
+            id: Uuid::new_v4(),
+            ..metadata.clone()
+        };
+        let matching = VersionedObject {
+            key: target.snapshot_key(&metadata),
+            version_id: "v1".to_owned(),
+        };
+        let other = VersionedObject {
+            key: target.snapshot_key(&other_metadata),
+            version_id: "v2".to_owned(),
+        };
+        let malformed = VersionedObject {
+            key: format!("{}/snapshots/{}/unrelated", target.prefix, metadata.id),
+            version_id: "v3".to_owned(),
+        };
+
+        let filtered = target
+            .snapshot_versions_from_objects(metadata.id, vec![matching.clone()])
+            .unwrap();
+        assert_eq!(filtered, vec![matching]);
+        assert!(
+            target
+                .snapshot_versions_from_objects(metadata.id, vec![other])
+                .is_err()
+        );
+        assert!(
+            target
+                .snapshot_versions_from_objects(metadata.id, vec![malformed])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn s3_advertises_all_version_delete_capability() {
+        let target = S3BackupTarget::new(
+            "https://s3.example.test",
+            "us-east-1",
+            "backup-bucket",
+            "linked-info/v1",
+            credentials(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            target.delete_capability(),
+            BackupDeleteCapability::AllVersions
+        );
     }
 
     #[test]

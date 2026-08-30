@@ -9,7 +9,7 @@ use std::{
         mpsc,
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use linked_info_extension_host_protocol::{
@@ -33,11 +33,7 @@ struct ExtensionHostConnection {
 }
 
 impl ExtensionHostConnection {
-    fn send(
-        &mut self,
-        request: &ExtensionHostRequestV1,
-        timeout: Duration,
-    ) -> Result<ExtensionHostResponseV1, String> {
+    fn write_request(&mut self, request: &ExtensionHostRequestV1) -> Result<(), String> {
         let encoded = serde_json::to_vec(request)
             .map_err(|_| "extension_runtime_protocol_unavailable".to_owned())?;
         if encoded.len() > MAXIMUM_EXTENSION_HOST_REQUEST_BYTES {
@@ -47,10 +43,46 @@ impl ExtensionHostConnection {
             .write_all(&encoded)
             .and_then(|()| self.input.write_all(b"\n"))
             .and_then(|()| self.input.flush())
-            .map_err(|_| "extension_runtime_protocol_unavailable".to_owned())?;
-        self.responses
-            .recv_timeout(timeout)
-            .map_err(|_| "extension_runtime_response_timeout".to_owned())
+            .map_err(|_| "extension_runtime_protocol_unavailable".to_owned())
+    }
+
+    fn receive_response_with_guard(
+        &self,
+        timeout: Duration,
+        mut guard: impl FnMut() -> bool,
+    ) -> Result<ExtensionHostResponseV1, String> {
+        let deadline = Instant::now()
+            .checked_add(timeout)
+            .ok_or_else(|| "extension_runtime_response_timeout".to_owned())?;
+        loop {
+            if !guard() {
+                return Err("extension_runtime_generation_revoked".to_owned());
+            }
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .filter(|remaining| !remaining.is_zero())
+                .ok_or_else(|| "extension_runtime_response_timeout".to_owned())?;
+            match self
+                .responses
+                .recv_timeout(remaining.min(Duration::from_millis(25)))
+            {
+                Ok(response) => return Ok(response),
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err("extension_runtime_protocol_unavailable".to_owned());
+                }
+            }
+        }
+    }
+
+    fn send_with_guard(
+        &mut self,
+        request: &ExtensionHostRequestV1,
+        timeout: Duration,
+        guard: impl FnMut() -> bool,
+    ) -> Result<ExtensionHostResponseV1, String> {
+        self.write_request(request)?;
+        self.receive_response_with_guard(timeout, guard)
     }
 }
 
@@ -162,6 +194,7 @@ impl ExtensionHostTermination {
 struct ExtensionHostEntry {
     connection: Mutex<ExtensionHostConnection>,
     termination: ExtensionHostTermination,
+    generation: u64,
 }
 
 impl ExtensionHostEntry {
@@ -175,6 +208,9 @@ impl ExtensionHostEntry {
 pub struct ExtensionRuntimeState {
     hosts: Mutex<BTreeMap<String, Arc<ExtensionHostEntry>>>,
     start_lock: Mutex<()>,
+    // Orders generation validation with request bytes entering the host pipe.
+    // It is never held while waiting for guest execution.
+    request_gate: Mutex<()>,
     generation: AtomicU64,
     next_request_id: AtomicU64,
 }
@@ -184,10 +220,34 @@ impl Default for ExtensionRuntimeState {
         Self {
             hosts: Mutex::new(BTreeMap::new()),
             start_lock: Mutex::new(()),
+            request_gate: Mutex::new(()),
             generation: AtomicU64::new(0),
             next_request_id: AtomicU64::new(1),
         }
     }
+}
+
+fn detach_hosts_for_revoke<T>(
+    hosts: &mut BTreeMap<String, T>,
+    generation: &AtomicU64,
+    requested_generation: u64,
+    host_generation: impl Fn(&T) -> u64,
+) -> BTreeMap<String, T> {
+    let previous = generation.fetch_max(requested_generation, Ordering::AcqRel);
+    let boundary = previous.max(requested_generation);
+
+    let mut revoked = BTreeMap::new();
+    for (key, host) in std::mem::take(hosts) {
+        let host_generation = host_generation(&host);
+        let should_revoke =
+            host_generation < boundary || (boundary == u64::MAX && host_generation == u64::MAX);
+        if should_revoke {
+            revoked.insert(key, host);
+        } else {
+            hosts.insert(key, host);
+        }
+    }
+    revoked
 }
 
 impl ExtensionRuntimeState {
@@ -200,24 +260,82 @@ impl ExtensionRuntimeState {
         generation: u64,
         allow_unsigned_development: bool,
     ) -> Result<(), String> {
-        let _start = self
-            .start_lock
-            .lock()
-            .map_err(|_| "extension_runtime_state_unavailable".to_owned())?;
-        if self
-            .hosts
-            .lock()
-            .map_err(|_| "extension_runtime_state_unavailable".to_owned())?
-            .contains_key(runtime_key)
-        {
-            return Ok(());
-        }
-        self.start(
+        self.ensure_started_internal(
             app,
             runtime_key,
             expected_extension_id,
             package_path,
             generation,
+            None,
+            allow_unsigned_development,
+        )
+    }
+
+    pub(crate) fn ensure_started_for_access_generation(
+        &self,
+        app: &tauri::AppHandle,
+        runtime_key: &str,
+        expected_extension_id: &str,
+        package_path: &Path,
+        generation: u64,
+        access_generation: &AtomicU64,
+        allow_unsigned_development: bool,
+    ) -> Result<(), String> {
+        self.ensure_started_internal(
+            app,
+            runtime_key,
+            expected_extension_id,
+            package_path,
+            generation,
+            Some(access_generation),
+            allow_unsigned_development,
+        )
+    }
+
+    fn ensure_started_internal(
+        &self,
+        app: &tauri::AppHandle,
+        runtime_key: &str,
+        expected_extension_id: &str,
+        package_path: &Path,
+        generation: u64,
+        access_generation: Option<&AtomicU64>,
+        allow_unsigned_development: bool,
+    ) -> Result<(), String> {
+        let _start = self
+            .start_lock
+            .lock()
+            .map_err(|_| "extension_runtime_state_unavailable".to_owned())?;
+        self.ensure_generation_startable(generation, access_generation)?;
+
+        let stale_host = {
+            // Keep host lookup and generation validation ordered with revoke.
+            let _gate = self
+                .request_gate
+                .lock()
+                .map_err(|_| "extension_runtime_state_unavailable".to_owned())?;
+            self.ensure_generation_startable(generation, access_generation)?;
+            let mut hosts = self
+                .hosts
+                .lock()
+                .map_err(|_| "extension_runtime_state_unavailable".to_owned())?;
+            match hosts.get(runtime_key) {
+                Some(host) if host.generation == generation => return Ok(()),
+                Some(_) => hosts.remove(runtime_key),
+                None => None,
+            }
+        };
+        if let Some(stale_host) = stale_host {
+            stale_host.terminate();
+        }
+
+        self.start_with_access_generation(
+            app,
+            runtime_key,
+            expected_extension_id,
+            package_path,
+            generation,
+            access_generation,
             allow_unsigned_development,
         )
     }
@@ -231,6 +349,28 @@ impl ExtensionRuntimeState {
         generation: u64,
         allow_unsigned_development: bool,
     ) -> Result<(), String> {
+        self.start_with_access_generation(
+            app,
+            runtime_key,
+            expected_extension_id,
+            package_path,
+            generation,
+            None,
+            allow_unsigned_development,
+        )
+    }
+
+    fn start_with_access_generation(
+        &self,
+        app: &tauri::AppHandle,
+        runtime_key: &str,
+        expected_extension_id: &str,
+        package_path: &Path,
+        generation: u64,
+        access_generation: Option<&AtomicU64>,
+        allow_unsigned_development: bool,
+    ) -> Result<(), String> {
+        self.ensure_generation_startable(generation, access_generation)?;
         let executable = extension_host_executable(app)?;
         let package_path = package_path
             .canonicalize()
@@ -300,18 +440,34 @@ impl ExtensionRuntimeState {
             responses: receiver,
             reader_thread: Some(reader_thread),
         };
-        let ready = connection.send(
+        let ready = connection.send_with_guard(
             &ExtensionHostRequestV1::Hello {
                 protocol_version: EXTENSION_HOST_PROTOCOL_VERSION,
             },
             STARTUP_TIMEOUT,
+            || {
+                self.ensure_generation_startable(generation, access_generation)
+                    .is_ok()
+            },
         );
+        let ready = match ready {
+            Ok(ready) => ready,
+            Err(error) => {
+                #[cfg(windows)]
+                drop(job);
+                #[cfg(unix)]
+                unsafe {
+                    let _ = libc::kill(child_pid as libc::pid_t, libc::SIGKILL);
+                }
+                return Err(error);
+            }
+        };
         match ready {
-            Ok(ExtensionHostResponseV1::Ready {
+            ExtensionHostResponseV1::Ready {
                 protocol_version,
                 extension_id,
                 generation: ready_generation,
-            }) if protocol_version == EXTENSION_HOST_PROTOCOL_VERSION
+            } if protocol_version == EXTENSION_HOST_PROTOCOL_VERSION
                 && extension_id == expected_extension_id
                 && ready_generation == generation => {}
             _ => {
@@ -336,19 +492,62 @@ impl ExtensionRuntimeState {
                     ExtensionHostTermination::new(child_pid)
                 }
             },
+            generation,
         });
-        let mut hosts = self
-            .hosts
-            .lock()
-            .map_err(|_| "extension_runtime_state_unavailable".to_owned())?;
-        let previous_generation = self.generation.fetch_max(generation, Ordering::AcqRel);
-        if previous_generation > generation || self.generation.load(Ordering::Acquire) != generation
+        let previous = {
+            // Revoke takes this same short gate before advancing its generation.
+            // Startup never holds it while waiting for the child handshake.
+            let _gate = self
+                .request_gate
+                .lock()
+                .map_err(|_| "extension_runtime_state_unavailable".to_owned())?;
+            self.ensure_generation_startable(generation, access_generation)?;
+            let mut hosts = self
+                .hosts
+                .lock()
+                .map_err(|_| "extension_runtime_state_unavailable".to_owned())?;
+            let previous_generation = self.generation.fetch_max(generation, Ordering::AcqRel);
+            if previous_generation > generation
+                || self.generation.load(Ordering::Acquire) != generation
+                || access_generation
+                    .is_some_and(|current| current.load(Ordering::Acquire) != generation)
+            {
+                drop(hosts);
+                entry.terminate();
+                return Err("extension_runtime_generation_revoked".to_owned());
+            }
+            hosts.insert(runtime_key.to_owned(), Arc::clone(&entry))
+        };
+        if let Some(previous) = previous {
+            previous.terminate();
+        }
+        Ok(())
+    }
+
+    fn ensure_generation_current(
+        &self,
+        expected: u64,
+        access_generation: Option<&AtomicU64>,
+    ) -> Result<(), String> {
+        if expected == u64::MAX
+            || self.generation.load(Ordering::Acquire) != expected
+            || access_generation.is_some_and(|current| current.load(Ordering::Acquire) != expected)
         {
-            entry.terminate();
             return Err("extension_runtime_generation_revoked".to_owned());
         }
-        if let Some(previous) = hosts.insert(runtime_key.to_owned(), entry) {
-            previous.terminate();
+        Ok(())
+    }
+
+    fn ensure_generation_startable(
+        &self,
+        expected: u64,
+        access_generation: Option<&AtomicU64>,
+    ) -> Result<(), String> {
+        if expected == u64::MAX
+            || self.generation.load(Ordering::Acquire) > expected
+            || access_generation.is_some_and(|current| current.load(Ordering::Acquire) != expected)
+        {
+            return Err("extension_runtime_generation_revoked".to_owned());
         }
         Ok(())
     }
@@ -356,13 +555,34 @@ impl ExtensionRuntimeState {
     pub(crate) fn request(
         &self,
         extension_id: &str,
-        mut request: ExtensionHostRequestV1,
+        request: ExtensionHostRequestV1,
         timeout: Duration,
     ) -> Result<ExtensionHostResponseV1, String> {
-        sanitize_request_content(&mut request);
+        self.request_internal(extension_id, request, timeout, None)
+    }
+
+    pub(crate) fn request_for_access_generation(
+        &self,
+        extension_id: &str,
+        request: ExtensionHostRequestV1,
+        timeout: Duration,
+        access_generation: &AtomicU64,
+    ) -> Result<ExtensionHostResponseV1, String> {
+        self.request_internal(extension_id, request, timeout, Some(access_generation))
+    }
+
+    fn request_internal(
+        &self,
+        extension_id: &str,
+        mut request: ExtensionHostRequestV1,
+        timeout: Duration,
+        access_generation: Option<&AtomicU64>,
+    ) -> Result<ExtensionHostResponseV1, String> {
         let request_id = request.request_id();
-        let request_generation = request.generation();
-        if request_id.is_none() || request_generation.is_none() {
+        let Some(request_generation) = request.generation() else {
+            return Err("extension_runtime_request_invalid".to_owned());
+        };
+        if request_id.is_none() {
             return Err("extension_runtime_request_invalid".to_owned());
         }
         let host = self
@@ -372,19 +592,38 @@ impl ExtensionRuntimeState {
             .get(extension_id)
             .cloned()
             .ok_or_else(|| "extension_runtime_not_started".to_owned())?;
-        let response = match host
+        let mut connection = host
             .connection
             .lock()
-            .map_err(|_| "extension_runtime_state_unavailable".to_owned())?
-            .send(&request, timeout)
-        {
+            .map_err(|_| "extension_runtime_state_unavailable".to_owned())?;
+        let response = (|| {
+            // The gate covers only validation, sanitization, and the pipe write;
+            // waiting for guest code happens after it is released.
+            let _gate = self
+                .request_gate
+                .lock()
+                .map_err(|_| "extension_runtime_state_unavailable".to_owned())?;
+            self.ensure_generation_current(request_generation, access_generation)?;
+            if host.generation != request_generation {
+                return Err("extension_runtime_generation_revoked".to_owned());
+            }
+            sanitize_request_content(&mut request);
+            connection.write_request(&request)?;
+            drop(_gate);
+            connection.receive_response_with_guard(timeout, || {
+                self.ensure_generation_current(request_generation, access_generation)
+                    .is_ok()
+            })
+        })();
+        let response = match response {
             Ok(response) => response,
             Err(error) => {
                 self.remove_failed_host(extension_id, &host);
                 return Err(error);
             }
         };
-        if response.request_id() != request_id || response.generation() != request_generation {
+        if response.request_id() != request_id || response.generation() != Some(request_generation)
+        {
             self.remove_failed_host(extension_id, &host);
             return Err("extension_runtime_protocol_unavailable".to_owned());
         }
@@ -407,12 +646,23 @@ impl ExtensionRuntimeState {
     }
 
     pub fn revoke_all(&self, generation: u64) {
-        self.generation.fetch_max(generation, Ordering::AcqRel);
-        let hosts = self
-            .hosts
-            .lock()
-            .map(|mut hosts| std::mem::take(&mut *hosts))
-            .unwrap_or_default();
+        // Generation advancement and detaching the hosts are one short,
+        // ordered operation. A stale revoke (for example, one racing a newly
+        // unlocked session) must not take hosts that already belong to a
+        // newer generation.
+        let hosts = {
+            let _gate = self
+                .request_gate
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut hosts = self
+                .hosts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            detach_hosts_for_revoke(&mut hosts, &self.generation, generation, |host| {
+                host.generation
+            })
+        };
         for host in hosts.into_values() {
             host.terminate();
         }
@@ -524,6 +774,7 @@ fn assign_child_to_kill_on_close_job(child: &Child) -> Result<OwnedHandle, Strin
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Barrier};
     #[cfg(windows)]
     use std::time::Instant;
 
@@ -540,6 +791,55 @@ mod tests {
         assert_eq!(state.generation.load(Ordering::Acquire), 9);
         assert_eq!(state.next_request_id(), 1);
         assert_eq!(state.next_request_id(), 2);
+    }
+
+    #[test]
+    fn generation_guards_distinguish_new_startup_from_revoked_access() {
+        let state = ExtensionRuntimeState::default();
+        let access_generation = AtomicU64::new(7);
+
+        // A freshly unlocked session may advance beyond the runtime's last
+        // generation and initialize a new host.
+        assert!(
+            state
+                .ensure_generation_startable(7, Some(&access_generation))
+                .is_ok()
+        );
+
+        state.generation.store(7, Ordering::Release);
+        access_generation.store(8, Ordering::Release);
+        assert_eq!(
+            state.ensure_generation_current(7, Some(&access_generation)),
+            Err("extension_runtime_generation_revoked".to_owned())
+        );
+        assert_eq!(
+            state.ensure_generation_startable(7, Some(&access_generation)),
+            Err("extension_runtime_generation_revoked".to_owned())
+        );
+    }
+
+    #[test]
+    fn stale_revoke_keeps_a_newer_host_installed_before_the_revoke_barrier() {
+        let generation = Arc::new(AtomicU64::new(7));
+        let hosts = Arc::new(Mutex::new(BTreeMap::from([("old".to_owned(), 7_u64)])));
+        let barrier = Arc::new(Barrier::new(2));
+        let next_generation = Arc::clone(&generation);
+        let next_hosts = Arc::clone(&hosts);
+        let next_barrier = Arc::clone(&barrier);
+        let installer = std::thread::spawn(move || {
+            next_barrier.wait();
+            next_generation.store(8, Ordering::Release);
+            next_hosts.lock().unwrap().insert("new".to_owned(), 8_u64);
+        });
+
+        barrier.wait();
+        installer.join().unwrap();
+        let mut hosts = hosts.lock().unwrap();
+        let revoked = detach_hosts_for_revoke(&mut hosts, &generation, 7, |value| *value);
+
+        assert_eq!(revoked.get("old"), Some(&7));
+        assert!(!hosts.contains_key("old"));
+        assert_eq!(hosts.get("new"), Some(&8));
     }
 
     #[test]
@@ -606,6 +906,7 @@ mod tests {
                 reader_thread: None,
             }),
             termination: ExtensionHostTermination::new(job),
+            generation: 0,
         });
         let locked_entry = Arc::clone(&entry);
         let (locked, locked_receiver) = mpsc::sync_channel(1);
