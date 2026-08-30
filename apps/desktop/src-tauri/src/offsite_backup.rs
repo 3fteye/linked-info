@@ -113,6 +113,20 @@ impl BackupOperationGuard for WorkspaceBackupOperationGuard<'_> {
     }
 }
 
+fn acquire_authorized_config_mutation<'a>(
+    config_lock: &'a Mutex<()>,
+    vault_state: &WorkspaceVaultState,
+    permit: WorkspaceAccessPermit,
+) -> Result<std::sync::MutexGuard<'a, ()>, String> {
+    let guard = config_lock
+        .lock()
+        .map_err(|_| "offsite_backup_config_unavailable".to_owned())?;
+    // Close the queueing gap before preparation. Callers revalidate again
+    // immediately before their first new persistent write.
+    vault_state.ensure_access_permit(permit)?;
+    Ok(guard)
+}
+
 impl Default for OffsiteBackupState {
     fn default() -> Self {
         Self {
@@ -475,9 +489,12 @@ pub async fn update_offsite_backup_retention_settings(
     let app_for_write = app.clone();
     let config_lock = Arc::clone(&state.config_lock);
     let summary = tauri::async_runtime::spawn_blocking(move || {
-        let _guard = config_lock
-            .lock()
-            .map_err(|_| "offsite_backup_config_unavailable".to_owned())?;
+        let vault_state_for_write = app_for_write.state::<WorkspaceVaultState>();
+        let _guard = acquire_authorized_config_mutation(
+            &config_lock,
+            &vault_state_for_write,
+            permit,
+        )?;
         let path = config_path(&app_for_write)?;
         let mut config = read_config_for_mutation(&path)?;
         let target = config
@@ -491,12 +508,13 @@ pub async fn update_offsite_backup_retention_settings(
         target.retention_max_age_days = max_age_days;
         target.last_retention_error = None;
         let summary = target_summary(target)?;
+        vault_state_for_write.ensure_access_permit(permit)?;
         write_config(&path, &config)?;
         Ok::<_, String>(summary)
     })
     .await
     .map_err(|error| error.to_string())??;
-    ensure_workspace_access(&app, &vault_state, Some(permit))?;
+    // A lock after admission must not report an already committed rule as failed.
     Ok(summary)
 }
 
@@ -752,9 +770,12 @@ pub async fn configure_s3_backup_target(
         target: Some(config_target),
     };
     let write_result = tauri::async_runtime::spawn_blocking(move || {
-        let _guard = config_lock
-            .lock()
-            .map_err(|_| "offsite_backup_config_unavailable".to_owned())?;
+        let vault_state_for_write = app_for_write.state::<WorkspaceVaultState>();
+        let _guard = acquire_authorized_config_mutation(
+            &config_lock,
+            &vault_state_for_write,
+            permit,
+        )?;
         let path = config_path(&app_for_write)?;
         let mut config = read_config_for_mutation(&path)?;
         if config.targets.len() >= MAXIMUM_TARGETS
@@ -766,6 +787,7 @@ pub async fn configure_s3_backup_target(
             return Err("offsite_backup_target_conflict".to_owned());
         }
         let transaction_path = config_transaction_path(&path)?;
+        vault_state_for_write.ensure_access_permit(permit)?;
         write_config_transaction(&transaction_path, &transaction)?;
         if let Err(error) = store_credential(&credential_id, stored_credentials.as_str()) {
             // Keep the journal. The next read can distinguish an uncommitted
@@ -861,9 +883,12 @@ pub async fn update_s3_backup_target(
     let prefix_for_write = prefix.clone();
     let previous_credential_id = previous.credential_id.clone();
     let write_result = tauri::async_runtime::spawn_blocking(move || {
-        let _guard = config_lock
-            .lock()
-            .map_err(|_| "offsite_backup_config_unavailable".to_owned())?;
+        let vault_state_for_write = app_for_write.state::<WorkspaceVaultState>();
+        let _guard = acquire_authorized_config_mutation(
+            &config_lock,
+            &vault_state_for_write,
+            permit,
+        )?;
         let path = config_path(&app_for_write)?;
         let mut config = read_config_for_mutation(&path)?;
         let index = config
@@ -913,6 +938,7 @@ pub async fn update_s3_backup_target(
                 target: Some(updated.clone()),
             };
             let transaction_path = config_transaction_path(&path)?;
+            vault_state_for_write.ensure_access_permit(permit)?;
             write_config_transaction(&transaction_path, &transaction)?;
             store_credential(&next_credential_id, stored.as_str())?;
             config.targets[index] = updated.clone();
@@ -931,6 +957,7 @@ pub async fn update_s3_backup_target(
             Ok((target_summary(&updated)?, cleanup))
         } else {
             config.targets[index] = updated.clone();
+            vault_state_for_write.ensure_access_permit(permit)?;
             write_config(&path, &config)?;
             Ok((target_summary(&updated)?, TargetCredentialCleanup::Complete))
         }
@@ -956,8 +983,14 @@ pub async fn remove_offsite_backup_target(
         .consume_sensitive_authorization(SensitiveOperation::BackupTargetChange, &authorization)?;
     let target = find_target(&app, &backup_state, target_id).await?;
     ensure_workspace_access(&app, &vault_state, Some(permit))?;
-    let cleanup =
-        remove_target_config_and_credential(&app, &backup_state, &target, target_id).await?;
+    let cleanup = remove_target_config_and_credential(
+        &app,
+        &backup_state,
+        &target,
+        target_id,
+        permit,
+    )
+    .await?;
     // The target is already absent from the authenticated configuration.
     Ok(committed_target_removal_outcome(cleanup))
 }
@@ -1041,8 +1074,14 @@ pub async fn delete_all_offsite_backups_and_remove_target(
         }
     };
     ensure_workspace_access(&app, &vault_state, Some(permit))?;
-    let cleanup =
-        remove_target_config_and_credential(&app, &backup_state, &config, target_id).await?;
+    let cleanup = remove_target_config_and_credential(
+        &app,
+        &backup_state,
+        &config,
+        target_id,
+        permit,
+    )
+    .await?;
     Ok(DeleteAllOffsiteBackupsOutcome {
         deleted_version_count,
         target_removed: true,
@@ -1282,14 +1321,18 @@ async fn remove_target_config_and_credential(
     state: &OffsiteBackupState,
     target: &BackupTargetConfig,
     target_id: Uuid,
+    permit: WorkspaceAccessPermit,
 ) -> Result<TargetCredentialCleanup, String> {
     let app_for_write = app.clone();
     let config_lock = Arc::clone(&state.config_lock);
     let expected_credential_id = target.credential_id.clone();
     let write_result = tauri::async_runtime::spawn_blocking(move || {
-        let _guard = config_lock
-            .lock()
-            .map_err(|_| "offsite_backup_config_unavailable".to_owned())?;
+        let vault_state_for_write = app_for_write.state::<WorkspaceVaultState>();
+        let _guard = acquire_authorized_config_mutation(
+            &config_lock,
+            &vault_state_for_write,
+            permit,
+        )?;
         let path = config_path(&app_for_write)?;
         let mut config = read_config_for_mutation(&path)?;
         let current = config
@@ -1312,6 +1355,7 @@ async fn remove_target_config_and_credential(
             target: None,
         };
         let transaction_path = config_transaction_path(&path)?;
+        vault_state_for_write.ensure_access_permit(permit)?;
         write_config_transaction(&transaction_path, &transaction)?;
         config.targets.retain(|item| item.id != target_id);
         write_config_unchecked(&path, &config)?;
@@ -2635,6 +2679,61 @@ mod tests {
 
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].id, expired);
+    }
+
+    #[test]
+    fn authorized_config_mutation_rechecks_after_waiting_for_the_config_lock() {
+        let config_lock = Arc::new(Mutex::new(()));
+        let held_config_lock = config_lock.lock().unwrap();
+        let state = Arc::new(WorkspaceVaultState::default());
+        let permit = state.issue_test_access_permit();
+        let writes = Arc::new([
+            std::sync::atomic::AtomicUsize::new(0),
+            std::sync::atomic::AtomicUsize::new(0),
+            std::sync::atomic::AtomicUsize::new(0),
+        ]);
+        let (ready_sender, ready_receiver) = std::sync::mpsc::channel();
+        let worker_lock = Arc::clone(&config_lock);
+        let worker_state = Arc::clone(&state);
+        let worker_writes = Arc::clone(&writes);
+        let worker = std::thread::spawn(move || {
+            ready_sender.send(()).unwrap();
+            let _guard =
+                acquire_authorized_config_mutation(&worker_lock, &worker_state, permit)?;
+            for counter in worker_writes.iter() {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            Ok::<_, String>(())
+        });
+
+        ready_receiver.recv().unwrap();
+        assert!(state.shutdown());
+        drop(held_config_lock);
+        assert_eq!(
+            worker.join().unwrap(),
+            Err("workspace_vault_session_expired".to_owned())
+        );
+        assert_eq!(
+            writes
+                .iter()
+                .map(|counter| counter.load(std::sync::atomic::Ordering::SeqCst))
+                .collect::<Vec<_>>(),
+            vec![0, 0, 0]
+        );
+
+        let current_permit = state.issue_test_access_permit();
+        let _guard =
+            acquire_authorized_config_mutation(&config_lock, &state, current_permit).unwrap();
+        for counter in writes.iter() {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        assert_eq!(
+            writes
+                .iter()
+                .map(|counter| counter.load(std::sync::atomic::Ordering::SeqCst))
+                .collect::<Vec<_>>(),
+            vec![1, 1, 1]
+        );
     }
 
     #[test]
