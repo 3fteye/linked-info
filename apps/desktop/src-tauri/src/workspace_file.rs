@@ -1387,7 +1387,8 @@ pub async fn rotate_workspace_data_key(
     );
     cleanup_locked_workspace(&app);
     crate::secret_clipboard::clear_active(&app);
-    let purge_result = crate::smart_reference_cache::purge(&app, &smart_reference_cache_state).await;
+    let purge_result =
+        crate::smart_reference_cache::purge(&app, &smart_reference_cache_state).await;
     let preparation_result = revoke_result.map(|_| ()).and(purge_result);
     let rotation_result = match preparation_result {
         Ok(()) => tauri::async_runtime::spawn_blocking(move || {
