@@ -2,10 +2,7 @@ use std::{
     collections::HashSet,
     fs, io,
     path::{Path, PathBuf},
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -90,33 +87,29 @@ impl Drop for TargetOperationClaim {
 /// port. The S3 adapter checks this guard before every page, delete request,
 /// and verification pass, so a lock/session replacement stops the next
 /// destructive step without exposing vault details to the adapter.
-struct WorkspaceBackupOperationGuard {
-    access_generation: Arc<AtomicU64>,
-    expected_generation: u64,
+struct WorkspaceBackupOperationGuard<'a> {
+    vault_state: &'a WorkspaceVaultState,
+    permit: Option<WorkspaceAccessPermit>,
 }
 
-impl WorkspaceBackupOperationGuard {
-    fn new(vault_state: &WorkspaceVaultState, permit: Option<WorkspaceAccessPermit>) -> Self {
-        let access_generation = vault_state.access_generation();
-        let expected_generation = permit
-            .map(WorkspaceAccessPermit::generation)
-            .unwrap_or_else(|| access_generation.load(Ordering::Acquire));
+impl<'a> WorkspaceBackupOperationGuard<'a> {
+    fn new(vault_state: &'a WorkspaceVaultState, permit: Option<WorkspaceAccessPermit>) -> Self {
         Self {
-            access_generation,
-            expected_generation,
+            vault_state,
+            permit,
         }
     }
 }
 
-impl BackupOperationGuard for WorkspaceBackupOperationGuard {
+impl BackupOperationGuard for WorkspaceBackupOperationGuard<'_> {
     fn check(&self) -> Result<(), BackupTargetError> {
-        if self.expected_generation != u64::MAX
-            && self.access_generation.load(Ordering::Acquire) == self.expected_generation
-        {
-            Ok(())
-        } else {
-            Err(BackupTargetError::Cancelled)
-        }
+        self.permit
+            .ok_or(BackupTargetError::Cancelled)
+            .and_then(|permit| {
+                self.vault_state
+                    .ensure_access_permit(permit)
+                    .map_err(|_| BackupTargetError::Cancelled)
+            })
     }
 }
 
@@ -2645,15 +2638,27 @@ mod tests {
     }
 
     #[test]
-    fn remote_delete_guard_cancels_after_workspace_generation_changes() {
-        let access_generation = Arc::new(AtomicU64::new(7));
-        let guard = WorkspaceBackupOperationGuard {
-            access_generation: Arc::clone(&access_generation),
-            expected_generation: 7,
-        };
+    fn remote_delete_guard_requires_a_current_unlocked_workspace_permit() {
+        let state = WorkspaceVaultState::default();
+        let locked_generation = state
+            .access_generation()
+            .load(std::sync::atomic::Ordering::Acquire);
+        let locked_guard = WorkspaceBackupOperationGuard::new(
+            &state,
+            Some(WorkspaceAccessPermit::for_test(locked_generation)),
+        );
+        let missing_permit_guard = WorkspaceBackupOperationGuard::new(&state, None);
 
+        assert_eq!(locked_guard.check(), Err(BackupTargetError::Cancelled));
+        assert_eq!(
+            missing_permit_guard.check(),
+            Err(BackupTargetError::Cancelled)
+        );
+
+        let permit = state.issue_test_access_permit();
+        let guard = WorkspaceBackupOperationGuard::new(&state, Some(permit));
         assert_eq!(guard.check(), Ok(()));
-        access_generation.store(8, Ordering::Release);
+        assert!(state.shutdown());
         assert_eq!(guard.check(), Err(BackupTargetError::Cancelled));
         assert_eq!(
             target_error(BackupTargetError::Cancelled),

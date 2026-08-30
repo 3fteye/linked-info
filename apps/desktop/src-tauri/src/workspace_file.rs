@@ -437,6 +437,32 @@ struct SensitiveAuthorization {
 }
 
 impl WorkspaceVaultState {
+    fn advance_access_generation(&self) -> Result<(), String> {
+        self.access_generation
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                current.checked_add(1)
+            })
+            .map(|_| ())
+            .map_err(|_| "workspace_vault_access_generation_exhausted".to_owned())
+    }
+
+    fn lock_data_key_for_transition(
+        &self,
+    ) -> Result<
+        std::sync::MutexGuard<'_, Option<Zeroizing<[u8; DATA_KEY_BYTES]>>>,
+        String,
+    > {
+        match self.data_key.lock() {
+            Ok(slot) => Ok(slot),
+            Err(_) => {
+                // Preserve the fail-closed boundary even when the key mutex is
+                // poisoned: existing generation-only tasks must be revoked.
+                self.advance_access_generation()?;
+                Err("workspace_vault_state_unavailable".to_owned())
+            }
+        }
+    }
+
     fn data_key(&self) -> Result<Zeroizing<[u8; DATA_KEY_BYTES]>, String> {
         self.data_key
             .lock()
@@ -447,15 +473,8 @@ impl WorkspaceVaultState {
     }
 
     fn replace_data_key(&self, key: [u8; DATA_KEY_BYTES]) -> Result<(), String> {
-        self.access_generation
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-                current.checked_add(1)
-            })
-            .map_err(|_| "workspace_vault_access_generation_exhausted".to_owned())?;
-        let mut slot = self
-            .data_key
-            .lock()
-            .map_err(|_| "workspace_vault_state_unavailable".to_owned())?;
+        let mut slot = self.lock_data_key_for_transition()?;
+        self.advance_access_generation()?;
         *slot = Some(Zeroizing::new(key));
         drop(slot);
         self.record_activity();
@@ -470,17 +489,11 @@ impl WorkspaceVaultState {
     }
 
     fn revoke_access(&self) -> Result<bool, String> {
-        let generation =
-            self.access_generation
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-                    current.checked_add(1)
-                });
-        let mut slot = self
-            .data_key
-            .lock()
-            .map_err(|_| "workspace_vault_state_unavailable".to_owned())?;
+        let mut slot = self.lock_data_key_for_transition()?;
+        let generation = self.advance_access_generation();
         let was_unlocked = slot.is_some();
         *slot = None;
+        drop(slot);
         if let Ok(mut authorization) = self.sensitive_authorization.lock() {
             *authorization = None;
         }
@@ -497,20 +510,27 @@ impl WorkspaceVaultState {
     }
 
     fn access_permit(&self) -> Result<WorkspaceAccessPermit, String> {
+        // The data-key mutex is the linearization boundary for both permit
+        // issuance and generation/key transitions.
+        let slot = self
+            .data_key
+            .lock()
+            .map_err(|_| "workspace_vault_state_unavailable".to_owned())?;
         let generation = self.access_generation.load(Ordering::Acquire);
         if generation == u64::MAX {
             return Err("workspace_vault_access_generation_exhausted".to_owned());
         }
-        if !self.is_unlocked()? {
+        if slot.is_none() {
             return Err("workspace_vault_locked".to_owned());
         }
-        // Read the generation on both sides of the unlocked check. If a lock
-        // advanced it while the permit was being issued, refuse the permit
-        // instead of accidentally adopting the post-lock generation.
-        if self.access_generation.load(Ordering::Acquire) != generation {
-            return Err("workspace_vault_session_expired".to_owned());
-        }
         Ok(WorkspaceAccessPermit { generation })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn issue_test_access_permit(&self) -> WorkspaceAccessPermit {
+        self.replace_data_key([0xA5; DATA_KEY_BYTES])
+            .expect("test vault unlock");
+        self.access_permit().expect("test access permit")
     }
 
     pub(crate) fn access_generation(&self) -> Arc<AtomicU64> {
@@ -551,9 +571,13 @@ impl WorkspaceVaultState {
     }
 
     pub fn ensure_access_permit(&self, permit: WorkspaceAccessPermit) -> Result<(), String> {
+        let slot = self
+            .data_key
+            .lock()
+            .map_err(|_| "workspace_vault_state_unavailable".to_owned())?;
         if permit.generation == u64::MAX
             || self.access_generation.load(Ordering::Acquire) != permit.generation
-            || !self.is_unlocked()?
+            || slot.is_none()
         {
             return Err("workspace_vault_session_expired".to_owned());
         }
@@ -4914,6 +4938,23 @@ mod tests {
             "workspace_vault_session_expired"
         );
         assert!(!state.shutdown());
+    }
+
+    #[test]
+    fn replacing_data_key_invalidates_old_permit_before_issuing_a_new_one() {
+        let state = WorkspaceVaultState::default();
+        state.replace_data_key([7; DATA_KEY_BYTES]).unwrap();
+        let old_permit = state.access_permit().unwrap();
+
+        state.replace_data_key([8; DATA_KEY_BYTES]).unwrap();
+        let new_permit = state.access_permit().unwrap();
+
+        assert_ne!(old_permit.generation, new_permit.generation);
+        assert_eq!(
+            state.ensure_access_permit(old_permit).unwrap_err(),
+            "workspace_vault_session_expired"
+        );
+        assert!(state.ensure_access_permit(new_permit).is_ok());
     }
 
     #[test]
