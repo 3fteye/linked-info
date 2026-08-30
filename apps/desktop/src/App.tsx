@@ -357,6 +357,7 @@ function errorReason(error: unknown): string {
 const offsiteErrorTranslationKeys: Record<string, string> = {
   offsite_backup_credential_cleanup_pending:
     "offsiteBackup.errors.credentialCleanupPending",
+  offsite_backup_credential_missing: "offsiteBackup.errors.credentialMissing",
   offsite_backup_config_transaction_pending:
     "offsiteBackup.errors.transactionPending",
   offsite_backup_purge_unverified: "offsiteBackup.errors.purgeUnverified",
@@ -7346,7 +7347,10 @@ function App({
                               {selectedOffsiteTarget.lastAutomaticError !== null && (
                                 <small className="offsite-automatic-error" role="alert">
                                   {t("offsiteBackup.automaticError", {
-                                    reason: selectedOffsiteTarget.lastAutomaticError,
+                                    reason: localizedOffsiteError(
+                                      selectedOffsiteTarget.lastAutomaticError,
+                                      t,
+                                    ),
                                   })}
                                 </small>
                               )}
@@ -7458,7 +7462,10 @@ function App({
                               {selectedOffsiteTarget.lastRetentionError !== null && (
                                 <small className="offsite-automatic-error" role="alert">
                                   {t("offsiteBackup.retentionError", {
-                                    reason: selectedOffsiteTarget.lastRetentionError,
+                                    reason: localizedOffsiteError(
+                                      selectedOffsiteTarget.lastRetentionError,
+                                      t,
+                                    ),
                                   })}
                                 </small>
                               )}

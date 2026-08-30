@@ -314,6 +314,13 @@ enum TargetCredentialCleanup {
     Pending,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CommittedCreateCredentialState {
+    Present,
+    Missing,
+    Unavailable,
+}
+
 fn credential_cleanup_warning(cleanup: TargetCredentialCleanup) -> Option<String> {
     (cleanup == TargetCredentialCleanup::Pending)
         .then(|| "offsite_backup_credential_cleanup_pending".to_owned())
@@ -328,6 +335,27 @@ fn classify_target_credential_cleanup(
     } else {
         TargetCredentialCleanup::Pending
     }
+}
+
+fn classify_committed_create_credential(
+    credential: Result<Zeroizing<String>, String>,
+) -> CommittedCreateCredentialState {
+    match credential {
+        Ok(_) => CommittedCreateCredentialState::Present,
+        Err(error) if error == "offsite_backup_credential_missing" => {
+            CommittedCreateCredentialState::Missing
+        }
+        Err(_) => CommittedCreateCredentialState::Unavailable,
+    }
+}
+
+fn committed_create_transaction_can_clear(
+    credential: Result<Zeroizing<String>, String>,
+) -> bool {
+    matches!(
+        classify_committed_create_credential(credential),
+        CommittedCreateCredentialState::Present | CommittedCreateCredentialState::Missing
+    )
 }
 
 fn committed_target_removal_outcome(
@@ -1818,9 +1846,11 @@ fn recover_config_transaction(
                 .expect("validated create transaction credential");
             let committed = current_target.is_some_and(|target| target.credential_id == next);
             if committed {
-                // A committed target must still have its credential. Keep the
-                // journal if the keyring is temporarily unavailable.
-                if load_credential(next).is_ok() {
+                // A definitely missing credential cannot be recovered from
+                // this journal. Keep the target repairable through credential
+                // replacement, but retain the journal for transient keyring
+                // read failures.
+                if committed_create_transaction_can_clear(load_credential(next)) {
                     clear_transaction = true;
                 }
             } else if credential_cleanup_is_complete(&config, transaction.target_id, next) {
@@ -2340,6 +2370,22 @@ mod tests {
             TargetCredentialCleanup::Complete
         );
         assert!(!delete_called.get());
+    }
+
+    #[test]
+    fn committed_create_recovery_only_retries_transient_credential_failures() {
+        assert!(committed_create_transaction_can_clear(Ok(Zeroizing::new(
+            "stored credential".to_owned()
+        ))));
+        assert!(committed_create_transaction_can_clear(Err(
+            "offsite_backup_credential_missing".to_owned()
+        )));
+        assert!(!committed_create_transaction_can_clear(Err(
+            "offsite_backup_credential_read_failed".to_owned()
+        )));
+        assert!(!committed_create_transaction_can_clear(Err(
+            "offsite_backup_credential_unavailable".to_owned()
+        )));
     }
 
     fn s3_target(prefix: &str) -> BackupTargetConfig {
