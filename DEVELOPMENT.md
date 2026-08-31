@@ -204,7 +204,7 @@ node scripts/prepare-public-document-import-benchmark.mjs docred <train_annotate
 
 公开标注只覆盖特定任务：CLUENER 不提供引用答案，DocRED 也不是个人笔记。不要把这些结果单独当作产品准确率；变更模型或提示词时应同时比较固定合成夹具和公开补充集。第三方原文、转换结果及模型预测不得提交到仓库。
 
-2026-08-30 已按架构审查确认的基线实现数据密钥轮换提交后清理、扩展锁定代数门控、向量缓存写入复验、离站配置事务、版本化 S3 删除验证和 D1 引用原子 batch。Draft PR [#15](https://github.com/3fteye/linked-info/pull/15) 的实现提交 `ef32fce` 已通过 [Windows CI 33308723865](https://github.com/3fteye/linked-info/actions/runs/33308723865)；普通 Code Review 对最新语义提交 `1473c18` 未提出主要问题，Security Review 未发现安全问题。真实系统密钥环故障、版本化 S3 桶、D1 并发和目标平台进程生命周期仍需外部验证；Cloudflare Worker 身份及工作区隔离仍是未来公开/同步部署的前置闸门。
+2026-08-31 已按架构审查确认的基线完成数据密钥轮换提交后清理、扩展锁定代数门控、向量缓存写入复验、离站配置提交感知事务、版本化 S3 删除验证和 D1 引用原子 batch。Draft PR [#15](https://github.com/3fteye/linked-info/pull/15) 的提交 `ff240ce` 已通过 [Windows CI 33352139368](https://github.com/3fteye/linked-info/actions/runs/33352139368)，覆盖 Rust 格式/lint/测试、桌面编译与生命周期、前端工作区回归、Edge 交互和生产构建；当前头部的云端审查证据以 PR 会话为准。真实系统密钥环故障、版本化 S3 桶、D1 并发和目标平台进程生命周期仍需外部验证；Cloudflare Worker 身份及工作区隔离仍是未来公开/同步部署的前置闸门。
 
 ## 开发环境
 
