@@ -2447,7 +2447,8 @@ fn write_config_migration(
     key: &[u8],
 ) -> Result<AtomicWriteStatus, String> {
     validate_config(&migration.config)?;
-    if migration.format != CONFIG_MIGRATION_FORMAT || migration.version != CONFIG_MIGRATION_VERSION {
+    if migration.format != CONFIG_MIGRATION_FORMAT || migration.version != CONFIG_MIGRATION_VERSION
+    {
         return Err("offsite_backup_invalid_config_migration".to_owned());
     }
     let envelope = AuthenticatedOffsiteBackupConfigMigration {
