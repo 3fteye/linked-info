@@ -308,4 +308,38 @@ describe("embedding analysis", () => {
       similarity: 1,
     });
   });
+
+  it("drops an in-flight analysis after its cache generation is invalidated", async () => {
+    let releaseEmbedding!: () => void;
+    const embeddingGate = new Promise<void>((resolve) => {
+      releaseEmbedding = resolve;
+    });
+    let startedResolve!: () => void;
+    const started = new Promise<void>((resolve) => {
+      startedResolve = resolve;
+    });
+    const delayedGateway: EmbeddingGateway = {
+      async embedLocal(_modelId, inputs) {
+        startedResolve();
+        await embeddingGate;
+        return inputs.map(vectorFor);
+      },
+      async embedRemote(_configuration, inputs) {
+        return inputs.map(vectorFor);
+      },
+    };
+    const analyzer = new EmbeddingAnalyzer(delayedGateway);
+    const analysis = analyzer.analyze(
+      "source",
+      [node("source", "OpenAI", null), node("candidate", "OpenAI", null)],
+      [],
+      defaultEmbeddingSettings,
+      "",
+    );
+
+    await started;
+    analyzer.clearCache();
+    releaseEmbedding();
+    await expect(analysis).rejects.toMatchObject({ reason: "cancelled" });
+  });
 });

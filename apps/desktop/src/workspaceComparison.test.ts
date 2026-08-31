@@ -251,6 +251,36 @@ describe("workspace replacement comparison", () => {
     });
   });
 
+  it("reports position bookmark changes as view metadata", () => {
+    const current = workspace();
+    const replacement = workspace();
+    current.view.bookmarks = [
+      {
+        id: thirdId,
+        name: "Current focus",
+        canvasId: defaultCanvasId,
+        x: 0,
+        y: 0,
+        zoom: 1,
+      },
+    ];
+    replacement.view.bookmarks = [
+      {
+        id: thirdId,
+        name: "Current focus",
+        canvasId: defaultCanvasId,
+        x: 80,
+        y: 40,
+        zoom: 1.25,
+      },
+    ];
+
+    expect(compareWorkspaces(current, replacement)).toMatchObject({
+      viewMetadataChanged: true,
+      identical: false,
+    });
+  });
+
   it("ignores JSON key insertion order when comparing view metadata", () => {
     const current = workspace();
     const replacement = workspace();

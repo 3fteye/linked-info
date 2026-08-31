@@ -7,13 +7,13 @@
 1. 从最新 `main` 创建 `io/<主题>` 分支，例如 `io/canvas-keyboard-navigation`。
 2. 只提交本次任务相关文件；本地草稿、真实工作区、导出、账号数据、模型文件和构建产物不得加入提交。
 3. 在本地运行与改动范围相称的快速验证。完整检查由 Windows GitHub Actions 完成。
-4. 推送功能分支并创建面向 `main` 的 Draft PR。实现和自检完成后将 PR 标记为 Ready for review。
+4. 每次成功提交后立即推送功能分支；第一次推送后创建面向 `main` 的 Draft PR，后续提交持续更新同一 PR。实现和自检完成后将 PR 标记为 Ready for review。
 
 ## 审查流程
 
 普通 Code Review 与 Security Review 是两条独立审查链：
 
-- 普通 Code Review 使用 [AGENTS.md](AGENTS.md) 中的仓库规则。PR 进入 Ready 状态后由自动审查触发；需要重新审查时在 PR 评论中使用 `@codex review`。
+- 普通 Code Review 使用 [AGENTS.md](AGENTS.md) 和 [linked-info-commit-discipline](.agents/skills/linked-info-commit-discipline/SKILL.md) 中的仓库规则。个人与仓库设置当前均不自动触发；发布代理根据最终 PR diff 决定是否在 PR 评论中使用 `@codex review`。
 - Security Review 使用仓库设置中单独指定的 [SECURITY.md](SECURITY.md)。只有改动涉及其威胁模型或强制安全边界时才触发对应安全审查，不能用普通 Code Review 代替。
 - 本地开发期间可以使用 Codex `/review` 检查未提交改动、当前分支或单个提交；本地结果不能替代 GitHub PR 上的审查记录。
 

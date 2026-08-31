@@ -34,6 +34,15 @@ export interface WorkspaceCanvas {
   viewport: CanvasViewport | null;
 }
 
+export interface CanvasBookmark {
+  id: string;
+  name: string;
+  canvasId: string;
+  x: number;
+  y: number;
+  zoom: number;
+}
+
 export const defaultCanvasId = "00000000-0000-4000-8000-000000000001";
 export const defaultCanvasName = "Main";
 
@@ -42,6 +51,7 @@ export interface WorkspaceViewMetadata {
   canvases: WorkspaceCanvas[];
   contentProcessorByNodeId: Record<string, string>;
   extensionMetadata: Record<string, WorkspaceExtensionMetadata>;
+  bookmarks?: CanvasBookmark[];
 }
 
 export type ExtensionMetadataJsonValue =
@@ -85,11 +95,13 @@ const maximumWorkspaceExtensionMetadataBytes = 64 * 1024;
 const maximumSingleExtensionMetadataBytes = 4 * 1024 * 1024;
 const maximumTotalExtensionMetadataBytes = 16 * 1024 * 1024;
 export const maximumWorkspaceCanvasCount = 256;
+export const maximumCanvasBookmarkCount = 4_096;
 const maximumCanvasNameCharacters = 128;
+const maximumCanvasBookmarkNameCharacters = 128;
 const maximumTotalCanvasPlacements = 1_000_000;
 const extensionMetadataUtf8Encoder = new TextEncoder();
 const invalidExtensionMetadataValue = Symbol("invalidExtensionMetadataValue");
-type WorkspaceSnapshotVersion = 1 | 2 | 3 | 4;
+type WorkspaceSnapshotVersion = 1 | 2 | 3 | 4 | 5;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -554,6 +566,57 @@ function parseNodeLayout(
   return layout;
 }
 
+function parseCanvasBookmarks(
+  value: unknown,
+  canvasIds: ReadonlySet<string>,
+): CanvasBookmark[] | null {
+  if (!Array.isArray(value) || value.length > maximumCanvasBookmarkCount) {
+    return null;
+  }
+  const bookmarks: CanvasBookmark[] = [];
+  const bookmarkIds = new Set<string>();
+  const normalizedNames = new Set<string>();
+  for (const candidate of value) {
+    if (
+      !isRecord(candidate) ||
+      Object.keys(candidate).length !== 6 ||
+      typeof candidate.name !== "string"
+    ) {
+      return null;
+    }
+    const id = canonicalNodeId(candidate.id);
+    const canvasId = canonicalNodeId(candidate.canvasId);
+    const name = candidate.name.trim();
+    const normalizedName = normalizeNodeName(name);
+    if (
+      id === null ||
+      canvasId === null ||
+      !canvasIds.has(canvasId) ||
+      bookmarkIds.has(id) ||
+      name.length === 0 ||
+      [...name].length > maximumCanvasBookmarkNameCharacters ||
+      normalizedNames.has(normalizedName) ||
+      !isFiniteNumber(candidate.x) ||
+      !isFiniteNumber(candidate.y) ||
+      !isFiniteNumber(candidate.zoom) ||
+      candidate.zoom <= 0
+    ) {
+      return null;
+    }
+    bookmarkIds.add(id);
+    normalizedNames.add(normalizedName);
+    bookmarks.push({
+      id,
+      name,
+      canvasId,
+      x: candidate.x,
+      y: candidate.y,
+      zoom: candidate.zoom,
+    });
+  }
+  return bookmarks;
+}
+
 function parseWorkspaceSnapshotValue(
   value: unknown,
   version: WorkspaceSnapshotVersion,
@@ -566,7 +629,7 @@ function parseWorkspaceSnapshotValue(
     return null;
   }
   const allowedKeys = new Set(
-    version === 4
+    version === 4 || version === 5
       ? ["nodes", "references", "view", "version"]
       : version === 1
         ? ["nodes", "layout", "references", "viewport", "version"]
@@ -634,11 +697,19 @@ function parseWorkspaceSnapshotValue(
   let extensionMetadata: Record<string, WorkspaceExtensionMetadata> = {};
   let canvases: WorkspaceCanvas[];
   let activeCanvasId: string;
-  if (version === 4) {
+  let bookmarks: CanvasBookmark[] | undefined;
+  if (version === 4 || version === 5) {
+    const hasExplicitVersion5 = value.version === 5;
     if (
       !isRecord(value.view) ||
       Array.isArray(value.view) ||
-      Object.keys(value.view).length !== 4 ||
+      (version === 4 && Object.keys(value.view).length !== 4) ||
+      (version === 5 &&
+        ((hasExplicitVersion5 &&
+          (Object.keys(value.view).length !== 5 ||
+            !Object.prototype.hasOwnProperty.call(value.view, "bookmarks"))) ||
+          (!hasExplicitVersion5 &&
+            ![4, 5].includes(Object.keys(value.view).length)))) ||
       !Array.isArray(value.view.canvases) ||
       value.view.canvases.length === 0 ||
       value.view.canvases.length > maximumWorkspaceCanvasCount
@@ -687,6 +758,15 @@ function parseWorkspaceSnapshotValue(
     }
     canvases = parsedCanvases;
     activeCanvasId = parsedActiveCanvasId;
+    if (
+      version === 5 &&
+      Object.prototype.hasOwnProperty.call(value.view, "bookmarks")
+    ) {
+      bookmarks = parseCanvasBookmarks(value.view.bookmarks, canvasIds) ?? undefined;
+      if (bookmarks === undefined) {
+        return null;
+      }
+    }
   } else {
     const layout = parseNodeLayout(value.layout, nodeIds, true);
     const viewport = parseCanvasViewport(value.viewport);
@@ -711,7 +791,15 @@ function parseWorkspaceSnapshotValue(
       !isRecord(value.view.contentProcessorByNodeId) ||
       Array.isArray(value.view.contentProcessorByNodeId) ||
       Object.keys(value.view).length !==
-        (version === 2 ? 1 : version === 3 ? 2 : 4) ||
+        (version === 5
+          ? Object.prototype.hasOwnProperty.call(value.view, "bookmarks")
+            ? 5
+            : 4
+          : version === 2
+            ? 1
+            : version === 3
+              ? 2
+              : 4) ||
       (version === 2 &&
         Object.prototype.hasOwnProperty.call(value.view, "extensionMetadata"))
     ) {
@@ -734,7 +822,7 @@ function parseWorkspaceSnapshotValue(
       }
       contentProcessorByNodeId[nodeId] = processorId;
     }
-    if (version === 3 || version === 4) {
+    if (version === 3 || version === 4 || version === 5) {
       const parsedExtensionMetadata = parseWorkspaceExtensionMetadata(
         value.view.extensionMetadata,
         nodeIds,
@@ -756,12 +844,26 @@ function parseWorkspaceSnapshotValue(
       canvases,
       contentProcessorByNodeId,
       extensionMetadata,
+      ...(bookmarks === undefined || bookmarks.length === 0 ? {} : { bookmarks }),
     },
   };
 }
 
 export function parseWorkspaceSnapshot(value: unknown): WorkspaceSnapshot | null {
-  return parseWorkspaceSnapshotValue(value, 4);
+  return parseWorkspaceSnapshotValue(value, 5);
+}
+
+export function migrateWorkspaceSnapshotV4(
+  value: unknown,
+): WorkspaceSnapshot | null {
+  const parsed = parseWorkspaceSnapshotValue(value, 4);
+  if (parsed === null) {
+    return null;
+  }
+  return {
+    ...parsed,
+    view: { ...parsed.view, bookmarks: [] },
+  };
 }
 
 export function migrateWorkspaceSnapshotV1(

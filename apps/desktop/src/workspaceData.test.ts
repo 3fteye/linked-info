@@ -4,6 +4,7 @@ import {
   defaultCanvasId,
   isNodeNameAvailable,
   migrateWorkspaceSnapshotV3,
+  migrateWorkspaceSnapshotV4,
   moveNodeLayoutToFront,
   parseWorkspaceSnapshot,
   persistedNodeNameFromDraft,
@@ -168,6 +169,63 @@ describe("parseWorkspaceSnapshot", () => {
     expect(parsed?.view.canvases[1].layout).toEqual([
       { nodeId: accountId, x: 900, y: -300, width: 640 },
     ]);
+  });
+
+  it("accepts, normalizes and validates portable canvas bookmarks", () => {
+    const workspace = validWorkspace();
+    const bookmarkId = "33333333-3333-4333-8333-333333333333";
+    workspace.view.bookmarks = [
+      {
+        id: bookmarkId.toUpperCase(),
+        name: "  Account focus  ",
+        canvasId: defaultCanvasId.toUpperCase(),
+        x: -120,
+        y: 80,
+        zoom: 1.5,
+      },
+    ];
+    const parsed = parseWorkspaceSnapshot(workspace);
+    expect(parsed?.view.bookmarks).toEqual([
+      {
+        id: bookmarkId,
+        name: "Account focus",
+        canvasId: defaultCanvasId,
+        x: -120,
+        y: 80,
+        zoom: 1.5,
+      },
+    ]);
+
+    const danglingCanvas = structuredClone(workspace);
+    danglingCanvas.view.bookmarks![0].canvasId = bookmarkId;
+    expect(parseWorkspaceSnapshot(danglingCanvas)).toBeNull();
+
+    const duplicateName = structuredClone(workspace);
+    duplicateName.view.bookmarks!.push({
+      id: "44444444-4444-4444-8444-444444444444",
+      name: "account focus",
+      canvasId: defaultCanvasId,
+      x: 0,
+      y: 0,
+      zoom: 1,
+    });
+    expect(parseWorkspaceSnapshot(duplicateName)).toBeNull();
+  });
+
+  it("migrates a version 4 workspace with no bookmarks into an empty bookmark set", () => {
+    const workspace = validWorkspace();
+    const migrated = migrateWorkspaceSnapshotV4({
+      version: 4,
+      nodes: workspace.nodes,
+      references: workspace.references,
+      view: {
+        activeCanvasId: defaultCanvasId,
+        canvases: workspace.view.canvases,
+        contentProcessorByNodeId: {},
+        extensionMetadata: {},
+      },
+    });
+    expect(migrated?.view.bookmarks).toEqual([]);
   });
 
   it("rejects duplicate canvas identity, normalized names, and a dangling active canvas", () => {

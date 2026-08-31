@@ -28,6 +28,21 @@ function validWorkspace(): WorkspaceSnapshot {
   };
 }
 
+function workspaceWithBookmark(): WorkspaceSnapshot {
+  const workspace = validWorkspace();
+  workspace.view.bookmarks = [
+    {
+      id: "22222222-2222-4222-8222-222222222222",
+      name: "Account focus",
+      canvasId: defaultCanvasId,
+      x: -120,
+      y: -80,
+      zoom: 1.4,
+    },
+  ];
+  return workspace;
+}
+
 function legacyWorkspace(workspace: WorkspaceSnapshot) {
   const canvas = activeWorkspaceCanvas(workspace);
   return {
@@ -49,6 +64,62 @@ describe("workspace backup", () => {
     }
   });
 
+  it("exports and imports position bookmarks in version 5", () => {
+    const workspace = workspaceWithBookmark();
+    const serialized = serializeWorkspaceExport(workspace);
+    const envelope = JSON.parse(serialized) as {
+      version: number;
+      workspace: { view: { bookmarks?: unknown[] } };
+    };
+
+    expect(envelope.version).toBe(5);
+    expect(envelope.workspace.view.bookmarks).toHaveLength(1);
+
+    const parsed = parseWorkspaceExport(serialized);
+    expect(parsed).toMatchObject({ ok: true, workspace });
+  });
+
+  it("rejects version 5 exports that omit the required bookmarks field", () => {
+    const envelope = JSON.parse(
+      serializeWorkspaceExport(workspaceWithBookmark()),
+    ) as {
+      workspace: { view: { bookmarks?: unknown[] } };
+    };
+    delete envelope.workspace.view.bookmarks;
+
+    expect(parseWorkspaceExport(JSON.stringify(envelope))).toEqual({
+      ok: false,
+      reason: "invalidWorkspace",
+    });
+  });
+
+  it("migrates version 4 exports without inventing position bookmarks", () => {
+    const workspace = validWorkspace();
+    const result = parseWorkspaceExport(
+      JSON.stringify({
+        format: "linked-info-workspace",
+        version: 4,
+        exportedAt: new Date().toISOString(),
+        workspace: {
+          version: 4,
+          nodes: workspace.nodes,
+          references: workspace.references,
+          view: {
+            activeCanvasId: defaultCanvasId,
+            canvases: workspace.view.canvases,
+            contentProcessorByNodeId: {},
+            extensionMetadata: {},
+          },
+        },
+      }),
+    );
+
+    expect(result).toMatchObject({ ok: true, workspace });
+    if (result.ok) {
+      expect(result.workspace.view.bookmarks).toEqual([]);
+    }
+  });
+
   it("classifies invalid JSON, format, version, and workspace data", () => {
     expect(parseWorkspaceExport("not json")).toEqual({
       ok: false,
@@ -62,7 +133,7 @@ describe("workspace backup", () => {
       parseWorkspaceExport(
         JSON.stringify({
           format: "linked-info-workspace",
-          version: 5,
+          version: 6,
           exportedAt: new Date().toISOString(),
           workspace: validWorkspace(),
         }),

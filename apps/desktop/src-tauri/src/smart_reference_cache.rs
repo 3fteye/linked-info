@@ -5,6 +5,7 @@ use std::{
     error::Error,
     fs, io,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
     sync::{Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -25,6 +26,31 @@ type StoreResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 #[derive(Default)]
 pub struct SmartReferenceCacheState {
     operation_lock: Arc<Mutex<()>>,
+    generation: Arc<AtomicU64>,
+}
+
+impl SmartReferenceCacheState {
+    fn generation(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.generation)
+    }
+
+    pub(crate) fn invalidate_for_purge(&self) -> Result<(), String> {
+        let mut current = self.generation.load(Ordering::Acquire);
+        loop {
+            if current == u64::MAX {
+                return Err("smart reference cache generation exhausted".to_owned());
+            }
+            match self.generation.compare_exchange(
+                current,
+                current + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Ok(()),
+                Err(observed) => current = observed,
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -52,6 +78,7 @@ pub struct CachedSmartReferenceResult {
     llm_selected_node_ids: Vec<String>,
     llm_uncertain_node_ids: Vec<String>,
     related_nodes: Vec<CachedRelatedNode>,
+    source_fingerprint: String,
     source_node_id: String,
     truncated_node_count: u64,
 }
@@ -206,6 +233,7 @@ fn valid_unique_node_ids(values: &[String], maximum: usize) -> bool {
 
 fn validate_result(result: &CachedSmartReferenceResult) -> Result<(), String> {
     if !valid_node_id(&result.source_node_id)
+        || !valid_sha256(&result.source_fingerprint)
         || result.candidates.len() > MAXIMUM_CANDIDATES
         || result.related_nodes.len() > MAXIMUM_RELATED_NODES
         || !valid_unique_node_ids(&result.llm_selected_node_ids, MAXIMUM_CANDIDATES)
@@ -261,12 +289,22 @@ fn is_access_error(error: &str) -> bool {
 async fn delete_cache_entry(
     store: SmartReferenceCacheStore,
     lock: Arc<Mutex<()>>,
+    generation: Arc<AtomicU64>,
+    expected_generation: u64,
+    app: AppHandle,
     key: String,
 ) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         let _guard = lock
             .lock()
             .map_err(|_| "smart reference cache lock is unavailable".to_owned())?;
+        if !cache_operation_is_current(
+            expected_generation,
+            generation.load(Ordering::Acquire),
+            crate::workspace_file::workspace_encryption_configured(&app),
+        ) {
+            return Ok(());
+        }
         store.delete(&key).map_err(|error| error.to_string())
     })
     .await
@@ -286,15 +324,27 @@ pub async fn read_smart_reference_result_cache(
     if !crate::workspace_file::workspace_encryption_configured(&app) {
         return Ok(None);
     }
+    let access_permit = crate::workspace_file::begin_workspace_access(&app, &vault_state)?;
     let store = smart_reference_cache_store(&app)?;
     let lock = operation_lock(&cache_state);
+    let generation = cache_state.generation();
+    let expected_generation = generation.load(Ordering::Acquire);
+    let app_for_check = app.clone();
     let read_store = SmartReferenceCacheStore::new(store.database_path.clone());
     let read_lock = Arc::clone(&lock);
+    let read_generation = Arc::clone(&generation);
     let read_key = key.clone();
     let encrypted = tauri::async_runtime::spawn_blocking(move || {
         let _guard = read_lock
             .lock()
             .map_err(|_| "smart reference cache lock is unavailable".to_owned())?;
+        if !cache_operation_is_current(
+            expected_generation,
+            read_generation.load(Ordering::Acquire),
+            crate::workspace_file::workspace_encryption_configured(&app_for_check),
+        ) {
+            return Ok(None);
+        }
         read_store
             .read(&read_key)
             .map_err(|error| error.to_string())
@@ -304,42 +354,95 @@ pub async fn read_smart_reference_result_cache(
     let Some(encrypted) = encrypted else {
         return Ok(None);
     };
+    crate::workspace_file::ensure_workspace_access(&app, &vault_state, access_permit)?;
+    let cache_path = store.database_path.clone();
     let plaintext = match vault_state.decrypt_derived_cache_payload(&encrypted, &cache_aad(&key)) {
         Ok(plaintext) => plaintext,
         Err(error) if is_access_error(&error) => return Err(error),
         Err(_) => {
-            delete_cache_entry(store, lock, key).await?;
+            delete_cache_entry(
+                SmartReferenceCacheStore::new(cache_path.clone()),
+                Arc::clone(&lock),
+                Arc::clone(&generation),
+                expected_generation,
+                app.clone(),
+                key.clone(),
+            )
+            .await?;
             return Ok(None);
         }
     };
+    if generation.load(Ordering::Acquire) != expected_generation {
+        return Ok(None);
+    }
     if plaintext.len() > MAXIMUM_RESULT_BYTES {
-        delete_cache_entry(store, lock, key).await?;
+        delete_cache_entry(
+            SmartReferenceCacheStore::new(cache_path.clone()),
+            Arc::clone(&lock),
+            Arc::clone(&generation),
+            expected_generation,
+            app.clone(),
+            key.clone(),
+        )
+        .await?;
         return Ok(None);
     }
     let result: CachedSmartReferenceResult = match serde_json::from_slice(&plaintext) {
         Ok(result) => result,
         Err(_) => {
-            delete_cache_entry(store, lock, key).await?;
+            delete_cache_entry(
+                SmartReferenceCacheStore::new(cache_path.clone()),
+                Arc::clone(&lock),
+                Arc::clone(&generation),
+                expected_generation,
+                app.clone(),
+                key.clone(),
+            )
+            .await?;
             return Ok(None);
         }
     };
     if validate_result(&result).is_err() {
-        delete_cache_entry(store, lock, key).await?;
+        delete_cache_entry(
+            SmartReferenceCacheStore::new(cache_path.clone()),
+            Arc::clone(&lock),
+            Arc::clone(&generation),
+            expected_generation,
+            app.clone(),
+            key.clone(),
+        )
+        .await?;
         return Ok(None);
     }
-    let touch_store = SmartReferenceCacheStore::new(store.database_path.clone());
+    if generation.load(Ordering::Acquire) != expected_generation {
+        return Ok(None);
+    }
+    let touch_store = SmartReferenceCacheStore::new(cache_path);
     let touch_lock = Arc::clone(&lock);
+    let touch_generation = Arc::clone(&generation);
+    let touch_app = app.clone();
     let touch_key = key;
     tauri::async_runtime::spawn_blocking(move || {
         let _guard = touch_lock
             .lock()
             .map_err(|_| "smart reference cache lock is unavailable".to_owned())?;
+        if !cache_operation_is_current(
+            expected_generation,
+            touch_generation.load(Ordering::Acquire),
+            crate::workspace_file::workspace_encryption_configured(&touch_app),
+        ) {
+            return Ok(());
+        }
         touch_store
             .touch(&touch_key)
             .map_err(|error| error.to_string())
     })
     .await
     .map_err(|error| error.to_string())??;
+    crate::workspace_file::ensure_workspace_access(&app, &vault_state, access_permit)?;
+    if generation.load(Ordering::Acquire) != expected_generation {
+        return Ok(None);
+    }
     Ok(Some(result))
 }
 
@@ -358,6 +461,9 @@ pub async fn write_smart_reference_result_cache(
     if !crate::workspace_file::workspace_encryption_configured(&app) {
         return Ok(());
     }
+    let access_permit = crate::workspace_file::begin_workspace_access(&app, &vault_state)?;
+    let generation = cache_state.generation();
+    let expected_generation = generation.load(Ordering::Acquire);
     let plaintext = serde_json::to_vec(&result)
         .map_err(|_| "smart reference cache result cannot be serialized".to_owned())?;
     if plaintext.len() > MAXIMUM_RESULT_BYTES {
@@ -366,16 +472,28 @@ pub async fn write_smart_reference_result_cache(
     let encrypted = vault_state.encrypt_derived_cache_payload(&plaintext, &cache_aad(&key))?;
     let store = smart_reference_cache_store(&app)?;
     let lock = operation_lock(&cache_state);
+    let app_for_check = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let _guard = lock
             .lock()
             .map_err(|_| "smart reference cache lock is unavailable".to_owned())?;
+        if !cache_operation_is_current(
+            expected_generation,
+            generation.load(Ordering::Acquire),
+            crate::workspace_file::workspace_encryption_configured(&app_for_check),
+        ) {
+            return Ok(());
+        }
         store
             .write(&key, &encrypted)
             .map_err(|error| error.to_string())
     })
     .await
     .map_err(|error| error.to_string())?
+    .and_then(|result| {
+        crate::workspace_file::ensure_workspace_access(&app, &vault_state, access_permit)?;
+        Ok(result)
+    })
 }
 
 #[tauri::command]
@@ -403,6 +521,7 @@ pub async fn clear_smart_reference_result_cache(
     app: AppHandle,
     cache_state: tauri::State<'_, SmartReferenceCacheState>,
 ) -> Result<SmartReferenceCacheStatus, String> {
+    cache_state.invalidate_for_purge()?;
     let store = smart_reference_cache_store(&app)?;
     let encrypted = crate::workspace_file::workspace_encryption_configured(&app);
     let lock = operation_lock(&cache_state);
@@ -418,6 +537,7 @@ pub async fn clear_smart_reference_result_cache(
 }
 
 pub async fn purge(app: &AppHandle, state: &SmartReferenceCacheState) -> Result<(), String> {
+    state.invalidate_for_purge()?;
     let store = smart_reference_cache_store(app)?;
     let lock = operation_lock(state);
     tauri::async_runtime::spawn_blocking(move || {
@@ -428,6 +548,14 @@ pub async fn purge(app: &AppHandle, state: &SmartReferenceCacheState) -> Result<
     })
     .await
     .map_err(|error| error.to_string())?
+}
+
+fn cache_operation_is_current(
+    expected_generation: u64,
+    current_generation: u64,
+    encrypted: bool,
+) -> bool {
+    expected_generation == current_generation && current_generation != u64::MAX && encrypted
 }
 
 fn empty_status(persistent: bool) -> SmartReferenceCacheStatus {
@@ -542,6 +670,7 @@ mod tests {
                 node_id: node_id(3),
                 similarity: 0.5,
             }],
+            source_fingerprint: "a".repeat(64),
             source_node_id: node_id(1),
             truncated_node_count: 0,
         }
@@ -566,6 +695,13 @@ mod tests {
     }
 
     #[test]
+    fn rejects_invalid_source_fingerprint() {
+        let mut invalid = result();
+        invalid.source_fingerprint = "not-a-sha256".to_owned();
+        assert!(validate_result(&invalid).is_err());
+    }
+
+    #[test]
     fn clearing_does_not_remove_unrelated_files() {
         let (directory, store) = test_store();
         store.write(&"b".repeat(64), b"opaque").unwrap();
@@ -574,5 +710,45 @@ mod tests {
         store.clear().unwrap();
         assert!(unrelated.exists());
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn stale_cache_generation_is_rejected_after_purge() {
+        let state = SmartReferenceCacheState::default();
+        let expected_generation = state.generation.load(Ordering::Acquire);
+        let lock = Arc::clone(&state.operation_lock);
+        let generation = state.generation();
+        let started = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let release = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let worker_started = Arc::clone(&started);
+        let worker_release = Arc::clone(&release);
+        let worker = std::thread::spawn(move || {
+            let _guard = lock.lock().unwrap();
+            worker_started.wait();
+            worker_release.wait();
+            cache_operation_is_current(
+                expected_generation,
+                generation.load(Ordering::Acquire),
+                true,
+            )
+        });
+
+        started.wait();
+        state.invalidate_for_purge().unwrap();
+        release.wait();
+        assert!(!worker.join().unwrap());
+    }
+
+    #[test]
+    fn generation_exhaustion_fails_closed_without_wrapping() {
+        let state = SmartReferenceCacheState::default();
+        state.generation.store(u64::MAX, Ordering::Release);
+
+        assert_eq!(
+            state.invalidate_for_purge(),
+            Err("smart reference cache generation exhausted".to_owned())
+        );
+        assert_eq!(state.generation.load(Ordering::Acquire), u64::MAX);
+        assert!(!cache_operation_is_current(u64::MAX, u64::MAX, true));
     }
 }

@@ -43,6 +43,7 @@ export function captureWorkspaceHistory(
       canvases: workspace.view.canvases,
       contentProcessorByNodeId: workspace.view.contentProcessorByNodeId,
       extensionMetadata: workspace.view.extensionMetadata,
+      bookmarks: workspace.view.bookmarks ?? [],
     },
   };
 }
@@ -147,6 +148,7 @@ export function restoreWorkspaceHistory(
       canvases,
       contentProcessorByNodeId: state.view.contentProcessorByNodeId,
       extensionMetadata: state.view.extensionMetadata,
+      bookmarks: state.view.bookmarks ?? currentView.bookmarks ?? [],
     },
   };
 }

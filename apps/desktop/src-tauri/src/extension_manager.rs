@@ -3,7 +3,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     sync::{
-        Mutex,
+        Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
     time::{Duration, Instant},
@@ -526,6 +526,7 @@ fn migrate_metadata_payload(
     runtime: &crate::extension_runtime::ExtensionRuntimeState,
     runtime_key: &str,
     generation: u64,
+    access_generation: &AtomicU64,
     from_version: u32,
     to_version: u32,
     value: &serde_json::Value,
@@ -537,7 +538,7 @@ fn migrate_metadata_payload(
         .filter(|remaining| !remaining.is_zero())
         .ok_or_else(|| "extension_metadata_migration_deadline_exceeded".to_owned())?;
     let request_id = runtime.next_request_id();
-    let response = runtime.request(
+    let response = runtime.request_for_access_generation(
         runtime_key,
         ExtensionHostRequestV1::MigrateMetadata {
             request_id,
@@ -550,6 +551,7 @@ fn migrate_metadata_payload(
             },
         },
         remaining,
+        access_generation,
     )?;
     let metadata_json = match response {
         ExtensionHostResponseV1::MetadataMigrated { metadata_json, .. } => metadata_json,
@@ -582,6 +584,7 @@ fn run_metadata_migration(
     existing: &InstalledExtensionRecord,
     old_package: &ValidatedExtensionPackage,
     generation: u64,
+    access_generation: &AtomicU64,
     input: Option<ExtensionMetadataMigrationInput>,
 ) -> Result<Option<ExtensionMetadataMigrationInput>, String> {
     let Some(input) = input else {
@@ -598,12 +601,13 @@ fn run_metadata_migration(
         "{}#migration#{prepared_install_id}",
         prepared.package.manifest.id
     );
-    if let Err(error) = runtime.start(
+    if let Err(error) = runtime.ensure_started_for_access_generation(
         app,
         &runtime_key,
         &prepared.package.manifest.id,
         &pending_path,
         generation,
+        access_generation,
         !prepared.package.signed,
     ) {
         let _ = fs::remove_file(pending_path);
@@ -620,6 +624,7 @@ fn run_metadata_migration(
         runtime,
         &runtime_key,
         generation,
+        access_generation,
         existing.metadata_schema_version,
         to_version,
         &input.workspace,
@@ -632,6 +637,7 @@ fn run_metadata_migration(
             runtime,
             &runtime_key,
             generation,
+            access_generation,
             existing.metadata_schema_version,
             to_version,
             node,
@@ -779,9 +785,12 @@ pub async fn migrate_prepared_extension_metadata(
     let vault = app.state::<crate::workspace_file::WorkspaceVaultState>();
     let manager = app.state::<ExtensionManagerState>();
     let permit = crate::workspace_file::begin_workspace_access(&app, &vault)?;
-    let generation = vault
-        .access_generation()
-        .load(std::sync::atomic::Ordering::Acquire);
+    let access_generation = vault.access_generation();
+    let generation = permit.map_or_else(
+        || access_generation.load(Ordering::Acquire),
+        crate::workspace_file::WorkspaceAccessPermit::generation,
+    );
+    crate::workspace_file::ensure_access_generation(&access_generation, permit)?;
     let prepared = manager
         .prepared
         .lock()
@@ -836,6 +845,7 @@ pub async fn migrate_prepared_extension_metadata(
     let task_prepared_id = prepared_install_id.clone();
     let task_prepared = prepared.clone();
     let task_existing = existing.clone();
+    let task_access_generation = Arc::clone(&access_generation);
     let migrated = tauri::async_runtime::spawn_blocking(move || {
         let runtime = task_app.state::<crate::extension_runtime::ExtensionRuntimeState>();
         run_metadata_migration(
@@ -847,6 +857,7 @@ pub async fn migrate_prepared_extension_metadata(
             &task_existing,
             &old_package,
             generation,
+            &task_access_generation,
             metadata,
         )
     })

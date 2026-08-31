@@ -55,7 +55,13 @@ import {
   unavailableLocalLlmRuntime,
 } from "./llmBridge";
 import { localLlmSettingsStore } from "./llmSettings";
-import { unavailableOffsiteBackupService } from "./offsiteBackup";
+import {
+  unavailableOffsiteBackupService,
+  type AutomaticBackupOutcome,
+  type OffsiteBackupSnapshot,
+  type OffsiteBackupService,
+  type OffsiteBackupTarget,
+} from "./offsiteBackup";
 import { unavailableSecretClipboard } from "./secretClipboard";
 import { memoryOnlySmartReferenceResultCache } from "./smartReferenceCache";
 import { unavailableWorkspaceBackupHistory } from "./workspaceBackupHistory";
@@ -118,6 +124,170 @@ async function click(testId: string): Promise<void> {
   });
 }
 
+async function setInputValue(
+  input: HTMLInputElement,
+  value: string,
+): Promise<void> {
+  await act(async () => {
+    const setter = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      "value",
+    )?.set;
+    setter?.call(input, value);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await Promise.resolve();
+  });
+}
+
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+} {
+  let resolve: (value: T) => void = () => {};
+  const promise = new Promise<T>((nextResolve) => {
+    resolve = nextResolve;
+  });
+  return { promise, resolve };
+}
+
+async function waitUntil(predicate: () => boolean): Promise<void> {
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    if (predicate()) {
+      return;
+    }
+    await act(async () => {
+      await new Promise((resolve) => window.setTimeout(resolve, 0));
+    });
+  }
+  throw new Error("condition did not become true");
+}
+
+async function findButton(label: RegExp): Promise<HTMLButtonElement> {
+  let match: HTMLButtonElement | undefined;
+  await waitUntil(() => {
+    match = Array.from(document.querySelectorAll<HTMLButtonElement>("button")).find(
+      (button) => label.test(button.textContent ?? ""),
+    );
+    return match !== undefined;
+  });
+  if (match === undefined) {
+    throw new Error(`missing button: ${label.source}`);
+  }
+  return match;
+}
+
+async function clickButton(label: RegExp): Promise<HTMLButtonElement> {
+  const button = await findButton(label);
+  await act(async () => {
+    button.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await Promise.resolve();
+  });
+  return button;
+}
+
+function encryptedStatus(): WorkspaceSecurityStatus {
+  return {
+    encrypted: true,
+    locked: false,
+    systemUnlockAvailable: false,
+    systemUnlockEnabled: false,
+    idleTimeoutMinutes: 15,
+  };
+}
+
+function encryptedSecurity(status: WorkspaceSecurityStatus): WorkspaceSecurity {
+  return {
+    ...unavailableWorkspaceSecurity,
+    available: true,
+    async inspect() {
+      return status;
+    },
+    async authorizeSensitiveOperation() {
+      return "one-time-authorization";
+    },
+  };
+}
+
+function memoryPersistence(initial: WorkspaceSnapshot): WorkspacePersistence {
+  let primary = initial;
+  return {
+    async load() {
+      return { status: "ready", workspace: primary };
+    },
+    async loadRecovery() {
+      return { status: "missing" };
+    },
+    async preserveForRecovery() {},
+    runExclusiveTransaction(transaction) {
+      return transaction();
+    },
+    async save(next) {
+      primary = next;
+    },
+    async swapWithRecovery() {
+      throw new Error("swap is not used in this test");
+    },
+  };
+}
+
+function offsiteTarget(id: string, name: string): OffsiteBackupTarget {
+  return {
+    id,
+    name,
+    endpoint: "https://example.r2.cloudflarestorage.com",
+    s3Provider: "cloudflareR2",
+    region: "auto",
+    bucket: "linked-info-backup",
+    prefix: "linked-info/v1",
+    createdAtMs: 1,
+    lastUploadAtMs: null,
+    lastVerifiedAtMs: null,
+    lastRestoreTestAtMs: null,
+    maximumUploadBytes: null,
+    automaticEnabled: true,
+    automaticIntervalHours: 24,
+    automaticPending: false,
+    lastAutomaticAttemptAtMs: null,
+    lastAutomaticError: null,
+    retentionEnabled: false,
+    retentionMaxSnapshots: 30,
+    retentionMaxAgeDays: 90,
+    lastRetentionCleanupAtMs: null,
+    lastRetentionError: null,
+  };
+}
+
+function offsiteSnapshot(id: string, createdAtMs: number): OffsiteBackupSnapshot {
+  return {
+    id,
+    createdAtMs,
+    sizeBytes: 128,
+    sha256: "a".repeat(64),
+  };
+}
+
+async function openDataSecuritySettings(): Promise<void> {
+  await click("settings-navigation");
+  await click("settings-tab-dataSecurity");
+}
+
+async function submitCurrentPassword(): Promise<void> {
+  const password = document.querySelector<HTMLInputElement>(
+    "#workspace-security-current-password",
+  );
+  expect(password).not.toBeNull();
+  if (password === null) {
+    throw new Error("missing current-password input");
+  }
+  await setInputValue(password, "correct horse battery staple");
+  await act(async () => {
+    password.form?.dispatchEvent(
+      new SubmitEvent("submit", { bubbles: true, cancelable: true }),
+    );
+    await Promise.resolve();
+  });
+}
+
 describe("App recovery transaction boundary", () => {
   let container: HTMLDivElement;
   let root: Root;
@@ -126,6 +296,8 @@ describe("App recovery transaction boundary", () => {
     persistence: WorkspacePersistence;
     security: WorkspaceSecurity;
     updateStatus: (status: WorkspaceSecurityStatus) => void;
+    offsiteBackup?: OffsiteBackupService;
+    status?: WorkspaceSecurityStatus;
   }): Promise<void> {
     await act(async () => {
       root.render(
@@ -139,20 +311,24 @@ describe("App recovery transaction boundary", () => {
           localEmbeddingRuntime={unavailableLocalEmbeddingRuntime}
           localLlmRuntime={unavailableLocalLlmRuntime}
           lifecycle={{ async registerCloseFlush() { return () => {}; } }}
-          offsiteBackup={unavailableOffsiteBackupService}
+          offsiteBackup={
+            options.offsiteBackup ?? unavailableOffsiteBackupService
+          }
           persistence={options.persistence}
           secretClipboard={unavailableSecretClipboard}
           smartReferenceResultCache={memoryOnlySmartReferenceResultCache}
           updateWorkspaceSecurityStatus={options.updateStatus}
           workspaceBackupHistory={unavailableWorkspaceBackupHistory}
           workspaceSecurity={options.security}
-          workspaceSecurityStatus={{
-            encrypted: false,
-            locked: false,
-            systemUnlockAvailable: false,
-            systemUnlockEnabled: false,
-            idleTimeoutMinutes: null,
-          }}
+          workspaceSecurityStatus={
+            options.status ?? {
+              encrypted: false,
+              locked: false,
+              systemUnlockAvailable: false,
+              systemUnlockEnabled: false,
+              idleTimeoutMinutes: null,
+            }
+          }
         />,
       );
       await Promise.resolve();
@@ -500,5 +676,485 @@ describe("App recovery transaction boundary", () => {
     ]);
     expect(primary.view.canvases[0].layout).toHaveLength(1);
     expect(primary.view.canvases[1].layout).toHaveLength(0);
+  });
+
+  it("does not reuse a completed bookmark rename as the next bookmark name", async () => {
+    let primary = workspace(currentNodeId, "Global node");
+    primary.view.bookmarks = [
+      {
+        id: "33333333-3333-4333-8333-333333333333",
+        name: "Existing bookmark",
+        canvasId: primary.view.activeCanvasId,
+        x: 0,
+        y: 0,
+        zoom: 1,
+      },
+    ];
+    const persistence: WorkspacePersistence = {
+      async load() {
+        return { status: "ready", workspace: primary };
+      },
+      async loadRecovery() {
+        return { status: "missing" };
+      },
+      async preserveForRecovery() {},
+      runExclusiveTransaction(transaction) {
+        return transaction();
+      },
+      async save(next) {
+        primary = next;
+      },
+      async swapWithRecovery() {
+        throw new Error("swap is not used in this test");
+      },
+    };
+
+    await renderApp({
+      persistence,
+      security: unavailableWorkspaceSecurity,
+      updateStatus: () => {},
+    });
+    await click("canvas-bookmarks-toggle");
+    await click("canvas-bookmark-rename");
+    const renameInput = document.querySelector<HTMLInputElement>(
+      ".canvas-bookmark-rename-input",
+    );
+    expect(renameInput?.value).toBe("Existing bookmark");
+
+    await act(async () => {
+      renameInput?.dispatchEvent(
+        new KeyboardEvent("keydown", { bubbles: true, key: "Enter" }),
+      );
+      await Promise.resolve();
+    });
+
+    const createInput = (await find("canvas-bookmark-name")) as HTMLInputElement;
+    expect(createInput.value).toBe("");
+    await click("canvas-bookmark-save");
+
+    expect(primary.view.bookmarks).toHaveLength(2);
+    expect(primary.view.bookmarks?.[0].name).toBe("Existing bookmark");
+    expect(primary.view.bookmarks?.[1].name).not.toBe("Existing bookmark");
+  });
+
+  it("does not optimistically apply an offsite target when config recovery is required", async () => {
+    let primary = workspace(currentNodeId, "Encrypted workspace");
+    const persistence: WorkspacePersistence = {
+      async load() {
+        return { status: "ready", workspace: primary };
+      },
+      async loadRecovery() {
+        return { status: "missing" };
+      },
+      async preserveForRecovery() {},
+      runExclusiveTransaction(transaction) {
+        return transaction();
+      },
+      async save(next) {
+        primary = next;
+      },
+      async swapWithRecovery() {
+        throw new Error("swap is not used in this test");
+      },
+    };
+    const encryptedStatus: WorkspaceSecurityStatus = {
+      encrypted: true,
+      locked: false,
+      systemUnlockAvailable: false,
+      systemUnlockEnabled: false,
+      idleTimeoutMinutes: 15,
+    };
+    const security: WorkspaceSecurity = {
+      ...unavailableWorkspaceSecurity,
+      available: true,
+      async inspect() {
+        return encryptedStatus;
+      },
+      async authorizeSensitiveOperation() {
+        return "one-time-authorization";
+      },
+    };
+    const inspectTargets = vi.fn(async () => []);
+    const configureS3Target = vi.fn(async () => ({
+      status: "recoveryRequired" as const,
+    }));
+    const offsiteBackup: OffsiteBackupService = {
+      ...unavailableOffsiteBackupService,
+      available: true,
+      inspectTargets,
+      configureS3Target,
+      async runDueAutomatic() {
+        return [];
+      },
+    };
+
+    await renderApp({
+      persistence,
+      security,
+      updateStatus: () => {},
+      offsiteBackup,
+      status: encryptedStatus,
+    });
+    await click("settings-navigation");
+    await click("settings-tab-dataSecurity");
+
+    await setInputValue(
+      (await find("offsite-s3-endpoint")) as HTMLInputElement,
+      "https://example.r2.cloudflarestorage.com",
+    );
+    await setInputValue(
+      (await find("offsite-s3-bucket")) as HTMLInputElement,
+      "linked-info-backup",
+    );
+    await setInputValue(
+      (await find("offsite-s3-access-key-id")) as HTMLInputElement,
+      "access-key-id",
+    );
+    await setInputValue(
+      (await find("offsite-s3-secret-access-key")) as HTMLInputElement,
+      "secret-access-key",
+    );
+    await setInputValue(
+      (await find("offsite-s3-session-token")) as HTMLInputElement,
+      "session-token",
+    );
+    await click("offsite-save-target");
+
+    const password = document.querySelector<HTMLInputElement>(
+      "#workspace-security-current-password",
+    );
+    expect(password).not.toBeNull();
+    if (password === null) {
+      throw new Error("missing current-password input");
+    }
+    await setInputValue(password, "correct horse battery staple");
+    await act(async () => {
+      password.form?.dispatchEvent(
+        new SubmitEvent("submit", { bubbles: true, cancelable: true }),
+      );
+      await Promise.resolve();
+    });
+
+    const message = await find("offsite-config-recovery-message");
+    expect(message.textContent).toMatch(/paused|暂停/);
+    expect(configureS3Target).toHaveBeenCalledOnce();
+    expect(inspectTargets.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(
+      (await find("offsite-s3-access-key-id") as HTMLInputElement).value,
+    ).toBe("");
+    expect(
+      (await find("offsite-s3-secret-access-key") as HTMLInputElement).value,
+    ).toBe("");
+    expect(
+      (await find("offsite-s3-session-token") as HTMLInputElement).value,
+    ).toBe("");
+    expect(
+      document.querySelector("#workspace-security-current-password"),
+    ).toBeNull();
+    expect((await find("offsite-save-target") as HTMLButtonElement).disabled).toBe(
+      true,
+    );
+    expect(document.querySelector(".offsite-target-selector")).toBeNull();
+  });
+
+  it("discards a deferred automatic result after config recovery and does not reschedule marking", async () => {
+    const status = encryptedStatus();
+    const targetId = "33333333-3333-4333-8333-333333333333";
+    const initialTarget = offsiteTarget(targetId, "Initial target");
+    const authoritativeTarget = offsiteTarget(targetId, "Authoritative target");
+    const staleTarget = offsiteTarget(targetId, "Stale automatic target");
+    const automatic = deferred<AutomaticBackupOutcome[]>();
+    const inspectTargets = vi
+      .fn<OffsiteBackupService["inspectTargets"]>()
+      .mockResolvedValueOnce([initialTarget])
+      .mockResolvedValueOnce([authoritativeTarget])
+      .mockResolvedValue([staleTarget]);
+    const markAutomaticPending = vi.fn<
+      OffsiteBackupService["markAutomaticPending"]
+    >(async () => ({ status: "committed", targets: [staleTarget] }));
+    const runDueAutomatic = vi.fn<OffsiteBackupService["runDueAutomatic"]>(
+      () => automatic.promise,
+    );
+    const configureS3Target = vi.fn<
+      OffsiteBackupService["configureS3Target"]
+    >(async () => ({ status: "recoveryRequired" }));
+    const offsiteBackup: OffsiteBackupService = {
+      ...unavailableOffsiteBackupService,
+      available: true,
+      inspectTargets,
+      configureS3Target,
+      markAutomaticPending,
+      runDueAutomatic,
+      async list() {
+        return { items: [], nextCursor: null };
+      },
+    };
+
+    await renderApp({
+      persistence: memoryPersistence(workspace(currentNodeId, "Initial node")),
+      security: encryptedSecurity(status),
+      updateStatus: () => {},
+      offsiteBackup,
+      status,
+    });
+    await waitUntil(() => runDueAutomatic.mock.calls.length === 1);
+
+    const editName = canvasHarness.editName;
+    expect(editName).not.toBeNull();
+    await act(async () => {
+      editName?.("Changed while automatic upload is pending");
+      await Promise.resolve();
+    });
+    await openDataSecuritySettings();
+    await setInputValue(
+      (await find("offsite-s3-endpoint")) as HTMLInputElement,
+      "https://example.r2.cloudflarestorage.com",
+    );
+    await setInputValue(
+      (await find("offsite-s3-bucket")) as HTMLInputElement,
+      "linked-info-backup",
+    );
+    await setInputValue(
+      (await find("offsite-s3-access-key-id")) as HTMLInputElement,
+      "access-key-id",
+    );
+    await setInputValue(
+      (await find("offsite-s3-secret-access-key")) as HTMLInputElement,
+      "secret-access-key",
+    );
+    await click("offsite-save-target");
+    await submitCurrentPassword();
+    await find("offsite-config-recovery-message");
+
+    const inspectCallsAfterRecovery = inspectTargets.mock.calls.length;
+    automatic.resolve([
+      {
+        status: "committed",
+        targetId,
+        uploaded: true,
+        error: null,
+      },
+    ]);
+    await act(async () => {
+      await automatic.promise;
+      await Promise.resolve();
+    });
+
+    expect(inspectTargets).toHaveBeenCalledTimes(inspectCallsAfterRecovery);
+    expect(markAutomaticPending).not.toHaveBeenCalled();
+    expect(runDueAutomatic).toHaveBeenCalledOnce();
+    expect(
+      Array.from(
+        document.querySelectorAll<HTMLOptionElement>(
+          ".offsite-target-selector option",
+        ),
+      ).map((option) => option.textContent),
+    ).toEqual(["Authoritative target"]);
+  });
+
+  it("keeps config recovery visible while allowing read-only refresh and restore after snapshot deletion", async () => {
+    const status = encryptedStatus();
+    const target = offsiteTarget(
+      "44444444-4444-4444-8444-444444444444",
+      "Recovery target",
+    );
+    const deletedSnapshot = offsiteSnapshot(
+      "55555555-5555-4555-8555-555555555555",
+      1_786_000_000_000,
+    );
+    const remainingSnapshot = offsiteSnapshot(
+      "66666666-6666-4666-8666-666666666666",
+      1_786_000_100_000,
+    );
+    const page = {
+      items: [deletedSnapshot, remainingSnapshot],
+      nextCursor: null,
+    };
+    const inspectTargets = vi.fn(async () => [target]);
+    const list = vi.fn(async () => page);
+    const deleteSnapshot = vi.fn<OffsiteBackupService["deleteSnapshot"]>(
+      async () => ({ status: "recoveryRequired", snapshotDeleted: true }),
+    );
+    const download = vi.fn<OffsiteBackupService["download"]>(async () => ({
+      metadata: remainingSnapshot,
+      encryptedExport: "encrypted-restore-preview",
+    }));
+    const offsiteBackup: OffsiteBackupService = {
+      ...unavailableOffsiteBackupService,
+      available: true,
+      inspectTargets,
+      list,
+      deleteSnapshot,
+      download,
+      async runDueAutomatic() {
+        return [];
+      },
+    };
+
+    await renderApp({
+      persistence: memoryPersistence(workspace(currentNodeId, "Encrypted node")),
+      security: encryptedSecurity(status),
+      updateStatus: () => {},
+      offsiteBackup,
+      status,
+    });
+    await openDataSecuritySettings();
+    await waitUntil(
+      () => document.querySelectorAll(".offsite-entry-actions").length === 2,
+    );
+
+    await clickButton(/删除快照|Delete snapshot/);
+    await submitCurrentPassword();
+    const recoveryBanner = await find("offsite-config-recovery-message");
+    const recoveryMessage = recoveryBanner.textContent;
+    expect(recoveryBanner.textContent).toMatch(/deleted|删除/);
+    expect(deleteSnapshot).toHaveBeenCalledOnce();
+    expect(document.querySelectorAll(".offsite-entry-actions")).toHaveLength(0);
+    expect(document.querySelector(".app-status-toast")).toBeNull();
+
+    const refresh = await findButton(/刷新|Refresh/);
+    expect(refresh.disabled).toBe(false);
+    await clickButton(/刷新|Refresh/);
+    await waitUntil(
+      () => document.querySelectorAll(".offsite-entry-actions").length === 2,
+    );
+    expect((await find("offsite-config-recovery-message")).textContent).toBe(
+      recoveryMessage,
+    );
+
+    const restore = await findButton(/恢复预览|Restore preview/);
+    expect(restore.disabled).toBe(false);
+    await clickButton(/恢复预览|Restore preview/);
+    expect(download).toHaveBeenCalledOnce();
+    expect(document.querySelector("#encrypted-import-password")).not.toBeNull();
+    expect((await find("offsite-config-recovery-message")).textContent).toBe(
+      recoveryMessage,
+    );
+  });
+
+  it("coordinates config recovery when the committed snapshot-delete refresh rejects", async () => {
+    const status = encryptedStatus();
+    const target = offsiteTarget(
+      "99999999-9999-4999-8999-999999999999",
+      "Refresh recovery target",
+    );
+    const snapshot = offsiteSnapshot(
+      "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      1_786_000_150_000,
+    );
+    const inspectTargets = vi
+      .fn<OffsiteBackupService["inspectTargets"]>()
+      .mockResolvedValueOnce([target])
+      .mockRejectedValueOnce(
+        new Error("offsite_backup_config_recovery_required"),
+      )
+      .mockResolvedValue([target]);
+    const deleteSnapshot = vi.fn<OffsiteBackupService["deleteSnapshot"]>(
+      async () => ({
+        status: "committed",
+        snapshotDeleted: true,
+        restoreDrillProofInvalidated: false,
+        warning: null,
+      }),
+    );
+    const offsiteBackup: OffsiteBackupService = {
+      ...unavailableOffsiteBackupService,
+      available: true,
+      inspectTargets,
+      async list() {
+        return { items: [snapshot], nextCursor: null };
+      },
+      deleteSnapshot,
+      async runDueAutomatic() {
+        return [];
+      },
+    };
+
+    await renderApp({
+      persistence: memoryPersistence(workspace(currentNodeId, "Encrypted node")),
+      security: encryptedSecurity(status),
+      updateStatus: () => {},
+      offsiteBackup,
+      status,
+    });
+    await openDataSecuritySettings();
+    await clickButton(/删除快照|Delete snapshot/);
+    await submitCurrentPassword();
+
+    const recoveryBanner = await find("offsite-config-recovery-message");
+    expect(recoveryBanner.textContent).toMatch(/paused|暂停/);
+    expect(deleteSnapshot).toHaveBeenCalledOnce();
+    expect(inspectTargets.mock.calls.length).toBeGreaterThanOrEqual(3);
+    expect(document.querySelector(".app-status-toast")).toBeNull();
+  });
+
+  it("closes the restore drill and clears its password when config recovery is required", async () => {
+    const status = encryptedStatus();
+    const target = offsiteTarget(
+      "77777777-7777-4777-8777-777777777777",
+      "Restore-drill target",
+    );
+    const snapshot = offsiteSnapshot(
+      "88888888-8888-4888-8888-888888888888",
+      1_786_000_200_000,
+    );
+    const testRestore = vi.fn<OffsiteBackupService["testRestore"]>(
+      async () => ({
+        status: "recoveryRequired",
+      }),
+    );
+    const offsiteBackup: OffsiteBackupService = {
+      ...unavailableOffsiteBackupService,
+      available: true,
+      async inspectTargets() {
+        return [target];
+      },
+      async list() {
+        return { items: [snapshot], nextCursor: null };
+      },
+      testRestore,
+      async runDueAutomatic() {
+        return [];
+      },
+    };
+
+    await renderApp({
+      persistence: memoryPersistence(workspace(currentNodeId, "Encrypted node")),
+      security: encryptedSecurity(status),
+      updateStatus: () => {},
+      offsiteBackup,
+      status,
+    });
+    await openDataSecuritySettings();
+    await clickButton(/恢复演练|Recovery drill/);
+    const password = document.querySelector<HTMLInputElement>(
+      "#offsite-restore-drill-password",
+    );
+    expect(password).not.toBeNull();
+    if (password === null) {
+      throw new Error("missing restore-drill password input");
+    }
+    await setInputValue(password, "snapshot master password");
+    await act(async () => {
+      password.form?.dispatchEvent(
+        new SubmitEvent("submit", { bubbles: true, cancelable: true }),
+      );
+      await Promise.resolve();
+    });
+
+    const recoveryBanner = await find("offsite-config-recovery-message");
+    expect(recoveryBanner.textContent).toMatch(/drill|演练/);
+    expect(testRestore).toHaveBeenCalledWith(
+      target.id,
+      snapshot.id,
+      "snapshot master password",
+    );
+    expect(
+      document.querySelector("#offsite-restore-drill-password"),
+    ).toBeNull();
+    expect(document.querySelector(".app-status-toast")).toBeNull();
+    expect(document.body.textContent).not.toMatch(
+      /恢复演练通过|Recovery drill passed/,
+    );
   });
 });

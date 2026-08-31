@@ -2,15 +2,19 @@ use std::{
     collections::HashSet,
     fs, io,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
 use hmac::{Hmac, KeyInit, Mac};
 use linked_info_backup_port::{
-    BackupListPage, BackupSnapshot, BackupSnapshotMetadata, BackupTarget, BackupTargetError,
-    BackupVerification, MAX_BACKUP_PAGE_LIMIT,
+    BackupDeleteOutcome, BackupListPage, BackupOperationGuard, BackupPurgeOutcome, BackupSnapshot,
+    BackupSnapshotMetadata, BackupTarget, BackupTargetError, BackupVerification,
+    MAX_BACKUP_PAGE_LIMIT,
 };
 use serde::{Deserialize, Serialize};
 use sha2_11::Sha256;
@@ -21,17 +25,24 @@ use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 use crate::{
     s3_backup_target::{S3BackupTarget, S3Credentials},
     workspace_file::{
-        SensitiveOperation, WorkspaceAccessPermit, WorkspaceVaultState, begin_workspace_access,
-        encrypt_offsite_workspace_snapshot, ensure_workspace_access,
-        test_current_offsite_workspace_restore, workspace_encryption_configured, write_atomically,
+        AtomicWriteStatus, SensitiveOperation, WorkspaceAccessPermit, WorkspaceVaultState,
+        begin_workspace_access, encrypt_offsite_workspace_snapshot, ensure_workspace_access,
+        test_current_offsite_workspace_restore, workspace_encryption_configured,
+        write_atomically_commit_aware,
     },
 };
 
 const CONFIG_FILE_NAME: &str = "offsite-backup-targets.json";
+const CONFIG_TRANSACTION_FILE_NAME: &str = "offsite-backup-targets.transaction.json";
+const CONFIG_MIGRATION_FILE_NAME: &str = "offsite-backup-targets.migration.json";
 const CONFIG_FORMAT: &str = "linked-info-offsite-backup-targets";
 const CONFIG_VERSION: u16 = 1;
 const AUTHENTICATED_CONFIG_FORMAT: &str = "linked-info-authenticated-offsite-backup-targets";
 const AUTHENTICATED_CONFIG_VERSION: u16 = 1;
+const CONFIG_TRANSACTION_FORMAT: &str = "linked-info-offsite-backup-transaction";
+const CONFIG_TRANSACTION_VERSION: u16 = 1;
+const CONFIG_MIGRATION_FORMAT: &str = "linked-info-offsite-backup-config-migration";
+const CONFIG_MIGRATION_VERSION: u16 = 1;
 const CONFIG_AUTH_CREDENTIAL_ID: &str = "00000000-0000-4000-8000-000000000001";
 const CONFIG_AUTH_KEY_BYTES: usize = 32;
 const KEYRING_SERVICE: &str = "com.linkedinfo.desktop.backup-target";
@@ -47,6 +58,7 @@ const MAXIMUM_RETENTION_AGE_DAYS: u32 = 3_650;
 pub struct OffsiteBackupState {
     config_lock: Arc<Mutex<()>>,
     automatic_uploads: Arc<Mutex<HashSet<Uuid>>>,
+    config_recovery_latched: Arc<AtomicBool>,
 }
 
 struct TargetOperationClaim {
@@ -79,16 +91,109 @@ impl Drop for TargetOperationClaim {
     }
 }
 
+/// Bridges the workspace access generation into the provider-neutral backup
+/// port. The S3 adapter checks this guard before every page, delete request,
+/// and verification pass, so a lock/session replacement stops the next
+/// destructive step without exposing vault details to the adapter.
+struct WorkspaceBackupOperationGuard<'a> {
+    vault_state: &'a WorkspaceVaultState,
+    config_recovery_latched: &'a AtomicBool,
+    permit: Option<WorkspaceAccessPermit>,
+}
+
+impl<'a> WorkspaceBackupOperationGuard<'a> {
+    fn new(vault_state: &'a WorkspaceVaultState, permit: Option<WorkspaceAccessPermit>) -> Self {
+        Self::new_with_latch(vault_state, permit, &NEVER_LATCHED)
+    }
+
+    fn new_with_latch(
+        vault_state: &'a WorkspaceVaultState,
+        permit: Option<WorkspaceAccessPermit>,
+        config_recovery_latched: &'a AtomicBool,
+    ) -> Self {
+        Self {
+            vault_state,
+            config_recovery_latched,
+            permit,
+        }
+    }
+}
+
+impl BackupOperationGuard for WorkspaceBackupOperationGuard<'_> {
+    fn check(&self) -> Result<(), BackupTargetError> {
+        if self.config_recovery_latched.load(Ordering::Acquire) {
+            return Err(BackupTargetError::Cancelled);
+        }
+        self.permit
+            .ok_or(BackupTargetError::Cancelled)
+            .and_then(|permit| {
+                self.vault_state
+                    .ensure_access_permit(permit)
+                    .map_err(|_| BackupTargetError::Cancelled)
+            })
+    }
+}
+
+static NEVER_LATCHED: AtomicBool = AtomicBool::new(false);
+
+fn acquire_authorized_config_mutation<'a>(
+    config_lock: &'a Mutex<()>,
+    config_recovery_latched: &AtomicBool,
+    vault_state: &WorkspaceVaultState,
+    permit: WorkspaceAccessPermit,
+) -> Result<std::sync::MutexGuard<'a, ()>, String> {
+    let guard = config_lock
+        .lock()
+        .map_err(|_| "offsite_backup_config_unavailable".to_owned())?;
+    ensure_config_mutation_allowed(config_recovery_latched)?;
+    // Close the queueing gap before preparation. Callers revalidate again
+    // immediately before their first new persistent write.
+    vault_state.ensure_access_permit(permit)?;
+    Ok(guard)
+}
+
 impl Default for OffsiteBackupState {
     fn default() -> Self {
         Self {
             config_lock: Arc::new(Mutex::new(())),
             automatic_uploads: Arc::new(Mutex::new(HashSet::new())),
+            config_recovery_latched: Arc::new(AtomicBool::new(false)),
         }
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+fn ensure_config_mutation_allowed(latch: &AtomicBool) -> Result<(), String> {
+    if latch.load(Ordering::Acquire) {
+        Err("offsite_backup_config_recovery_required".to_owned())
+    } else {
+        Ok(())
+    }
+}
+
+fn latch_atomic_recovery(latch: &AtomicBool, status: AtomicWriteStatus) {
+    if status == AtomicWriteStatus::RecoveryRequired {
+        latch.store(true, Ordering::Release);
+    }
+}
+
+fn latch_commit_recovery<T>(latch: &AtomicBool, outcome: &CommitOutcome<T>) {
+    if matches!(outcome, CommitOutcome::RecoveryRequired) {
+        latch.store(true, Ordering::Release);
+    }
+}
+
+fn latch_recovery_error<T>(latch: &AtomicBool, result: Result<T, String>) -> Result<T, String> {
+    if result
+        .as_ref()
+        .err()
+        .is_some_and(|error| error == "offsite_backup_config_recovery_required")
+    {
+        latch.store(true, Ordering::Release);
+    }
+    result
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct OffsiteBackupConfig {
     format: String,
     version: u16,
@@ -114,6 +219,78 @@ struct AuthenticatedOffsiteBackupConfig {
     authentication: String,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum ConfigTransactionKind {
+    Create,
+    Update,
+    Remove,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum ConfigTransactionPhase {
+    #[default]
+    Prepared,
+    CleanupComplete,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OffsiteBackupConfigTransaction {
+    format: String,
+    version: u16,
+    operation_id: Uuid,
+    #[serde(default, skip_serializing_if = "config_transaction_phase_is_prepared")]
+    phase: ConfigTransactionPhase,
+    kind: ConfigTransactionKind,
+    target_id: Uuid,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    previous_credential_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    next_credential_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    target: Option<BackupTargetConfig>,
+}
+
+fn config_transaction_phase_is_prepared(phase: &ConfigTransactionPhase) -> bool {
+    *phase == ConfigTransactionPhase::Prepared
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AuthenticatedOffsiteBackupConfigTransaction {
+    format: String,
+    version: u16,
+    transaction: OffsiteBackupConfigTransaction,
+    authentication: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum ConfigMigrationPhase {
+    Prepared,
+    CleanupComplete,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OffsiteBackupConfigMigration {
+    format: String,
+    version: u16,
+    phase: ConfigMigrationPhase,
+    config: OffsiteBackupConfig,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AuthenticatedOffsiteBackupConfigMigration {
+    format: String,
+    version: u16,
+    migration: OffsiteBackupConfigMigration,
+    authentication: String,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 enum BackupProviderKind {
@@ -130,7 +307,7 @@ pub enum S3ProviderTemplate {
     Custom,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BackupTargetConfig {
     id: Uuid,
@@ -204,19 +381,359 @@ pub struct BackupTargetSummary {
 }
 
 #[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AutomaticBackupOutcome {
-    target_id: Uuid,
-    uploaded: bool,
-    error: Option<String>,
+#[serde(
+    tag = "status",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum AutomaticBackupOutcome {
+    Committed {
+        target_id: Uuid,
+        uploaded: bool,
+        error: Option<String>,
+    },
+    RecoveryRequired {
+        target_id: Uuid,
+        uploaded: bool,
+    },
 }
 
 #[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DeleteAllOffsiteBackupsOutcome {
-    deleted_count: usize,
-    target_removed: bool,
-    error: Option<String>,
+#[serde(
+    tag = "status",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum BackupTargetMutationOutcome {
+    Committed { target: BackupTargetSummary },
+    RecoveryRequired,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(
+    tag = "status",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum BackupTargetsMutationOutcome {
+    Committed { targets: Vec<BackupTargetSummary> },
+    RecoveryRequired,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(
+    tag = "status",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum CreateOffsiteBackupOutcome {
+    Committed {
+        snapshot: BackupSnapshotMetadata,
+        warning: Option<String>,
+    },
+    RecoveryRequired {
+        snapshot: BackupSnapshotMetadata,
+    },
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(
+    tag = "status",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum VerifyOffsiteBackupOutcome {
+    Committed {
+        verification: BackupVerification,
+        warning: Option<String>,
+    },
+    RecoveryRequired {
+        verification: BackupVerification,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(
+    tag = "status",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum DeleteAllOffsiteBackupsOutcome {
+    Committed {
+        /// Number of remote object-version and delete-marker records removed.
+        deleted_version_count: usize,
+        target_removed: bool,
+        warning: Option<String>,
+    },
+    RecoveryRequired {
+        /// Remote deletion is already authoritative even though the local
+        /// target-removal commit needs recovery.
+        deleted_version_count: usize,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(
+    tag = "status",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum DeleteOffsiteBackupOutcome {
+    Committed {
+        snapshot_deleted: bool,
+        /// True only when the invalidated proof state was persisted locally.
+        restore_drill_proof_invalidated: bool,
+        warning: Option<String>,
+    },
+    RecoveryRequired {
+        snapshot_deleted: bool,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(
+    tag = "status",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum RemoveOffsiteBackupTargetOutcome {
+    Committed {
+        target_removed: bool,
+        warning: Option<String>,
+    },
+    RecoveryRequired,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(
+    tag = "status",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum ConfigureS3BackupTargetOutcome {
+    Committed {
+        target: BackupTargetSummary,
+        warning: Option<String>,
+    },
+    RecoveryRequired,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(
+    tag = "status",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum UpdateS3BackupTargetOutcome {
+    Committed {
+        target: BackupTargetSummary,
+        warning: Option<String>,
+    },
+    RecoveryRequired,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum CommitOutcome<T> {
+    Committed(T),
+    RecoveryRequired,
+}
+
+impl<T> CommitOutcome<T> {
+    fn map<U>(self, map: impl FnOnce(T) -> U) -> CommitOutcome<U> {
+        match self {
+            CommitOutcome::Committed(value) => CommitOutcome::Committed(map(value)),
+            CommitOutcome::RecoveryRequired => CommitOutcome::RecoveryRequired,
+        }
+    }
+}
+
+fn complete_config_commit<T>(
+    journal_write: AtomicWriteStatus,
+    prepare: impl FnOnce() -> Result<(), String>,
+    commit_config: impl FnOnce() -> Result<AtomicWriteStatus, String>,
+    finish: impl FnOnce() -> T,
+) -> Result<CommitOutcome<T>, String> {
+    if journal_write == AtomicWriteStatus::RecoveryRequired {
+        return Ok(CommitOutcome::RecoveryRequired);
+    }
+    prepare()?;
+    if commit_config()? == AtomicWriteStatus::RecoveryRequired {
+        return Ok(CommitOutcome::RecoveryRequired);
+    }
+    Ok(CommitOutcome::Committed(finish()))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TargetCredentialCleanup {
+    Complete,
+    Pending,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CommittedConfigCleanup {
+    Complete,
+    CredentialPending,
+    TransactionPending,
+    DurabilityPending,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CommittedCreateCredentialState {
+    Present,
+    Missing,
+    Unavailable,
+}
+
+fn committed_config_cleanup_warning(cleanup: CommittedConfigCleanup) -> Option<String> {
+    match cleanup {
+        CommittedConfigCleanup::Complete => None,
+        CommittedConfigCleanup::CredentialPending => {
+            Some("offsite_backup_credential_cleanup_pending".to_owned())
+        }
+        CommittedConfigCleanup::TransactionPending => {
+            Some("offsite_backup_config_transaction_cleanup_pending".to_owned())
+        }
+        CommittedConfigCleanup::DurabilityPending => {
+            Some("offsite_backup_config_transaction_cleanup_pending".to_owned())
+        }
+    }
+}
+
+fn classify_target_credential_cleanup(
+    credential_referenced_elsewhere: bool,
+    delete_stale_credential: impl FnOnce() -> Result<(), String>,
+) -> TargetCredentialCleanup {
+    if credential_referenced_elsewhere || delete_stale_credential().is_ok() {
+        TargetCredentialCleanup::Complete
+    } else {
+        TargetCredentialCleanup::Pending
+    }
+}
+
+fn finish_committed_config_transaction(
+    credential_cleanup: TargetCredentialCleanup,
+    clear_transaction: impl FnOnce() -> Result<(), String>,
+) -> CommittedConfigCleanup {
+    if credential_cleanup == TargetCredentialCleanup::Pending {
+        return CommittedConfigCleanup::CredentialPending;
+    }
+    match clear_transaction() {
+        Ok(()) => CommittedConfigCleanup::Complete,
+        Err(error) if error == "offsite_backup_config_recovery_required" => {
+            CommittedConfigCleanup::DurabilityPending
+        }
+        Err(_) => CommittedConfigCleanup::TransactionPending,
+    }
+}
+
+fn classify_committed_create_credential(
+    credential: Result<Zeroizing<String>, String>,
+) -> CommittedCreateCredentialState {
+    match credential {
+        Ok(_) => CommittedCreateCredentialState::Present,
+        Err(error) if error == "offsite_backup_credential_missing" => {
+            CommittedCreateCredentialState::Missing
+        }
+        Err(_) => CommittedCreateCredentialState::Unavailable,
+    }
+}
+
+fn committed_create_transaction_can_clear(credential: Result<Zeroizing<String>, String>) -> bool {
+    matches!(
+        classify_committed_create_credential(credential),
+        CommittedCreateCredentialState::Present | CommittedCreateCredentialState::Missing
+    )
+}
+
+fn target_removal_outcome(
+    commit: CommitOutcome<CommittedConfigCleanup>,
+) -> RemoveOffsiteBackupTargetOutcome {
+    match commit {
+        CommitOutcome::Committed(CommittedConfigCleanup::DurabilityPending) => {
+            RemoveOffsiteBackupTargetOutcome::RecoveryRequired
+        }
+        CommitOutcome::Committed(cleanup) => RemoveOffsiteBackupTargetOutcome::Committed {
+            target_removed: true,
+            warning: committed_config_cleanup_warning(cleanup),
+        },
+        CommitOutcome::RecoveryRequired => RemoveOffsiteBackupTargetOutcome::RecoveryRequired,
+    }
+}
+
+fn target_configuration_outcome(
+    commit: CommitOutcome<(BackupTargetSummary, CommittedConfigCleanup)>,
+) -> ConfigureS3BackupTargetOutcome {
+    match commit {
+        CommitOutcome::Committed((_, CommittedConfigCleanup::DurabilityPending)) => {
+            ConfigureS3BackupTargetOutcome::RecoveryRequired
+        }
+        CommitOutcome::Committed((target, cleanup)) => ConfigureS3BackupTargetOutcome::Committed {
+            target,
+            warning: committed_config_cleanup_warning(cleanup),
+        },
+        CommitOutcome::RecoveryRequired => ConfigureS3BackupTargetOutcome::RecoveryRequired,
+    }
+}
+
+fn target_update_outcome(
+    commit: CommitOutcome<(BackupTargetSummary, CommittedConfigCleanup)>,
+) -> UpdateS3BackupTargetOutcome {
+    match commit {
+        CommitOutcome::Committed((_, CommittedConfigCleanup::DurabilityPending)) => {
+            UpdateS3BackupTargetOutcome::RecoveryRequired
+        }
+        CommitOutcome::Committed((target, cleanup)) => UpdateS3BackupTargetOutcome::Committed {
+            target,
+            warning: committed_config_cleanup_warning(cleanup),
+        },
+        CommitOutcome::RecoveryRequired => UpdateS3BackupTargetOutcome::RecoveryRequired,
+    }
+}
+
+fn delete_all_outcome(
+    deleted_version_count: usize,
+    commit: CommitOutcome<CommittedConfigCleanup>,
+) -> DeleteAllOffsiteBackupsOutcome {
+    match commit {
+        CommitOutcome::Committed(CommittedConfigCleanup::DurabilityPending) => {
+            DeleteAllOffsiteBackupsOutcome::RecoveryRequired {
+                deleted_version_count,
+            }
+        }
+        CommitOutcome::Committed(cleanup) => DeleteAllOffsiteBackupsOutcome::Committed {
+            deleted_version_count,
+            target_removed: true,
+            warning: committed_config_cleanup_warning(cleanup),
+        },
+        CommitOutcome::RecoveryRequired => DeleteAllOffsiteBackupsOutcome::RecoveryRequired {
+            deleted_version_count,
+        },
+    }
+}
+
+fn committed_snapshot_deletion_outcome(
+    was_restore_drill_proof: bool,
+    proof_update: Result<CommitOutcome<()>, String>,
+) -> DeleteOffsiteBackupOutcome {
+    match proof_update {
+        Ok(CommitOutcome::RecoveryRequired) => DeleteOffsiteBackupOutcome::RecoveryRequired {
+            snapshot_deleted: true,
+        },
+        Err(error) if error == "offsite_backup_config_recovery_required" => {
+            DeleteOffsiteBackupOutcome::RecoveryRequired {
+                snapshot_deleted: true,
+            }
+        }
+        proof_update => {
+            let proof_update_succeeded = matches!(proof_update, Ok(CommitOutcome::Committed(())));
+            DeleteOffsiteBackupOutcome::Committed {
+                snapshot_deleted: true,
+                restore_drill_proof_invalidated: was_restore_drill_proof && proof_update_succeeded,
+                warning: (was_restore_drill_proof && !proof_update_succeeded)
+                    .then(|| "offsite_backup_snapshot_deleted_proof_update_failed".to_owned()),
+            }
+        }
+    }
 }
 
 fn default_automatic_interval_hours() -> u32 {
@@ -271,19 +788,21 @@ pub async fn update_offsite_backup_automatic_settings(
     target_id: Uuid,
     enabled: bool,
     interval_hours: u32,
-) -> Result<BackupTargetSummary, String> {
-    let permit = begin_workspace_access(&app, &vault_state)?;
+) -> Result<BackupTargetMutationOutcome, String> {
+    let _permit = begin_workspace_access(&app, &vault_state)?;
     if !(1..=MAXIMUM_AUTOMATIC_INTERVAL_HOURS).contains(&interval_hours) {
         return Err("offsite_backup_invalid_automatic_interval".to_owned());
     }
     let app_for_write = app.clone();
     let config_lock = Arc::clone(&state.config_lock);
+    let recovery_latch = Arc::clone(&state.config_recovery_latched);
     let summary = tauri::async_runtime::spawn_blocking(move || {
         let _guard = config_lock
             .lock()
             .map_err(|_| "offsite_backup_config_unavailable".to_owned())?;
+        ensure_config_mutation_allowed(&recovery_latch)?;
         let path = config_path(&app_for_write)?;
-        let mut config = read_config(&path)?;
+        let mut config = read_config_for_mutation_with_latch(&path, &recovery_latch)?;
         let target = config
             .targets
             .iter_mut()
@@ -298,13 +817,18 @@ pub async fn update_offsite_backup_automatic_settings(
         target.automatic_enabled = enabled;
         target.automatic_interval_hours = interval_hours;
         let summary = target_summary(target)?;
-        write_config(&path, &config)?;
-        Ok::<_, String>(summary)
+        let write_status = write_config(&path, &config)?;
+        latch_atomic_recovery(&recovery_latch, write_status);
+        Ok::<_, String>((summary, write_status))
     })
     .await
     .map_err(|error| error.to_string())??;
-    ensure_workspace_access(&app, &vault_state, permit)?;
-    Ok(summary)
+    Ok(match summary.1 {
+        AtomicWriteStatus::Committed => {
+            BackupTargetMutationOutcome::Committed { target: summary.0 }
+        }
+        AtomicWriteStatus::RecoveryRequired => BackupTargetMutationOutcome::RecoveryRequired,
+    })
 }
 
 #[tauri::command]
@@ -317,7 +841,8 @@ pub async fn update_offsite_backup_retention_settings(
     max_snapshots: u32,
     max_age_days: u32,
     authorization: String,
-) -> Result<BackupTargetSummary, String> {
+) -> Result<BackupTargetMutationOutcome, String> {
+    let _claim = TargetOperationClaim::acquire(&state, target_id)?;
     let permit = vault_state.consume_sensitive_authorization(
         SensitiveOperation::BackupRetentionChange,
         &authorization,
@@ -325,12 +850,17 @@ pub async fn update_offsite_backup_retention_settings(
     validate_retention_settings(max_snapshots, max_age_days)?;
     let app_for_write = app.clone();
     let config_lock = Arc::clone(&state.config_lock);
+    let recovery_latch = Arc::clone(&state.config_recovery_latched);
     let summary = tauri::async_runtime::spawn_blocking(move || {
-        let _guard = config_lock
-            .lock()
-            .map_err(|_| "offsite_backup_config_unavailable".to_owned())?;
+        let vault_state_for_write = app_for_write.state::<WorkspaceVaultState>();
+        let _guard = acquire_authorized_config_mutation(
+            &config_lock,
+            &recovery_latch,
+            &vault_state_for_write,
+            permit,
+        )?;
         let path = config_path(&app_for_write)?;
-        let mut config = read_config(&path)?;
+        let mut config = read_config_for_mutation_with_latch(&path, &recovery_latch)?;
         let target = config
             .targets
             .iter_mut()
@@ -342,13 +872,20 @@ pub async fn update_offsite_backup_retention_settings(
         target.retention_max_age_days = max_age_days;
         target.last_retention_error = None;
         let summary = target_summary(target)?;
-        write_config(&path, &config)?;
-        Ok::<_, String>(summary)
+        vault_state_for_write.ensure_access_permit(permit)?;
+        let write_status = write_config(&path, &config)?;
+        latch_atomic_recovery(&recovery_latch, write_status);
+        Ok::<_, String>((summary, write_status))
     })
     .await
     .map_err(|error| error.to_string())??;
-    ensure_workspace_access(&app, &vault_state, Some(permit))?;
-    Ok(summary)
+    // A lock after admission must not report an already committed rule as failed.
+    Ok(match summary.1 {
+        AtomicWriteStatus::Committed => {
+            BackupTargetMutationOutcome::Committed { target: summary.0 }
+        }
+        AtomicWriteStatus::RecoveryRequired => BackupTargetMutationOutcome::RecoveryRequired,
+    })
 }
 
 #[tauri::command]
@@ -356,16 +893,18 @@ pub async fn mark_automatic_offsite_backup_pending(
     app: tauri::AppHandle,
     state: tauri::State<'_, OffsiteBackupState>,
     vault_state: tauri::State<'_, WorkspaceVaultState>,
-) -> Result<Vec<BackupTargetSummary>, String> {
-    let permit = begin_workspace_access(&app, &vault_state)?;
+) -> Result<BackupTargetsMutationOutcome, String> {
+    let _permit = begin_workspace_access(&app, &vault_state)?;
     let app_for_write = app.clone();
     let config_lock = Arc::clone(&state.config_lock);
+    let recovery_latch = Arc::clone(&state.config_recovery_latched);
     let summaries = tauri::async_runtime::spawn_blocking(move || {
         let _guard = config_lock
             .lock()
             .map_err(|_| "offsite_backup_config_unavailable".to_owned())?;
+        ensure_config_mutation_allowed(&recovery_latch)?;
         let path = config_path(&app_for_write)?;
-        let mut config = read_config(&path)?;
+        let mut config = read_config_for_mutation_with_latch(&path, &recovery_latch)?;
         let mut changed = false;
         for target in &mut config.targets {
             if target.automatic_enabled {
@@ -376,19 +915,27 @@ pub async fn mark_automatic_offsite_backup_pending(
                 changed = true;
             }
         }
-        if changed {
-            write_config(&path, &config)?;
-        }
-        config
+        let write_status = if changed {
+            write_config(&path, &config)?
+        } else {
+            AtomicWriteStatus::Committed
+        };
+        latch_atomic_recovery(&recovery_latch, write_status);
+        let targets = config
             .targets
             .iter()
             .map(target_summary)
-            .collect::<Result<Vec<_>, String>>()
+            .collect::<Result<Vec<_>, String>>()?;
+        Ok::<_, String>((targets, write_status))
     })
     .await
     .map_err(|error| error.to_string())??;
-    ensure_workspace_access(&app, &vault_state, permit)?;
-    Ok(summaries)
+    Ok(match summaries.1 {
+        AtomicWriteStatus::Committed => BackupTargetsMutationOutcome::Committed {
+            targets: summaries.0,
+        },
+        AtomicWriteStatus::RecoveryRequired => BackupTargetsMutationOutcome::RecoveryRequired,
+    })
 }
 
 #[tauri::command]
@@ -405,27 +952,30 @@ pub async fn run_due_automatic_offsite_backups(
         .targets
         .into_iter()
         .filter(|target| automatic_backup_due(target, now))
-        .filter(|target| claim_automatic_upload(&state, target.id))
+        .filter_map(|target| {
+            TargetOperationClaim::acquire(&state, target.id)
+                .ok()
+                .map(|claim| (target, claim))
+        })
         .collect::<Vec<_>>();
     if candidates.is_empty() {
         ensure_workspace_access(&app, &vault_state, permit)?;
         return Ok(Vec::new());
     }
 
-    let encrypted = match encrypt_offsite_workspace_snapshot(&app, &vault_state, contents).await {
-        Ok(encrypted) => encrypted,
-        Err(error) => {
-            for candidate in &candidates {
-                release_automatic_upload(&state, candidate.id);
-            }
-            return Err(error);
-        }
-    };
+    let encrypted = encrypt_offsite_workspace_snapshot(&app, &vault_state, contents).await?;
     ensure_workspace_access(&app, &vault_state, permit)?;
     let snapshot = BackupSnapshot::new(Uuid::new_v4(), now, encrypted.into_bytes())
         .map_err(|_| "offsite_backup_invalid_snapshot".to_owned())?;
     let mut outcomes = Vec::with_capacity(candidates.len());
-    for candidate in candidates {
+    for (candidate, _claim) in candidates {
+        if ensure_config_mutation_allowed(&state.config_recovery_latched).is_err() {
+            outcomes.push(AutomaticBackupOutcome::RecoveryRequired {
+                target_id: candidate.id,
+                uploaded: false,
+            });
+            break;
+        }
         let result = run_automatic_upload(
             &app,
             &state,
@@ -435,10 +985,8 @@ pub async fn run_due_automatic_offsite_backups(
             snapshot.clone(),
         )
         .await;
-        release_automatic_upload(&state, candidate.id);
         outcomes.push(result);
     }
-    ensure_workspace_access(&app, &vault_state, permit)?;
     Ok(outcomes)
 }
 
@@ -524,7 +1072,7 @@ pub async fn configure_s3_backup_target(
     secret_access_key: String,
     session_token: Option<String>,
     authorization: String,
-) -> Result<BackupTargetSummary, String> {
+) -> Result<ConfigureS3BackupTargetOutcome, String> {
     let permit = vault_state
         .consume_sensitive_authorization(SensitiveOperation::BackupTargetChange, &authorization)?;
     let name = validate_target_name(&name)?;
@@ -560,17 +1108,6 @@ pub async fn configure_s3_backup_target(
 
     let id = Uuid::new_v4();
     let credential_id = id.to_string();
-    let credential_id_for_store = credential_id.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        store_credential(&credential_id_for_store, stored_credentials.as_str())
-    })
-    .await
-    .map_err(|error| error.to_string())??;
-
-    if let Err(error) = ensure_workspace_access(&app, &vault_state, Some(permit)) {
-        let _ = delete_credential(&credential_id);
-        return Err(error);
-    }
 
     let config_target = BackupTargetConfig {
         id,
@@ -602,13 +1139,29 @@ pub async fn configure_s3_backup_target(
     let summary = target_summary(&config_target)?;
     let app_for_write = app.clone();
     let config_lock = Arc::clone(&backup_state.config_lock);
+    let recovery_latch = Arc::clone(&backup_state.config_recovery_latched);
     let target_for_write = config_target.clone();
+    let transaction = OffsiteBackupConfigTransaction {
+        format: CONFIG_TRANSACTION_FORMAT.to_owned(),
+        version: CONFIG_TRANSACTION_VERSION,
+        operation_id: Uuid::new_v4(),
+        phase: ConfigTransactionPhase::Prepared,
+        kind: ConfigTransactionKind::Create,
+        target_id: id,
+        previous_credential_id: None,
+        next_credential_id: Some(credential_id.clone()),
+        target: Some(config_target),
+    };
     let write_result = tauri::async_runtime::spawn_blocking(move || {
-        let _guard = config_lock
-            .lock()
-            .map_err(|_| "offsite_backup_config_unavailable".to_owned())?;
+        let vault_state_for_write = app_for_write.state::<WorkspaceVaultState>();
+        let _guard = acquire_authorized_config_mutation(
+            &config_lock,
+            &recovery_latch,
+            &vault_state_for_write,
+            permit,
+        )?;
         let path = config_path(&app_for_write)?;
-        let mut config = read_config(&path)?;
+        let mut config = read_config_for_mutation_with_latch(&path, &recovery_latch)?;
         if config.targets.len() >= MAXIMUM_TARGETS
             || config
                 .targets
@@ -617,17 +1170,39 @@ pub async fn configure_s3_backup_target(
         {
             return Err("offsite_backup_target_conflict".to_owned());
         }
-        config.targets.push(target_for_write);
-        write_config(&path, &config)
+        let transaction_path = config_transaction_path(&path)?;
+        vault_state_for_write.ensure_access_permit(permit)?;
+        let journal_write = write_config_transaction(&transaction_path, &transaction)?;
+        let outcome = complete_config_commit(
+            journal_write,
+            || store_credential(&credential_id, stored_credentials.as_str()),
+            || {
+                config.targets.push(target_for_write);
+                write_config_unchecked(&path, &config)
+            },
+            || {
+                finish_committed_config_transaction(TargetCredentialCleanup::Complete, || {
+                    clear_config_transaction(&transaction_path, &transaction)
+                })
+            },
+        )?;
+        latch_commit_recovery(&recovery_latch, &outcome);
+        if matches!(
+            &outcome,
+            CommitOutcome::Committed(CommittedConfigCleanup::DurabilityPending)
+        ) {
+            recovery_latch.store(true, Ordering::Release);
+        }
+        Ok(outcome)
     })
     .await
     .map_err(|error| error.to_string())?;
-    if let Err(error) = write_result {
-        let _ = delete_credential(&credential_id);
-        return Err(error);
-    }
-    ensure_workspace_access(&app, &vault_state, Some(permit))?;
-    Ok(summary)
+    let commit = write_result?;
+    // Configuration is committed. A concurrent lock must not turn this into a
+    // false pre-commit error; the returned summary contains no credentials.
+    Ok(target_configuration_outcome(
+        commit.map(|cleanup| (summary, cleanup)),
+    ))
 }
 
 #[tauri::command]
@@ -648,7 +1223,7 @@ pub async fn update_s3_backup_target(
     secret_access_key: String,
     session_token: Option<String>,
     authorization: String,
-) -> Result<BackupTargetSummary, String> {
+) -> Result<UpdateS3BackupTargetOutcome, String> {
     let _claim = TargetOperationClaim::acquire(&backup_state, target_id)?;
     let permit = vault_state
         .consume_sensitive_authorization(SensitiveOperation::BackupTargetChange, &authorization)?;
@@ -659,8 +1234,7 @@ pub async fn update_s3_backup_target(
     let prefix = S3BackupTarget::normalize_prefix(&prefix).map_err(target_error)?;
     let previous = find_target(&app, &backup_state, target_id).await?;
 
-    let mut replacement_credential = None;
-    let (credentials, next_credential_id) = if replace_credentials {
+    let (credentials, replacement_credential) = if replace_credentials {
         let mut record = S3CredentialRecord {
             format: S3_CREDENTIAL_FORMAT.to_owned(),
             version: S3_CREDENTIAL_VERSION,
@@ -678,8 +1252,7 @@ pub async fn update_s3_backup_target(
             secret_access_key: std::mem::take(&mut record.secret_access_key),
             session_token: record.session_token.take(),
         };
-        replacement_credential = Some((credential_id.clone(), stored));
-        (credentials, credential_id)
+        (credentials, Some((credential_id, stored)))
     } else {
         if !access_key_id.is_empty()
             || !secret_access_key.is_empty()
@@ -690,10 +1263,7 @@ pub async fn update_s3_backup_target(
             return Err("offsite_backup_unexpected_credential_input".to_owned());
         }
         let stored = load_credential_async(previous.credential_id.clone()).await?;
-        (
-            parse_s3_credentials(stored.as_str())?,
-            previous.credential_id.clone(),
-        )
+        (parse_s3_credentials(stored.as_str())?, None)
     };
 
     let target = S3BackupTarget::new(&endpoint, &region, &bucket, &prefix, credentials)
@@ -701,41 +1271,34 @@ pub async fn update_s3_backup_target(
     target.list(None, 1).await.map_err(target_error)?;
     ensure_workspace_access(&app, &vault_state, Some(permit))?;
 
-    if let Some((credential_id, stored)) = replacement_credential.as_ref() {
-        let credential_id = credential_id.clone();
-        let stored = Zeroizing::new(stored.to_string());
-        tauri::async_runtime::spawn_blocking(move || {
-            store_credential(&credential_id, stored.as_str())
-        })
-        .await
-        .map_err(|error| error.to_string())??;
-    }
-    if let Err(error) = ensure_workspace_access(&app, &vault_state, Some(permit)) {
-        if replacement_credential.is_some() {
-            let _ = delete_credential(&next_credential_id);
-        }
-        return Err(error);
-    }
-
     let app_for_write = app.clone();
     let config_lock = Arc::clone(&backup_state.config_lock);
+    let recovery_latch = Arc::clone(&backup_state.config_recovery_latched);
     let endpoint_for_write = endpoint.clone();
     let region_for_write = region.clone();
     let bucket_for_write = bucket.clone();
     let prefix_for_write = prefix.clone();
-    let next_credential_id_for_write = next_credential_id.clone();
+    let previous_credential_id = previous.credential_id.clone();
     let write_result = tauri::async_runtime::spawn_blocking(move || {
-        let _guard = config_lock
-            .lock()
-            .map_err(|_| "offsite_backup_config_unavailable".to_owned())?;
+        let vault_state_for_write = app_for_write.state::<WorkspaceVaultState>();
+        let _guard = acquire_authorized_config_mutation(
+            &config_lock,
+            &recovery_latch,
+            &vault_state_for_write,
+            permit,
+        )?;
         let path = config_path(&app_for_write)?;
-        let mut config = read_config(&path)?;
+        let mut config = read_config_for_mutation_with_latch(&path, &recovery_latch)?;
         let index = config
             .targets
             .iter()
             .position(|target| target.id == target_id)
             .ok_or_else(|| "offsite_backup_target_not_found".to_owned())?;
-        let mut updated = config.targets[index].clone();
+        let current = config.targets[index].clone();
+        if current.credential_id != previous_credential_id {
+            return Err("offsite_backup_target_changed".to_owned());
+        }
+        let mut updated = current;
         let remote_location_changed = remote_target_location_changed(
             &updated,
             &endpoint_for_write,
@@ -749,7 +1312,6 @@ pub async fn update_s3_backup_target(
         updated.region = Some(region_for_write);
         updated.bucket = Some(bucket_for_write);
         updated.prefix = Some(prefix_for_write);
-        updated.credential_id = next_credential_id_for_write;
         if remote_location_changed {
             reset_remote_target_status(&mut updated);
         }
@@ -761,31 +1323,68 @@ pub async fn update_s3_backup_target(
         {
             return Err("offsite_backup_target_conflict".to_owned());
         }
+        let next_credential_id = replacement_credential
+            .as_ref()
+            .map(|(credential_id, _)| credential_id.clone())
+            .unwrap_or_else(|| previous_credential_id.clone());
+        updated.credential_id = next_credential_id.clone();
+        let transaction = OffsiteBackupConfigTransaction {
+            format: CONFIG_TRANSACTION_FORMAT.to_owned(),
+            version: CONFIG_TRANSACTION_VERSION,
+            operation_id: Uuid::new_v4(),
+            phase: ConfigTransactionPhase::Prepared,
+            kind: ConfigTransactionKind::Update,
+            target_id,
+            previous_credential_id: Some(previous_credential_id.clone()),
+            next_credential_id: Some(next_credential_id.clone()),
+            target: Some(updated.clone()),
+        };
+        let transaction_path = config_transaction_path(&path)?;
+        vault_state_for_write.ensure_access_permit(permit)?;
+        let journal_write = write_config_transaction(&transaction_path, &transaction)?;
         let summary = target_summary(&updated)?;
-        config.targets[index] = updated;
-        write_config(&path, &config)?;
-        Ok(summary)
+        let credential_referenced_elsewhere =
+            config_references_credential(&config, target_id, &previous_credential_id);
+        let commit = complete_config_commit(
+            journal_write,
+            || {
+                if let Some((_, stored)) = replacement_credential.as_ref() {
+                    store_credential(&next_credential_id, stored.as_str())?;
+                }
+                Ok(())
+            },
+            || {
+                config.targets[index] = updated;
+                write_config_unchecked(&path, &config)
+            },
+            || {
+                let credential_cleanup = if next_credential_id == previous_credential_id {
+                    TargetCredentialCleanup::Complete
+                } else {
+                    classify_target_credential_cleanup(credential_referenced_elsewhere, || {
+                        delete_credential(&previous_credential_id)
+                    })
+                };
+                finish_committed_config_transaction(credential_cleanup, || {
+                    clear_config_transaction(&transaction_path, &transaction)
+                })
+            },
+        )?;
+        latch_commit_recovery(&recovery_latch, &commit);
+        if matches!(
+            &commit,
+            CommitOutcome::Committed(CommittedConfigCleanup::DurabilityPending)
+        ) {
+            recovery_latch.store(true, Ordering::Release);
+        }
+        Ok(commit.map(|cleanup| (summary, cleanup)))
     })
     .await
     .map_err(|error| error.to_string())?;
-    let summary = match write_result {
-        Ok(summary) => summary,
-        Err(error) => {
-            if replacement_credential.is_some() {
-                let _ = delete_credential(&next_credential_id);
-            }
-            return Err(error);
-        }
-    };
-    let old_credential_cleanup = if replacement_credential.is_some() {
-        delete_credential_async(previous.credential_id).await
-    } else {
-        Ok(())
-    };
-    let access_result = ensure_workspace_access(&app, &vault_state, Some(permit));
-    old_credential_cleanup?;
-    access_result?;
-    Ok(summary)
+    let commit = write_result?;
+    // The updated configuration is authoritative even if the session locks
+    // after the commit point. Never report it as an uncommitted failure.
+    Ok(target_update_outcome(commit))
 }
 
 #[tauri::command]
@@ -795,14 +1394,17 @@ pub async fn remove_offsite_backup_target(
     vault_state: tauri::State<'_, WorkspaceVaultState>,
     target_id: Uuid,
     authorization: String,
-) -> Result<(), String> {
+) -> Result<RemoveOffsiteBackupTargetOutcome, String> {
     let _claim = TargetOperationClaim::acquire(&backup_state, target_id)?;
     let permit = vault_state
         .consume_sensitive_authorization(SensitiveOperation::BackupTargetChange, &authorization)?;
     let target = find_target(&app, &backup_state, target_id).await?;
     ensure_workspace_access(&app, &vault_state, Some(permit))?;
-    remove_target_config_and_credential(&app, &backup_state, &target, target_id).await?;
-    ensure_workspace_access(&app, &vault_state, Some(permit))
+    let commit =
+        remove_target_config_and_credential(&app, &backup_state, &target, target_id, permit)
+            .await?;
+    // The target is already absent from the authenticated configuration.
+    Ok(target_removal_outcome(commit))
 }
 
 #[tauri::command]
@@ -813,28 +1415,53 @@ pub async fn delete_offsite_backup(
     target_id: Uuid,
     snapshot_id: Uuid,
     authorization: String,
-) -> Result<(), String> {
+) -> Result<DeleteOffsiteBackupOutcome, String> {
     let _claim = TargetOperationClaim::acquire(&backup_state, target_id)?;
     let permit = vault_state.consume_sensitive_authorization(
         SensitiveOperation::BackupSnapshotDelete,
         &authorization,
     )?;
+    let operation_guard = WorkspaceBackupOperationGuard::new_with_latch(
+        &vault_state,
+        Some(permit),
+        &backup_state.config_recovery_latched,
+    );
     let config = find_target(&app, &backup_state, target_id).await?;
+    ensure_config_mutation_allowed(&backup_state.config_recovery_latched)?;
     let target = open_target(&config).await?;
     ensure_workspace_access(&app, &vault_state, Some(permit))?;
-    if !target.delete(snapshot_id).await.map_err(target_error)? {
-        return Err("offsite_backup_snapshot_not_found".to_owned());
-    }
-    ensure_workspace_access(&app, &vault_state, Some(permit))?;
-    update_target_status(&app, &backup_state, target_id, move |config| {
-        if config.last_restore_test_snapshot_id == Some(snapshot_id) {
-            config.last_restore_test_snapshot_id = None;
-            config.last_restore_test_at_ms = None;
+    match target
+        .delete_with_verification_guarded(snapshot_id, &operation_guard)
+        .await
+        .map_err(target_error)?
+    {
+        BackupDeleteOutcome::Deleted { .. } => {}
+        BackupDeleteOutcome::NotFound => {
+            return Err("offsite_backup_snapshot_not_found".to_owned());
         }
-        Ok(())
-    })
-    .await?;
-    ensure_workspace_access(&app, &vault_state, Some(permit))
+        BackupDeleteOutcome::Unverified { .. } => {
+            return Err("offsite_backup_snapshot_delete_unverified".to_owned());
+        }
+    }
+    if ensure_config_mutation_allowed(&backup_state.config_recovery_latched).is_err() {
+        return Ok(DeleteOffsiteBackupOutcome::RecoveryRequired {
+            snapshot_deleted: true,
+        });
+    }
+    let was_restore_drill_proof = config.last_restore_test_snapshot_id == Some(snapshot_id);
+    let proof_update = if was_restore_drill_proof {
+        update_target_status(&app, &backup_state, target_id, move |config| {
+            record_snapshot_deleted(config, snapshot_id);
+            Ok(())
+        })
+        .await
+    } else {
+        Ok(CommitOutcome::Committed(()))
+    };
+    Ok(committed_snapshot_deletion_outcome(
+        was_restore_drill_proof,
+        proof_update,
+    ))
 }
 
 #[tauri::command]
@@ -849,45 +1476,48 @@ pub async fn delete_all_offsite_backups_and_remove_target(
     let _claim = TargetOperationClaim::acquire(&backup_state, target_id)?;
     let permit = vault_state
         .consume_sensitive_authorization(SensitiveOperation::BackupTargetDestroy, &authorization)?;
+    let operation_guard = WorkspaceBackupOperationGuard::new_with_latch(
+        &vault_state,
+        Some(permit),
+        &backup_state.config_recovery_latched,
+    );
     let config = find_target(&app, &backup_state, target_id).await?;
     if confirmation_name != config.name {
         return Err("offsite_backup_target_confirmation_mismatch".to_owned());
     }
+    ensure_config_mutation_allowed(&backup_state.config_recovery_latched)?;
     let target = open_target(&config).await?;
     ensure_workspace_access(&app, &vault_state, Some(permit))?;
-    let snapshots = list_all_snapshots(target.as_ref(), || {
-        ensure_workspace_access(&app, &vault_state, Some(permit))
-    })
-    .await?;
-    let mut deleted_count = 0;
-    for snapshot in snapshots {
-        ensure_workspace_access(&app, &vault_state, Some(permit))?;
-        match target.delete(snapshot.id).await {
-            Ok(true) => deleted_count += 1,
-            Ok(false) => {
-                return Ok(DeleteAllOffsiteBackupsOutcome {
-                    deleted_count,
-                    target_removed: false,
-                    error: Some("offsite_backup_snapshot_not_found".to_owned()),
-                });
-            }
-            Err(error) => {
-                return Ok(DeleteAllOffsiteBackupsOutcome {
-                    deleted_count,
-                    target_removed: false,
-                    error: Some(target_error(error)),
-                });
-            }
+    let purge = target
+        .purge_with_verification_guarded(&operation_guard)
+        .await
+        .map_err(target_error)?;
+    let deleted_version_count = match purge {
+        BackupPurgeOutcome::Deleted { removed_versions } => {
+            usize::try_from(removed_versions).unwrap_or(usize::MAX)
         }
+        BackupPurgeOutcome::Unverified { removed_versions } => {
+            return Ok(DeleteAllOffsiteBackupsOutcome::Committed {
+                deleted_version_count: usize::try_from(removed_versions).unwrap_or(usize::MAX),
+                target_removed: false,
+                warning: Some("offsite_backup_purge_unverified".to_owned()),
+            });
+        }
+    };
+    match remove_target_config_and_credential(&app, &backup_state, &config, target_id, permit).await
+    {
+        Ok(commit) => Ok(delete_all_outcome(deleted_version_count, commit)),
+        Err(error) if error == "offsite_backup_config_recovery_required" => {
+            Ok(DeleteAllOffsiteBackupsOutcome::RecoveryRequired {
+                deleted_version_count,
+            })
+        }
+        Err(_) => Ok(DeleteAllOffsiteBackupsOutcome::Committed {
+            deleted_version_count,
+            target_removed: false,
+            warning: Some("offsite_backup_remote_purge_succeeded_config_update_failed".to_owned()),
+        }),
     }
-    ensure_workspace_access(&app, &vault_state, Some(permit))?;
-    remove_target_config_and_credential(&app, &backup_state, &config, target_id).await?;
-    ensure_workspace_access(&app, &vault_state, Some(permit))?;
-    Ok(DeleteAllOffsiteBackupsOutcome {
-        deleted_count,
-        target_removed: true,
-        error: None,
-    })
 }
 
 #[tauri::command]
@@ -897,10 +1527,11 @@ pub async fn create_offsite_backup(
     vault_state: tauri::State<'_, WorkspaceVaultState>,
     target_id: Uuid,
     contents: String,
-) -> Result<BackupSnapshotMetadata, String> {
+) -> Result<CreateOffsiteBackupOutcome, String> {
     let _claim = TargetOperationClaim::acquire(&backup_state, target_id)?;
     let permit = begin_workspace_access(&app, &vault_state)?;
     let target_config = find_target(&app, &backup_state, target_id).await?;
+    ensure_config_mutation_allowed(&backup_state.config_recovery_latched)?;
     let uploaded_revision = target_config.automatic_revision;
     let target = open_target(&target_config).await?;
     let encrypted = encrypt_offsite_workspace_snapshot(&app, &vault_state, contents).await?;
@@ -911,9 +1542,18 @@ pub async fn create_offsite_backup(
         encrypted.into_bytes(),
     )
     .map_err(|_| "offsite_backup_invalid_snapshot".to_owned())?;
+    ensure_config_mutation_allowed(&backup_state.config_recovery_latched)?;
     let metadata = target.upload(snapshot).await.map_err(target_error)?;
-    ensure_workspace_access(&app, &vault_state, permit)?;
-    update_target_status(&app, &backup_state, target_id, move |config| {
+    if ensure_config_mutation_allowed(&backup_state.config_recovery_latched).is_err() {
+        return Ok(CreateOffsiteBackupOutcome::RecoveryRequired { snapshot: metadata });
+    }
+    if ensure_workspace_access(&app, &vault_state, permit).is_err() {
+        return Ok(CreateOffsiteBackupOutcome::Committed {
+            snapshot: metadata,
+            warning: Some("offsite_backup_upload_succeeded_local_status_update_failed".to_owned()),
+        });
+    }
+    let status_update = update_target_status(&app, &backup_state, target_id, move |config| {
         record_upload_success(
             config,
             uploaded_revision,
@@ -922,11 +1562,29 @@ pub async fn create_offsite_backup(
         );
         Ok(())
     })
-    .await?;
-    ensure_workspace_access(&app, &vault_state, permit)?;
-    run_retention_cleanup(&app, &backup_state, &vault_state, permit, target_id).await;
-    ensure_workspace_access(&app, &vault_state, permit)?;
-    Ok(metadata)
+    .await;
+    match status_update {
+        Ok(CommitOutcome::RecoveryRequired) => {
+            Ok(CreateOffsiteBackupOutcome::RecoveryRequired { snapshot: metadata })
+        }
+        Ok(CommitOutcome::Committed(())) => {
+            if run_retention_cleanup(&app, &backup_state, &vault_state, permit, target_id).await {
+                Ok(CreateOffsiteBackupOutcome::RecoveryRequired { snapshot: metadata })
+            } else {
+                Ok(CreateOffsiteBackupOutcome::Committed {
+                    snapshot: metadata,
+                    warning: None,
+                })
+            }
+        }
+        Err(error) if error == "offsite_backup_config_recovery_required" => {
+            Ok(CreateOffsiteBackupOutcome::RecoveryRequired { snapshot: metadata })
+        }
+        Err(_) => Ok(CreateOffsiteBackupOutcome::Committed {
+            snapshot: metadata,
+            warning: Some("offsite_backup_upload_succeeded_local_status_update_failed".to_owned()),
+        }),
+    }
 }
 
 #[tauri::command]
@@ -982,7 +1640,7 @@ pub async fn verify_offsite_backup(
     vault_state: tauri::State<'_, WorkspaceVaultState>,
     target_id: Uuid,
     snapshot_id: Uuid,
-) -> Result<BackupVerification, String> {
+) -> Result<VerifyOffsiteBackupOutcome, String> {
     let permit = begin_workspace_access(&app, &vault_state)?;
     let config = find_target(&app, &backup_state, target_id).await?;
     let verification = open_target(&config)
@@ -990,14 +1648,40 @@ pub async fn verify_offsite_backup(
         .verify(snapshot_id)
         .await
         .map_err(target_error)?;
-    ensure_workspace_access(&app, &vault_state, permit)?;
-    update_target_status(&app, &backup_state, target_id, |config| {
+    if ensure_config_mutation_allowed(&backup_state.config_recovery_latched).is_err() {
+        return Ok(VerifyOffsiteBackupOutcome::RecoveryRequired { verification });
+    }
+    if ensure_workspace_access(&app, &vault_state, permit).is_err() {
+        return Ok(VerifyOffsiteBackupOutcome::Committed {
+            verification,
+            warning: Some(
+                "offsite_backup_verification_succeeded_local_status_update_failed".to_owned(),
+            ),
+        });
+    }
+    let status_update = update_target_status(&app, &backup_state, target_id, |config| {
         config.last_verified_at_ms = Some(current_time_milliseconds()?);
         Ok(())
     })
-    .await?;
-    ensure_workspace_access(&app, &vault_state, permit)?;
-    Ok(verification)
+    .await;
+    Ok(match status_update {
+        Ok(CommitOutcome::Committed(())) => VerifyOffsiteBackupOutcome::Committed {
+            verification,
+            warning: None,
+        },
+        Ok(CommitOutcome::RecoveryRequired) => {
+            VerifyOffsiteBackupOutcome::RecoveryRequired { verification }
+        }
+        Err(error) if error == "offsite_backup_config_recovery_required" => {
+            VerifyOffsiteBackupOutcome::RecoveryRequired { verification }
+        }
+        Err(_) => VerifyOffsiteBackupOutcome::Committed {
+            verification,
+            warning: Some(
+                "offsite_backup_verification_succeeded_local_status_update_failed".to_owned(),
+            ),
+        },
+    })
 }
 
 #[tauri::command]
@@ -1008,7 +1692,8 @@ pub async fn test_offsite_backup_restore(
     target_id: Uuid,
     snapshot_id: Uuid,
     password: String,
-) -> Result<BackupTargetSummary, String> {
+) -> Result<BackupTargetMutationOutcome, String> {
+    let _claim = TargetOperationClaim::acquire(&backup_state, target_id)?;
     let permit = begin_workspace_access(&app, &vault_state)?
         .ok_or_else(|| "workspace_vault_not_configured".to_owned())?;
     let config = find_target(&app, &backup_state, target_id).await?;
@@ -1024,16 +1709,26 @@ pub async fn test_offsite_backup_restore(
     test_current_offsite_workspace_restore(&app, &vault_state, encrypted, password, permit).await?;
     ensure_workspace_access(&app, &vault_state, Some(permit))?;
     let completed_at_ms = current_time_milliseconds()?;
-    update_target_status(&app, &backup_state, target_id, move |config| {
+    let status_update = update_target_status(&app, &backup_state, target_id, move |config| {
         config.last_verified_at_ms = Some(completed_at_ms);
         config.last_restore_test_at_ms = Some(completed_at_ms);
         config.last_restore_test_snapshot_id = Some(snapshot_id);
         Ok(())
     })
-    .await?;
-    ensure_workspace_access(&app, &vault_state, Some(permit))?;
-    let updated = find_target(&app, &backup_state, target_id).await?;
-    target_summary(&updated)
+    .await;
+    Ok(match status_update {
+        Ok(CommitOutcome::RecoveryRequired) => BackupTargetMutationOutcome::RecoveryRequired,
+        Err(error) if error == "offsite_backup_config_recovery_required" => {
+            BackupTargetMutationOutcome::RecoveryRequired
+        }
+        Err(error) => return Err(error),
+        Ok(CommitOutcome::Committed(())) => {
+            let updated = find_target(&app, &backup_state, target_id).await?;
+            BackupTargetMutationOutcome::Committed {
+                target: target_summary(&updated)?,
+            }
+        }
+    })
 }
 
 async fn open_target(config: &BackupTargetConfig) -> Result<Box<dyn BackupTarget>, String> {
@@ -1122,31 +1817,77 @@ async fn remove_target_config_and_credential(
     state: &OffsiteBackupState,
     target: &BackupTargetConfig,
     target_id: Uuid,
-) -> Result<(), String> {
-    let credential = load_credential_async(target.credential_id.clone()).await?;
-    delete_credential_async(target.credential_id.clone()).await?;
+    permit: WorkspaceAccessPermit,
+) -> Result<CommitOutcome<CommittedConfigCleanup>, String> {
     let app_for_write = app.clone();
     let config_lock = Arc::clone(&state.config_lock);
+    let recovery_latch = Arc::clone(&state.config_recovery_latched);
+    let expected_credential_id = target.credential_id.clone();
     let write_result = tauri::async_runtime::spawn_blocking(move || {
-        let _guard = config_lock
-            .lock()
-            .map_err(|_| "offsite_backup_config_unavailable".to_owned())?;
+        let vault_state_for_write = app_for_write.state::<WorkspaceVaultState>();
+        let _guard = acquire_authorized_config_mutation(
+            &config_lock,
+            &recovery_latch,
+            &vault_state_for_write,
+            permit,
+        )?;
         let path = config_path(&app_for_write)?;
-        let mut config = read_config(&path)?;
-        let previous_length = config.targets.len();
-        config.targets.retain(|item| item.id != target_id);
-        if config.targets.len() == previous_length {
-            return Err("offsite_backup_target_not_found".to_owned());
+        let mut config = read_config_for_mutation_with_latch(&path, &recovery_latch)?;
+        let current = config
+            .targets
+            .iter()
+            .find(|item| item.id == target_id)
+            .cloned()
+            .ok_or_else(|| "offsite_backup_target_not_found".to_owned())?;
+        if current.credential_id != expected_credential_id {
+            return Err("offsite_backup_target_changed".to_owned());
         }
-        write_config(&path, &config)
+        let transaction = OffsiteBackupConfigTransaction {
+            format: CONFIG_TRANSACTION_FORMAT.to_owned(),
+            version: CONFIG_TRANSACTION_VERSION,
+            operation_id: Uuid::new_v4(),
+            phase: ConfigTransactionPhase::Prepared,
+            kind: ConfigTransactionKind::Remove,
+            target_id,
+            previous_credential_id: Some(current.credential_id.clone()),
+            next_credential_id: None,
+            target: None,
+        };
+        let transaction_path = config_transaction_path(&path)?;
+        vault_state_for_write.ensure_access_permit(permit)?;
+        let journal_write = write_config_transaction(&transaction_path, &transaction)?;
+        let credential_referenced_elsewhere =
+            config_references_credential(&config, target_id, &current.credential_id);
+        let outcome = complete_config_commit(
+            journal_write,
+            || Ok(()),
+            || {
+                config.targets.retain(|item| item.id != target_id);
+                write_config_unchecked(&path, &config)
+            },
+            || {
+                let cleanup =
+                    classify_target_credential_cleanup(credential_referenced_elsewhere, || {
+                        delete_credential(&current.credential_id)
+                    });
+                finish_committed_config_transaction(cleanup, || {
+                    clear_config_transaction(&transaction_path, &transaction)
+                })
+            },
+        )?;
+        latch_commit_recovery(&recovery_latch, &outcome);
+        if matches!(
+            &outcome,
+            CommitOutcome::Committed(CommittedConfigCleanup::DurabilityPending)
+        ) {
+            recovery_latch.store(true, Ordering::Release);
+        }
+        Ok(outcome)
     })
     .await
     .map_err(|error| error.to_string())?;
-    if let Err(error) = write_result {
-        let _ = store_credential(&target.credential_id, &credential);
-        return Err(error);
-    }
-    Ok(())
+    let outcome = write_result?;
+    Ok(outcome)
 }
 
 async fn list_all_snapshots(
@@ -1206,6 +1947,14 @@ fn reset_remote_target_status(target: &mut BackupTargetConfig) {
     target.last_retention_error = None;
 }
 
+fn record_snapshot_deleted(target: &mut BackupTargetConfig, snapshot_id: Uuid) {
+    if target.last_restore_test_snapshot_id == Some(snapshot_id) {
+        target.last_restore_test_at_ms = None;
+        target.last_restore_test_snapshot_id = None;
+        target.retention_enabled = false;
+    }
+}
+
 fn remote_target_location_changed(
     target: &BackupTargetConfig,
     endpoint: &str,
@@ -1219,20 +1968,6 @@ fn remote_target_location_changed(
         || target.prefix.as_deref() != Some(prefix)
 }
 
-fn claim_automatic_upload(state: &OffsiteBackupState, target_id: Uuid) -> bool {
-    state
-        .automatic_uploads
-        .lock()
-        .map(|mut uploads| uploads.insert(target_id))
-        .unwrap_or(false)
-}
-
-fn release_automatic_upload(state: &OffsiteBackupState, target_id: Uuid) {
-    if let Ok(mut uploads) = state.automatic_uploads.lock() {
-        uploads.remove(&target_id);
-    }
-}
-
 async fn run_automatic_upload(
     app: &tauri::AppHandle,
     state: &OffsiteBackupState,
@@ -1242,53 +1977,92 @@ async fn run_automatic_upload(
     snapshot: BackupSnapshot,
 ) -> AutomaticBackupOutcome {
     let target_id = target_config.id;
-    let result = async {
+    let upload_result = async {
         ensure_workspace_access(app, vault_state, permit)?;
         let target = open_target(target_config).await?;
         ensure_workspace_access(app, vault_state, permit)?;
-        target.upload(snapshot).await.map_err(target_error)?;
-        ensure_workspace_access(app, vault_state, permit)?;
-        let uploaded_revision = target_config.automatic_revision;
-        update_target_status(app, state, target_id, move |config| {
-            record_upload_success(
-                config,
-                uploaded_revision,
-                current_time_milliseconds()?,
-                true,
-            );
-            Ok(())
-        })
-        .await?;
-        ensure_workspace_access(app, vault_state, permit)
+        ensure_config_mutation_allowed(&state.config_recovery_latched)?;
+        target.upload(snapshot).await.map_err(target_error)
     }
     .await;
-
-    match result {
-        Ok(()) => {
-            run_retention_cleanup(app, state, vault_state, permit, target_id).await;
-            AutomaticBackupOutcome {
-                target_id,
-                uploaded: true,
-                error: None,
-            }
-        }
-        Err(error) => {
-            let stored_error = bounded_automatic_error(&error);
-            if error != "workspace_vault_session_expired" && error != "workspace_vault_locked" {
-                let error_for_config = stored_error.clone();
-                let _ = update_target_status(app, state, target_id, move |config| {
-                    config.last_automatic_attempt_at_ms = Some(current_time_milliseconds()?);
-                    config.last_automatic_error = Some(error_for_config);
-                    Ok(())
-                })
-                .await;
-            }
-            AutomaticBackupOutcome {
+    if let Err(error) = upload_result {
+        if error == "offsite_backup_config_recovery_required" {
+            return AutomaticBackupOutcome::RecoveryRequired {
                 target_id,
                 uploaded: false,
-                error: Some(stored_error),
+            };
+        }
+        let stored_error = bounded_automatic_error(&error);
+        if error != "workspace_vault_session_expired" && error != "workspace_vault_locked" {
+            let error_for_config = stored_error.clone();
+            let _ = update_target_status(app, state, target_id, move |config| {
+                config.last_automatic_attempt_at_ms = Some(current_time_milliseconds()?);
+                config.last_automatic_error = Some(error_for_config);
+                Ok(())
+            })
+            .await;
+        }
+        return AutomaticBackupOutcome::Committed {
+            target_id,
+            uploaded: false,
+            error: Some(stored_error),
+        };
+    }
+
+    if ensure_config_mutation_allowed(&state.config_recovery_latched).is_err() {
+        return AutomaticBackupOutcome::RecoveryRequired {
+            target_id,
+            uploaded: true,
+        };
+    }
+    if ensure_workspace_access(app, vault_state, permit).is_err() {
+        return AutomaticBackupOutcome::Committed {
+            target_id,
+            uploaded: true,
+            error: Some("offsite_backup_upload_succeeded_local_status_update_failed".to_owned()),
+        };
+    }
+    let uploaded_revision = target_config.automatic_revision;
+    match update_target_status(app, state, target_id, move |config| {
+        record_upload_success(
+            config,
+            uploaded_revision,
+            current_time_milliseconds()?,
+            true,
+        );
+        Ok(())
+    })
+    .await
+    {
+        Ok(CommitOutcome::RecoveryRequired) => AutomaticBackupOutcome::RecoveryRequired {
+            target_id,
+            uploaded: true,
+        },
+        Ok(CommitOutcome::Committed(())) => {
+            if run_retention_cleanup(app, state, vault_state, permit, target_id).await {
+                AutomaticBackupOutcome::RecoveryRequired {
+                    target_id,
+                    uploaded: true,
+                }
+            } else {
+                AutomaticBackupOutcome::Committed {
+                    target_id,
+                    uploaded: true,
+                    error: None,
+                }
             }
         }
+        Err(error) if error == "offsite_backup_config_recovery_required" => {
+            AutomaticBackupOutcome::RecoveryRequired {
+                target_id,
+                uploaded: true,
+            }
+        }
+        Err(_) => AutomaticBackupOutcome::Committed {
+            target_id,
+            uploaded: true,
+            error: Some("offsite_backup_upload_succeeded_local_status_update_failed".to_owned()),
+        },
     }
 }
 
@@ -1316,12 +2090,18 @@ async fn run_retention_cleanup(
     vault_state: &WorkspaceVaultState,
     permit: Option<WorkspaceAccessPermit>,
     target_id: Uuid,
-) {
+) -> bool {
     let result = async {
+        let operation_guard = WorkspaceBackupOperationGuard::new_with_latch(
+            vault_state,
+            permit,
+            &state.config_recovery_latched,
+        );
         let config = find_target(app, state, target_id).await?;
         if !config.retention_enabled {
             return Ok(());
         }
+        ensure_config_mutation_allowed(&state.config_recovery_latched)?;
         ensure_retention_enable_allowed(&config, true)?;
         ensure_workspace_access(app, vault_state, permit)?;
         let target = open_target(&config).await?;
@@ -1329,21 +2109,38 @@ async fn run_retention_cleanup(
             ensure_workspace_access(app, vault_state, permit)
         })
         .await?;
+        ensure_retention_proof_present(&config, &snapshots)?;
         let now = current_time_milliseconds()?;
         let candidates = retention_candidates(&config, snapshots, now);
         for snapshot in candidates {
             ensure_workspace_access(app, vault_state, permit)?;
-            if !target.delete(snapshot.id).await.map_err(target_error)? {
-                return Err("offsite_backup_snapshot_not_found".to_owned());
+            match target
+                .delete_with_verification_guarded(snapshot.id, &operation_guard)
+                .await
+                .map_err(target_error)?
+            {
+                BackupDeleteOutcome::Deleted { .. } => {}
+                BackupDeleteOutcome::NotFound => {
+                    return Err("offsite_backup_snapshot_not_found".to_owned());
+                }
+                BackupDeleteOutcome::Unverified { .. } => {
+                    return Err("offsite_backup_snapshot_delete_unverified".to_owned());
+                }
             }
         }
         ensure_workspace_access(app, vault_state, permit)?;
-        update_target_status(app, state, target_id, move |target| {
+        match update_target_status(app, state, target_id, move |target| {
             target.last_retention_cleanup_at_ms = Some(now);
             target.last_retention_error = None;
             Ok(())
         })
-        .await
+        .await?
+        {
+            CommitOutcome::Committed(()) => Ok(()),
+            CommitOutcome::RecoveryRequired => {
+                Err("offsite_backup_config_recovery_required".to_owned())
+            }
+        }
     }
     .await;
 
@@ -1357,6 +2154,7 @@ async fn run_retention_cleanup(
             .await;
         }
     }
+    state.config_recovery_latched.load(Ordering::Acquire)
 }
 
 fn retention_candidates(
@@ -1387,17 +2185,33 @@ fn retention_candidates(
         .collect()
 }
 
+fn ensure_retention_proof_present(
+    config: &BackupTargetConfig,
+    snapshots: &[BackupSnapshotMetadata],
+) -> Result<(), String> {
+    ensure_retention_enable_allowed(config, true)?;
+    if config
+        .last_restore_test_snapshot_id
+        .is_some_and(|proof_id| snapshots.iter().any(|snapshot| snapshot.id == proof_id))
+    {
+        Ok(())
+    } else {
+        Err("offsite_backup_retention_requires_new_restore_drill".to_owned())
+    }
+}
+
 async fn read_config_locked(
     app: &tauri::AppHandle,
     state: &OffsiteBackupState,
 ) -> Result<OffsiteBackupConfig, String> {
     let app = app.clone();
     let config_lock = Arc::clone(&state.config_lock);
+    let recovery_latch = Arc::clone(&state.config_recovery_latched);
     tauri::async_runtime::spawn_blocking(move || {
         let _guard = config_lock
             .lock()
             .map_err(|_| "offsite_backup_config_unavailable".to_owned())?;
-        read_config(&config_path(&app)?)
+        latch_recovery_error(&recovery_latch, read_config(&config_path(&app)?))
     })
     .await
     .map_err(|error| error.to_string())?
@@ -1408,25 +2222,33 @@ async fn update_target_status(
     state: &OffsiteBackupState,
     target_id: Uuid,
     update: impl FnOnce(&mut BackupTargetConfig) -> Result<(), String> + Send + 'static,
-) -> Result<(), String> {
+) -> Result<CommitOutcome<()>, String> {
     let app = app.clone();
     let config_lock = Arc::clone(&state.config_lock);
-    tauri::async_runtime::spawn_blocking(move || {
+    let recovery_latch = Arc::clone(&state.config_recovery_latched);
+    let outcome = tauri::async_runtime::spawn_blocking(move || {
         let _guard = config_lock
             .lock()
             .map_err(|_| "offsite_backup_config_unavailable".to_owned())?;
+        ensure_config_mutation_allowed(&recovery_latch)?;
         let path = config_path(&app)?;
-        let mut config = read_config(&path)?;
+        let mut config = read_config_for_mutation_with_latch(&path, &recovery_latch)?;
         let target = config
             .targets
             .iter_mut()
             .find(|target| target.id == target_id)
             .ok_or_else(|| "offsite_backup_target_not_found".to_owned())?;
         update(target)?;
-        write_config(&path, &config)
+        let write_status = write_config(&path, &config)?;
+        latch_atomic_recovery(&recovery_latch, write_status);
+        Ok::<CommitOutcome<()>, String>(match write_status {
+            AtomicWriteStatus::Committed => CommitOutcome::Committed(()),
+            AtomicWriteStatus::RecoveryRequired => CommitOutcome::RecoveryRequired,
+        })
     })
     .await
-    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())??;
+    Ok(outcome)
 }
 
 fn target_summary(config: &BackupTargetConfig) -> Result<BackupTargetSummary, String> {
@@ -1463,7 +2285,502 @@ fn config_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
         .map_err(|error| error.to_string())
 }
 
+fn config_transaction_path(path: &Path) -> Result<PathBuf, String> {
+    path.parent()
+        .map(|parent| parent.join(CONFIG_TRANSACTION_FILE_NAME))
+        .ok_or_else(|| "offsite_backup_invalid_config_path".to_owned())
+}
+
+fn config_migration_path(path: &Path) -> Result<PathBuf, String> {
+    path.parent()
+        .map(|parent| parent.join(CONFIG_MIGRATION_FILE_NAME))
+        .ok_or_else(|| "offsite_backup_invalid_config_path".to_owned())
+}
+
+fn validate_transaction_credential_id(value: &str) -> Result<(), String> {
+    if Uuid::parse_str(value).is_err() || value == CONFIG_AUTH_CREDENTIAL_ID {
+        Err("offsite_backup_invalid_config_transaction".to_owned())
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_config_transaction(transaction: &OffsiteBackupConfigTransaction) -> Result<(), String> {
+    if transaction.format != CONFIG_TRANSACTION_FORMAT
+        || transaction.version != CONFIG_TRANSACTION_VERSION
+    {
+        return Err("offsite_backup_invalid_config_transaction".to_owned());
+    }
+    match transaction.kind {
+        ConfigTransactionKind::Create => {
+            let target = transaction
+                .target
+                .as_ref()
+                .ok_or_else(|| "offsite_backup_invalid_config_transaction".to_owned())?;
+            if transaction.previous_credential_id.is_some()
+                || transaction.next_credential_id.as_deref() != Some(&target.credential_id)
+            {
+                return Err("offsite_backup_invalid_config_transaction".to_owned());
+            }
+            validate_transaction_credential_id(&target.credential_id)?;
+        }
+        ConfigTransactionKind::Update => {
+            let target = transaction
+                .target
+                .as_ref()
+                .ok_or_else(|| "offsite_backup_invalid_config_transaction".to_owned())?;
+            let previous = transaction
+                .previous_credential_id
+                .as_deref()
+                .ok_or_else(|| "offsite_backup_invalid_config_transaction".to_owned())?;
+            let next = transaction
+                .next_credential_id
+                .as_deref()
+                .ok_or_else(|| "offsite_backup_invalid_config_transaction".to_owned())?;
+            if next != target.credential_id {
+                return Err("offsite_backup_invalid_config_transaction".to_owned());
+            }
+            validate_transaction_credential_id(previous)?;
+            validate_transaction_credential_id(next)?;
+        }
+        ConfigTransactionKind::Remove => {
+            if transaction.target.is_some() || transaction.next_credential_id.is_some() {
+                return Err("offsite_backup_invalid_config_transaction".to_owned());
+            }
+            validate_transaction_credential_id(
+                transaction
+                    .previous_credential_id
+                    .as_deref()
+                    .ok_or_else(|| "offsite_backup_invalid_config_transaction".to_owned())?,
+            )?;
+        }
+    }
+    if let Some(target) = transaction.target.as_ref() {
+        if target.id != transaction.target_id {
+            return Err("offsite_backup_invalid_config_transaction".to_owned());
+        }
+        validate_config(&OffsiteBackupConfig {
+            format: CONFIG_FORMAT.to_owned(),
+            version: CONFIG_VERSION,
+            targets: vec![target.clone()],
+        })?;
+    }
+    Ok(())
+}
+
+fn write_config_transaction(
+    path: &Path,
+    transaction: &OffsiteBackupConfigTransaction,
+) -> Result<AtomicWriteStatus, String> {
+    validate_config_transaction(transaction)?;
+    let key = load_or_create_config_auth_key()?;
+    write_config_transaction_with(path, transaction, &key, |path, contents| {
+        write_atomically_commit_aware(path, contents).map_err(|error| error.to_string())
+    })
+}
+
+fn write_config_transaction_with(
+    path: &Path,
+    transaction: &OffsiteBackupConfigTransaction,
+    key: &[u8],
+    write: impl FnOnce(&Path, &[u8]) -> Result<AtomicWriteStatus, String>,
+) -> Result<AtomicWriteStatus, String> {
+    validate_config_transaction(transaction)?;
+    let authentication = config_transaction_authentication(transaction, &key)?;
+    let envelope = AuthenticatedOffsiteBackupConfigTransaction {
+        format: CONFIG_TRANSACTION_FORMAT.to_owned(),
+        version: CONFIG_TRANSACTION_VERSION,
+        transaction: transaction.clone(),
+        authentication,
+    };
+    let contents = serde_json::to_vec_pretty(&envelope).map_err(|error| error.to_string())?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| "offsite_backup_invalid_config_path".to_owned())?;
+    fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    write(path, &contents)
+}
+
+fn read_config_transaction(path: &Path) -> Result<Option<OffsiteBackupConfigTransaction>, String> {
+    let contents = match fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+    };
+    let envelope: AuthenticatedOffsiteBackupConfigTransaction = serde_json::from_str(&contents)
+        .map_err(|_| "offsite_backup_invalid_config_transaction".to_owned())?;
+    if envelope.format != CONFIG_TRANSACTION_FORMAT
+        || envelope.version != CONFIG_TRANSACTION_VERSION
+    {
+        return Err("offsite_backup_invalid_config_transaction".to_owned());
+    }
+    validate_config_transaction(&envelope.transaction)?;
+    let key = load_config_auth_key()?;
+    let supplied = STANDARD_NO_PAD
+        .decode(envelope.authentication)
+        .map_err(|_| "offsite_backup_config_authentication_failed".to_owned())?;
+    let expected = config_transaction_authentication(&envelope.transaction, &key)?;
+    let expected = STANDARD_NO_PAD
+        .decode(expected)
+        .map_err(|_| "offsite_backup_config_authentication_failed".to_owned())?;
+    if supplied != expected {
+        return Err("offsite_backup_config_authentication_failed".to_owned());
+    }
+    Ok(Some(envelope.transaction))
+}
+
+fn config_migration_authentication(
+    migration: &OffsiteBackupConfigMigration,
+    key: &[u8],
+) -> Result<String, String> {
+    let serialized = serde_json::to_vec(migration)
+        .map_err(|_| "offsite_backup_config_authentication_failed".to_owned())?;
+    let mut mac = hmac::Hmac::<Sha256>::new_from_slice(key)
+        .map_err(|_| "offsite_backup_config_authentication_failed".to_owned())?;
+    mac.update(&serialized);
+    Ok(STANDARD_NO_PAD.encode(mac.finalize().into_bytes()))
+}
+
+fn write_config_migration(
+    path: &Path,
+    migration: &OffsiteBackupConfigMigration,
+    key: &[u8],
+) -> Result<AtomicWriteStatus, String> {
+    validate_config(&migration.config)?;
+    if migration.format != CONFIG_MIGRATION_FORMAT || migration.version != CONFIG_MIGRATION_VERSION
+    {
+        return Err("offsite_backup_invalid_config_migration".to_owned());
+    }
+    let envelope = AuthenticatedOffsiteBackupConfigMigration {
+        format: CONFIG_MIGRATION_FORMAT.to_owned(),
+        version: CONFIG_MIGRATION_VERSION,
+        migration: migration.clone(),
+        authentication: config_migration_authentication(migration, key)?,
+    };
+    let contents = serde_json::to_vec_pretty(&envelope).map_err(|error| error.to_string())?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| "offsite_backup_invalid_config_path".to_owned())?;
+    fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    write_atomically_commit_aware(path, &contents).map_err(|error| error.to_string())
+}
+
+fn read_config_migration(
+    path: &Path,
+    key: &[u8],
+) -> Result<Option<OffsiteBackupConfigMigration>, String> {
+    let contents = match fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+    };
+    let envelope: AuthenticatedOffsiteBackupConfigMigration = serde_json::from_str(&contents)
+        .map_err(|_| "offsite_backup_invalid_config_migration".to_owned())?;
+    if envelope.format != CONFIG_MIGRATION_FORMAT
+        || envelope.version != CONFIG_MIGRATION_VERSION
+        || envelope.migration.format != CONFIG_MIGRATION_FORMAT
+        || envelope.migration.version != CONFIG_MIGRATION_VERSION
+    {
+        return Err("offsite_backup_invalid_config_migration".to_owned());
+    }
+    validate_config(&envelope.migration.config)?;
+    let supplied = STANDARD_NO_PAD
+        .decode(envelope.authentication)
+        .map_err(|_| "offsite_backup_config_authentication_failed".to_owned())?;
+    let expected = STANDARD_NO_PAD
+        .decode(config_migration_authentication(&envelope.migration, key)?)
+        .map_err(|_| "offsite_backup_config_authentication_failed".to_owned())?;
+    if supplied != expected {
+        return Err("offsite_backup_config_authentication_failed".to_owned());
+    }
+    Ok(Some(envelope.migration))
+}
+
+fn clear_config_transaction(
+    path: &Path,
+    transaction: &OffsiteBackupConfigTransaction,
+) -> Result<(), String> {
+    if transaction.phase != ConfigTransactionPhase::CleanupComplete {
+        let mut completed = transaction.clone();
+        completed.phase = ConfigTransactionPhase::CleanupComplete;
+        if write_config_transaction(path, &completed)? == AtomicWriteStatus::RecoveryRequired {
+            return Err("offsite_backup_config_recovery_required".to_owned());
+        }
+    }
+    remove_config_transaction_file(path)
+}
+
+fn remove_config_transaction_file(path: &Path) -> Result<(), String> {
+    remove_config_transaction_file_with(
+        path,
+        |target| fs::remove_file(target),
+        |parent| sync_config_parent_directory(parent),
+    )
+}
+
+fn remove_config_transaction_file_with(
+    path: &Path,
+    remove: impl FnOnce(&Path) -> io::Result<()>,
+    sync_parent: impl FnOnce(&Path) -> io::Result<()>,
+) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| "offsite_backup_invalid_config_path".to_owned())?;
+    match remove(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.to_string()),
+    }
+    sync_parent(parent).map_err(|error| error.to_string())
+}
+
+#[cfg(unix)]
+fn sync_config_parent_directory(parent: &Path) -> io::Result<()> {
+    std::fs::File::open(parent)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_config_parent_directory(_parent: &Path) -> io::Result<()> {
+    Ok(())
+}
+
+fn config_references_credential(
+    config: &OffsiteBackupConfig,
+    excluded_target_id: Uuid,
+    credential_id: &str,
+) -> bool {
+    config
+        .targets
+        .iter()
+        .any(|target| target.id != excluded_target_id && target.credential_id == credential_id)
+}
+
+fn credential_cleanup_is_complete(
+    config: &OffsiteBackupConfig,
+    excluded_target_id: Uuid,
+    credential_id: &str,
+) -> bool {
+    // A credential still used by another target is not stale.  Treating it as
+    // already cleaned lets recovery discard the journal without deleting a
+    // credential that remains in active use.
+    classify_target_credential_cleanup(
+        config_references_credential(config, excluded_target_id, credential_id),
+        || delete_credential(credential_id),
+    ) == TargetCredentialCleanup::Complete
+}
+
+fn recover_config_transaction(
+    path: &Path,
+    config: OffsiteBackupConfig,
+) -> Result<OffsiteBackupConfig, String> {
+    let transaction_path = config_transaction_path(path)?;
+    let Some(transaction) = read_config_transaction(&transaction_path)? else {
+        return Ok(config);
+    };
+    if transaction.phase == ConfigTransactionPhase::CleanupComplete {
+        let _ = clear_config_transaction(&transaction_path, &transaction);
+        return Ok(config);
+    }
+
+    // The transaction may have been left after the config replacement crossed
+    // its commit point but before its parent directory was durable. Rewriting
+    // the already authenticated current state is idempotent and confirms which
+    // side of the transaction is authoritative before credential cleanup.
+    if write_config_unchecked(path, &config) != Ok(AtomicWriteStatus::Committed) {
+        return Ok(config);
+    }
+    let current_target = config
+        .targets
+        .iter()
+        .find(|target| target.id == transaction.target_id);
+    let mut clear_transaction = false;
+    match transaction.kind {
+        ConfigTransactionKind::Create => {
+            let next = transaction
+                .next_credential_id
+                .as_deref()
+                .expect("validated create transaction credential");
+            let committed = current_target == transaction.target.as_ref();
+            if committed {
+                // A definitely missing credential cannot be recovered from
+                // this journal. Keep the target repairable through credential
+                // replacement, but retain the journal for transient keyring
+                // read failures.
+                if committed_create_transaction_can_clear(load_credential(next)) {
+                    clear_transaction = true;
+                }
+            } else if current_target.is_some_and(|target| target.credential_id == next) {
+                // The config references the new credential but does not match
+                // the authenticated transaction payload. Keep the journal and
+                // do not guess which state is authoritative.
+            } else if credential_cleanup_is_complete(&config, transaction.target_id, next) {
+                clear_transaction = true;
+            }
+        }
+        ConfigTransactionKind::Update => {
+            let previous = transaction
+                .previous_credential_id
+                .as_deref()
+                .expect("validated update transaction credential");
+            let next = transaction
+                .next_credential_id
+                .as_deref()
+                .expect("validated update transaction credential");
+            let committed = current_target == transaction.target.as_ref();
+            if previous == next {
+                clear_transaction = true;
+            } else if committed {
+                if credential_cleanup_is_complete(&config, transaction.target_id, previous) {
+                    clear_transaction = true;
+                }
+            } else if current_target.is_some_and(|target| target.credential_id == next) {
+                // An unexpected target body must not cause recovery to delete
+                // the credential currently referenced by the configuration.
+            } else if credential_cleanup_is_complete(&config, transaction.target_id, next) {
+                clear_transaction = true;
+            }
+        }
+        ConfigTransactionKind::Remove => {
+            let previous = transaction
+                .previous_credential_id
+                .as_deref()
+                .expect("validated remove transaction credential");
+            if current_target.is_none() {
+                if credential_cleanup_is_complete(&config, transaction.target_id, previous) {
+                    clear_transaction = true;
+                }
+            } else {
+                // The config commit did not happen; retain the target and
+                // discard only the stale intent.
+                clear_transaction = true;
+            }
+        }
+    }
+    if clear_transaction {
+        // The recovered configuration is authoritative even when journal
+        // removal fails. Keep reads available; the mutation guard below will
+        // preserve the journal boundary until a later read clears it.
+        let _ = clear_config_transaction(&transaction_path, &transaction);
+    }
+    Ok(config)
+}
+
+fn finish_config_migration(
+    path: &Path,
+    migration: &OffsiteBackupConfigMigration,
+    key: &[u8],
+) -> Result<(), String> {
+    let migration_path = config_migration_path(path)?;
+    let mut completed = migration.clone();
+    completed.phase = ConfigMigrationPhase::CleanupComplete;
+    if write_config_migration(&migration_path, &completed, key)?
+        == AtomicWriteStatus::RecoveryRequired
+    {
+        return Err("offsite_backup_config_recovery_required".to_owned());
+    }
+    let _ = remove_config_transaction_file(&migration_path);
+    Ok(())
+}
+
+fn migrate_legacy_config_with_key(
+    path: &Path,
+    config: &OffsiteBackupConfig,
+    key: &[u8],
+    may_create_intent: bool,
+    activate_key: impl FnOnce() -> Result<(), String>,
+    write_authenticated_config: impl FnOnce(
+        &Path,
+        &OffsiteBackupConfig,
+        &[u8],
+    ) -> Result<AtomicWriteStatus, String>,
+) -> Result<(), String> {
+    let migration_path = config_migration_path(path)?;
+    let migration = if may_create_intent {
+        let migration = OffsiteBackupConfigMigration {
+            format: CONFIG_MIGRATION_FORMAT.to_owned(),
+            version: CONFIG_MIGRATION_VERSION,
+            phase: ConfigMigrationPhase::Prepared,
+            config: config.clone(),
+        };
+        if write_config_migration(&migration_path, &migration, key)?
+            == AtomicWriteStatus::RecoveryRequired
+        {
+            return Err("offsite_backup_config_recovery_required".to_owned());
+        }
+        migration
+    } else {
+        match read_config_migration(&migration_path, key)? {
+            Some(migration)
+                if migration.phase == ConfigMigrationPhase::Prepared
+                    && migration.config == *config =>
+            {
+                migration
+            }
+            Some(_) | None => {
+                return Err("offsite_backup_config_authentication_failed".to_owned());
+            }
+        }
+    };
+    activate_key()?;
+    if write_authenticated_config(path, config, key)? == AtomicWriteStatus::RecoveryRequired {
+        return Err("offsite_backup_config_recovery_required".to_owned());
+    }
+    finish_config_migration(path, &migration, key)
+}
+
+fn recover_authenticated_config_migration(
+    path: &Path,
+    config: &OffsiteBackupConfig,
+    key: &[u8],
+) -> Result<(), String> {
+    let migration_path = config_migration_path(path)?;
+    let Some(migration) = read_config_migration(&migration_path, key)? else {
+        return Ok(());
+    };
+    if migration.phase == ConfigMigrationPhase::Prepared && migration.config != *config {
+        return Err("offsite_backup_config_recovery_required".to_owned());
+    }
+    finish_config_migration(path, &migration, key)
+}
+
+fn ensure_no_pending_config_migration(path: &Path) -> Result<(), String> {
+    let migration_path = config_migration_path(path)?;
+    match fs::metadata(migration_path) {
+        Ok(_) => Err("offsite_backup_config_migration_pending".to_owned()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
 fn read_config(path: &Path) -> Result<OffsiteBackupConfig, String> {
+    let config = read_config_without_transaction(path)?;
+    recover_config_transaction(path, config)
+}
+
+fn read_config_for_mutation(path: &Path) -> Result<OffsiteBackupConfig, String> {
+    let config = read_config(path)?;
+    ensure_no_pending_config_migration(path)?;
+    ensure_no_pending_config_transaction(path)?;
+    Ok(config)
+}
+
+fn read_config_for_mutation_with_latch(
+    path: &Path,
+    recovery_latch: &AtomicBool,
+) -> Result<OffsiteBackupConfig, String> {
+    latch_recovery_error(recovery_latch, read_config_for_mutation(path))
+}
+
+fn ensure_no_pending_config_transaction(path: &Path) -> Result<(), String> {
+    let transaction_path = config_transaction_path(path)?;
+    match fs::metadata(transaction_path) {
+        Ok(_) => Err("offsite_backup_config_transaction_pending".to_owned()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn read_config_without_transaction(path: &Path) -> Result<OffsiteBackupConfig, String> {
     let contents = match fs::read_to_string(path) {
         Ok(contents) => contents,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -1478,36 +2795,97 @@ fn read_config(path: &Path) -> Result<OffsiteBackupConfig, String> {
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| "offsite_backup_invalid_config".to_owned())?;
     if format == CONFIG_FORMAT {
-        if load_optional_config_auth_key()?.is_some() {
-            return Err("offsite_backup_config_authentication_failed".to_owned());
-        }
         let config: OffsiteBackupConfig = serde_json::from_value(value)
             .map_err(|_| "offsite_backup_invalid_config".to_owned())?;
         validate_config(&config)?;
-        write_config(path, &config)?;
+        match load_optional_config_auth_key()? {
+            Some(key) => migrate_legacy_config_with_key(
+                path,
+                &config,
+                &key,
+                false,
+                || Ok(()),
+                write_config_with_key,
+            )?,
+            None => {
+                let key = generate_config_auth_key()?;
+                migrate_legacy_config_with_key(
+                    path,
+                    &config,
+                    &key,
+                    true,
+                    || store_config_auth_key(&key),
+                    write_config_with_key,
+                )?;
+            }
+        }
         return Ok(config);
     }
     if format != AUTHENTICATED_CONFIG_FORMAT {
         return Err("offsite_backup_invalid_config".to_owned());
     }
     let key = load_config_auth_key()?;
-    parse_authenticated_config(&contents, &key)
+    let config = parse_authenticated_config(&contents, &key)?;
+    recover_authenticated_config_migration(path, &config, &key)?;
+    Ok(config)
 }
 
-fn write_config(path: &Path, config: &OffsiteBackupConfig) -> Result<(), String> {
+fn write_config(path: &Path, config: &OffsiteBackupConfig) -> Result<AtomicWriteStatus, String> {
+    ensure_no_pending_config_transaction(path)?;
+    write_config_unchecked(path, config)
+}
+
+fn write_config_unchecked(
+    path: &Path,
+    config: &OffsiteBackupConfig,
+) -> Result<AtomicWriteStatus, String> {
     validate_config(config)?;
     let key = load_or_create_config_auth_key()?;
-    let envelope = authenticated_config(config.clone(), &key)?;
+    write_config_unchecked_with(path, config, &key, |path, contents| {
+        write_atomically_commit_aware(path, contents).map_err(|error| error.to_string())
+    })
+}
+
+fn write_config_with_key(
+    path: &Path,
+    config: &OffsiteBackupConfig,
+    key: &[u8],
+) -> Result<AtomicWriteStatus, String> {
+    write_config_unchecked_with(path, config, key, |path, contents| {
+        write_atomically_commit_aware(path, contents).map_err(|error| error.to_string())
+    })
+}
+
+fn write_config_unchecked_with(
+    path: &Path,
+    config: &OffsiteBackupConfig,
+    key: &[u8],
+    write: impl FnOnce(&Path, &[u8]) -> Result<AtomicWriteStatus, String>,
+) -> Result<AtomicWriteStatus, String> {
+    validate_config(config)?;
+    let envelope = authenticated_config(config.clone(), key)?;
     let contents = serde_json::to_vec_pretty(&envelope).map_err(|error| error.to_string())?;
     let parent = path
         .parent()
         .ok_or_else(|| "offsite_backup_invalid_config_path".to_owned())?;
     fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    write_atomically(path, &contents).map_err(|error| error.to_string())
+    write(path, &contents)
 }
 
 fn config_authentication(config: &OffsiteBackupConfig, key: &[u8]) -> Result<String, String> {
     let serialized = serde_json::to_vec(config).map_err(|error| error.to_string())?;
+    let mut mac = hmac::Hmac::<Sha256>::new_from_slice(key)
+        .map_err(|_| "offsite_backup_config_authentication_failed".to_owned())?;
+    mac.update(&serialized);
+    Ok(STANDARD_NO_PAD.encode(mac.finalize().into_bytes()))
+}
+
+fn config_transaction_authentication(
+    transaction: &OffsiteBackupConfigTransaction,
+    key: &[u8],
+) -> Result<String, String> {
+    let serialized = serde_json::to_vec(transaction)
+        .map_err(|_| "offsite_backup_config_authentication_failed".to_owned())?;
     let mut mac = hmac::Hmac::<Sha256>::new_from_slice(key)
         .map_err(|_| "offsite_backup_config_authentication_failed".to_owned())?;
     mac.update(&serialized);
@@ -1651,8 +3029,13 @@ fn ensure_retention_enable_allowed(
     enabled: bool,
 ) -> Result<(), String> {
     if enabled
-        && target.last_restore_test_at_ms.is_some()
-        && target.last_restore_test_snapshot_id.is_none()
+        && !matches!(
+            (
+                target.last_restore_test_at_ms,
+                target.last_restore_test_snapshot_id,
+            ),
+            (Some(_), Some(_))
+        )
     {
         Err("offsite_backup_retention_requires_new_restore_drill".to_owned())
     } else {
@@ -1690,19 +3073,29 @@ fn load_config_auth_key() -> Result<Zeroizing<Vec<u8>>, String> {
         .ok_or_else(|| "offsite_backup_config_authentication_failed".to_owned())
 }
 
+fn generate_config_auth_key() -> Result<Zeroizing<Vec<u8>>, String> {
+    let mut key = [0_u8; CONFIG_AUTH_KEY_BYTES];
+    getrandom::fill(&mut key)
+        .map_err(|_| "offsite_backup_config_authentication_failed".to_owned())?;
+    Ok(Zeroizing::new(key.to_vec()))
+}
+
+fn store_config_auth_key(key: &[u8]) -> Result<(), String> {
+    if key.len() != CONFIG_AUTH_KEY_BYTES {
+        return Err("offsite_backup_config_authentication_failed".to_owned());
+    }
+    let encoded = Zeroizing::new(STANDARD_NO_PAD.encode(key));
+    credential_entry(CONFIG_AUTH_CREDENTIAL_ID)?
+        .set_password(&encoded)
+        .map_err(|_| "offsite_backup_config_authentication_failed".to_owned())
+}
+
 fn load_or_create_config_auth_key() -> Result<Zeroizing<Vec<u8>>, String> {
-    let entry = credential_entry(CONFIG_AUTH_CREDENTIAL_ID)?;
     match load_optional_config_auth_key()? {
         Some(key) => Ok(key),
         None => {
-            let mut key = [0_u8; CONFIG_AUTH_KEY_BYTES];
-            getrandom::fill(&mut key)
-                .map_err(|_| "offsite_backup_config_authentication_failed".to_owned())?;
-            let key = Zeroizing::new(key.to_vec());
-            let encoded = Zeroizing::new(STANDARD_NO_PAD.encode(key.as_slice()));
-            entry
-                .set_password(&encoded)
-                .map_err(|_| "offsite_backup_config_authentication_failed".to_owned())?;
+            let key = generate_config_auth_key()?;
+            store_config_auth_key(&key)?;
             Ok(key)
         }
     }
@@ -1756,6 +3149,7 @@ fn current_time_milliseconds() -> Result<u64, String> {
 fn target_error(error: BackupTargetError) -> String {
     match error {
         BackupTargetError::Unauthorized => "offsite_backup_unauthorized",
+        BackupTargetError::Cancelled => "workspace_vault_session_expired",
         BackupTargetError::InvalidRequest => "offsite_backup_invalid_request",
         BackupTargetError::NotFound => "offsite_backup_snapshot_not_found",
         BackupTargetError::Conflict => "offsite_backup_snapshot_conflict",
@@ -1801,6 +3195,507 @@ mod tests {
         assert!(!serialized.contains("secret"));
     }
 
+    #[test]
+    fn config_transaction_requires_consistent_target_and_credential_ids() {
+        let target = s3_target("linked-info/v1");
+        let transaction = OffsiteBackupConfigTransaction {
+            format: CONFIG_TRANSACTION_FORMAT.to_owned(),
+            version: CONFIG_TRANSACTION_VERSION,
+            operation_id: Uuid::new_v4(),
+            phase: ConfigTransactionPhase::Prepared,
+            kind: ConfigTransactionKind::Create,
+            target_id: target.id,
+            previous_credential_id: None,
+            next_credential_id: Some(target.credential_id.clone()),
+            target: Some(target.clone()),
+        };
+        assert_eq!(validate_config_transaction(&transaction), Ok(()));
+
+        let mut inconsistent = transaction.clone();
+        inconsistent.next_credential_id = Some(Uuid::new_v4().to_string());
+        assert_eq!(
+            validate_config_transaction(&inconsistent),
+            Err("offsite_backup_invalid_config_transaction".to_owned())
+        );
+
+        let mut tampered = transaction;
+        tampered.operation_id = Uuid::new_v4();
+        assert_ne!(
+            config_transaction_authentication(&tampered, &[9; CONFIG_AUTH_KEY_BYTES]).unwrap(),
+            config_transaction_authentication(&inconsistent, &[9; CONFIG_AUTH_KEY_BYTES]).unwrap()
+        );
+
+        let mut metadata_only_update = tampered;
+        metadata_only_update.kind = ConfigTransactionKind::Update;
+        metadata_only_update.previous_credential_id =
+            metadata_only_update.next_credential_id.clone();
+        assert_eq!(validate_config_transaction(&metadata_only_update), Ok(()));
+        assert!(
+            !serde_json::to_value(&metadata_only_update)
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .contains_key("phase")
+        );
+    }
+
+    #[test]
+    fn shared_credential_is_already_cleaned_during_transaction_recovery() {
+        let target = s3_target("linked-info/primary");
+        let mut shared_target = target.clone();
+        shared_target.id = Uuid::new_v4();
+        shared_target.prefix = Some("linked-info/secondary".to_owned());
+        let config = OffsiteBackupConfig {
+            targets: vec![target.clone(), shared_target],
+            ..OffsiteBackupConfig::default()
+        };
+
+        // The short-circuit must avoid touching the keyring: this credential
+        // is still owned by the other target.
+        assert!(credential_cleanup_is_complete(
+            &config,
+            target.id,
+            &target.credential_id,
+        ));
+    }
+
+    #[test]
+    fn committed_target_outcomes_keep_cleanup_failure_as_a_warning() {
+        assert_eq!(
+            target_removal_outcome(CommitOutcome::Committed(CommittedConfigCleanup::Complete)),
+            RemoveOffsiteBackupTargetOutcome::Committed {
+                target_removed: true,
+                warning: None,
+            }
+        );
+        assert_eq!(
+            target_removal_outcome(CommitOutcome::Committed(
+                CommittedConfigCleanup::CredentialPending,
+            )),
+            RemoveOffsiteBackupTargetOutcome::Committed {
+                target_removed: true,
+                warning: Some("offsite_backup_credential_cleanup_pending".to_owned()),
+            }
+        );
+        assert_eq!(
+            target_removal_outcome(CommitOutcome::RecoveryRequired),
+            RemoveOffsiteBackupTargetOutcome::RecoveryRequired,
+        );
+        assert_eq!(
+            target_removal_outcome(CommitOutcome::Committed(
+                CommittedConfigCleanup::DurabilityPending,
+            )),
+            RemoveOffsiteBackupTargetOutcome::RecoveryRequired,
+        );
+
+        let target = target_summary(&s3_target("linked-info/v1")).unwrap();
+        let serialized = serde_json::to_value(target_configuration_outcome(
+            CommitOutcome::Committed((target.clone(), CommittedConfigCleanup::TransactionPending)),
+        ))
+        .unwrap();
+        assert_eq!(serialized["status"], "committed");
+        assert_eq!(
+            serialized["target"]["id"],
+            serde_json::Value::String(target.id.to_string())
+        );
+        assert_eq!(
+            serialized["warning"],
+            "offsite_backup_config_transaction_cleanup_pending"
+        );
+        let serialized = serde_json::to_value(target_configuration_outcome(
+            CommitOutcome::Committed((target.clone(), CommittedConfigCleanup::DurabilityPending)),
+        ))
+        .unwrap();
+        assert_eq!(
+            serialized,
+            serde_json::json!({ "status": "recoveryRequired" })
+        );
+
+        let serialized =
+            serde_json::to_value(target_update_outcome(CommitOutcome::RecoveryRequired)).unwrap();
+        assert_eq!(
+            serialized,
+            serde_json::json!({ "status": "recoveryRequired" })
+        );
+        let serialized = serde_json::to_value(target_update_outcome(CommitOutcome::Committed((
+            target,
+            CommittedConfigCleanup::DurabilityPending,
+        ))))
+        .unwrap();
+        assert_eq!(
+            serialized,
+            serde_json::json!({ "status": "recoveryRequired" })
+        );
+
+        assert_eq!(
+            delete_all_outcome(7, CommitOutcome::RecoveryRequired),
+            DeleteAllOffsiteBackupsOutcome::RecoveryRequired {
+                deleted_version_count: 7,
+            }
+        );
+        assert_eq!(
+            delete_all_outcome(
+                8,
+                CommitOutcome::Committed(CommittedConfigCleanup::DurabilityPending),
+            ),
+            DeleteAllOffsiteBackupsOutcome::RecoveryRequired {
+                deleted_version_count: 8,
+            }
+        );
+    }
+
+    #[test]
+    fn committed_snapshot_deletion_keeps_remote_success_when_proof_update_fails() {
+        assert_eq!(
+            committed_snapshot_deletion_outcome(false, Ok(CommitOutcome::Committed(()))),
+            DeleteOffsiteBackupOutcome::Committed {
+                snapshot_deleted: true,
+                restore_drill_proof_invalidated: false,
+                warning: None,
+            }
+        );
+        assert_eq!(
+            committed_snapshot_deletion_outcome(true, Ok(CommitOutcome::Committed(()))),
+            DeleteOffsiteBackupOutcome::Committed {
+                snapshot_deleted: true,
+                restore_drill_proof_invalidated: true,
+                warning: None,
+            }
+        );
+        assert_eq!(
+            committed_snapshot_deletion_outcome(true, Ok(CommitOutcome::RecoveryRequired)),
+            DeleteOffsiteBackupOutcome::RecoveryRequired {
+                snapshot_deleted: true,
+            }
+        );
+        assert_eq!(
+            committed_snapshot_deletion_outcome(true, Err("injected write failure".to_owned()),),
+            DeleteOffsiteBackupOutcome::Committed {
+                snapshot_deleted: true,
+                restore_drill_proof_invalidated: false,
+                warning: Some("offsite_backup_snapshot_deleted_proof_update_failed".to_owned(),),
+            }
+        );
+    }
+
+    #[test]
+    fn credential_cleanup_classifies_post_commit_keyring_failures() {
+        assert_eq!(
+            classify_target_credential_cleanup(false, || Ok(())),
+            TargetCredentialCleanup::Complete
+        );
+        assert_eq!(
+            classify_target_credential_cleanup(false, || Err("keyring unavailable".to_owned())),
+            TargetCredentialCleanup::Pending
+        );
+
+        let delete_called = std::cell::Cell::new(false);
+        assert_eq!(
+            classify_target_credential_cleanup(true, || {
+                delete_called.set(true);
+                Err("shared credential must not be deleted".to_owned())
+            }),
+            TargetCredentialCleanup::Complete
+        );
+        assert!(!delete_called.get());
+    }
+
+    #[test]
+    fn committed_transaction_cleanup_failure_is_deferred_without_losing_the_commit() {
+        assert_eq!(
+            finish_committed_config_transaction(TargetCredentialCleanup::Complete, || {
+                Err("injected journal cleanup failure".to_owned())
+            }),
+            CommittedConfigCleanup::TransactionPending
+        );
+        assert_eq!(
+            finish_committed_config_transaction(TargetCredentialCleanup::Complete, || Ok(())),
+            CommittedConfigCleanup::Complete
+        );
+        assert_eq!(
+            finish_committed_config_transaction(TargetCredentialCleanup::Complete, || {
+                Err("offsite_backup_config_recovery_required".to_owned())
+            }),
+            CommittedConfigCleanup::DurabilityPending
+        );
+
+        let clear_called = std::cell::Cell::new(false);
+        assert_eq!(
+            finish_committed_config_transaction(TargetCredentialCleanup::Pending, || {
+                clear_called.set(true);
+                Ok(())
+            }),
+            CommittedConfigCleanup::CredentialPending
+        );
+        assert!(!clear_called.get());
+    }
+
+    #[test]
+    fn config_recovery_stops_mutation_at_each_durable_boundary() {
+        let prepared = std::cell::Cell::new(false);
+        let config_written = std::cell::Cell::new(false);
+        let cleanup_started = std::cell::Cell::new(false);
+        let outcome = complete_config_commit(
+            AtomicWriteStatus::RecoveryRequired,
+            || {
+                prepared.set(true);
+                Ok(())
+            },
+            || {
+                config_written.set(true);
+                Ok(AtomicWriteStatus::Committed)
+            },
+            || cleanup_started.set(true),
+        )
+        .unwrap();
+        assert_eq!(outcome, CommitOutcome::RecoveryRequired);
+        assert!(!prepared.get());
+        assert!(!config_written.get());
+        assert!(!cleanup_started.get());
+
+        let outcome = complete_config_commit(
+            AtomicWriteStatus::Committed,
+            || {
+                prepared.set(true);
+                Ok(())
+            },
+            || {
+                config_written.set(true);
+                Ok(AtomicWriteStatus::RecoveryRequired)
+            },
+            || cleanup_started.set(true),
+        )
+        .unwrap();
+        assert_eq!(outcome, CommitOutcome::RecoveryRequired);
+        assert!(prepared.get());
+        assert!(config_written.get());
+        assert!(!cleanup_started.get());
+    }
+
+    #[test]
+    fn config_and_transaction_writers_preserve_recovery_required() {
+        let directory = std::env::temp_dir().join(format!(
+            "linked-info-offsite-commit-aware-write-{}",
+            Uuid::new_v4()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let config_path = directory.join(CONFIG_FILE_NAME);
+        let transaction_path = directory.join(CONFIG_TRANSACTION_FILE_NAME);
+        let target = s3_target("linked-info/commit-aware");
+        let config = OffsiteBackupConfig {
+            targets: vec![target.clone()],
+            ..OffsiteBackupConfig::default()
+        };
+        let transaction = OffsiteBackupConfigTransaction {
+            format: CONFIG_TRANSACTION_FORMAT.to_owned(),
+            version: CONFIG_TRANSACTION_VERSION,
+            operation_id: Uuid::new_v4(),
+            phase: ConfigTransactionPhase::Prepared,
+            kind: ConfigTransactionKind::Create,
+            target_id: target.id,
+            previous_credential_id: None,
+            next_credential_id: Some(target.credential_id.clone()),
+            target: Some(target),
+        };
+        let injected_write = |path: &Path, contents: &[u8]| {
+            fs::write(path, contents).map_err(|error| error.to_string())?;
+            Ok(AtomicWriteStatus::RecoveryRequired)
+        };
+
+        assert_eq!(
+            write_config_unchecked_with(
+                &config_path,
+                &config,
+                &[3; CONFIG_AUTH_KEY_BYTES],
+                injected_write,
+            )
+            .unwrap(),
+            AtomicWriteStatus::RecoveryRequired
+        );
+        assert!(config_path.exists());
+        assert_eq!(
+            write_config_transaction_with(
+                &transaction_path,
+                &transaction,
+                &[3; CONFIG_AUTH_KEY_BYTES],
+                injected_write,
+            )
+            .unwrap(),
+            AtomicWriteStatus::RecoveryRequired
+        );
+        assert!(transaction_path.exists());
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn legacy_config_migration_resumes_with_the_authenticated_intent() {
+        let directory = std::env::temp_dir().join(format!(
+            "linked-info-offsite-config-migration-{}",
+            Uuid::new_v4()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join(CONFIG_FILE_NAME);
+        let config = OffsiteBackupConfig {
+            targets: vec![s3_target("linked-info/legacy")],
+            ..OffsiteBackupConfig::default()
+        };
+        let legacy = serde_json::to_vec_pretty(&config).unwrap();
+        fs::write(&path, &legacy).unwrap();
+        let fake_keyring_key = [7_u8; CONFIG_AUTH_KEY_BYTES];
+        let fake_keyring_activated = std::cell::Cell::new(false);
+
+        assert_eq!(
+            migrate_legacy_config_with_key(
+                &path,
+                &config,
+                &fake_keyring_key,
+                true,
+                || {
+                    fake_keyring_activated.set(true);
+                    Ok(())
+                },
+                |_, _, _| Ok(AtomicWriteStatus::RecoveryRequired),
+            ),
+            Err("offsite_backup_config_recovery_required".to_owned())
+        );
+        assert!(fake_keyring_activated.get());
+        assert_eq!(fs::read(&path).unwrap(), legacy);
+        let migration_path = config_migration_path(&path).unwrap();
+        let migration = read_config_migration(&migration_path, &fake_keyring_key)
+            .unwrap()
+            .unwrap();
+        assert_eq!(migration.phase, ConfigMigrationPhase::Prepared);
+        assert_eq!(migration.config, config);
+
+        migrate_legacy_config_with_key(
+            &path,
+            &config,
+            &fake_keyring_key,
+            false,
+            || Ok(()),
+            write_config_with_key,
+        )
+        .unwrap();
+        let authenticated = fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            parse_authenticated_config(&authenticated, &fake_keyring_key).unwrap(),
+            config
+        );
+        assert!(!migration_path.exists());
+
+        fs::write(&path, &legacy).unwrap();
+        assert_eq!(
+            migrate_legacy_config_with_key(
+                &path,
+                &config,
+                &fake_keyring_key,
+                false,
+                || Ok(()),
+                write_config_with_key,
+            ),
+            Err("offsite_backup_config_authentication_failed".to_owned())
+        );
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn missing_transaction_file_still_confirms_parent_directory_state() {
+        let directory = std::env::temp_dir().join(format!(
+            "linked-info-offsite-missing-transaction-{}",
+            Uuid::new_v4()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join(CONFIG_TRANSACTION_FILE_NAME);
+        let sync_called = std::cell::Cell::new(false);
+
+        remove_config_transaction_file_with(
+            &path,
+            |_| Err(io::Error::from(io::ErrorKind::NotFound)),
+            |_| {
+                sync_called.set(true);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(sync_called.get());
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn historical_prepared_transaction_bytes_and_hmac_remain_stable() {
+        let transaction = OffsiteBackupConfigTransaction {
+            format: CONFIG_TRANSACTION_FORMAT.to_owned(),
+            version: CONFIG_TRANSACTION_VERSION,
+            operation_id: Uuid::parse_str("00000000-0000-4000-8000-000000000002").unwrap(),
+            phase: ConfigTransactionPhase::Prepared,
+            kind: ConfigTransactionKind::Remove,
+            target_id: Uuid::parse_str("00000000-0000-4000-8000-000000000003").unwrap(),
+            previous_credential_id: Some("00000000-0000-4000-8000-000000000004".to_owned()),
+            next_credential_id: None,
+            target: None,
+        };
+        let historical = concat!(
+            "{\"format\":\"linked-info-offsite-backup-transaction\",",
+            "\"version\":1,",
+            "\"operationId\":\"00000000-0000-4000-8000-000000000002\",",
+            "\"kind\":\"remove\",",
+            "\"targetId\":\"00000000-0000-4000-8000-000000000003\",",
+            "\"previousCredentialId\":\"00000000-0000-4000-8000-000000000004\"}"
+        );
+
+        assert_eq!(serde_json::to_string(&transaction).unwrap(), historical);
+        assert_eq!(
+            config_transaction_authentication(&transaction, &[9; CONFIG_AUTH_KEY_BYTES]).unwrap(),
+            "axs+7UW05jP3SUVwdv2IkkR5it/JHvmZTWZkuuhUzDg"
+        );
+        let restored: OffsiteBackupConfigTransaction = serde_json::from_str(historical).unwrap();
+        assert_eq!(restored.phase, ConfigTransactionPhase::Prepared);
+        assert_eq!(
+            config_transaction_authentication(&restored, &[9; CONFIG_AUTH_KEY_BYTES]).unwrap(),
+            "axs+7UW05jP3SUVwdv2IkkR5it/JHvmZTWZkuuhUzDg"
+        );
+    }
+
+    #[test]
+    fn pending_transaction_blocks_mutation_until_journal_cleanup_succeeds() {
+        let directory = std::env::temp_dir().join(format!(
+            "linked-info-offsite-config-transaction-{}",
+            Uuid::new_v4()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join(CONFIG_FILE_NAME);
+        let transaction_path = config_transaction_path(&path).unwrap();
+        fs::write(&transaction_path, b"pending").unwrap();
+
+        assert_eq!(
+            ensure_no_pending_config_transaction(&path),
+            Err("offsite_backup_config_transaction_pending".to_owned())
+        );
+        assert_eq!(remove_config_transaction_file(&transaction_path), Ok(()));
+        assert_eq!(ensure_no_pending_config_transaction(&path), Ok(()));
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn committed_create_recovery_only_retries_transient_credential_failures() {
+        assert!(committed_create_transaction_can_clear(Ok(Zeroizing::new(
+            "stored credential".to_owned()
+        ))));
+        assert!(committed_create_transaction_can_clear(Err(
+            "offsite_backup_credential_missing".to_owned()
+        )));
+        assert!(!committed_create_transaction_can_clear(Err(
+            "offsite_backup_credential_read_failed".to_owned()
+        )));
+        assert!(!committed_create_transaction_can_clear(Err(
+            "offsite_backup_credential_unavailable".to_owned()
+        )));
+    }
+
     fn s3_target(prefix: &str) -> BackupTargetConfig {
         BackupTargetConfig {
             id: Uuid::new_v4(),
@@ -1832,6 +3727,104 @@ mod tests {
     }
 
     #[test]
+    fn target_operation_claim_blocks_the_same_target_until_drop() {
+        let state = OffsiteBackupState::default();
+        let target_id = Uuid::new_v4();
+        let claim = TargetOperationClaim::acquire(&state, target_id).unwrap();
+
+        assert_eq!(
+            TargetOperationClaim::acquire(&state, target_id)
+                .err()
+                .as_deref(),
+            Some("offsite_backup_target_busy")
+        );
+        assert!(TargetOperationClaim::acquire(&state, Uuid::new_v4()).is_ok());
+        drop(claim);
+        assert!(TargetOperationClaim::acquire(&state, target_id).is_ok());
+    }
+
+    #[test]
+    fn config_recovery_latch_blocks_later_mutations_for_the_process_lifetime() {
+        let state = OffsiteBackupState::default();
+        assert_eq!(
+            ensure_config_mutation_allowed(&state.config_recovery_latched),
+            Ok(())
+        );
+
+        state.config_recovery_latched.store(true, Ordering::Release);
+
+        assert_eq!(
+            ensure_config_mutation_allowed(&state.config_recovery_latched),
+            Err("offsite_backup_config_recovery_required".to_owned())
+        );
+        assert!(state.config_recovery_latched.load(Ordering::Acquire));
+
+        let migration_latch = AtomicBool::new(false);
+        assert_eq!(
+            latch_recovery_error::<()>(
+                &migration_latch,
+                Err("offsite_backup_config_recovery_required".to_owned()),
+            ),
+            Err("offsite_backup_config_recovery_required".to_owned())
+        );
+        assert!(migration_latch.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn automatic_recovery_before_upload_keeps_the_target_in_the_tagged_result() {
+        let target_id = Uuid::new_v4();
+        let serialized = serde_json::to_value(AutomaticBackupOutcome::RecoveryRequired {
+            target_id,
+            uploaded: false,
+        })
+        .unwrap();
+
+        assert_eq!(serialized["status"], "recoveryRequired");
+        assert_eq!(
+            serialized["targetId"],
+            serde_json::Value::String(target_id.to_string())
+        );
+        assert_eq!(serialized["uploaded"], false);
+    }
+
+    #[test]
+    fn recovery_is_latched_before_the_next_waiting_writer_enters() {
+        let config_lock = Arc::new(Mutex::new(()));
+        let recovery_latch = Arc::new(AtomicBool::new(false));
+        let writes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (latched_sender, latched_receiver) = std::sync::mpsc::channel();
+        let (release_sender, release_receiver) = std::sync::mpsc::channel();
+
+        let first_lock = Arc::clone(&config_lock);
+        let first_latch = Arc::clone(&recovery_latch);
+        let first = std::thread::spawn(move || {
+            let _guard = first_lock.lock().unwrap();
+            latch_atomic_recovery(&first_latch, AtomicWriteStatus::RecoveryRequired);
+            latched_sender.send(()).unwrap();
+            release_receiver.recv().unwrap();
+        });
+        latched_receiver.recv().unwrap();
+
+        let second_lock = Arc::clone(&config_lock);
+        let second_latch = Arc::clone(&recovery_latch);
+        let second_writes = Arc::clone(&writes);
+        let second = std::thread::spawn(move || {
+            let _guard = second_lock.lock().unwrap();
+            ensure_config_mutation_allowed(&second_latch)?;
+            second_writes.fetch_add(1, Ordering::SeqCst);
+            Ok::<_, String>(())
+        });
+        release_sender.send(()).unwrap();
+
+        first.join().unwrap();
+        assert_eq!(
+            second.join().unwrap(),
+            Err("offsite_backup_config_recovery_required".to_owned())
+        );
+        assert_eq!(writes.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
     fn authenticated_config_rejects_tampered_endpoints() {
         let key = [7_u8; CONFIG_AUTH_KEY_BYTES];
         let config = OffsiteBackupConfig {
@@ -1859,10 +3852,18 @@ mod tests {
     }
 
     #[test]
-    fn restore_drill_without_snapshot_id_requires_revalidation_before_retention_is_enabled() {
+    fn legacy_restore_drill_without_snapshot_id_requires_revalidation_before_retention_is_enabled()
+    {
         let mut target = s3_target("linked-info/v1");
         target.last_restore_test_at_ms = Some(42);
 
+        assert!(
+            validate_config(&OffsiteBackupConfig {
+                targets: vec![target.clone()],
+                ..OffsiteBackupConfig::default()
+            })
+            .is_ok()
+        );
         assert_eq!(ensure_retention_enable_allowed(&target, false), Ok(()));
         assert_eq!(
             ensure_retention_enable_allowed(&target, true),
@@ -1963,6 +3964,30 @@ mod tests {
         assert!(!target.retention_enabled);
         assert_eq!(target.last_retention_cleanup_at_ms, None);
         assert_eq!(target.last_retention_error, None);
+        assert_eq!(ensure_retention_enable_allowed(&target, false), Ok(()));
+        assert_eq!(
+            ensure_retention_enable_allowed(&target, true),
+            Err("offsite_backup_retention_requires_new_restore_drill".to_owned())
+        );
+    }
+
+    #[test]
+    fn deleting_the_restore_tested_snapshot_clears_proof_and_disables_retention() {
+        let proof_id = Uuid::new_v4();
+        let mut target = s3_target("linked-info/v1");
+        target.last_restore_test_at_ms = Some(12);
+        target.last_restore_test_snapshot_id = Some(proof_id);
+        target.retention_enabled = true;
+
+        record_snapshot_deleted(&mut target, Uuid::new_v4());
+        assert_eq!(target.last_restore_test_at_ms, Some(12));
+        assert_eq!(target.last_restore_test_snapshot_id, Some(proof_id));
+        assert!(target.retention_enabled);
+
+        record_snapshot_deleted(&mut target, proof_id);
+        assert_eq!(target.last_restore_test_at_ms, None);
+        assert_eq!(target.last_restore_test_snapshot_id, None);
+        assert!(!target.retention_enabled);
     }
 
     #[test]
@@ -2034,6 +4059,24 @@ mod tests {
     }
 
     #[test]
+    fn retention_requires_the_bound_proof_snapshot_in_the_complete_remote_listing() {
+        let now = 200 * 24 * 60 * 60 * 1_000;
+        let proof_id = Uuid::new_v4();
+        let mut target = s3_target("linked-info/v1");
+        target.last_restore_test_at_ms = Some(now - 1);
+        target.last_restore_test_snapshot_id = Some(proof_id);
+
+        assert_eq!(
+            ensure_retention_proof_present(&target, &[snapshot(Uuid::new_v4(), now)]),
+            Err("offsite_backup_retention_requires_new_restore_drill".to_owned())
+        );
+        assert_eq!(
+            ensure_retention_proof_present(&target, &[snapshot(proof_id, now - 1)]),
+            Ok(())
+        );
+    }
+
+    #[test]
     fn retention_uses_count_or_age_limit() {
         let day = 24 * 60 * 60 * 1_000;
         let now = 200 * day;
@@ -2057,5 +4100,113 @@ mod tests {
 
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].id, expired);
+    }
+
+    #[test]
+    fn authorized_config_mutation_rechecks_after_waiting_for_the_config_lock() {
+        let config_lock = Arc::new(Mutex::new(()));
+        let held_config_lock = config_lock.lock().unwrap();
+        let state = Arc::new(WorkspaceVaultState::default());
+        let permit = state.issue_test_access_permit();
+        let writes = Arc::new([
+            std::sync::atomic::AtomicUsize::new(0),
+            std::sync::atomic::AtomicUsize::new(0),
+            std::sync::atomic::AtomicUsize::new(0),
+        ]);
+        let (ready_sender, ready_receiver) = std::sync::mpsc::channel();
+        let worker_lock = Arc::clone(&config_lock);
+        let worker_state = Arc::clone(&state);
+        let recovery_latch = Arc::new(AtomicBool::new(false));
+        let worker_recovery_latch = Arc::clone(&recovery_latch);
+        let worker_writes = Arc::clone(&writes);
+        let worker = std::thread::spawn(move || {
+            ready_sender.send(()).unwrap();
+            let _guard = acquire_authorized_config_mutation(
+                &worker_lock,
+                &worker_recovery_latch,
+                &worker_state,
+                permit,
+            )?;
+            for counter in worker_writes.iter() {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            Ok::<_, String>(())
+        });
+
+        ready_receiver.recv().unwrap();
+        assert!(state.shutdown());
+        drop(held_config_lock);
+        assert_eq!(
+            worker.join().unwrap(),
+            Err("workspace_vault_session_expired".to_owned())
+        );
+        assert_eq!(
+            writes
+                .iter()
+                .map(|counter| counter.load(std::sync::atomic::Ordering::SeqCst))
+                .collect::<Vec<_>>(),
+            vec![0, 0, 0]
+        );
+
+        let current_permit = state.issue_test_access_permit();
+        let _guard = acquire_authorized_config_mutation(
+            &config_lock,
+            &recovery_latch,
+            &state,
+            current_permit,
+        )
+        .unwrap();
+        for counter in writes.iter() {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        assert_eq!(
+            writes
+                .iter()
+                .map(|counter| counter.load(std::sync::atomic::Ordering::SeqCst))
+                .collect::<Vec<_>>(),
+            vec![1, 1, 1]
+        );
+    }
+
+    #[test]
+    fn remote_delete_guard_requires_a_current_unlocked_workspace_permit() {
+        let state = WorkspaceVaultState::default();
+        let locked_generation = state
+            .access_generation()
+            .load(std::sync::atomic::Ordering::Acquire);
+        let locked_guard = WorkspaceBackupOperationGuard::new(
+            &state,
+            Some(WorkspaceAccessPermit::for_test(locked_generation)),
+        );
+        let missing_permit_guard = WorkspaceBackupOperationGuard::new(&state, None);
+
+        assert_eq!(locked_guard.check(), Err(BackupTargetError::Cancelled));
+        assert_eq!(
+            missing_permit_guard.check(),
+            Err(BackupTargetError::Cancelled)
+        );
+
+        let permit = state.issue_test_access_permit();
+        let guard = WorkspaceBackupOperationGuard::new(&state, Some(permit));
+        assert_eq!(guard.check(), Ok(()));
+        assert!(state.shutdown());
+        assert_eq!(guard.check(), Err(BackupTargetError::Cancelled));
+        assert_eq!(
+            target_error(BackupTargetError::Cancelled),
+            "workspace_vault_session_expired"
+        );
+    }
+
+    #[test]
+    fn remote_mutation_guard_stops_after_config_recovery_is_latched() {
+        let state = WorkspaceVaultState::default();
+        let permit = state.issue_test_access_permit();
+        let recovery_latch = AtomicBool::new(false);
+        let guard =
+            WorkspaceBackupOperationGuard::new_with_latch(&state, Some(permit), &recovery_latch);
+
+        assert_eq!(guard.check(), Ok(()));
+        recovery_latch.store(true, Ordering::Release);
+        assert_eq!(guard.check(), Err(BackupTargetError::Cancelled));
     }
 }

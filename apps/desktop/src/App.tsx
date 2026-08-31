@@ -9,6 +9,7 @@ import {
 import {
   AlertTriangle,
   ArchiveRestore,
+  Bookmark,
   BrainCircuit,
   Cloud,
   Clock3,
@@ -121,6 +122,7 @@ import {
 import { supportedLanguages, type SupportedLanguage } from "./locales";
 import {
   activeWorkspaceCanvas,
+  maximumCanvasBookmarkCount,
   emptyWorkspace,
   isNodeNameAvailable,
   isUnnamedNode,
@@ -134,6 +136,7 @@ import {
   updateNodeExtensionMetadata,
   updateWorkspaceCanvas,
   type CanvasViewport,
+  type CanvasBookmark,
   type ExtensionMetadataPayload,
   type InformationNode,
   type NodeLayout,
@@ -351,6 +354,38 @@ function errorReason(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function isOffsiteConfigRecoveryError(error: unknown): boolean {
+  return errorReason(error) === "offsite_backup_config_recovery_required";
+}
+
+const offsiteErrorTranslationKeys: Record<string, string> = {
+  offsite_backup_credential_cleanup_pending:
+    "offsiteBackup.errors.credentialCleanupPending",
+  offsite_backup_credential_missing: "offsiteBackup.errors.credentialMissing",
+  offsite_backup_config_transaction_pending:
+    "offsiteBackup.errors.transactionPending",
+  offsite_backup_config_recovery_required:
+    "offsiteBackup.errors.configRecoveryRequired",
+  offsite_backup_purge_unverified: "offsiteBackup.errors.purgeUnverified",
+  offsite_backup_remote_purge_succeeded_config_update_failed:
+    "offsiteBackup.errors.remotePurgeConfigUpdateFailed",
+  offsite_backup_snapshot_delete_unverified:
+    "offsiteBackup.errors.snapshotDeleteUnverified",
+  offsite_backup_target_changed: "offsiteBackup.errors.targetChanged",
+  offsite_backup_upload_succeeded_local_status_update_failed:
+    "offsiteBackup.errors.uploadSucceededLocalStatusUpdateFailed",
+  offsite_backup_verification_succeeded_local_status_update_failed:
+    "offsiteBackup.errors.verificationSucceededLocalStatusUpdateFailed",
+};
+
+function localizedOffsiteError(
+  reason: string,
+  translate: (key: string) => string,
+): string {
+  const key = offsiteErrorTranslationKeys[reason];
+  return key === undefined ? reason : translate(key);
+}
+
 function formatByteCount(bytes: number): string {
   if (bytes < 1024) {
     return `${bytes} B`;
@@ -541,6 +576,13 @@ function App({
   const [referenceFilterNodeIds, setReferenceFilterNodeIds] = useState<string[]>([]);
   const [canvasNameDraft, setCanvasNameDraft] = useState("");
   const [canvasNameEditing, setCanvasNameEditing] = useState(false);
+  const [canvasBookmarksOpen, setCanvasBookmarksOpen] = useState(false);
+  const [canvasBookmarkName, setCanvasBookmarkName] = useState("");
+  const [canvasBookmarkRenameDraft, setCanvasBookmarkRenameDraft] =
+    useState("");
+  const [canvasBookmarkEditingId, setCanvasBookmarkEditingId] = useState<
+    string | null
+  >(null);
   const [pendingWorkspaceDeletion, setPendingWorkspaceDeletion] =
     useState<PendingWorkspaceDeletion | null>(null);
   const [canvasPlacementClipboard, setCanvasPlacementClipboard] =
@@ -644,6 +686,12 @@ function App({
   const [offsitePage, setOffsitePage] = useState<OffsiteBackupPage | null>(null);
   const [offsiteBusy, setOffsiteBusy] = useState(false);
   const [offsiteMessage, setOffsiteMessage] = useState<string | null>(null);
+  const [offsiteConfigRecoveryRequired, setOffsiteConfigRecoveryRequired] =
+    useState(false);
+  const [offsiteConfigRecoveryMessage, setOffsiteConfigRecoveryMessage] =
+    useState<string | null>(null);
+  const offsiteConfigRecoveryRequiredRef = useRef(false);
+  const offsiteConfigRecoveryGenerationRef = useRef(0);
   const automaticOffsiteRunningRef = useRef(false);
   const automaticOffsiteRevisionRef = useRef(0);
   const automaticOffsiteMarkedRevisionRef = useRef(0);
@@ -805,6 +853,35 @@ function App({
     window.addEventListener("keydown", focusNodeSearch, true);
     return () => window.removeEventListener("keydown", focusNodeSearch, true);
   }, []);
+
+  useEffect(() => {
+    if (!canvasBookmarksOpen) {
+      return;
+    }
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setCanvasBookmarksOpen(false);
+        setCanvasBookmarkEditingId(null);
+        setCanvasBookmarkRenameDraft("");
+      }
+    };
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      if (
+        event.target instanceof Element &&
+        event.target.closest(".canvas-bookmark-control") === null
+      ) {
+        setCanvasBookmarksOpen(false);
+        setCanvasBookmarkEditingId(null);
+        setCanvasBookmarkRenameDraft("");
+      }
+    };
+    window.addEventListener("keydown", closeOnEscape, true);
+    window.addEventListener("pointerdown", closeOnOutsidePointer, true);
+    return () => {
+      window.removeEventListener("keydown", closeOnEscape, true);
+      window.removeEventListener("pointerdown", closeOnOutsidePointer, true);
+    };
+  }, [canvasBookmarksOpen]);
 
   function dismissAppNotice() {
     if (appNoticeTimerRef.current !== null) {
@@ -1307,8 +1384,14 @@ function App({
       })
       .catch((error) => {
         if (active) {
+          if (isOffsiteConfigRecoveryError(error)) {
+            void reconcileOffsiteConfiguration();
+            return;
+          }
           setOffsiteMessage(
-            t("offsiteBackup.errors.inspect", { reason: errorReason(error) }),
+            t("offsiteBackup.errors.inspect", {
+              reason: localizedOffsiteError(errorReason(error), t),
+            }),
           );
         }
       });
@@ -1320,6 +1403,7 @@ function App({
   useEffect(() => {
     if (
       !persistenceReady ||
+      offsiteConfigRecoveryRequired ||
       !workspaceSecurityStatus.encrypted ||
       !offsiteBackup.available
     ) {
@@ -1338,7 +1422,12 @@ function App({
       );
     }, 5 * 60 * 1_000);
     return () => window.clearInterval(timer);
-  }, [offsiteBackup, persistenceReady, workspaceSecurityStatus.encrypted]);
+  }, [
+    offsiteBackup,
+    offsiteConfigRecoveryRequired,
+    persistenceReady,
+    workspaceSecurityStatus.encrypted,
+  ]);
 
   useEffect(() => {
     if (
@@ -1358,8 +1447,14 @@ function App({
       })
       .catch((error) => {
         if (active) {
+          if (isOffsiteConfigRecoveryError(error)) {
+            void reconcileOffsiteConfiguration();
+            return;
+          }
           setOffsiteMessage(
-            t("offsiteBackup.errors.list", { reason: errorReason(error) }),
+            t("offsiteBackup.errors.list", {
+              reason: localizedOffsiteError(errorReason(error), t),
+            }),
           );
         }
       });
@@ -1479,6 +1574,16 @@ function App({
   const activeCanvas = useMemo(
     () => activeWorkspaceCanvas(workspace),
     [workspace],
+  );
+  const canvasBookmarks = useMemo(
+    () =>
+      [...(workspace.view.bookmarks ?? [])].sort((left, right) =>
+        left.name.localeCompare(right.name, activeLanguage, {
+          numeric: true,
+          sensitivity: "base",
+        }),
+      ),
+    [activeLanguage, workspace.view.bookmarks],
   );
   const activeCanvasNodeIds = useMemo(
     () => new Set(activeCanvas.layout.map((item) => item.nodeId)),
@@ -2005,14 +2110,30 @@ function App({
             sessionToken: pendingBackupTarget.sessionToken,
             authorization,
           };
-          const configured =
-            pendingBackupTarget.targetId === null
-              ? await offsiteBackup.configureS3Target(targetInput)
-              : await offsiteBackup.updateS3Target({
-                  ...targetInput,
-                  targetId: pendingBackupTarget.targetId,
-                  replaceCredentials: pendingBackupTarget.replaceCredentials,
-                });
+          let configured: OffsiteBackupTarget;
+          let configurationWarning: string | null = null;
+          if (pendingBackupTarget.targetId === null) {
+            const configureResult =
+              await offsiteBackup.configureS3Target(targetInput);
+            if (configureResult.status === "recoveryRequired") {
+              await reconcileOffsiteConfiguration();
+              return;
+            }
+            configured = configureResult.target;
+            configurationWarning = configureResult.warning;
+          } else {
+            const updateResult = await offsiteBackup.updateS3Target({
+              ...targetInput,
+              targetId: pendingBackupTarget.targetId,
+              replaceCredentials: pendingBackupTarget.replaceCredentials,
+            });
+            if (updateResult.status === "recoveryRequired") {
+              await reconcileOffsiteConfiguration();
+              return;
+            }
+            configured = updateResult.target;
+            configurationWarning = updateResult.warning;
+          }
           setOffsiteTargets((targets) =>
             pendingBackupTarget.targetId === null
               ? [...targets, configured]
@@ -2023,10 +2144,20 @@ function App({
           setSelectedOffsiteTargetId(configured.id);
           setOffsitePage(null);
           resetOffsiteTargetForm();
-          showAppNotice(
+          const configuredNotice =
             pendingBackupTarget.targetId === null
               ? t("offsiteBackup.targetConnected")
-              : t("offsiteBackup.targetUpdated"),
+              : configurationWarning ===
+                  "offsite_backup_credential_cleanup_pending"
+                ? t("offsiteBackup.targetUpdatedCleanupPending")
+                : t("offsiteBackup.targetUpdated");
+          showAppNotice(
+            configurationWarning ===
+              "offsite_backup_config_transaction_cleanup_pending"
+              ? t("offsiteBackup.targetTransactionCleanupPending", {
+                  result: configuredNotice,
+                })
+              : configuredNotice,
           );
         } else if (
           securityDialog === "offsiteSensitive" &&
@@ -2034,59 +2165,190 @@ function App({
         ) {
           const action = pendingOffsiteSensitiveAction;
           if (action.kind === "deleteSnapshot") {
-            await offsiteBackup.deleteSnapshot(
+            const result = await offsiteBackup.deleteSnapshot(
               action.targetId,
               action.snapshotId,
               authorization,
             );
-            setOffsitePage(await offsiteBackup.list(action.targetId));
-            setOffsiteTargets(await offsiteBackup.inspectTargets());
-            showAppNotice(t("offsiteBackup.snapshotDeleted"));
+            if (result.status === "recoveryRequired") {
+              await reconcileOffsiteConfiguration(
+                t("offsiteBackup.configRecoveryActions.snapshotDeleted"),
+              );
+              return;
+            }
+            setOffsitePage((page) =>
+              page === null
+                ? null
+                : {
+                    ...page,
+                    items: page.items.filter(
+                      (snapshot) => snapshot.id !== action.snapshotId,
+                    ),
+                  },
+            );
+            if (result.restoreDrillProofInvalidated) {
+              setOffsiteTargets((targets) =>
+                targets.map((target) =>
+                  target.id === action.targetId
+                    ? {
+                        ...target,
+                        lastRestoreTestAtMs: null,
+                        retentionEnabled: false,
+                      }
+                    : target,
+                ),
+              );
+            }
+            const [pageRefresh, targetsRefresh] = await Promise.allSettled([
+              offsiteBackup.list(action.targetId),
+              offsiteBackup.inspectTargets(),
+            ]);
+            if (pageRefresh.status === "fulfilled") {
+              setOffsitePage({
+                ...pageRefresh.value,
+                items: pageRefresh.value.items.filter(
+                  (snapshot) => snapshot.id !== action.snapshotId,
+                ),
+              });
+            }
+            if (targetsRefresh.status === "fulfilled") {
+              setOffsiteTargets(
+                result.restoreDrillProofInvalidated
+                  ? targetsRefresh.value.map((target) =>
+                      target.id === action.targetId
+                        ? {
+                            ...target,
+                            lastRestoreTestAtMs: null,
+                            retentionEnabled: false,
+                          }
+                        : target,
+                    )
+                  : targetsRefresh.value,
+              );
+            }
+            const refreshFailure =
+              pageRefresh.status === "rejected"
+                ? pageRefresh.reason
+                : targetsRefresh.status === "rejected"
+                  ? targetsRefresh.reason
+                  : null;
+            if (isOffsiteConfigRecoveryError(refreshFailure)) {
+              await reconcileOffsiteConfiguration(
+                t("offsiteBackup.configRecoveryActions.snapshotDeleted"),
+              );
+              return;
+            }
+            if (refreshFailure !== null) {
+              setOffsiteMessage(
+                t("offsiteBackup.errors.refreshAfterDelete", {
+                  reason: localizedOffsiteError(errorReason(refreshFailure), t),
+                }),
+              );
+            }
+            showAppNotice(
+              result.warning ===
+                "offsite_backup_snapshot_deleted_proof_update_failed"
+                ? t("offsiteBackup.snapshotDeletedProofUpdateFailed")
+                : result.restoreDrillProofInvalidated
+                  ? t("offsiteBackup.snapshotDeletedProofInvalidated")
+                  : t("offsiteBackup.snapshotDeleted"),
+            );
           } else if (action.kind === "removeTarget") {
-            await offsiteBackup.removeTarget(action.targetId, authorization);
-            const targets = await offsiteBackup.inspectTargets();
-            setOffsiteTargets(targets);
-            setSelectedOffsiteTargetId(targets[0]?.id ?? null);
+            const result = await offsiteBackup.removeTarget(
+              action.targetId,
+              authorization,
+            );
+            if (result.status === "recoveryRequired") {
+              await reconcileOffsiteConfiguration();
+              return;
+            }
+            const remainingTargets = offsiteTargets.filter(
+              (target) => target.id !== action.targetId,
+            );
+            setOffsiteTargets((targets) =>
+              targets.filter((target) => target.id !== action.targetId),
+            );
+            setSelectedOffsiteTargetId(remainingTargets[0]?.id ?? null);
             setOffsitePage(null);
             if (editingOffsiteTargetId === action.targetId) {
               cancelOffsiteTargetEdit();
             }
-            showAppNotice(t("offsiteBackup.targetRemoved"));
+            const removedNotice = t("offsiteBackup.targetRemoved");
+            showAppNotice(
+              result.warning ===
+                "offsite_backup_config_transaction_cleanup_pending"
+                ? t("offsiteBackup.targetTransactionCleanupPending", {
+                    result: removedNotice,
+                  })
+                : result.warning ===
+                    "offsite_backup_credential_cleanup_pending"
+                  ? t("offsiteBackup.targetRemovedCleanupPending")
+                  : removedNotice,
+            );
           } else if (action.kind === "destroyTarget") {
             const result = await offsiteBackup.deleteAllAndRemoveTarget(
               action.targetId,
               offsiteConfirmationName,
               authorization,
             );
+            if (result.status === "recoveryRequired") {
+              await reconcileOffsiteConfiguration(
+                t("offsiteBackup.configRecoveryActions.remoteVersionsDeleted", {
+                  count: result.deletedVersionCount,
+                }),
+              );
+              return;
+            }
             if (!result.targetRemoved) {
               setOffsiteMessage(
                 t("offsiteBackup.errors.destroyPartial", {
-                  count: result.deletedCount,
-                  reason: result.error ?? "offsite_backup_unknown_error",
+                  count: result.deletedVersionCount,
+                  reason: localizedOffsiteError(
+                    result.warning ?? "offsite_backup_unknown_error",
+                    t,
+                  ),
                 }),
               );
             } else {
-              const targets = await offsiteBackup.inspectTargets();
-              setOffsiteTargets(targets);
-              setSelectedOffsiteTargetId(targets[0]?.id ?? null);
+              const remainingTargets = offsiteTargets.filter(
+                (target) => target.id !== action.targetId,
+              );
+              setOffsiteTargets((targets) =>
+                targets.filter((target) => target.id !== action.targetId),
+              );
+              setSelectedOffsiteTargetId(remainingTargets[0]?.id ?? null);
               setOffsitePage(null);
               if (editingOffsiteTargetId === action.targetId) {
                 cancelOffsiteTargetEdit();
               }
+              const destroyedNotice = t("offsiteBackup.targetDestroyed", {
+                count: result.deletedVersionCount,
+              });
               showAppNotice(
-                t("offsiteBackup.targetDestroyed", {
-                  count: result.deletedCount,
-                }),
+                result.warning ===
+                  "offsite_backup_config_transaction_cleanup_pending"
+                  ? t("offsiteBackup.targetTransactionCleanupPending", {
+                      result: destroyedNotice,
+                    })
+                  : result.warning ===
+                      "offsite_backup_credential_cleanup_pending"
+                    ? t("offsiteBackup.targetDestroyedCleanupPending")
+                    : destroyedNotice,
               );
             }
           } else {
-            const updated = await offsiteBackup.updateRetentionSettings(
+            const updateResult = await offsiteBackup.updateRetentionSettings(
               action.targetId,
               action.enabled,
               action.maxSnapshots,
               action.maxAgeDays,
               authorization,
             );
+            if (updateResult.status === "recoveryRequired") {
+              await reconcileOffsiteConfiguration();
+              return;
+            }
+            const updated = updateResult.target;
             setOffsiteTargets((targets) =>
               targets.map((target) =>
                 target.id === updated.id ? updated : target,
@@ -2115,7 +2377,12 @@ function App({
       setSecurityPassword("");
       setSecurityPasswordConfirmation("");
     } catch (error) {
+      if (isOffsiteConfigRecoveryError(error)) {
+        await reconcileOffsiteConfiguration();
+        return;
+      }
       const reason = errorReason(error);
+      const displayReason = localizedOffsiteError(reason, t);
       setSecurityMessage(
         reason === "workspace_vault_password_blocked"
           ? t("security.passwordBlocked")
@@ -2123,7 +2390,7 @@ function App({
             ? t("security.passwordRateLimited")
             : reason === "offsite_backup_retention_requires_new_restore_drill"
               ? t("offsiteBackup.errors.retentionRequiresRestoreDrill")
-            : t("security.operationFailed", { reason }),
+            : t("security.operationFailed", { reason: displayReason }),
       );
       try {
         updateWorkspaceSecurityStatus(await workspaceSecurity.inspect());
@@ -3704,6 +3971,179 @@ function App({
     editBaselineRef.current = null;
   }
 
+  function nextCanvasBookmarkName(bookmarks: readonly CanvasBookmark[]): string {
+    const names = new Set(bookmarks.map((bookmark) => normalizeNodeName(bookmark.name)));
+    let index = bookmarks.length + 1;
+    let candidate = t("canvases.bookmarkGeneratedName", { index });
+    while (names.has(normalizeNodeName(candidate))) {
+      index += 1;
+      candidate = t("canvases.bookmarkGeneratedName", { index });
+    }
+    return candidate;
+  }
+
+  function saveCanvasBookmark() {
+    const current = workspaceRef.current;
+    const bookmarks = current.view.bookmarks ?? [];
+    if (bookmarks.length >= maximumCanvasBookmarkCount) {
+      showAppNotice(
+        t("canvases.bookmarkMaximumReached", {
+          count: maximumCanvasBookmarkCount,
+        }),
+      );
+      return;
+    }
+    const name = canvasBookmarkName.trim() || nextCanvasBookmarkName(bookmarks);
+    if (
+      [...name].length > 128 ||
+      bookmarks.some(
+        (bookmark) => normalizeNodeName(bookmark.name) === normalizeNodeName(name),
+      )
+    ) {
+      showAppNotice(t("canvases.bookmarkNameInvalid"));
+      return;
+    }
+    const canvas = activeWorkspaceCanvas(current);
+    const viewport = canvas.viewport ?? { x: 0, y: 0, zoom: 1 };
+    const bookmark: CanvasBookmark = {
+      id: crypto.randomUUID(),
+      name,
+      canvasId: canvas.id,
+      x: viewport.x,
+      y: viewport.y,
+      zoom: viewport.zoom,
+    };
+    updateWorkspace(
+      (workspace) => ({
+        ...workspace,
+        view: {
+          ...workspace.view,
+          bookmarks: [...(workspace.view.bookmarks ?? []), bookmark],
+        },
+      }),
+      { flushImmediately: true, recordHistory: true },
+    );
+    setCanvasBookmarkName("");
+    showAppNotice(t("canvases.bookmarkSaved", { name }));
+  }
+
+  function finishCanvasBookmarkRename() {
+    setCanvasBookmarkEditingId(null);
+    setCanvasBookmarkRenameDraft("");
+  }
+
+  function updateCanvasBookmark(bookmarkId: string) {
+    const current = workspaceRef.current;
+    const bookmarks = current.view.bookmarks ?? [];
+    const bookmark = bookmarks.find((item) => item.id === bookmarkId);
+    if (bookmark === undefined) {
+      return;
+    }
+    const canvas = activeWorkspaceCanvas(current);
+    const viewport = canvas.viewport ?? { x: 0, y: 0, zoom: 1 };
+    updateWorkspace(
+      (workspace) => ({
+        ...workspace,
+        view: {
+          ...workspace.view,
+          bookmarks: (workspace.view.bookmarks ?? []).map((item) =>
+            item.id === bookmarkId
+              ? {
+                  ...item,
+                  canvasId: canvas.id,
+                  x: viewport.x,
+                  y: viewport.y,
+                  zoom: viewport.zoom,
+                }
+              : item,
+          ),
+        },
+      }),
+      { flushImmediately: true, recordHistory: true },
+    );
+    showAppNotice(t("canvases.bookmarkUpdated", { name: bookmark.name }));
+  }
+
+  function renameCanvasBookmark(bookmarkId: string, rawName: string) {
+    const name = rawName.trim();
+    const bookmarks = workspaceRef.current.view.bookmarks ?? [];
+    if (
+      name.length === 0 ||
+      [...name].length > 128 ||
+      bookmarks.some(
+        (bookmark) =>
+          bookmark.id !== bookmarkId &&
+          normalizeNodeName(bookmark.name) === normalizeNodeName(name),
+      )
+    ) {
+      showAppNotice(t("canvases.bookmarkNameInvalid"));
+      return;
+    }
+    updateWorkspace(
+      (workspace) => ({
+        ...workspace,
+        view: {
+          ...workspace.view,
+          bookmarks: (workspace.view.bookmarks ?? []).map((bookmark) =>
+            bookmark.id === bookmarkId ? { ...bookmark, name } : bookmark,
+          ),
+        },
+      }),
+      { flushImmediately: true, recordHistory: true },
+    );
+  }
+
+  function deleteCanvasBookmark(bookmarkId: string) {
+    const bookmark = (workspaceRef.current.view.bookmarks ?? []).find(
+      (item) => item.id === bookmarkId,
+    );
+    if (bookmark === undefined) {
+      return;
+    }
+    updateWorkspace(
+      (workspace) => ({
+        ...workspace,
+        view: {
+          ...workspace.view,
+          bookmarks: (workspace.view.bookmarks ?? []).filter(
+            (item) => item.id !== bookmarkId,
+          ),
+        },
+      }),
+      { flushImmediately: true, recordHistory: true },
+    );
+    showAppNotice(t("canvases.bookmarkDeleted", { name: bookmark.name }));
+  }
+
+  function jumpToCanvasBookmark(bookmark: CanvasBookmark) {
+    const current = workspaceRef.current;
+    if (!current.view.canvases.some((canvas) => canvas.id === bookmark.canvasId)) {
+      showAppNotice(t("canvases.bookmarkTargetMissing"));
+      return;
+    }
+    updateWorkspace(
+      (workspace) => ({
+        ...workspace,
+        view: updateWorkspaceCanvas(
+          {
+            ...workspace.view,
+            activeCanvasId: bookmark.canvasId,
+          },
+          bookmark.canvasId,
+          (canvas) => ({
+            ...canvas,
+            viewport: { x: bookmark.x, y: bookmark.y, zoom: bookmark.zoom },
+          }),
+        ),
+      }),
+      { flushImmediately: true, affectsOffsiteBackup: false },
+    );
+    setCanvasBookmarksOpen(false);
+    finishCanvasBookmarkRename();
+    setEditingNodeId(null);
+    editBaselineRef.current = null;
+  }
+
   function requestCanvasFocus(nodeIds: readonly string[]) {
     const uniqueNodeIds = [...new Set(nodeIds)];
     if (uniqueNodeIds.length === 0) {
@@ -4002,6 +4442,9 @@ function App({
           ...workspace.view,
           activeCanvasId: nextActive.id,
           canvases: workspace.view.canvases.filter((canvas) => canvas.id !== canvasId),
+          bookmarks: (workspace.view.bookmarks ?? []).filter(
+            (bookmark) => bookmark.canvasId !== canvasId,
+          ),
         },
       }),
       { flushImmediately: true, recordHistory: true },
@@ -4294,6 +4737,62 @@ function App({
     setOffsiteMessage(null);
   }
 
+  async function reconcileOffsiteConfiguration(
+    completedAction: string | null = null,
+  ) {
+    if (offsiteConfigRecoveryRequiredRef.current) {
+      return;
+    }
+    offsiteConfigRecoveryRequiredRef.current = true;
+    offsiteConfigRecoveryGenerationRef.current += 1;
+    setOffsiteConfigRecoveryRequired(true);
+    setOffsiteConfigRecoveryMessage(
+      t("offsiteBackup.configRecoveryRestartRequired"),
+    );
+    setOffsiteAccessKeyId("");
+    setOffsiteSecretAccessKey("");
+    setOffsiteSessionToken("");
+    setPendingBackupTarget(null);
+    setPendingOffsiteSensitiveAction(null);
+    setOffsiteConfirmationName("");
+    setSecurityDialog(null);
+    setSecurityCurrentPassword("");
+    setSecurityPassword("");
+    setSecurityPasswordConfirmation("");
+    setOffsiteRestoreDrill(null);
+    setOffsiteRestoreDrillPassword("");
+    setOffsiteRestoreDrillError(null);
+    setOffsiteRestoreDrillSucceeded(false);
+    resetOffsiteTargetForm();
+    setOffsitePage(null);
+    try {
+      const targets = await offsiteBackup.inspectTargets();
+      setOffsiteTargets(targets);
+      setSelectedOffsiteTargetId((current) =>
+        current !== null && targets.some((target) => target.id === current)
+          ? current
+          : (targets[0]?.id ?? null),
+      );
+      setOffsiteConfigRecoveryMessage(
+        completedAction === null
+          ? t("offsiteBackup.configRecoveryRestartRequired")
+          : t("offsiteBackup.configRecoveryRestartRequiredAfterAction", {
+              action: completedAction,
+            }),
+      );
+    } catch (error) {
+      const reason = localizedOffsiteError(errorReason(error), t);
+      setOffsiteConfigRecoveryMessage(
+        completedAction === null
+          ? t("offsiteBackup.configRecoveryReloadFailed", { reason })
+          : t("offsiteBackup.configRecoveryReloadFailedAfterAction", {
+              action: completedAction,
+              reason,
+            }),
+      );
+    }
+  }
+
   function renderOffsiteConnectionFields() {
     return (
       <>
@@ -4302,7 +4801,7 @@ function App({
           <span>{t("offsiteBackup.s3Provider")}</span>
           <select
             data-testid="offsite-s3-provider"
-            disabled={offsiteBusy}
+            disabled={offsiteBusy || offsiteConfigRecoveryRequired}
             onChange={(event) =>
               changeS3Provider(event.target.value as S3ProviderTemplate)
             }
@@ -4331,7 +4830,7 @@ function App({
           <input
             autoComplete="off"
             data-testid="offsite-s3-region"
-            disabled={offsiteBusy}
+            disabled={offsiteBusy || offsiteConfigRecoveryRequired}
             onChange={(event) => {
               setOffsiteRegion(event.target.value);
               setOffsiteRecoveryPage(null);
@@ -4348,7 +4847,7 @@ function App({
           <span>{t("offsiteBackup.s3Endpoint")}</span>
           <input
             data-testid="offsite-s3-endpoint"
-            disabled={offsiteBusy}
+            disabled={offsiteBusy || offsiteConfigRecoveryRequired}
             onChange={(event) => {
               setOffsiteEndpoint(event.target.value);
               setOffsiteRecoveryPage(null);
@@ -4365,7 +4864,8 @@ function App({
           <span>{t("offsiteBackup.s3Bucket")}</span>
           <input
             autoComplete="off"
-            disabled={offsiteBusy}
+            data-testid="offsite-s3-bucket"
+            disabled={offsiteBusy || offsiteConfigRecoveryRequired}
             onChange={(event) => {
               setOffsiteBucket(event.target.value);
               setOffsiteRecoveryPage(null);
@@ -4377,7 +4877,7 @@ function App({
           <span>{t("offsiteBackup.s3Prefix")}</span>
           <input
             autoComplete="off"
-            disabled={offsiteBusy}
+            disabled={offsiteBusy || offsiteConfigRecoveryRequired}
             onChange={(event) => {
               setOffsitePrefix(event.target.value);
               setOffsiteRecoveryPage(null);
@@ -4390,7 +4890,7 @@ function App({
             <input
               checked={replaceOffsiteCredentials}
               data-testid="offsite-replace-credentials"
-              disabled={offsiteBusy}
+              disabled={offsiteBusy || offsiteConfigRecoveryRequired}
               onChange={(event) => {
                 setReplaceOffsiteCredentials(event.target.checked);
                 setOffsiteAccessKeyId("");
@@ -4408,7 +4908,8 @@ function App({
               <span>{t("offsiteBackup.s3AccessKeyId")}</span>
               <input
                 autoComplete="off"
-                disabled={offsiteBusy}
+                data-testid="offsite-s3-access-key-id"
+                disabled={offsiteBusy || offsiteConfigRecoveryRequired}
                 onChange={(event) => {
                   setOffsiteAccessKeyId(event.target.value);
                   setOffsiteRecoveryPage(null);
@@ -4421,7 +4922,8 @@ function App({
               <span>{t("offsiteBackup.s3SecretAccessKey")}</span>
               <input
                 autoComplete="off"
-                disabled={offsiteBusy}
+                data-testid="offsite-s3-secret-access-key"
+                disabled={offsiteBusy || offsiteConfigRecoveryRequired}
                 onChange={(event) => {
                   setOffsiteSecretAccessKey(event.target.value);
                   setOffsiteRecoveryPage(null);
@@ -4434,7 +4936,8 @@ function App({
               <span>{t("offsiteBackup.s3SessionToken")}</span>
               <input
                 autoComplete="off"
-                disabled={offsiteBusy}
+                data-testid="offsite-s3-session-token"
+                disabled={offsiteBusy || offsiteConfigRecoveryRequired}
                 onChange={(event) => {
                   setOffsiteSessionToken(event.target.value);
                   setOffsiteRecoveryPage(null);
@@ -4454,6 +4957,10 @@ function App({
   }
 
   function requestOffsiteTargetConfiguration() {
+    if (offsiteConfigRecoveryRequiredRef.current) {
+      setOffsiteMessage(t("offsiteBackup.configRecoveryRestartRequired"));
+      return;
+    }
     const replacingCredentials =
       editingOffsiteTargetId === null || replaceOffsiteCredentials;
     const connection = currentTemporaryBackupConnection(replacingCredentials);
@@ -4479,7 +4986,11 @@ function App({
   }
 
   function requestOffsiteSensitiveAction(action: PendingOffsiteSensitiveAction) {
-    if (offsiteBusy || securityBusy) {
+    if (
+      offsiteBusy ||
+      securityBusy ||
+      offsiteConfigRecoveryRequiredRef.current
+    ) {
       return;
     }
     setOffsiteMessage(null);
@@ -4509,7 +5020,9 @@ function App({
       offsiteRecoveryConnectionRef.current = null;
       setOffsiteRecoveryPage(null);
       setOffsiteMessage(
-        t("offsiteBackup.errors.list", { reason: errorReason(error) }),
+        t("offsiteBackup.errors.list", {
+          reason: localizedOffsiteError(errorReason(error), t),
+        }),
       );
     } finally {
       setOffsiteBusy(false);
@@ -4543,7 +5056,9 @@ function App({
       setEncryptedImportError(null);
     } catch (error) {
       setOffsiteMessage(
-        t("offsiteBackup.errors.download", { reason: errorReason(error) }),
+        t("offsiteBackup.errors.download", {
+          reason: localizedOffsiteError(errorReason(error), t),
+        }),
       );
     } finally {
       setOffsiteBusy(false);
@@ -4564,8 +5079,14 @@ function App({
       setOffsiteTargets(targets);
       setOffsitePage(page);
     } catch (error) {
+      if (isOffsiteConfigRecoveryError(error)) {
+        await reconcileOffsiteConfiguration();
+        return;
+      }
       setOffsiteMessage(
-        t("offsiteBackup.errors.list", { reason: errorReason(error) }),
+        t("offsiteBackup.errors.list", {
+          reason: localizedOffsiteError(errorReason(error), t),
+        }),
       );
     } finally {
       setOffsiteBusy(false);
@@ -4578,35 +5099,68 @@ function App({
   ) {
     if (
       automaticOffsiteRunningRef.current ||
+      offsiteConfigRecoveryRequiredRef.current ||
       !workspaceSecurityStatus.encrypted ||
       !offsiteBackup.available
     ) {
       return;
     }
+    const recoveryGeneration = offsiteConfigRecoveryGenerationRef.current;
+    const recoveryStarted = () =>
+      offsiteConfigRecoveryRequiredRef.current ||
+      offsiteConfigRecoveryGenerationRef.current !== recoveryGeneration;
     automaticOffsiteRunningRef.current = true;
     let pendingMarkCompleted = !markPending;
     try {
       if (markPending) {
-        const targets = await offsiteBackup.markAutomaticPending();
+        const markResult = await offsiteBackup.markAutomaticPending();
+        if (recoveryStarted()) {
+          return;
+        }
+        if (markResult.status === "recoveryRequired") {
+          await reconcileOffsiteConfiguration();
+          return;
+        }
         pendingMarkCompleted = true;
         automaticOffsiteMarkedRevisionRef.current = Math.max(
           automaticOffsiteMarkedRevisionRef.current,
           markedRevision,
         );
-        setOffsiteTargets(targets);
+        setOffsiteTargets(markResult.targets);
       }
       const outcomes = await offsiteBackup.runDueAutomatic(
         serializeWorkspaceExport(workspaceRef.current),
       );
-      if (outcomes.length > 0) {
-        setOffsiteTargets(await offsiteBackup.inspectTargets());
+      if (recoveryStarted()) {
+        return;
       }
-    } catch {
+      const recoveryOutcome = outcomes.find(
+        (outcome) => outcome.status === "recoveryRequired",
+      );
+      if (recoveryOutcome !== undefined) {
+        await reconcileOffsiteConfiguration(
+          recoveryOutcome.uploaded
+            ? t("offsiteBackup.configRecoveryActions.snapshotUploaded")
+            : null,
+        );
+        return;
+      }
+      if (outcomes.length > 0) {
+        const targets = await offsiteBackup.inspectTargets();
+        if (!recoveryStarted()) {
+          setOffsiteTargets(targets);
+        }
+      }
+    } catch (error) {
+      if (isOffsiteConfigRecoveryError(error)) {
+        await reconcileOffsiteConfiguration();
+      }
       // Automatic backup failures stay isolated from local persistence. Rust keeps
       // the target pending and records a bounded provider error for Settings.
     } finally {
       automaticOffsiteRunningRef.current = false;
       if (
+        !recoveryStarted() &&
         pendingMarkCompleted &&
         automaticOffsiteRevisionRef.current >
         automaticOffsiteMarkedRevisionRef.current
@@ -4624,17 +5178,22 @@ function App({
     enabled: boolean,
     intervalHours: number,
   ) {
-    if (offsiteBusy) {
+    if (offsiteBusy || offsiteConfigRecoveryRequiredRef.current) {
       return;
     }
     setOffsiteBusy(true);
     setOffsiteMessage(null);
     try {
-      const updated = await offsiteBackup.updateAutomaticSettings(
+      const updateResult = await offsiteBackup.updateAutomaticSettings(
         targetId,
         enabled,
         intervalHours,
       );
+      if (updateResult.status === "recoveryRequired") {
+        await reconcileOffsiteConfiguration();
+        return;
+      }
+      const updated = updateResult.target;
       setOffsiteTargets((targets) =>
         targets.map((target) => (target.id === updated.id ? updated : target)),
       );
@@ -4647,9 +5206,13 @@ function App({
         void requestAutomaticOffsiteBackup(false);
       }
     } catch (error) {
+      if (isOffsiteConfigRecoveryError(error)) {
+        await reconcileOffsiteConfiguration();
+        return;
+      }
       setOffsiteMessage(
         t("offsiteBackup.errors.automaticSettings", {
-          reason: errorReason(error),
+          reason: localizedOffsiteError(errorReason(error), t),
         }),
       );
     } finally {
@@ -4658,7 +5221,11 @@ function App({
   }
 
   async function createOffsiteSnapshot() {
-    if (selectedOffsiteTargetId === null || offsiteBusy) {
+    if (
+      selectedOffsiteTargetId === null ||
+      offsiteBusy ||
+      offsiteConfigRecoveryRequiredRef.current
+    ) {
       return;
     }
     setOffsiteBusy(true);
@@ -4666,17 +5233,37 @@ function App({
     try {
       await persistence.save(workspaceRef.current);
       const plaintext = serializeWorkspaceExport(workspaceRef.current);
-      await offsiteBackup.create(selectedOffsiteTargetId, plaintext);
+      const uploadResult = await offsiteBackup.create(
+        selectedOffsiteTargetId,
+        plaintext,
+      );
+      if (uploadResult.status === "recoveryRequired") {
+        await reconcileOffsiteConfiguration(
+          t("offsiteBackup.configRecoveryActions.snapshotUploaded"),
+        );
+        return;
+      }
       const [targets, page] = await Promise.all([
         offsiteBackup.inspectTargets(),
         offsiteBackup.list(selectedOffsiteTargetId),
       ]);
       setOffsiteTargets(targets);
       setOffsitePage(page);
-      showAppNotice(t("offsiteBackup.uploadSuccess"));
+      showAppNotice(
+        uploadResult.warning ===
+          "offsite_backup_upload_succeeded_local_status_update_failed"
+          ? t("offsiteBackup.uploadSucceededStatusUpdateFailed")
+          : t("offsiteBackup.uploadSuccess"),
+      );
     } catch (error) {
+      if (isOffsiteConfigRecoveryError(error)) {
+        await reconcileOffsiteConfiguration();
+        return;
+      }
       setOffsiteMessage(
-        t("offsiteBackup.errors.upload", { reason: errorReason(error) }),
+        t("offsiteBackup.errors.upload", {
+          reason: localizedOffsiteError(errorReason(error), t),
+        }),
       );
     } finally {
       setOffsiteBusy(false);
@@ -4684,25 +5271,50 @@ function App({
   }
 
   async function verifyOffsiteSnapshot(snapshotId: string) {
-    if (selectedOffsiteTargetId === null || offsiteBusy) {
+    if (
+      selectedOffsiteTargetId === null ||
+      offsiteBusy ||
+      offsiteConfigRecoveryRequiredRef.current
+    ) {
       return;
     }
     setOffsiteBusy(true);
     setOffsiteMessage(null);
     try {
-      const verification = await offsiteBackup.verify(
+      const verifyResult = await offsiteBackup.verify(
         selectedOffsiteTargetId,
         snapshotId,
       );
+      if (verifyResult.status === "recoveryRequired") {
+        await reconcileOffsiteConfiguration(
+          t("offsiteBackup.configRecoveryActions.snapshotVerified"),
+        );
+        return;
+      }
       setOffsiteTargets(await offsiteBackup.inspectTargets());
       showAppNotice(
-        t("offsiteBackup.verifySuccess", {
-          size: formatByteCount(verification.downloadedBytes),
-        }),
+        verifyResult.warning ===
+          "offsite_backup_verification_succeeded_local_status_update_failed"
+          ? t("offsiteBackup.verifySucceededStatusUpdateFailed", {
+              size: formatByteCount(
+                verifyResult.verification.downloadedBytes,
+              ),
+            })
+          : t("offsiteBackup.verifySuccess", {
+              size: formatByteCount(
+                verifyResult.verification.downloadedBytes,
+              ),
+            }),
       );
     } catch (error) {
+      if (isOffsiteConfigRecoveryError(error)) {
+        await reconcileOffsiteConfiguration();
+        return;
+      }
       setOffsiteMessage(
-        t("offsiteBackup.errors.verify", { reason: errorReason(error) }),
+        t("offsiteBackup.errors.verify", {
+          reason: localizedOffsiteError(errorReason(error), t),
+        }),
       );
     } finally {
       setOffsiteBusy(false);
@@ -4710,7 +5322,11 @@ function App({
   }
 
   function openOffsiteRestoreDrill(snapshotId: string, createdAtMs: number) {
-    if (selectedOffsiteTargetId === null || offsiteBusy) {
+    if (
+      selectedOffsiteTargetId === null ||
+      offsiteBusy ||
+      offsiteConfigRecoveryRequiredRef.current
+    ) {
       return;
     }
     setOffsiteRestoreDrill({
@@ -4737,6 +5353,7 @@ function App({
     if (
       offsiteRestoreDrill === null ||
       offsiteBusy ||
+      offsiteConfigRecoveryRequiredRef.current ||
       offsiteRestoreDrillPassword.length === 0
     ) {
       return;
@@ -4744,11 +5361,18 @@ function App({
     setOffsiteBusy(true);
     setOffsiteRestoreDrillError(null);
     try {
-      const updated = await offsiteBackup.testRestore(
+      const restoreResult = await offsiteBackup.testRestore(
         offsiteRestoreDrill.targetId,
         offsiteRestoreDrill.snapshotId,
         offsiteRestoreDrillPassword,
       );
+      if (restoreResult.status === "recoveryRequired") {
+        await reconcileOffsiteConfiguration(
+          t("offsiteBackup.configRecoveryActions.restoreDrillCompleted"),
+        );
+        return;
+      }
+      const updated = restoreResult.target;
       setOffsiteTargets((targets) =>
         targets.map((target) => (target.id === updated.id ? updated : target)),
       );
@@ -4756,6 +5380,10 @@ function App({
       setOffsiteRestoreDrillSucceeded(true);
     } catch (error) {
       const reason = errorReason(error);
+      if (reason === "offsite_backup_config_recovery_required") {
+        await reconcileOffsiteConfiguration();
+        return;
+      }
       setOffsiteRestoreDrillError(
         reason === "workspace_vault_invalid_password"
           ? t("security.invalidPassword")
@@ -4767,7 +5395,9 @@ function App({
                 ? t("offsiteBackup.errors.snapshotKeyMismatch")
                 : reason === "workspace_restore_snapshot_wrap_inconsistent"
                   ? t("offsiteBackup.errors.snapshotWrapInconsistent")
-          : t("offsiteBackup.errors.restoreDrill", { reason }),
+          : t("offsiteBackup.errors.restoreDrill", {
+              reason: localizedOffsiteError(reason, t),
+            }),
       );
     } finally {
       setOffsiteBusy(false);
@@ -4795,8 +5425,14 @@ function App({
       setEncryptedImportPassword("");
       setEncryptedImportError(null);
     } catch (error) {
+      if (isOffsiteConfigRecoveryError(error)) {
+        await reconcileOffsiteConfiguration();
+        return;
+      }
       setOffsiteMessage(
-        t("offsiteBackup.errors.download", { reason: errorReason(error) }),
+        t("offsiteBackup.errors.download", {
+          reason: localizedOffsiteError(errorReason(error), t),
+        }),
       );
     } finally {
       setOffsiteBusy(false);
@@ -5394,6 +6030,170 @@ function App({
                   >
                     <Trash2 aria-hidden="true" size={15} />
                   </button>
+                </div>
+              )}
+              {activeView === "canvas" && (
+                <div className="canvas-bookmark-control">
+                  <button
+                    aria-expanded={canvasBookmarksOpen}
+                    aria-label={t("canvases.bookmarks")}
+                    className="secondary-button canvas-bookmark-toggle"
+                    data-testid="canvas-bookmarks-toggle"
+                    onClick={() => {
+                      if (canvasBookmarksOpen) {
+                        finishCanvasBookmarkRename();
+                      }
+                      setCanvasBookmarksOpen((current) => !current);
+                    }}
+                    title={t("canvases.bookmarks")}
+                    type="button"
+                  >
+                    <Bookmark aria-hidden="true" size={15} />
+                    <span>{canvasBookmarks.length}</span>
+                  </button>
+                  {canvasBookmarksOpen && (
+                    <div
+                      aria-label={t("canvases.bookmarks")}
+                      className="canvas-bookmark-popover"
+                      data-testid="canvas-bookmarks-popover"
+                      role="dialog"
+                    >
+                      <div className="canvas-bookmark-create">
+                        <input
+                          aria-label={t("canvases.bookmarkName")}
+                          data-testid="canvas-bookmark-name"
+                          maxLength={128}
+                          onChange={(event) => setCanvasBookmarkName(event.target.value)}
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter") {
+                              event.preventDefault();
+                              saveCanvasBookmark();
+                            }
+                          }}
+                          placeholder={t("canvases.bookmarkNamePlaceholder")}
+                          value={canvasBookmarkName}
+                        />
+                        <button
+                          aria-label={t("canvases.saveBookmark")}
+                          className="icon-button"
+                          data-testid="canvas-bookmark-save"
+                          onClick={saveCanvasBookmark}
+                          title={t("canvases.saveBookmark")}
+                          type="button"
+                        >
+                          <Bookmark aria-hidden="true" size={15} />
+                        </button>
+                      </div>
+                      {canvasBookmarks.length === 0 ? (
+                        <p className="canvas-bookmark-empty">
+                          {t("canvases.noBookmarks")}
+                        </p>
+                      ) : (
+                        <div className="canvas-bookmark-list">
+                          {canvasBookmarks.map((bookmark) => {
+                            const canvas = workspace.view.canvases.find(
+                              (item) => item.id === bookmark.canvasId,
+                            );
+                            const editing = canvasBookmarkEditingId === bookmark.id;
+                            return (
+                              <div
+                                className="canvas-bookmark-item"
+                                data-testid="canvas-bookmark-item"
+                                key={bookmark.id}
+                              >
+                                {editing ? (
+                                  <input
+                                    autoFocus
+                                    aria-label={t("canvases.bookmarkName")}
+                                    className="canvas-bookmark-rename-input"
+                                    onChange={(event) =>
+                                      setCanvasBookmarkRenameDraft(
+                                        event.target.value,
+                                      )
+                                    }
+                                    onBlur={finishCanvasBookmarkRename}
+                                    onKeyDown={(event) => {
+                                      if (event.key === "Enter") {
+                                        event.preventDefault();
+                                        renameCanvasBookmark(
+                                          bookmark.id,
+                                          canvasBookmarkRenameDraft,
+                                        );
+                                        finishCanvasBookmarkRename();
+                                      } else if (event.key === "Escape") {
+                                        finishCanvasBookmarkRename();
+                                      }
+                                    }}
+                                    value={canvasBookmarkRenameDraft}
+                                  />
+                                ) : (
+                                  <button
+                                    className="canvas-bookmark-jump"
+                                    data-testid="canvas-bookmark-jump"
+                                    onClick={() => jumpToCanvasBookmark(bookmark)}
+                                    type="button"
+                                  >
+                                    <strong>{bookmark.name}</strong>
+                                    <span>
+                                      {canvas?.name ??
+                                        t("canvases.bookmarkTargetMissing")}
+                                    </span>
+                                  </button>
+                                )}
+                                <div className="canvas-bookmark-actions">
+                                  <button
+                                    aria-label={t("canvases.renameBookmark", {
+                                      name: bookmark.name,
+                                    })}
+                                    className="icon-button"
+                                    data-testid="canvas-bookmark-rename"
+                                    onClick={() => {
+                                      setCanvasBookmarkRenameDraft(bookmark.name);
+                                      setCanvasBookmarkEditingId(bookmark.id);
+                                    }}
+                                    title={t("canvases.renameBookmark", {
+                                      name: bookmark.name,
+                                    })}
+                                    type="button"
+                                  >
+                                    <Pencil aria-hidden="true" size={13} />
+                                  </button>
+                                  <button
+                                    aria-label={t("canvases.updateBookmark", {
+                                      name: bookmark.name,
+                                    })}
+                                    className="icon-button"
+                                    data-testid="canvas-bookmark-update"
+                                    onClick={() => updateCanvasBookmark(bookmark.id)}
+                                    title={t("canvases.updateBookmark", {
+                                      name: bookmark.name,
+                                    })}
+                                    type="button"
+                                  >
+                                    <RefreshCw aria-hidden="true" size={13} />
+                                  </button>
+                                  <button
+                                    aria-label={t("canvases.deleteBookmark", {
+                                      name: bookmark.name,
+                                    })}
+                                    className="icon-button danger-icon-button"
+                                    data-testid="canvas-bookmark-delete"
+                                    onClick={() => deleteCanvasBookmark(bookmark.id)}
+                                    title={t("canvases.deleteBookmark", {
+                                      name: bookmark.name,
+                                    })}
+                                    type="button"
+                                  >
+                                    <Trash2 aria-hidden="true" size={13} />
+                                  </button>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
               )}
               <div
@@ -6862,7 +7662,9 @@ function App({
                                 <label className="switch-setting">
                                   <input
                                     checked={selectedOffsiteTarget.automaticEnabled}
-                                    disabled={offsiteBusy}
+                                    disabled={
+                                      offsiteBusy || offsiteConfigRecoveryRequired
+                                    }
                                     onChange={(event) =>
                                       void updateAutomaticOffsiteSettings(
                                         selectedOffsiteTarget.id,
@@ -6879,6 +7681,7 @@ function App({
                                   <select
                                     disabled={
                                       offsiteBusy ||
+                                      offsiteConfigRecoveryRequired ||
                                       !selectedOffsiteTarget.automaticEnabled
                                     }
                                     onChange={(event) =>
@@ -6910,7 +7713,10 @@ function App({
                               {selectedOffsiteTarget.lastAutomaticError !== null && (
                                 <small className="offsite-automatic-error" role="alert">
                                   {t("offsiteBackup.automaticError", {
-                                    reason: selectedOffsiteTarget.lastAutomaticError,
+                                    reason: localizedOffsiteError(
+                                      selectedOffsiteTarget.lastAutomaticError,
+                                      t,
+                                    ),
                                   })}
                                 </small>
                               )}
@@ -6918,7 +7724,9 @@ function App({
                                 <label className="switch-setting">
                                   <input
                                     checked={selectedOffsiteTarget.retentionEnabled}
-                                    disabled={offsiteBusy}
+                                    disabled={
+                                      offsiteBusy || offsiteConfigRecoveryRequired
+                                    }
                                     onChange={(event) =>
                                       requestOffsiteSensitiveAction({
                                         kind: "retention",
@@ -6937,7 +7745,9 @@ function App({
                                 <label>
                                   <span>{t("offsiteBackup.retentionCount")}</span>
                                   <select
-                                    disabled={offsiteBusy}
+                                    disabled={
+                                      offsiteBusy || offsiteConfigRecoveryRequired
+                                    }
                                     onChange={(event) =>
                                       requestOffsiteSensitiveAction({
                                         kind: "retention",
@@ -6960,7 +7770,9 @@ function App({
                                 <label>
                                   <span>{t("offsiteBackup.retentionAge")}</span>
                                   <select
-                                    disabled={offsiteBusy}
+                                    disabled={
+                                      offsiteBusy || offsiteConfigRecoveryRequired
+                                    }
                                     onChange={(event) =>
                                       requestOffsiteSensitiveAction({
                                         kind: "retention",
@@ -7022,7 +7834,10 @@ function App({
                               {selectedOffsiteTarget.lastRetentionError !== null && (
                                 <small className="offsite-automatic-error" role="alert">
                                   {t("offsiteBackup.retentionError", {
-                                    reason: selectedOffsiteTarget.lastRetentionError,
+                                    reason: localizedOffsiteError(
+                                      selectedOffsiteTarget.lastRetentionError,
+                                      t,
+                                    ),
                                   })}
                                 </small>
                               )}
@@ -7032,7 +7847,7 @@ function App({
                             <div className="backup-actions">
                               <button
                                 className="secondary-button"
-                                disabled={offsiteBusy}
+                                disabled={offsiteBusy || offsiteConfigRecoveryRequired}
                                 onClick={() =>
                                   beginOffsiteTargetEdit(selectedOffsiteTarget)
                                 }
@@ -7043,7 +7858,11 @@ function App({
                               </button>
                               <button
                                 className="primary-button"
-                                disabled={offsiteBusy || selectedOffsiteTargetId === null}
+                                disabled={
+                                  offsiteBusy ||
+                                  offsiteConfigRecoveryRequired ||
+                                  selectedOffsiteTargetId === null
+                                }
                                 onClick={() => void createOffsiteSnapshot()}
                                 type="button"
                               >
@@ -7052,7 +7871,7 @@ function App({
                               </button>
                               <button
                                 className="secondary-button"
-                                disabled={offsiteBusy}
+                                disabled={offsiteBusy || offsiteConfigRecoveryRequired}
                                 onClick={() =>
                                   requestOffsiteSensitiveAction({
                                     kind: "removeTarget",
@@ -7067,7 +7886,7 @@ function App({
                               </button>
                               <button
                                 className="danger-button"
-                                disabled={offsiteBusy}
+                                disabled={offsiteBusy || offsiteConfigRecoveryRequired}
                                 onClick={() =>
                                   requestOffsiteSensitiveAction({
                                     kind: "destroyTarget",
@@ -7118,7 +7937,9 @@ function App({
                                   <div className="offsite-entry-actions">
                                     <button
                                       className="secondary-button"
-                                      disabled={offsiteBusy}
+                                      disabled={
+                                        offsiteBusy || offsiteConfigRecoveryRequired
+                                      }
                                       onClick={() =>
                                         void verifyOffsiteSnapshot(snapshot.id)
                                       }
@@ -7129,7 +7950,9 @@ function App({
                                     </button>
                                     <button
                                       className="danger-button"
-                                      disabled={offsiteBusy}
+                                      disabled={
+                                        offsiteBusy || offsiteConfigRecoveryRequired
+                                      }
                                       onClick={() =>
                                         selectedOffsiteTargetId !== null &&
                                         requestOffsiteSensitiveAction({
@@ -7146,7 +7969,9 @@ function App({
                                     </button>
                                     <button
                                       className="secondary-button"
-                                      disabled={offsiteBusy}
+                                      disabled={
+                                        offsiteBusy || offsiteConfigRecoveryRequired
+                                      }
                                       onClick={() =>
                                         openOffsiteRestoreDrill(
                                           snapshot.id,
@@ -7176,8 +8001,19 @@ function App({
                       )}
                     </>
                   )}
+                  {offsiteConfigRecoveryMessage !== null && (
+                    <small
+                      className="offsite-automatic-error"
+                      data-testid="offsite-config-recovery-message"
+                      role="alert"
+                    >
+                      {offsiteConfigRecoveryMessage}
+                    </small>
+                  )}
                   {offsiteMessage !== null && (
-                    <small role="status">{offsiteMessage}</small>
+                    <small data-testid="offsite-message" role="status">
+                      {offsiteMessage}
+                    </small>
                   )}
                 </div>
               </div>
@@ -7210,7 +8046,7 @@ function App({
                       <label>
                         <span>{t("offsiteBackup.targetName")}</span>
                         <input
-                          disabled={offsiteBusy}
+                          disabled={offsiteBusy || offsiteConfigRecoveryRequired}
                           maxLength={80}
                           onChange={(event) => setOffsiteTargetName(event.target.value)}
                           value={offsiteTargetName}
@@ -7231,7 +8067,12 @@ function App({
                         )}
                         <button
                           className="secondary-button"
-                          disabled={offsiteBusy || !offsiteBackup.available}
+                          data-testid="offsite-save-target"
+                          disabled={
+                            offsiteBusy ||
+                            offsiteConfigRecoveryRequired ||
+                            !offsiteBackup.available
+                          }
                           onClick={requestOffsiteTargetConfiguration}
                           type="button"
                         >

@@ -41,7 +41,8 @@ export interface EmbeddingGateway {
 export type EmbeddingAnalysisError =
   | "sourceEmpty"
   | "remoteConfigurationMissing"
-  | "invalidEmbeddingResponse";
+  | "invalidEmbeddingResponse"
+  | "cancelled";
 
 export class EmbeddingAnalysisFailure extends Error {
   readonly reason: EmbeddingAnalysisError;
@@ -319,6 +320,7 @@ export class EmbeddingAnalyzer {
     settings: EmbeddingSettings,
     remoteToken: string,
   ): Promise<EmbeddingAnalysis> {
+    const expectedGeneration = this.cacheGeneration;
     const sourceNode = nodes.find((node) => node.id === sourceNodeId);
     const source = sourceNode === undefined ? null : chunksForNode(sourceNode);
     if (source === null) {
@@ -341,6 +343,7 @@ export class EmbeddingAnalyzer {
       source.chunks.map((text) => ({ role: "query" as const, text })),
       settings,
       remoteToken,
+      expectedGeneration,
     );
     const documentInputs = comparableNodes.flatMap((node) =>
       node.chunks.map((text) => ({ role: "document" as const, text })),
@@ -349,7 +352,10 @@ export class EmbeddingAnalyzer {
       documentInputs,
       settings,
       remoteToken,
+      expectedGeneration,
     );
+
+    this.ensureCacheGeneration(expectedGeneration);
 
     let documentIndex = 0;
     const relatedNodes = comparableNodes.map<EmbeddingRelatedNode>((node) => {
@@ -384,15 +390,27 @@ export class EmbeddingAnalyzer {
   }
 
   clearCache(): void {
+    this.cacheGeneration += 1;
     this.memoryCache.clear();
+  }
+
+  private cacheGeneration = 0;
+
+  private ensureCacheGeneration(expectedGeneration: number): void {
+    if (expectedGeneration !== this.cacheGeneration) {
+      throw new EmbeddingAnalysisFailure("cancelled");
+    }
   }
 
   private async embeddingsFor(
     inputs: EmbeddingInput[],
     settings: EmbeddingSettings,
     remoteToken: string,
+    expectedGeneration: number,
   ): Promise<Float32Array[]> {
+    this.ensureCacheGeneration(expectedGeneration);
     const fingerprint = await sha256Text(embeddingSettingsFingerprint(settings));
+    this.ensureCacheGeneration(expectedGeneration);
     const hashes: string[] = [];
     for (let start = 0; start < inputs.length; start += maximumPersistentCacheBatchSize) {
       hashes.push(
@@ -402,6 +420,7 @@ export class EmbeddingAnalyzer {
             .map((input) => sha256Text(input.text)),
         )),
       );
+      this.ensureCacheGeneration(expectedGeneration);
     }
     const persistentKeys = inputs.map<EmbeddingVectorCacheKey>((input, index) => ({
       fingerprint,
@@ -435,15 +454,20 @@ export class EmbeddingAnalyzer {
         const result = await this.persistentCache.read(
           batch.map((item) => item.persistentKey),
         );
+        this.ensureCacheGeneration(expectedGeneration);
         if (result.length === batch.length) {
           cachedVectors = result;
         }
-      } catch {
+      } catch (error) {
+        if (error instanceof EmbeddingAnalysisFailure && error.reason === "cancelled") {
+          throw error;
+        }
         cachedVectors = null;
       }
       if (cachedVectors === null) {
         continue;
       }
+      this.ensureCacheGeneration(expectedGeneration);
       cachedVectors.forEach((vector, index) => {
         if (vector === null) {
           return;
@@ -481,6 +505,7 @@ export class EmbeddingAnalyzer {
             batchInputs,
           );
         }
+        this.ensureCacheGeneration(expectedGeneration);
         if (responseVectors.length !== batchInputs.length) {
           throw new EmbeddingAnalysisFailure("invalidEmbeddingResponse");
         }
@@ -501,13 +526,19 @@ export class EmbeddingAnalyzer {
           });
         });
         try {
+          this.ensureCacheGeneration(expectedGeneration);
           await this.persistentCache.write(persistentEntries);
-        } catch {
+          this.ensureCacheGeneration(expectedGeneration);
+        } catch (error) {
+          if (error instanceof EmbeddingAnalysisFailure && error.reason === "cancelled") {
+            throw error;
+          }
           // The cache is derived data. A write failure must not discard a valid analysis.
         }
       }
     }
 
+    this.ensureCacheGeneration(expectedGeneration);
     return resolvedVectors.map((vector) => {
       if (vector === undefined) {
         throw new EmbeddingAnalysisFailure("invalidEmbeddingResponse");

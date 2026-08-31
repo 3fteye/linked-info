@@ -4,7 +4,7 @@ use std::{
     net::IpAddr,
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex,
+        Arc, Condvar, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     time::{Duration, Instant},
@@ -170,6 +170,8 @@ pub struct EmbeddingState {
     local_task_active: Arc<AtomicBool>,
     local_download_cancel: Arc<Mutex<Option<Arc<AtomicBool>>>>,
     unload_requested: Arc<AtomicBool>,
+    task_lifecycle: Arc<Mutex<()>>,
+    task_finished: Arc<(Mutex<()>, Condvar)>,
 }
 
 impl Default for EmbeddingState {
@@ -179,29 +181,46 @@ impl Default for EmbeddingState {
             local_task_active: Arc::new(AtomicBool::new(false)),
             local_download_cancel: Arc::new(Mutex::new(None)),
             unload_requested: Arc::new(AtomicBool::new(false)),
+            task_lifecycle: Arc::new(Mutex::new(())),
+            task_finished: Arc::new((Mutex::new(()), Condvar::new())),
         }
     }
 }
 
 impl EmbeddingState {
     pub fn shutdown(&self) -> Result<(), String> {
+        // Serialize shutdown with task admission. Keeping this gate while
+        // waiting prevents a task from starting after cancellation was
+        // requested and loading a model again before the lock completes.
+        let _lifecycle = self
+            .task_lifecycle
+            .lock()
+            .map_err(|_| "local embedding lifecycle is unavailable".to_owned())?;
         self.unload_requested.store(true, Ordering::Release);
         if let Ok(slot) = self.local_download_cancel.lock() {
             if let Some(cancel) = slot.as_ref() {
                 cancel.store(true, Ordering::Release);
             }
         }
-        match self.local_model.try_lock() {
-            Ok(mut model) => {
-                *model = None;
-                self.unload_requested.store(false, Ordering::Release);
-                Ok(())
-            }
-            Err(std::sync::TryLockError::WouldBlock) => Ok(()),
-            Err(std::sync::TryLockError::Poisoned(_)) => {
-                Err("local embedding model lock is unavailable".to_owned())
-            }
+
+        let (finished_lock, finished_signal) = &*self.task_finished;
+        let mut finished_guard = finished_lock
+            .lock()
+            .map_err(|_| "local embedding task state is unavailable".to_owned())?;
+        while self.local_task_active.load(Ordering::Acquire) {
+            finished_guard = finished_signal
+                .wait(finished_guard)
+                .map_err(|_| "local embedding task state is unavailable".to_owned())?;
         }
+        drop(finished_guard);
+
+        let mut model = self
+            .local_model
+            .lock()
+            .map_err(|_| "local embedding model lock is unavailable".to_owned())?;
+        *model = None;
+        self.unload_requested.store(false, Ordering::Release);
+        Ok(())
     }
 }
 
@@ -210,6 +229,7 @@ struct LocalTaskGuard {
     cancel_slot: Arc<Mutex<Option<Arc<AtomicBool>>>>,
     local_model: Arc<Mutex<Option<LoadedLocalModel>>>,
     unload_requested: Arc<AtomicBool>,
+    task_finished: Arc<(Mutex<()>, Condvar)>,
 }
 
 impl Drop for LocalTaskGuard {
@@ -222,7 +242,11 @@ impl Drop for LocalTaskGuard {
                 *model = None;
             }
         }
+        // Serialize the state transition with shutdown's condition-variable
+        // check so a notification cannot be lost between the check and wait.
+        let _finished_guard = self.task_finished.0.lock().ok();
         self.active.store(false, Ordering::Release);
+        self.task_finished.1.notify_all();
     }
 }
 
@@ -487,6 +511,13 @@ fn emit_local_progress(
 }
 
 fn begin_local_task(state: &EmbeddingState) -> Result<(Arc<AtomicBool>, LocalTaskGuard), String> {
+    let _lifecycle = state
+        .task_lifecycle
+        .lock()
+        .map_err(|_| "local embedding lifecycle is unavailable".to_owned())?;
+    if state.unload_requested.load(Ordering::Acquire) {
+        return Err("local embedding is shutting down".to_owned());
+    }
     state
         .local_task_active
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -504,6 +535,7 @@ fn begin_local_task(state: &EmbeddingState) -> Result<(Arc<AtomicBool>, LocalTas
         cancel_slot: Arc::clone(&state.local_download_cancel),
         local_model: Arc::clone(&state.local_model),
         unload_requested: Arc::clone(&state.unload_requested),
+        task_finished: Arc::clone(&state.task_finished),
     };
     Ok((cancel, guard))
 }
@@ -1093,9 +1125,11 @@ pub async fn embed_remote_texts(
 
 #[cfg(test)]
 mod tests {
+    use std::{sync::mpsc, thread, time::Duration};
+
     use super::{
-        LOCAL_MODELS, local_http_endpoint_allowed, local_model_spec, model_total_bytes,
-        validate_remote_endpoint,
+        EmbeddingState, LOCAL_MODELS, begin_local_task, local_http_endpoint_allowed,
+        local_model_spec, model_total_bytes, validate_remote_endpoint,
     };
     use reqwest::Url;
 
@@ -1123,5 +1157,33 @@ mod tests {
                 model.files.iter().map(|file| file.size).sum::<u64>()
             );
         }
+    }
+
+    #[test]
+    fn shutdown_waits_for_an_in_flight_local_task() {
+        let state = std::sync::Arc::new(EmbeddingState::default());
+        let (_cancel, task_guard) = begin_local_task(&state).unwrap();
+        let (started_sender, started_receiver) = mpsc::channel();
+        let (finished_sender, finished_receiver) = mpsc::channel();
+        let shutdown_state = std::sync::Arc::clone(&state);
+        let shutdown = thread::spawn(move || {
+            started_sender.send(()).unwrap();
+            shutdown_state.shutdown().unwrap();
+            finished_sender.send(()).unwrap();
+        });
+
+        started_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+        assert!(
+            finished_receiver
+                .recv_timeout(Duration::from_millis(50))
+                .is_err()
+        );
+        drop(task_guard);
+        finished_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+        shutdown.join().unwrap();
     }
 }

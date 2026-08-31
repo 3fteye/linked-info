@@ -7,7 +7,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{
-        Arc, Mutex,
+        Arc, Condvar, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     time::{Duration, Instant, UNIX_EPOCH},
@@ -356,6 +356,10 @@ struct RunningLocalLlm {
 pub struct LlmState {
     task_active: Arc<AtomicBool>,
     download_cancel: Arc<Mutex<Option<Arc<AtomicBool>>>>,
+    task_lifecycle: Arc<Mutex<()>>,
+    task_finished: Arc<(Mutex<()>, Condvar)>,
+    shutdown_requested: Arc<AtomicBool>,
+    server_lifecycle: Arc<Mutex<()>>,
     server: Arc<Mutex<Option<RunningLocalLlm>>>,
 }
 
@@ -364,6 +368,10 @@ impl Default for LlmState {
         Self {
             task_active: Arc::new(AtomicBool::new(false)),
             download_cancel: Arc::new(Mutex::new(None)),
+            task_lifecycle: Arc::new(Mutex::new(())),
+            task_finished: Arc::new((Mutex::new(()), Condvar::new())),
+            shutdown_requested: Arc::new(AtomicBool::new(false)),
+            server_lifecycle: Arc::new(Mutex::new(())),
             server: Arc::new(Mutex::new(None)),
         }
     }
@@ -371,12 +379,30 @@ impl Default for LlmState {
 
 impl LlmState {
     pub fn shutdown(&self) {
+        // Keep task admission closed until the in-flight task has released its
+        // cancellation token and all plaintext work has stopped.
+        let Ok(_lifecycle) = self.task_lifecycle.lock() else {
+            if let Ok(slot) = self.download_cancel.lock()
+                && let Some(cancel) = slot.as_ref()
+            {
+                cancel.store(true, Ordering::Release);
+            }
+            let _ = stop_server(&self.server);
+            return;
+        };
+        self.shutdown_requested.store(true, Ordering::Release);
         if let Ok(slot) = self.download_cancel.lock()
             && let Some(cancel) = slot.as_ref()
         {
             cancel.store(true, Ordering::Release);
         }
-        let _ = stop_server(&self.server);
+
+        wait_for_llm_task(self);
+
+        // Serialize process teardown with the startup path. The task wait
+        // above prevents a completed shutdown from racing a late spawn.
+        let _ = stop_server_synchronized(self);
+        self.shutdown_requested.store(false, Ordering::Release);
     }
 }
 
@@ -389,6 +415,7 @@ impl Drop for LlmState {
 struct LlmTaskGuard {
     active: Arc<AtomicBool>,
     cancel_slot: Arc<Mutex<Option<Arc<AtomicBool>>>>,
+    task_finished: Arc<(Mutex<()>, Condvar)>,
 }
 
 impl Drop for LlmTaskGuard {
@@ -396,7 +423,11 @@ impl Drop for LlmTaskGuard {
         if let Ok(mut slot) = self.cancel_slot.lock() {
             *slot = None;
         }
+        // Coordinate the state transition with shutdown's condition-variable
+        // check so it cannot miss the final task completion notification.
+        let _finished_guard = self.task_finished.0.lock().ok();
         self.active.store(false, Ordering::Release);
+        self.task_finished.1.notify_all();
     }
 }
 
@@ -577,7 +608,22 @@ fn emit_local_llm_progress(
     );
 }
 
+fn ensure_llm_task_active(cancel: &AtomicBool) -> Result<(), String> {
+    if cancel.load(Ordering::Acquire) {
+        Err(LOCAL_LLM_DOWNLOAD_CANCELLED.to_owned())
+    } else {
+        Ok(())
+    }
+}
+
 fn begin_llm_task(state: &LlmState) -> Result<(Arc<AtomicBool>, LlmTaskGuard), String> {
+    let _lifecycle = state
+        .task_lifecycle
+        .lock()
+        .map_err(|_| "local LLM lifecycle is unavailable".to_owned())?;
+    if state.shutdown_requested.load(Ordering::Acquire) {
+        return Err("local LLM is shutting down".to_owned());
+    }
     state
         .task_active
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -595,6 +641,7 @@ fn begin_llm_task(state: &LlmState) -> Result<(Arc<AtomicBool>, LlmTaskGuard), S
         LlmTaskGuard {
             active: Arc::clone(&state.task_active),
             cancel_slot: Arc::clone(&state.download_cancel),
+            task_finished: Arc::clone(&state.task_finished),
         },
     ))
 }
@@ -702,6 +749,9 @@ async fn ensure_local_llm_model(
     spec: &'static LocalLlmModelSpec,
     cancel: Arc<AtomicBool>,
 ) -> Result<(), PrepareLlmError> {
+    if cancel.load(Ordering::Acquire) {
+        return Err(PrepareLlmError::Cancelled);
+    }
     fs::create_dir_all(cache_dir)?;
     let final_path = local_llm_model_path(cache_dir, spec);
     let complete = final_path
@@ -710,6 +760,9 @@ async fn ensure_local_llm_model(
         .unwrap_or(false);
     if complete {
         if verified_model_marker_matches(cache_dir, spec) {
+            if cancel.load(Ordering::Acquire) {
+                return Err(PrepareLlmError::Cancelled);
+            }
             emit_local_llm_progress(app, spec, LocalLlmPhase::Ready, spec.size, None);
             return Ok(());
         }
@@ -721,8 +774,18 @@ async fn ensure_local_llm_model(
         })
         .await
         .map_err(|error| PrepareLlmError::Message(error.to_string()))?;
+        if cancel.load(Ordering::Acquire) {
+            return Err(PrepareLlmError::Cancelled);
+        }
         if verification.is_ok() {
+            if cancel.load(Ordering::Acquire) {
+                return Err(PrepareLlmError::Cancelled);
+            }
             write_verified_model_marker(cache_dir, spec)?;
+            if cancel.load(Ordering::Acquire) {
+                remove_verified_model_marker(cache_dir, spec);
+                return Err(PrepareLlmError::Cancelled);
+            }
             emit_local_llm_progress(app, spec, LocalLlmPhase::Ready, spec.size, None);
             return Ok(());
         }
@@ -886,6 +949,9 @@ async fn ensure_local_llm_model(
         tauri::async_runtime::spawn_blocking(move || verify_sha256(&verification_path, expected))
             .await
             .map_err(|error| PrepareLlmError::Message(error.to_string()))?;
+    if cancel.load(Ordering::Acquire) {
+        return Err(PrepareLlmError::Cancelled);
+    }
     if let Err(error) = verification {
         OpenOptions::new()
             .write(true)
@@ -899,8 +965,19 @@ async fn ensure_local_llm_model(
     if final_path.exists() {
         fs::remove_file(&final_path)?;
     }
+    if cancel.load(Ordering::Acquire) {
+        return Err(PrepareLlmError::Cancelled);
+    }
     fs::rename(&partial_path, &final_path)?;
+    if cancel.load(Ordering::Acquire) {
+        remove_verified_model_marker(cache_dir, spec);
+        return Err(PrepareLlmError::Cancelled);
+    }
     write_verified_model_marker(cache_dir, spec)?;
+    if cancel.load(Ordering::Acquire) {
+        remove_verified_model_marker(cache_dir, spec);
+        return Err(PrepareLlmError::Cancelled);
+    }
     emit_local_llm_progress(app, spec, LocalLlmPhase::Ready, spec.size, None);
     Ok(())
 }
@@ -961,6 +1038,46 @@ fn stop_server(server: &Arc<Mutex<Option<RunningLocalLlm>>>) -> Result<(), Strin
         let _ = running.child.wait();
     }
     Ok(())
+}
+
+fn stop_server_synchronized(state: &LlmState) -> Result<(), String> {
+    match state.server_lifecycle.lock() {
+        Ok(_server_lifecycle) => stop_server(&state.server),
+        // The server slot has its own mutex. Even if the lifecycle gate was
+        // poisoned by a prior panic, make a best-effort process teardown.
+        Err(_) => stop_server(&state.server),
+    }
+}
+
+fn wait_for_llm_task(state: &LlmState) {
+    let (finished_lock, finished_signal) = &*state.task_finished;
+    match finished_lock.lock() {
+        Ok(mut finished_guard) => {
+            while state.task_active.load(Ordering::Acquire) {
+                match finished_signal.wait(finished_guard) {
+                    Ok(next_guard) => finished_guard = next_guard,
+                    Err(_) => break,
+                }
+            }
+        }
+        Err(_) => {
+            // A poisoned condition-variable mutex must not reopen the
+            // lifecycle gate while a task is still active. Fall back to the
+            // atomic completion flag and keep the state fail-closed.
+            while state.task_active.load(Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+        }
+    }
+}
+
+fn ensure_llm_task_active_or_stop(state: &LlmState, cancel: &AtomicBool) -> Result<(), String> {
+    if cancel.load(Ordering::Acquire) {
+        let _ = stop_server_synchronized(state);
+        Err(LOCAL_LLM_DOWNLOAD_CANCELLED.to_owned())
+    } else {
+        Ok(())
+    }
 }
 
 fn existing_server_connection(
@@ -1043,8 +1160,16 @@ fn start_local_llm_server(
     state: &LlmState,
     spec: &'static LocalLlmModelSpec,
     model_path: &Path,
+    cancel: &AtomicBool,
 ) -> Result<LocalLlmConnection, String> {
+    ensure_llm_task_active(cancel)?;
+    let _server_lifecycle = state
+        .server_lifecycle
+        .lock()
+        .map_err(|_| "local LLM server lifecycle is unavailable".to_owned())?;
+    ensure_llm_task_active(cancel)?;
     stop_server(&state.server)?;
+    ensure_llm_task_active(cancel)?;
     let runtime_path = local_llm_runtime_path(app)?;
     let runtime_dir = runtime_path
         .parent()
@@ -1099,6 +1224,11 @@ fn start_local_llm_server(
     let mut child = command
         .spawn()
         .map_err(|error| format!("cannot start bundled llama.cpp runtime: {error}"))?;
+    if let Err(error) = ensure_llm_task_active(cancel) {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(error);
+    }
     #[cfg(windows)]
     let job = assign_child_to_kill_on_close_job(&child).map_err(|error| {
         let _ = child.kill();
@@ -1109,10 +1239,19 @@ fn start_local_llm_server(
         endpoint: format!("http://127.0.0.1:{port}"),
         api_key,
     };
-    let mut slot = state
-        .server
-        .lock()
-        .map_err(|_| "local LLM server state is unavailable".to_owned())?;
+    let mut slot = match state.server.lock() {
+        Ok(slot) => slot,
+        Err(_) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("local LLM server state is unavailable".to_owned());
+        }
+    };
+    if let Err(error) = ensure_llm_task_active(cancel) {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(error);
+    }
     *slot = Some(RunningLocalLlm {
         model_id: spec.id.to_owned(),
         child,
@@ -1128,36 +1267,58 @@ async fn ensure_local_llm_server(
     state: &LlmState,
     spec: &'static LocalLlmModelSpec,
     model_path: &Path,
+    cancel: Arc<AtomicBool>,
 ) -> Result<LocalLlmConnection, String> {
+    ensure_llm_task_active_or_stop(state, &cancel)?;
     if let Some(connection) = existing_server_connection(state, spec.id)? {
+        ensure_llm_task_active_or_stop(state, &cancel)?;
         return Ok(connection);
     }
+    ensure_llm_task_active_or_stop(state, &cancel)?;
     emit_local_llm_progress(app, spec, LocalLlmPhase::Loading, spec.size, None);
-    let connection = start_local_llm_server(app, state, spec, model_path)?;
-    let client = reqwest::Client::builder()
+    let connection = start_local_llm_server(app, state, spec, model_path, &cancel)?;
+    ensure_llm_task_active_or_stop(state, &cancel)?;
+    let client = match reqwest::Client::builder()
         .timeout(Duration::from_secs(4))
         .build()
-        .map_err(|error| format!("cannot create local LLM health client: {error}"))?;
+    {
+        Ok(client) => client,
+        Err(error) => {
+            let _ = stop_server_synchronized(state);
+            return Err(format!("cannot create local LLM health client: {error}"));
+        }
+    };
     let deadline = Instant::now() + Duration::from_secs(180);
     loop {
+        ensure_llm_task_active_or_stop(state, &cancel)?;
         if Instant::now() >= deadline {
-            stop_server(&state.server)?;
+            stop_server_synchronized(state)?;
             return Err("local LLM model loading timed out".to_owned());
         }
-        if client
-            .get(format!("{}/health", connection.endpoint))
-            .bearer_auth(&connection.api_key)
-            .send()
-            .await
-            .map(|response| response.status().is_success())
-            .unwrap_or(false)
-        {
+        let healthy = tokio::select! {
+            response = client
+                .get(format!("{}/health", connection.endpoint))
+                .bearer_auth(&connection.api_key)
+                .send() => response.map(|response| response.status().is_success()).unwrap_or(false),
+            _ = wait_for_cancellation(Arc::clone(&cancel)) => {
+                let _ = stop_server_synchronized(state);
+                return Err(LOCAL_LLM_DOWNLOAD_CANCELLED.to_owned());
+            },
+        };
+        ensure_llm_task_active_or_stop(state, &cancel)?;
+        if healthy {
             return Ok(connection);
         }
         if existing_server_connection(state, spec.id)?.is_none() {
             return Err("local LLM runtime exited while loading the model".to_owned());
         }
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_millis(250)) => {},
+            _ = wait_for_cancellation(Arc::clone(&cancel)) => {
+                let _ = stop_server_synchronized(state);
+                return Err(LOCAL_LLM_DOWNLOAD_CANCELLED.to_owned());
+            },
+        }
     }
 }
 
@@ -1877,7 +2038,9 @@ async fn request_structured_local_import<T: for<'de> Deserialize<'de>>(
     system_prompt: &str,
     example_pairs: &[(String, String)],
     request_json: &str,
+    cancel: Arc<AtomicBool>,
 ) -> Result<T, String> {
+    ensure_llm_task_active(&cancel)?;
     if estimated_import_prompt_tokens(system_prompt, example_pairs, request_json)
         > MAXIMUM_ESTIMATED_IMPORT_INPUT_TOKENS
     {
@@ -1923,30 +2086,41 @@ async fn request_structured_local_import<T: for<'de> Deserialize<'de>>(
         .timeout(Duration::from_secs(180))
         .build()
         .map_err(|error| format!("cannot create local LLM request client: {error}"))?;
-    let response = client
-        .post(format!("{}/v1/chat/completions", connection.endpoint))
-        .bearer_auth(&connection.api_key)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|error| format!("local document import request failed: {error}"))?;
+    let response = tokio::select! {
+        response = client
+            .post(format!("{}/v1/chat/completions", connection.endpoint))
+            .bearer_auth(&connection.api_key)
+            .json(&body)
+            .send() => response
+            .map_err(|error| format!("local document import request failed: {error}"))?,
+        _ = wait_for_cancellation(Arc::clone(&cancel)) => {
+            return Err(LOCAL_LLM_DOWNLOAD_CANCELLED.to_owned());
+        },
+    };
+    ensure_llm_task_active(&cancel)?;
     if !response.status().is_success() {
         return Err(format!(
             "local LLM runtime returned HTTP {}",
             response.status()
         ));
     }
-    let response = response
-        .json::<ChatCompletionResponse>()
-        .await
-        .map_err(|error| format!("local document import envelope is invalid: {error}"))?;
+    let response = tokio::select! {
+        response = response.json::<ChatCompletionResponse>() => response
+            .map_err(|error| format!("local document import envelope is invalid: {error}"))?,
+        _ = wait_for_cancellation(Arc::clone(&cancel)) => {
+            return Err(LOCAL_LLM_DOWNLOAD_CANCELLED.to_owned());
+        },
+    };
+    ensure_llm_task_active(&cancel)?;
     let content = response
         .choices
         .first()
         .and_then(|choice| choice.message.content.as_deref())
         .ok_or_else(|| "local document import response did not contain content".to_owned())?;
-    serde_json::from_str::<T>(content)
-        .map_err(|error| format!("local document import response is invalid: {error}"))
+    let parsed = serde_json::from_str::<T>(content)
+        .map_err(|error| format!("local document import response is invalid: {error}"))?;
+    ensure_llm_task_active(&cancel)?;
+    Ok(parsed)
 }
 
 fn serialize_import_examples<Request: Serialize, Response: Serialize>(
@@ -1969,11 +2143,13 @@ fn serialize_import_examples<Request: Serialize, Response: Serialize>(
 async fn request_local_document_import<EnsureAccess>(
     connection: &LocalLlmConnection,
     request: &LocalDocumentImportRequest,
+    cancel: Arc<AtomicBool>,
     mut ensure_access: EnsureAccess,
 ) -> Result<LocalDocumentImportResponse, String>
 where
     EnsureAccess: FnMut() -> Result<(), String>,
 {
+    ensure_llm_task_active(&cancel)?;
     let prompt = document_import_prompt_contract()?;
     let entity_examples = serialize_import_examples(
         prompt
@@ -1985,6 +2161,7 @@ where
     let request_json = serde_json::to_string(request)
         .map_err(|error| format!("cannot serialize local document import request: {error}"))?;
     ensure_access()?;
+    ensure_llm_task_active(&cancel)?;
     let entities = request_structured_local_import::<DocumentImportEntityResponse>(
         connection,
         "linked_info_document_entities",
@@ -1992,9 +2169,11 @@ where
         &prompt.entity.system_prompt,
         &entity_examples,
         &request_json,
+        Arc::clone(&cancel),
     )
     .await?;
     ensure_access()?;
+    ensure_llm_task_active(&cancel)?;
     validate_document_import_entities(&entities)?;
     let entities = aliased_entities(&entities);
     let record_request = DocumentImportRecordRequest {
@@ -2025,9 +2204,11 @@ where
         &prompt.record.system_prompt,
         &record_examples,
         &record_request_json,
+        Arc::clone(&cancel),
     )
     .await?;
     ensure_access()?;
+    ensure_llm_task_active(&cancel)?;
     validate_document_import_records(&record_request, &records)?;
     preserve_sensitive_relationship_record(&record_request, &mut records)?;
     validate_document_import_records(&record_request, &records)?;
@@ -2061,9 +2242,11 @@ where
         &prompt.reference.system_prompt,
         &reference_examples,
         &reference_request_json,
+        Arc::clone(&cancel),
     )
     .await?;
     ensure_access()?;
+    ensure_llm_task_active(&cancel)?;
     validate_document_import_references(&reference_request, &references)?;
     let references = complete_required_record_references(&reference_request, &references);
     validate_document_import_references(&reference_request, &references)?;
@@ -2073,7 +2256,9 @@ where
 async fn request_local_llm_review(
     connection: &LocalLlmConnection,
     request: &LocalLlmReviewRequest,
+    cancel: Arc<AtomicBool>,
 ) -> Result<LocalLlmReviewResponse, String> {
+    ensure_llm_task_active(&cancel)?;
     let request_json = serde_json::to_string(request)
         .map_err(|error| format!("cannot serialize local LLM review request: {error}"))?;
     let aliases = request
@@ -2111,23 +2296,32 @@ async fn request_local_llm_review(
         .timeout(Duration::from_secs(180))
         .build()
         .map_err(|error| format!("cannot create local LLM request client: {error}"))?;
-    let response = client
-        .post(format!("{}/v1/chat/completions", connection.endpoint))
-        .bearer_auth(&connection.api_key)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|error| format!("local LLM request failed: {error}"))?;
+    let response = tokio::select! {
+        response = client
+            .post(format!("{}/v1/chat/completions", connection.endpoint))
+            .bearer_auth(&connection.api_key)
+            .json(&body)
+            .send() => response
+            .map_err(|error| format!("local LLM request failed: {error}"))?,
+        _ = wait_for_cancellation(Arc::clone(&cancel)) => {
+            return Err(LOCAL_LLM_DOWNLOAD_CANCELLED.to_owned());
+        },
+    };
+    ensure_llm_task_active(&cancel)?;
     if !response.status().is_success() {
         return Err(format!(
             "local LLM runtime returned HTTP {}",
             response.status()
         ));
     }
-    let response = response
-        .json::<ChatCompletionResponse>()
-        .await
-        .map_err(|error| format!("local LLM response envelope is invalid: {error}"))?;
+    let response = tokio::select! {
+        response = response.json::<ChatCompletionResponse>() => response
+            .map_err(|error| format!("local LLM response envelope is invalid: {error}"))?,
+        _ = wait_for_cancellation(Arc::clone(&cancel)) => {
+            return Err(LOCAL_LLM_DOWNLOAD_CANCELLED.to_owned());
+        },
+    };
+    ensure_llm_task_active(&cancel)?;
     let content = response
         .choices
         .first()
@@ -2136,6 +2330,7 @@ async fn request_local_llm_review(
     let decision = serde_json::from_str::<LocalLlmWireResponse>(content)
         .map(finalize_review_response)
         .map_err(|error| format!("local LLM structured response is invalid: {error}"))?;
+    ensure_llm_task_active(&cancel)?;
     validate_review_response(request, &decision)?;
     Ok(decision)
 }
@@ -2179,13 +2374,18 @@ pub fn inspect_local_llm_models(
 
 #[tauri::command]
 pub fn cancel_local_llm_download(state: tauri::State<'_, LlmState>) -> Result<(), String> {
-    let slot = state
-        .download_cancel
-        .lock()
-        .map_err(|_| "local LLM cancellation state is unavailable".to_owned())?;
-    if let Some(cancel) = slot.as_ref() {
-        cancel.store(true, Ordering::Release);
+    {
+        let slot = state
+            .download_cancel
+            .lock()
+            .map_err(|_| "local LLM cancellation state is unavailable".to_owned())?;
+        if let Some(cancel) = slot.as_ref() {
+            cancel.store(true, Ordering::Release);
+        }
     }
+    // The same cancellation token is used by inference tasks. Stop the local
+    // runtime as well so a cancelled request cannot retain its prompt in RAM.
+    let _ = stop_server_synchronized(&state);
     Ok(())
 }
 
@@ -2198,14 +2398,24 @@ pub async fn prepare_local_llm_model(
     let spec = local_llm_model_spec(&model_id)?;
     let (cancel, _guard) = begin_llm_task(&state)?;
     let cache_dir = local_llm_cache_dir(&app)?;
-    ensure_local_llm_model(&app, &cache_dir, spec, cancel)
+    ensure_local_llm_model(&app, &cache_dir, spec, Arc::clone(&cancel))
         .await
         .map_err(|error| emit_prepare_failure(&app, spec, error))
 }
 
 #[tauri::command]
 pub fn stop_local_llm(state: tauri::State<'_, LlmState>) -> Result<(), String> {
-    stop_server(&state.server)
+    let _lifecycle = state
+        .task_lifecycle
+        .lock()
+        .map_err(|_| "local LLM lifecycle is unavailable".to_owned())?;
+    if let Ok(slot) = state.download_cancel.lock()
+        && let Some(cancel) = slot.as_ref()
+    {
+        cancel.store(true, Ordering::Release);
+    }
+    wait_for_llm_task(&state);
+    stop_server_synchronized(&state)
 }
 
 #[tauri::command]
@@ -2221,15 +2431,19 @@ pub async fn review_local_references(
     let spec = local_llm_model_spec(&model_id)?;
     let (cancel, _guard) = begin_llm_task(&state)?;
     let cache_dir = local_llm_cache_dir(&app)?;
-    ensure_local_llm_model(&app, &cache_dir, spec, cancel)
+    ensure_local_llm_model(&app, &cache_dir, spec, Arc::clone(&cancel))
         .await
         .map_err(|error| emit_prepare_failure(&app, spec, error))?;
     crate::workspace_file::ensure_workspace_access(&app, &vault_state, access_permit)?;
     let model_path = local_llm_model_path(&cache_dir, spec);
-    let connection = ensure_local_llm_server(&app, &state, spec, &model_path).await?;
+    let connection =
+        ensure_local_llm_server(&app, &state, spec, &model_path, Arc::clone(&cancel)).await?;
     crate::workspace_file::ensure_workspace_access(&app, &vault_state, access_permit)?;
     emit_local_llm_progress(&app, spec, LocalLlmPhase::Inferencing, spec.size, None);
-    let response = request_local_llm_review(&connection, &request).await;
+    let response = request_local_llm_review(&connection, &request, Arc::clone(&cancel)).await;
+    if cancel.load(Ordering::Acquire) {
+        let _ = stop_server_synchronized(&state);
+    }
     crate::workspace_file::ensure_workspace_access(&app, &vault_state, access_permit)?;
     match response {
         Ok(response) => {
@@ -2256,18 +2470,23 @@ pub async fn extract_local_document_import(
     let spec = local_llm_model_spec(&model_id)?;
     let (cancel, _guard) = begin_llm_task(&state)?;
     let cache_dir = local_llm_cache_dir(&app)?;
-    ensure_local_llm_model(&app, &cache_dir, spec, cancel)
+    ensure_local_llm_model(&app, &cache_dir, spec, Arc::clone(&cancel))
         .await
         .map_err(|error| emit_prepare_failure(&app, spec, error))?;
     crate::workspace_file::ensure_workspace_access(&app, &vault_state, access_permit)?;
     let model_path = local_llm_model_path(&cache_dir, spec);
-    let connection = ensure_local_llm_server(&app, &state, spec, &model_path).await?;
+    let connection =
+        ensure_local_llm_server(&app, &state, spec, &model_path, Arc::clone(&cancel)).await?;
     crate::workspace_file::ensure_workspace_access(&app, &vault_state, access_permit)?;
     emit_local_llm_progress(&app, spec, LocalLlmPhase::Inferencing, spec.size, None);
-    let response = request_local_document_import(&connection, &request, || {
-        crate::workspace_file::ensure_workspace_access(&app, &vault_state, access_permit)
-    })
-    .await;
+    let response =
+        request_local_document_import(&connection, &request, Arc::clone(&cancel), || {
+            crate::workspace_file::ensure_workspace_access(&app, &vault_state, access_permit)
+        })
+        .await;
+    if cancel.load(Ordering::Acquire) {
+        let _ = stop_server_synchronized(&state);
+    }
     crate::workspace_file::ensure_workspace_access(&app, &vault_state, access_permit)?;
     match response {
         Ok(response) => {
@@ -2644,5 +2863,53 @@ mod tests {
             1_201_294_591,
         ));
         assert!(!content_range_starts_at("invalid", 0));
+    }
+
+    #[test]
+    fn cancelled_llm_task_is_rejected_at_each_lifecycle_boundary() {
+        let state = LlmState::default();
+        let cancel = AtomicBool::new(true);
+        assert_eq!(
+            ensure_llm_task_active(&cancel),
+            Err(LOCAL_LLM_DOWNLOAD_CANCELLED.to_owned())
+        );
+        assert_eq!(
+            ensure_llm_task_active_or_stop(&state, &cancel),
+            Err(LOCAL_LLM_DOWNLOAD_CANCELLED.to_owned())
+        );
+    }
+
+    #[test]
+    fn shutdown_waits_for_an_in_flight_llm_task_before_releasing_the_gate() {
+        let state = Arc::new(LlmState::default());
+        let (_cancel, guard) = begin_llm_task(&state).expect("task admission should succeed");
+        let (finished_sender, finished_receiver) = std::sync::mpsc::channel();
+        let shutdown_state = Arc::clone(&state);
+        let shutdown_thread = std::thread::spawn(move || {
+            shutdown_state.shutdown();
+            finished_sender
+                .send(())
+                .expect("shutdown result should be observable");
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !state.shutdown_requested.load(Ordering::Acquire) {
+            assert!(
+                Instant::now() < deadline,
+                "shutdown did not enter the lifecycle gate"
+            );
+            std::thread::yield_now();
+        }
+        assert!(state.task_active.load(Ordering::Acquire));
+        assert!(finished_receiver.try_recv().is_err());
+
+        drop(guard);
+        assert!(
+            finished_receiver
+                .recv_timeout(Duration::from_secs(2))
+                .is_ok()
+        );
+        shutdown_thread.join().expect("shutdown should not panic");
+        assert!(!state.shutdown_requested.load(Ordering::Acquire));
     }
 }
