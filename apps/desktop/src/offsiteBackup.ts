@@ -67,49 +67,121 @@ export interface OffsiteBackupVerification {
   downloadedBytes: number;
 }
 
-export interface AutomaticBackupOutcome {
-  targetId: string;
-  uploaded: boolean;
-  error: string | null;
-}
+export type AutomaticBackupOutcome =
+  | {
+      status: "committed";
+      targetId: string;
+      uploaded: boolean;
+      error: string | null;
+    }
+  | {
+      status: "recoveryRequired";
+      targetId: string;
+      uploaded: boolean;
+    };
 
-export interface DeleteAllOffsiteBackupsOutcome {
-  /** Number of object-version and delete-marker records removed remotely. */
-  deletedVersionCount: number;
-  targetRemoved: boolean;
-  error: string | null;
-}
+export type BackupTargetMutationOutcome =
+  | { status: "committed"; target: OffsiteBackupTarget }
+  | { status: "recoveryRequired" };
+
+export type BackupTargetsMutationOutcome =
+  | { status: "committed"; targets: OffsiteBackupTarget[] }
+  | { status: "recoveryRequired" };
+
+export type CreateOffsiteBackupWarning =
+  | "offsite_backup_upload_succeeded_local_status_update_failed"
+  | null;
+
+export type CreateOffsiteBackupOutcome =
+  | {
+      status: "committed";
+      snapshot: OffsiteBackupSnapshot;
+      warning: CreateOffsiteBackupWarning;
+    }
+  | {
+      status: "recoveryRequired";
+      snapshot: OffsiteBackupSnapshot;
+    };
+
+export type VerifyOffsiteBackupWarning =
+  | "offsite_backup_verification_succeeded_local_status_update_failed"
+  | null;
+
+export type VerifyOffsiteBackupOutcome =
+  | {
+      status: "committed";
+      verification: OffsiteBackupVerification;
+      warning: VerifyOffsiteBackupWarning;
+    }
+  | {
+      status: "recoveryRequired";
+      verification: OffsiteBackupVerification;
+    };
+
+export type DeleteAllOffsiteBackupsWarning =
+  | CommittedConfigWarning
+  | "offsite_backup_purge_unverified"
+  | "offsite_backup_remote_purge_succeeded_config_update_failed";
+
+export type DeleteAllOffsiteBackupsOutcome =
+  | {
+      status: "committed";
+      /** Number of object-version and delete-marker records removed remotely. */
+      deletedVersionCount: number;
+      targetRemoved: boolean;
+      warning: DeleteAllOffsiteBackupsWarning;
+    }
+  | {
+      status: "recoveryRequired";
+      /** Remote deletion is authoritative even while local removal is recovered. */
+      deletedVersionCount: number;
+    };
 
 export type DeleteOffsiteBackupWarning =
   | "offsite_backup_snapshot_deleted_proof_update_failed"
   | null;
 
-export interface DeleteOffsiteBackupOutcome {
-  snapshotDeleted: true;
-  /** True only when the invalidated proof state was persisted locally. */
-  restoreDrillProofInvalidated: boolean;
-  error: DeleteOffsiteBackupWarning;
-}
+export type DeleteOffsiteBackupOutcome =
+  | {
+      status: "committed";
+      snapshotDeleted: true;
+      /** True only when the invalidated proof state was persisted locally. */
+      restoreDrillProofInvalidated: boolean;
+      warning: DeleteOffsiteBackupWarning;
+    }
+  | {
+      status: "recoveryRequired";
+      snapshotDeleted: true;
+    };
 
 export type CommittedConfigWarning =
   | "offsite_backup_credential_cleanup_pending"
   | "offsite_backup_config_transaction_cleanup_pending"
   | null;
 
-export interface RemoveOffsiteBackupTargetOutcome {
-  targetRemoved: true;
-  error: CommittedConfigWarning;
-}
+export type RemoveOffsiteBackupTargetOutcome =
+  | {
+      status: "committed";
+      targetRemoved: true;
+      warning: CommittedConfigWarning;
+    }
+  | { status: "recoveryRequired" };
 
-export interface ConfigureS3BackupTargetOutcome {
-  target: OffsiteBackupTarget;
-  error: CommittedConfigWarning;
-}
+export type ConfigureS3BackupTargetOutcome =
+  | {
+      status: "committed";
+      target: OffsiteBackupTarget;
+      warning: CommittedConfigWarning;
+    }
+  | { status: "recoveryRequired" };
 
-export interface UpdateS3BackupTargetOutcome {
-  target: OffsiteBackupTarget;
-  error: CommittedConfigWarning;
-}
+export type UpdateS3BackupTargetOutcome =
+  | {
+      status: "committed";
+      target: OffsiteBackupTarget;
+      warning: CommittedConfigWarning;
+    }
+  | { status: "recoveryRequired" };
 
 export interface OffsiteBackupService {
   readonly available: boolean;
@@ -144,17 +216,17 @@ export interface OffsiteBackupService {
     targetId: string,
     enabled: boolean,
     intervalHours: number,
-  ): Promise<OffsiteBackupTarget>;
+  ): Promise<BackupTargetMutationOutcome>;
   updateRetentionSettings(
     targetId: string,
     enabled: boolean,
     maxSnapshots: number,
     maxAgeDays: number,
     authorization: string,
-  ): Promise<OffsiteBackupTarget>;
-  markAutomaticPending(): Promise<OffsiteBackupTarget[]>;
+  ): Promise<BackupTargetMutationOutcome>;
+  markAutomaticPending(): Promise<BackupTargetsMutationOutcome>;
   runDueAutomatic(contents: string): Promise<AutomaticBackupOutcome[]>;
-  create(targetId: string, contents: string): Promise<OffsiteBackupSnapshot>;
+  create(targetId: string, contents: string): Promise<CreateOffsiteBackupOutcome>;
   list(
     targetId: string,
     cursor?: string | null,
@@ -167,12 +239,12 @@ export interface OffsiteBackupService {
   verify(
     targetId: string,
     snapshotId: string,
-  ): Promise<OffsiteBackupVerification>;
+  ): Promise<VerifyOffsiteBackupOutcome>;
   testRestore(
     targetId: string,
     snapshotId: string,
     password: string,
-  ): Promise<OffsiteBackupTarget>;
+  ): Promise<BackupTargetMutationOutcome>;
   listRecovery(input: TemporaryBackupConnection & {
     cursor?: string | null;
     limit?: number;
@@ -219,7 +291,7 @@ export const tauriOffsiteBackupService: OffsiteBackupService = {
     );
   },
   updateAutomaticSettings(targetId, enabled, intervalHours) {
-    return invoke<OffsiteBackupTarget>(
+    return invoke<BackupTargetMutationOutcome>(
       "update_offsite_backup_automatic_settings",
       { targetId, enabled, intervalHours },
     );
@@ -231,13 +303,13 @@ export const tauriOffsiteBackupService: OffsiteBackupService = {
     maxAgeDays,
     authorization,
   ) {
-    return invoke<OffsiteBackupTarget>(
+    return invoke<BackupTargetMutationOutcome>(
       "update_offsite_backup_retention_settings",
       { targetId, enabled, maxSnapshots, maxAgeDays, authorization },
     );
   },
   markAutomaticPending() {
-    return invoke<OffsiteBackupTarget[]>(
+    return invoke<BackupTargetsMutationOutcome>(
       "mark_automatic_offsite_backup_pending",
     );
   },
@@ -248,7 +320,7 @@ export const tauriOffsiteBackupService: OffsiteBackupService = {
     );
   },
   create(targetId, contents) {
-    return invoke<OffsiteBackupSnapshot>("create_offsite_backup", {
+    return invoke<CreateOffsiteBackupOutcome>("create_offsite_backup", {
       targetId,
       contents,
     });
@@ -267,13 +339,13 @@ export const tauriOffsiteBackupService: OffsiteBackupService = {
     });
   },
   verify(targetId, snapshotId) {
-    return invoke<OffsiteBackupVerification>("verify_offsite_backup", {
+    return invoke<VerifyOffsiteBackupOutcome>("verify_offsite_backup", {
       targetId,
       snapshotId,
     });
   },
   testRestore(targetId, snapshotId, password) {
-    return invoke<OffsiteBackupTarget>("test_offsite_backup_restore", {
+    return invoke<BackupTargetMutationOutcome>("test_offsite_backup_restore", {
       targetId,
       snapshotId,
       password,

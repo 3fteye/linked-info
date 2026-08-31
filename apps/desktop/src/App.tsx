@@ -354,16 +354,28 @@ function errorReason(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function isOffsiteConfigRecoveryError(error: unknown): boolean {
+  return errorReason(error) === "offsite_backup_config_recovery_required";
+}
+
 const offsiteErrorTranslationKeys: Record<string, string> = {
   offsite_backup_credential_cleanup_pending:
     "offsiteBackup.errors.credentialCleanupPending",
   offsite_backup_credential_missing: "offsiteBackup.errors.credentialMissing",
   offsite_backup_config_transaction_pending:
     "offsiteBackup.errors.transactionPending",
+  offsite_backup_config_recovery_required:
+    "offsiteBackup.errors.configRecoveryRequired",
   offsite_backup_purge_unverified: "offsiteBackup.errors.purgeUnverified",
+  offsite_backup_remote_purge_succeeded_config_update_failed:
+    "offsiteBackup.errors.remotePurgeConfigUpdateFailed",
   offsite_backup_snapshot_delete_unverified:
     "offsiteBackup.errors.snapshotDeleteUnverified",
   offsite_backup_target_changed: "offsiteBackup.errors.targetChanged",
+  offsite_backup_upload_succeeded_local_status_update_failed:
+    "offsiteBackup.errors.uploadSucceededLocalStatusUpdateFailed",
+  offsite_backup_verification_succeeded_local_status_update_failed:
+    "offsiteBackup.errors.verificationSucceededLocalStatusUpdateFailed",
 };
 
 function localizedOffsiteError(
@@ -674,6 +686,12 @@ function App({
   const [offsitePage, setOffsitePage] = useState<OffsiteBackupPage | null>(null);
   const [offsiteBusy, setOffsiteBusy] = useState(false);
   const [offsiteMessage, setOffsiteMessage] = useState<string | null>(null);
+  const [offsiteConfigRecoveryRequired, setOffsiteConfigRecoveryRequired] =
+    useState(false);
+  const [offsiteConfigRecoveryMessage, setOffsiteConfigRecoveryMessage] =
+    useState<string | null>(null);
+  const offsiteConfigRecoveryRequiredRef = useRef(false);
+  const offsiteConfigRecoveryGenerationRef = useRef(0);
   const automaticOffsiteRunningRef = useRef(false);
   const automaticOffsiteRevisionRef = useRef(0);
   const automaticOffsiteMarkedRevisionRef = useRef(0);
@@ -1366,6 +1384,10 @@ function App({
       })
       .catch((error) => {
         if (active) {
+          if (isOffsiteConfigRecoveryError(error)) {
+            void reconcileOffsiteConfiguration();
+            return;
+          }
           setOffsiteMessage(
             t("offsiteBackup.errors.inspect", {
               reason: localizedOffsiteError(errorReason(error), t),
@@ -1381,6 +1403,7 @@ function App({
   useEffect(() => {
     if (
       !persistenceReady ||
+      offsiteConfigRecoveryRequired ||
       !workspaceSecurityStatus.encrypted ||
       !offsiteBackup.available
     ) {
@@ -1399,7 +1422,12 @@ function App({
       );
     }, 5 * 60 * 1_000);
     return () => window.clearInterval(timer);
-  }, [offsiteBackup, persistenceReady, workspaceSecurityStatus.encrypted]);
+  }, [
+    offsiteBackup,
+    offsiteConfigRecoveryRequired,
+    persistenceReady,
+    workspaceSecurityStatus.encrypted,
+  ]);
 
   useEffect(() => {
     if (
@@ -1419,6 +1447,10 @@ function App({
       })
       .catch((error) => {
         if (active) {
+          if (isOffsiteConfigRecoveryError(error)) {
+            void reconcileOffsiteConfiguration();
+            return;
+          }
           setOffsiteMessage(
             t("offsiteBackup.errors.list", {
               reason: localizedOffsiteError(errorReason(error), t),
@@ -2083,16 +2115,24 @@ function App({
           if (pendingBackupTarget.targetId === null) {
             const configureResult =
               await offsiteBackup.configureS3Target(targetInput);
+            if (configureResult.status === "recoveryRequired") {
+              await reconcileOffsiteConfiguration();
+              return;
+            }
             configured = configureResult.target;
-            configurationWarning = configureResult.error;
+            configurationWarning = configureResult.warning;
           } else {
             const updateResult = await offsiteBackup.updateS3Target({
               ...targetInput,
               targetId: pendingBackupTarget.targetId,
               replaceCredentials: pendingBackupTarget.replaceCredentials,
             });
+            if (updateResult.status === "recoveryRequired") {
+              await reconcileOffsiteConfiguration();
+              return;
+            }
             configured = updateResult.target;
-            configurationWarning = updateResult.error;
+            configurationWarning = updateResult.warning;
           }
           setOffsiteTargets((targets) =>
             pendingBackupTarget.targetId === null
@@ -2130,6 +2170,12 @@ function App({
               action.snapshotId,
               authorization,
             );
+            if (result.status === "recoveryRequired") {
+              await reconcileOffsiteConfiguration(
+                t("offsiteBackup.configRecoveryActions.snapshotDeleted"),
+              );
+              return;
+            }
             setOffsitePage((page) =>
               page === null
                 ? null
@@ -2186,6 +2232,12 @@ function App({
                 : targetsRefresh.status === "rejected"
                   ? targetsRefresh.reason
                   : null;
+            if (isOffsiteConfigRecoveryError(refreshFailure)) {
+              await reconcileOffsiteConfiguration(
+                t("offsiteBackup.configRecoveryActions.snapshotDeleted"),
+              );
+              return;
+            }
             if (refreshFailure !== null) {
               setOffsiteMessage(
                 t("offsiteBackup.errors.refreshAfterDelete", {
@@ -2194,7 +2246,7 @@ function App({
               );
             }
             showAppNotice(
-              result.error ===
+              result.warning ===
                 "offsite_backup_snapshot_deleted_proof_update_failed"
                 ? t("offsiteBackup.snapshotDeletedProofUpdateFailed")
                 : result.restoreDrillProofInvalidated
@@ -2206,6 +2258,10 @@ function App({
               action.targetId,
               authorization,
             );
+            if (result.status === "recoveryRequired") {
+              await reconcileOffsiteConfiguration();
+              return;
+            }
             const remainingTargets = offsiteTargets.filter(
               (target) => target.id !== action.targetId,
             );
@@ -2219,12 +2275,12 @@ function App({
             }
             const removedNotice = t("offsiteBackup.targetRemoved");
             showAppNotice(
-              result.error ===
+              result.warning ===
                 "offsite_backup_config_transaction_cleanup_pending"
                 ? t("offsiteBackup.targetTransactionCleanupPending", {
                     result: removedNotice,
                   })
-                : result.error ===
+                : result.warning ===
                     "offsite_backup_credential_cleanup_pending"
                   ? t("offsiteBackup.targetRemovedCleanupPending")
                   : removedNotice,
@@ -2235,12 +2291,20 @@ function App({
               offsiteConfirmationName,
               authorization,
             );
+            if (result.status === "recoveryRequired") {
+              await reconcileOffsiteConfiguration(
+                t("offsiteBackup.configRecoveryActions.remoteVersionsDeleted", {
+                  count: result.deletedVersionCount,
+                }),
+              );
+              return;
+            }
             if (!result.targetRemoved) {
               setOffsiteMessage(
                 t("offsiteBackup.errors.destroyPartial", {
                   count: result.deletedVersionCount,
                   reason: localizedOffsiteError(
-                    result.error ?? "offsite_backup_unknown_error",
+                    result.warning ?? "offsite_backup_unknown_error",
                     t,
                   ),
                 }),
@@ -2261,25 +2325,30 @@ function App({
                 count: result.deletedVersionCount,
               });
               showAppNotice(
-                result.error ===
+                result.warning ===
                   "offsite_backup_config_transaction_cleanup_pending"
                   ? t("offsiteBackup.targetTransactionCleanupPending", {
                       result: destroyedNotice,
                     })
-                  : result.error ===
+                  : result.warning ===
                       "offsite_backup_credential_cleanup_pending"
                     ? t("offsiteBackup.targetDestroyedCleanupPending")
                     : destroyedNotice,
               );
             }
           } else {
-            const updated = await offsiteBackup.updateRetentionSettings(
+            const updateResult = await offsiteBackup.updateRetentionSettings(
               action.targetId,
               action.enabled,
               action.maxSnapshots,
               action.maxAgeDays,
               authorization,
             );
+            if (updateResult.status === "recoveryRequired") {
+              await reconcileOffsiteConfiguration();
+              return;
+            }
+            const updated = updateResult.target;
             setOffsiteTargets((targets) =>
               targets.map((target) =>
                 target.id === updated.id ? updated : target,
@@ -2308,6 +2377,10 @@ function App({
       setSecurityPassword("");
       setSecurityPasswordConfirmation("");
     } catch (error) {
+      if (isOffsiteConfigRecoveryError(error)) {
+        await reconcileOffsiteConfiguration();
+        return;
+      }
       const reason = errorReason(error);
       const displayReason = localizedOffsiteError(reason, t);
       setSecurityMessage(
@@ -4664,6 +4737,62 @@ function App({
     setOffsiteMessage(null);
   }
 
+  async function reconcileOffsiteConfiguration(
+    completedAction: string | null = null,
+  ) {
+    if (offsiteConfigRecoveryRequiredRef.current) {
+      return;
+    }
+    offsiteConfigRecoveryRequiredRef.current = true;
+    offsiteConfigRecoveryGenerationRef.current += 1;
+    setOffsiteConfigRecoveryRequired(true);
+    setOffsiteConfigRecoveryMessage(
+      t("offsiteBackup.configRecoveryRestartRequired"),
+    );
+    setOffsiteAccessKeyId("");
+    setOffsiteSecretAccessKey("");
+    setOffsiteSessionToken("");
+    setPendingBackupTarget(null);
+    setPendingOffsiteSensitiveAction(null);
+    setOffsiteConfirmationName("");
+    setSecurityDialog(null);
+    setSecurityCurrentPassword("");
+    setSecurityPassword("");
+    setSecurityPasswordConfirmation("");
+    setOffsiteRestoreDrill(null);
+    setOffsiteRestoreDrillPassword("");
+    setOffsiteRestoreDrillError(null);
+    setOffsiteRestoreDrillSucceeded(false);
+    resetOffsiteTargetForm();
+    setOffsitePage(null);
+    try {
+      const targets = await offsiteBackup.inspectTargets();
+      setOffsiteTargets(targets);
+      setSelectedOffsiteTargetId((current) =>
+        current !== null && targets.some((target) => target.id === current)
+          ? current
+          : (targets[0]?.id ?? null),
+      );
+      setOffsiteConfigRecoveryMessage(
+        completedAction === null
+          ? t("offsiteBackup.configRecoveryRestartRequired")
+          : t("offsiteBackup.configRecoveryRestartRequiredAfterAction", {
+              action: completedAction,
+            }),
+      );
+    } catch (error) {
+      const reason = localizedOffsiteError(errorReason(error), t);
+      setOffsiteConfigRecoveryMessage(
+        completedAction === null
+          ? t("offsiteBackup.configRecoveryReloadFailed", { reason })
+          : t("offsiteBackup.configRecoveryReloadFailedAfterAction", {
+              action: completedAction,
+              reason,
+            }),
+      );
+    }
+  }
+
   function renderOffsiteConnectionFields() {
     return (
       <>
@@ -4672,7 +4801,7 @@ function App({
           <span>{t("offsiteBackup.s3Provider")}</span>
           <select
             data-testid="offsite-s3-provider"
-            disabled={offsiteBusy}
+            disabled={offsiteBusy || offsiteConfigRecoveryRequired}
             onChange={(event) =>
               changeS3Provider(event.target.value as S3ProviderTemplate)
             }
@@ -4701,7 +4830,7 @@ function App({
           <input
             autoComplete="off"
             data-testid="offsite-s3-region"
-            disabled={offsiteBusy}
+            disabled={offsiteBusy || offsiteConfigRecoveryRequired}
             onChange={(event) => {
               setOffsiteRegion(event.target.value);
               setOffsiteRecoveryPage(null);
@@ -4718,7 +4847,7 @@ function App({
           <span>{t("offsiteBackup.s3Endpoint")}</span>
           <input
             data-testid="offsite-s3-endpoint"
-            disabled={offsiteBusy}
+            disabled={offsiteBusy || offsiteConfigRecoveryRequired}
             onChange={(event) => {
               setOffsiteEndpoint(event.target.value);
               setOffsiteRecoveryPage(null);
@@ -4735,7 +4864,8 @@ function App({
           <span>{t("offsiteBackup.s3Bucket")}</span>
           <input
             autoComplete="off"
-            disabled={offsiteBusy}
+            data-testid="offsite-s3-bucket"
+            disabled={offsiteBusy || offsiteConfigRecoveryRequired}
             onChange={(event) => {
               setOffsiteBucket(event.target.value);
               setOffsiteRecoveryPage(null);
@@ -4747,7 +4877,7 @@ function App({
           <span>{t("offsiteBackup.s3Prefix")}</span>
           <input
             autoComplete="off"
-            disabled={offsiteBusy}
+            disabled={offsiteBusy || offsiteConfigRecoveryRequired}
             onChange={(event) => {
               setOffsitePrefix(event.target.value);
               setOffsiteRecoveryPage(null);
@@ -4760,7 +4890,7 @@ function App({
             <input
               checked={replaceOffsiteCredentials}
               data-testid="offsite-replace-credentials"
-              disabled={offsiteBusy}
+              disabled={offsiteBusy || offsiteConfigRecoveryRequired}
               onChange={(event) => {
                 setReplaceOffsiteCredentials(event.target.checked);
                 setOffsiteAccessKeyId("");
@@ -4778,7 +4908,8 @@ function App({
               <span>{t("offsiteBackup.s3AccessKeyId")}</span>
               <input
                 autoComplete="off"
-                disabled={offsiteBusy}
+                data-testid="offsite-s3-access-key-id"
+                disabled={offsiteBusy || offsiteConfigRecoveryRequired}
                 onChange={(event) => {
                   setOffsiteAccessKeyId(event.target.value);
                   setOffsiteRecoveryPage(null);
@@ -4791,7 +4922,8 @@ function App({
               <span>{t("offsiteBackup.s3SecretAccessKey")}</span>
               <input
                 autoComplete="off"
-                disabled={offsiteBusy}
+                data-testid="offsite-s3-secret-access-key"
+                disabled={offsiteBusy || offsiteConfigRecoveryRequired}
                 onChange={(event) => {
                   setOffsiteSecretAccessKey(event.target.value);
                   setOffsiteRecoveryPage(null);
@@ -4804,7 +4936,8 @@ function App({
               <span>{t("offsiteBackup.s3SessionToken")}</span>
               <input
                 autoComplete="off"
-                disabled={offsiteBusy}
+                data-testid="offsite-s3-session-token"
+                disabled={offsiteBusy || offsiteConfigRecoveryRequired}
                 onChange={(event) => {
                   setOffsiteSessionToken(event.target.value);
                   setOffsiteRecoveryPage(null);
@@ -4824,6 +4957,10 @@ function App({
   }
 
   function requestOffsiteTargetConfiguration() {
+    if (offsiteConfigRecoveryRequiredRef.current) {
+      setOffsiteMessage(t("offsiteBackup.configRecoveryRestartRequired"));
+      return;
+    }
     const replacingCredentials =
       editingOffsiteTargetId === null || replaceOffsiteCredentials;
     const connection = currentTemporaryBackupConnection(replacingCredentials);
@@ -4849,7 +4986,11 @@ function App({
   }
 
   function requestOffsiteSensitiveAction(action: PendingOffsiteSensitiveAction) {
-    if (offsiteBusy || securityBusy) {
+    if (
+      offsiteBusy ||
+      securityBusy ||
+      offsiteConfigRecoveryRequiredRef.current
+    ) {
       return;
     }
     setOffsiteMessage(null);
@@ -4938,6 +5079,10 @@ function App({
       setOffsiteTargets(targets);
       setOffsitePage(page);
     } catch (error) {
+      if (isOffsiteConfigRecoveryError(error)) {
+        await reconcileOffsiteConfiguration();
+        return;
+      }
       setOffsiteMessage(
         t("offsiteBackup.errors.list", {
           reason: localizedOffsiteError(errorReason(error), t),
@@ -4954,35 +5099,68 @@ function App({
   ) {
     if (
       automaticOffsiteRunningRef.current ||
+      offsiteConfigRecoveryRequiredRef.current ||
       !workspaceSecurityStatus.encrypted ||
       !offsiteBackup.available
     ) {
       return;
     }
+    const recoveryGeneration = offsiteConfigRecoveryGenerationRef.current;
+    const recoveryStarted = () =>
+      offsiteConfigRecoveryRequiredRef.current ||
+      offsiteConfigRecoveryGenerationRef.current !== recoveryGeneration;
     automaticOffsiteRunningRef.current = true;
     let pendingMarkCompleted = !markPending;
     try {
       if (markPending) {
-        const targets = await offsiteBackup.markAutomaticPending();
+        const markResult = await offsiteBackup.markAutomaticPending();
+        if (recoveryStarted()) {
+          return;
+        }
+        if (markResult.status === "recoveryRequired") {
+          await reconcileOffsiteConfiguration();
+          return;
+        }
         pendingMarkCompleted = true;
         automaticOffsiteMarkedRevisionRef.current = Math.max(
           automaticOffsiteMarkedRevisionRef.current,
           markedRevision,
         );
-        setOffsiteTargets(targets);
+        setOffsiteTargets(markResult.targets);
       }
       const outcomes = await offsiteBackup.runDueAutomatic(
         serializeWorkspaceExport(workspaceRef.current),
       );
-      if (outcomes.length > 0) {
-        setOffsiteTargets(await offsiteBackup.inspectTargets());
+      if (recoveryStarted()) {
+        return;
       }
-    } catch {
+      const recoveryOutcome = outcomes.find(
+        (outcome) => outcome.status === "recoveryRequired",
+      );
+      if (recoveryOutcome !== undefined) {
+        await reconcileOffsiteConfiguration(
+          recoveryOutcome.uploaded
+            ? t("offsiteBackup.configRecoveryActions.snapshotUploaded")
+            : null,
+        );
+        return;
+      }
+      if (outcomes.length > 0) {
+        const targets = await offsiteBackup.inspectTargets();
+        if (!recoveryStarted()) {
+          setOffsiteTargets(targets);
+        }
+      }
+    } catch (error) {
+      if (isOffsiteConfigRecoveryError(error)) {
+        await reconcileOffsiteConfiguration();
+      }
       // Automatic backup failures stay isolated from local persistence. Rust keeps
       // the target pending and records a bounded provider error for Settings.
     } finally {
       automaticOffsiteRunningRef.current = false;
       if (
+        !recoveryStarted() &&
         pendingMarkCompleted &&
         automaticOffsiteRevisionRef.current >
         automaticOffsiteMarkedRevisionRef.current
@@ -5000,17 +5178,22 @@ function App({
     enabled: boolean,
     intervalHours: number,
   ) {
-    if (offsiteBusy) {
+    if (offsiteBusy || offsiteConfigRecoveryRequiredRef.current) {
       return;
     }
     setOffsiteBusy(true);
     setOffsiteMessage(null);
     try {
-      const updated = await offsiteBackup.updateAutomaticSettings(
+      const updateResult = await offsiteBackup.updateAutomaticSettings(
         targetId,
         enabled,
         intervalHours,
       );
+      if (updateResult.status === "recoveryRequired") {
+        await reconcileOffsiteConfiguration();
+        return;
+      }
+      const updated = updateResult.target;
       setOffsiteTargets((targets) =>
         targets.map((target) => (target.id === updated.id ? updated : target)),
       );
@@ -5023,6 +5206,10 @@ function App({
         void requestAutomaticOffsiteBackup(false);
       }
     } catch (error) {
+      if (isOffsiteConfigRecoveryError(error)) {
+        await reconcileOffsiteConfiguration();
+        return;
+      }
       setOffsiteMessage(
         t("offsiteBackup.errors.automaticSettings", {
           reason: localizedOffsiteError(errorReason(error), t),
@@ -5034,7 +5221,11 @@ function App({
   }
 
   async function createOffsiteSnapshot() {
-    if (selectedOffsiteTargetId === null || offsiteBusy) {
+    if (
+      selectedOffsiteTargetId === null ||
+      offsiteBusy ||
+      offsiteConfigRecoveryRequiredRef.current
+    ) {
       return;
     }
     setOffsiteBusy(true);
@@ -5042,15 +5233,33 @@ function App({
     try {
       await persistence.save(workspaceRef.current);
       const plaintext = serializeWorkspaceExport(workspaceRef.current);
-      await offsiteBackup.create(selectedOffsiteTargetId, plaintext);
+      const uploadResult = await offsiteBackup.create(
+        selectedOffsiteTargetId,
+        plaintext,
+      );
+      if (uploadResult.status === "recoveryRequired") {
+        await reconcileOffsiteConfiguration(
+          t("offsiteBackup.configRecoveryActions.snapshotUploaded"),
+        );
+        return;
+      }
       const [targets, page] = await Promise.all([
         offsiteBackup.inspectTargets(),
         offsiteBackup.list(selectedOffsiteTargetId),
       ]);
       setOffsiteTargets(targets);
       setOffsitePage(page);
-      showAppNotice(t("offsiteBackup.uploadSuccess"));
+      showAppNotice(
+        uploadResult.warning ===
+          "offsite_backup_upload_succeeded_local_status_update_failed"
+          ? t("offsiteBackup.uploadSucceededStatusUpdateFailed")
+          : t("offsiteBackup.uploadSuccess"),
+      );
     } catch (error) {
+      if (isOffsiteConfigRecoveryError(error)) {
+        await reconcileOffsiteConfiguration();
+        return;
+      }
       setOffsiteMessage(
         t("offsiteBackup.errors.upload", {
           reason: localizedOffsiteError(errorReason(error), t),
@@ -5062,23 +5271,46 @@ function App({
   }
 
   async function verifyOffsiteSnapshot(snapshotId: string) {
-    if (selectedOffsiteTargetId === null || offsiteBusy) {
+    if (
+      selectedOffsiteTargetId === null ||
+      offsiteBusy ||
+      offsiteConfigRecoveryRequiredRef.current
+    ) {
       return;
     }
     setOffsiteBusy(true);
     setOffsiteMessage(null);
     try {
-      const verification = await offsiteBackup.verify(
+      const verifyResult = await offsiteBackup.verify(
         selectedOffsiteTargetId,
         snapshotId,
       );
+      if (verifyResult.status === "recoveryRequired") {
+        await reconcileOffsiteConfiguration(
+          t("offsiteBackup.configRecoveryActions.snapshotVerified"),
+        );
+        return;
+      }
       setOffsiteTargets(await offsiteBackup.inspectTargets());
       showAppNotice(
-        t("offsiteBackup.verifySuccess", {
-          size: formatByteCount(verification.downloadedBytes),
-        }),
+        verifyResult.warning ===
+          "offsite_backup_verification_succeeded_local_status_update_failed"
+          ? t("offsiteBackup.verifySucceededStatusUpdateFailed", {
+              size: formatByteCount(
+                verifyResult.verification.downloadedBytes,
+              ),
+            })
+          : t("offsiteBackup.verifySuccess", {
+              size: formatByteCount(
+                verifyResult.verification.downloadedBytes,
+              ),
+            }),
       );
     } catch (error) {
+      if (isOffsiteConfigRecoveryError(error)) {
+        await reconcileOffsiteConfiguration();
+        return;
+      }
       setOffsiteMessage(
         t("offsiteBackup.errors.verify", {
           reason: localizedOffsiteError(errorReason(error), t),
@@ -5090,7 +5322,11 @@ function App({
   }
 
   function openOffsiteRestoreDrill(snapshotId: string, createdAtMs: number) {
-    if (selectedOffsiteTargetId === null || offsiteBusy) {
+    if (
+      selectedOffsiteTargetId === null ||
+      offsiteBusy ||
+      offsiteConfigRecoveryRequiredRef.current
+    ) {
       return;
     }
     setOffsiteRestoreDrill({
@@ -5117,6 +5353,7 @@ function App({
     if (
       offsiteRestoreDrill === null ||
       offsiteBusy ||
+      offsiteConfigRecoveryRequiredRef.current ||
       offsiteRestoreDrillPassword.length === 0
     ) {
       return;
@@ -5124,11 +5361,18 @@ function App({
     setOffsiteBusy(true);
     setOffsiteRestoreDrillError(null);
     try {
-      const updated = await offsiteBackup.testRestore(
+      const restoreResult = await offsiteBackup.testRestore(
         offsiteRestoreDrill.targetId,
         offsiteRestoreDrill.snapshotId,
         offsiteRestoreDrillPassword,
       );
+      if (restoreResult.status === "recoveryRequired") {
+        await reconcileOffsiteConfiguration(
+          t("offsiteBackup.configRecoveryActions.restoreDrillCompleted"),
+        );
+        return;
+      }
+      const updated = restoreResult.target;
       setOffsiteTargets((targets) =>
         targets.map((target) => (target.id === updated.id ? updated : target)),
       );
@@ -5136,6 +5380,10 @@ function App({
       setOffsiteRestoreDrillSucceeded(true);
     } catch (error) {
       const reason = errorReason(error);
+      if (reason === "offsite_backup_config_recovery_required") {
+        await reconcileOffsiteConfiguration();
+        return;
+      }
       setOffsiteRestoreDrillError(
         reason === "workspace_vault_invalid_password"
           ? t("security.invalidPassword")
@@ -5177,6 +5425,10 @@ function App({
       setEncryptedImportPassword("");
       setEncryptedImportError(null);
     } catch (error) {
+      if (isOffsiteConfigRecoveryError(error)) {
+        await reconcileOffsiteConfiguration();
+        return;
+      }
       setOffsiteMessage(
         t("offsiteBackup.errors.download", {
           reason: localizedOffsiteError(errorReason(error), t),
@@ -7410,7 +7662,9 @@ function App({
                                 <label className="switch-setting">
                                   <input
                                     checked={selectedOffsiteTarget.automaticEnabled}
-                                    disabled={offsiteBusy}
+                                    disabled={
+                                      offsiteBusy || offsiteConfigRecoveryRequired
+                                    }
                                     onChange={(event) =>
                                       void updateAutomaticOffsiteSettings(
                                         selectedOffsiteTarget.id,
@@ -7427,6 +7681,7 @@ function App({
                                   <select
                                     disabled={
                                       offsiteBusy ||
+                                      offsiteConfigRecoveryRequired ||
                                       !selectedOffsiteTarget.automaticEnabled
                                     }
                                     onChange={(event) =>
@@ -7469,7 +7724,9 @@ function App({
                                 <label className="switch-setting">
                                   <input
                                     checked={selectedOffsiteTarget.retentionEnabled}
-                                    disabled={offsiteBusy}
+                                    disabled={
+                                      offsiteBusy || offsiteConfigRecoveryRequired
+                                    }
                                     onChange={(event) =>
                                       requestOffsiteSensitiveAction({
                                         kind: "retention",
@@ -7488,7 +7745,9 @@ function App({
                                 <label>
                                   <span>{t("offsiteBackup.retentionCount")}</span>
                                   <select
-                                    disabled={offsiteBusy}
+                                    disabled={
+                                      offsiteBusy || offsiteConfigRecoveryRequired
+                                    }
                                     onChange={(event) =>
                                       requestOffsiteSensitiveAction({
                                         kind: "retention",
@@ -7511,7 +7770,9 @@ function App({
                                 <label>
                                   <span>{t("offsiteBackup.retentionAge")}</span>
                                   <select
-                                    disabled={offsiteBusy}
+                                    disabled={
+                                      offsiteBusy || offsiteConfigRecoveryRequired
+                                    }
                                     onChange={(event) =>
                                       requestOffsiteSensitiveAction({
                                         kind: "retention",
@@ -7586,7 +7847,7 @@ function App({
                             <div className="backup-actions">
                               <button
                                 className="secondary-button"
-                                disabled={offsiteBusy}
+                                disabled={offsiteBusy || offsiteConfigRecoveryRequired}
                                 onClick={() =>
                                   beginOffsiteTargetEdit(selectedOffsiteTarget)
                                 }
@@ -7597,7 +7858,11 @@ function App({
                               </button>
                               <button
                                 className="primary-button"
-                                disabled={offsiteBusy || selectedOffsiteTargetId === null}
+                                disabled={
+                                  offsiteBusy ||
+                                  offsiteConfigRecoveryRequired ||
+                                  selectedOffsiteTargetId === null
+                                }
                                 onClick={() => void createOffsiteSnapshot()}
                                 type="button"
                               >
@@ -7606,7 +7871,7 @@ function App({
                               </button>
                               <button
                                 className="secondary-button"
-                                disabled={offsiteBusy}
+                                disabled={offsiteBusy || offsiteConfigRecoveryRequired}
                                 onClick={() =>
                                   requestOffsiteSensitiveAction({
                                     kind: "removeTarget",
@@ -7621,7 +7886,7 @@ function App({
                               </button>
                               <button
                                 className="danger-button"
-                                disabled={offsiteBusy}
+                                disabled={offsiteBusy || offsiteConfigRecoveryRequired}
                                 onClick={() =>
                                   requestOffsiteSensitiveAction({
                                     kind: "destroyTarget",
@@ -7672,7 +7937,9 @@ function App({
                                   <div className="offsite-entry-actions">
                                     <button
                                       className="secondary-button"
-                                      disabled={offsiteBusy}
+                                      disabled={
+                                        offsiteBusy || offsiteConfigRecoveryRequired
+                                      }
                                       onClick={() =>
                                         void verifyOffsiteSnapshot(snapshot.id)
                                       }
@@ -7683,7 +7950,9 @@ function App({
                                     </button>
                                     <button
                                       className="danger-button"
-                                      disabled={offsiteBusy}
+                                      disabled={
+                                        offsiteBusy || offsiteConfigRecoveryRequired
+                                      }
                                       onClick={() =>
                                         selectedOffsiteTargetId !== null &&
                                         requestOffsiteSensitiveAction({
@@ -7700,7 +7969,9 @@ function App({
                                     </button>
                                     <button
                                       className="secondary-button"
-                                      disabled={offsiteBusy}
+                                      disabled={
+                                        offsiteBusy || offsiteConfigRecoveryRequired
+                                      }
                                       onClick={() =>
                                         openOffsiteRestoreDrill(
                                           snapshot.id,
@@ -7730,8 +8001,19 @@ function App({
                       )}
                     </>
                   )}
+                  {offsiteConfigRecoveryMessage !== null && (
+                    <small
+                      className="offsite-automatic-error"
+                      data-testid="offsite-config-recovery-message"
+                      role="alert"
+                    >
+                      {offsiteConfigRecoveryMessage}
+                    </small>
+                  )}
                   {offsiteMessage !== null && (
-                    <small role="status">{offsiteMessage}</small>
+                    <small data-testid="offsite-message" role="status">
+                      {offsiteMessage}
+                    </small>
                   )}
                 </div>
               </div>
@@ -7764,7 +8046,7 @@ function App({
                       <label>
                         <span>{t("offsiteBackup.targetName")}</span>
                         <input
-                          disabled={offsiteBusy}
+                          disabled={offsiteBusy || offsiteConfigRecoveryRequired}
                           maxLength={80}
                           onChange={(event) => setOffsiteTargetName(event.target.value)}
                           value={offsiteTargetName}
@@ -7785,7 +8067,12 @@ function App({
                         )}
                         <button
                           className="secondary-button"
-                          disabled={offsiteBusy || !offsiteBackup.available}
+                          data-testid="offsite-save-target"
+                          disabled={
+                            offsiteBusy ||
+                            offsiteConfigRecoveryRequired ||
+                            !offsiteBackup.available
+                          }
                           onClick={requestOffsiteTargetConfiguration}
                           type="button"
                         >

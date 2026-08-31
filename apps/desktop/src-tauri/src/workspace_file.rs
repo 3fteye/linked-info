@@ -2653,27 +2653,27 @@ fn rewrap_vault_metadata(
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum VaultMetadataWriteStatus {
+pub(crate) enum AtomicWriteStatus {
     Committed,
     RecoveryRequired,
 }
 
 fn password_change_recovery_result(
-    write_status: VaultMetadataWriteStatus,
+    write_status: AtomicWriteStatus,
 ) -> Option<WorkspaceSecurityTransactionResult> {
     match write_status {
-        VaultMetadataWriteStatus::RecoveryRequired => Some(WorkspaceSecurityTransactionResult {
+        AtomicWriteStatus::RecoveryRequired => Some(WorkspaceSecurityTransactionResult {
             status: WorkspaceSecurityTransactionStatus::RecoveryRequired,
             security_status: None,
         }),
-        VaultMetadataWriteStatus::Committed => None,
+        AtomicWriteStatus::Committed => None,
     }
 }
 
 fn write_vault_metadata_commit_aware(
     store: &WorkspaceFileStore,
     serialized: &[u8],
-) -> Result<VaultMetadataWriteStatus, String> {
+) -> Result<AtomicWriteStatus, String> {
     write_vault_metadata_commit_aware_with_parent_sync(store, serialized, sync_parent_directory)
 }
 
@@ -2681,23 +2681,14 @@ fn write_vault_metadata_commit_aware_with_parent_sync(
     store: &WorkspaceFileStore,
     serialized: &[u8],
     confirm_parent_durability: impl FnOnce(&Path) -> io::Result<()>,
-) -> Result<VaultMetadataWriteStatus, String> {
-    match write_atomically_with_parent_sync(
+) -> Result<AtomicWriteStatus, String> {
+    write_atomically_commit_aware_with(
         &store.vault_path(),
         serialized,
+        replace_file,
         confirm_parent_durability,
-    ) {
-        Ok(()) => Ok(VaultMetadataWriteStatus::Committed),
-        Err(write_error) => match fs::read(store.vault_path()) {
-            Ok(current) if current == serialized => {
-                // Replacement happened, but the final durability step reported
-                // an error. The caller must not report a pre-commit failure.
-                Ok(VaultMetadataWriteStatus::RecoveryRequired)
-            }
-            Ok(_) => Err(write_error.to_string()),
-            Err(_) => Ok(VaultMetadataWriteStatus::RecoveryRequired),
-        },
-    }
+    )
+    .map_err(|error| error.to_string())
 }
 
 fn create_system_unlock_envelope(
@@ -4527,14 +4518,32 @@ fn workspace_storage_from_export(contents: &str) -> io::Result<String> {
 }
 
 pub(crate) fn write_atomically(target: &Path, contents: &[u8]) -> io::Result<()> {
-    write_atomically_with_parent_sync(target, contents, sync_parent_directory)
+    match write_atomically_commit_aware(target, contents)? {
+        AtomicWriteStatus::Committed => Ok(()),
+        AtomicWriteStatus::RecoveryRequired => Err(io::Error::other(
+            "atomic write committed but parent directory durability could not be confirmed",
+        )),
+    }
 }
 
-fn write_atomically_with_parent_sync(
+pub(crate) fn write_atomically_commit_aware(
     target: &Path,
     contents: &[u8],
+) -> io::Result<AtomicWriteStatus> {
+    write_atomically_commit_aware_with(
+        target,
+        contents,
+        replace_file,
+        sync_parent_directory,
+    )
+}
+
+fn write_atomically_commit_aware_with(
+    target: &Path,
+    contents: &[u8],
+    replace: impl FnOnce(&Path, &Path) -> io::Result<()>,
     confirm_parent_durability: impl FnOnce(&Path) -> io::Result<()>,
-) -> io::Result<()> {
+) -> io::Result<AtomicWriteStatus> {
     let parent = target.parent().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -4554,7 +4563,7 @@ fn write_atomically_with_parent_sync(
         sequence
     ));
 
-    let write_result = (|| {
+    let prepare_and_replace_result = (|| {
         let mut file = OpenOptions::new()
             .create_new(true)
             .write(true)
@@ -4562,14 +4571,19 @@ fn write_atomically_with_parent_sync(
         file.write_all(contents)?;
         file.sync_all()?;
         drop(file);
-        replace_file(&temporary, target)?;
-        confirm_parent_durability(parent)
+        replace(&temporary, target)
     })();
 
-    if write_result.is_err() {
+    if let Err(error) = prepare_and_replace_result {
         let _ = fs::remove_file(&temporary);
+        return Err(error);
     }
-    write_result
+
+    if confirm_parent_durability(parent).is_ok() {
+        Ok(AtomicWriteStatus::Committed)
+    } else {
+        Ok(AtomicWriteStatus::RecoveryRequired)
+    }
 }
 
 #[cfg(windows)]
@@ -5315,6 +5329,74 @@ mod tests {
             store.read_plaintext(WorkspaceFileSlot::Primary).unwrap(),
             Some(second)
         );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn atomic_write_does_not_infer_a_commit_from_matching_existing_contents() {
+        let directory = test_directory();
+        fs::create_dir_all(&directory).unwrap();
+        let target = directory.join("matching.json");
+        fs::write(&target, b"unchanged").unwrap();
+        let parent_sync_called = Cell::new(false);
+
+        let result = write_atomically_commit_aware_with(
+            &target,
+            b"unchanged",
+            |_, _| Err(io::Error::other("injected replacement failure")),
+            |_| {
+                parent_sync_called.set(true);
+                Ok(())
+            },
+        );
+
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "injected replacement failure"
+        );
+        assert!(!parent_sync_called.get());
+        assert_eq!(fs::read(&target).unwrap(), b"unchanged".to_vec());
+        assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn atomic_write_requires_recovery_after_replacement_sync_failure() {
+        let directory = test_directory();
+        fs::create_dir_all(&directory).unwrap();
+        let target = directory.join("recovery-required.json");
+        fs::write(&target, b"previous").unwrap();
+
+        let status = write_atomically_commit_aware_with(
+            &target,
+            b"replacement",
+            replace_file,
+            |_| Err(io::Error::other("injected parent-directory sync failure")),
+        )
+        .unwrap();
+
+        assert_eq!(status, AtomicWriteStatus::RecoveryRequired);
+        assert_eq!(fs::read(&target).unwrap(), b"replacement".to_vec());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn atomic_write_reports_a_fully_durable_commit() {
+        let directory = test_directory();
+        fs::create_dir_all(&directory).unwrap();
+        let target = directory.join("committed.json");
+        fs::write(&target, b"previous").unwrap();
+
+        let status = write_atomically_commit_aware_with(
+            &target,
+            b"replacement",
+            replace_file,
+            |_| Ok(()),
+        )
+        .unwrap();
+
+        assert_eq!(status, AtomicWriteStatus::Committed);
+        assert_eq!(fs::read(&target).unwrap(), b"replacement".to_vec());
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -6890,7 +6972,7 @@ mod tests {
             })
             .unwrap();
 
-        assert_eq!(write_status, VaultMetadataWriteStatus::RecoveryRequired);
+        assert_eq!(write_status, AtomicWriteStatus::RecoveryRequired);
         let result = password_change_recovery_result(write_status).unwrap();
         assert_eq!(
             result.status,

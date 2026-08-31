@@ -17,7 +17,7 @@ describe("tauriOffsiteBackupService", () => {
 
   it("updates an existing target without changing its identity", async () => {
     const updated = { id: "target-1", name: "Backblaze B2" };
-    const outcome = { target: updated, error: null };
+    const outcome = { status: "committed", target: updated, warning: null };
     invokeMock.mockResolvedValue(outcome);
     const input = {
       targetId: "target-1",
@@ -43,8 +43,9 @@ describe("tauriOffsiteBackupService", () => {
 
   it("returns a committed target-creation warning without rejecting", async () => {
     const outcome = {
+      status: "committed",
       target: { id: "target-1", name: "Cloudflare R2" },
-      error: "offsite_backup_config_transaction_cleanup_pending",
+      warning: "offsite_backup_config_transaction_cleanup_pending",
     };
     invokeMock.mockResolvedValue(outcome);
     const input = {
@@ -71,8 +72,9 @@ describe("tauriOffsiteBackupService", () => {
 
   it("can update non-secret settings while retaining stored credentials", async () => {
     invokeMock.mockResolvedValue({
+      status: "committed",
       target: { id: "target-1" },
-      error: null,
+      warning: null,
     });
     const input = {
       targetId: "target-1",
@@ -92,8 +94,9 @@ describe("tauriOffsiteBackupService", () => {
     await expect(
       tauriOffsiteBackupService.updateS3Target(input),
     ).resolves.toEqual({
+      status: "committed",
       target: { id: "target-1" },
-      error: null,
+      warning: null,
     });
 
     expect(invokeMock).toHaveBeenCalledWith("update_s3_backup_target", input);
@@ -101,8 +104,9 @@ describe("tauriOffsiteBackupService", () => {
 
   it("returns a committed target-removal warning without rejecting", async () => {
     const outcome = {
+      status: "committed",
       targetRemoved: true,
-      error: "offsite_backup_credential_cleanup_pending",
+      warning: "offsite_backup_credential_cleanup_pending",
     };
     invokeMock.mockResolvedValue(outcome);
 
@@ -120,8 +124,9 @@ describe("tauriOffsiteBackupService", () => {
 
   it("returns a committed transaction-cleanup warning without rejecting", async () => {
     const outcome = {
+      status: "committed",
       targetRemoved: true,
-      error: "offsite_backup_config_transaction_cleanup_pending",
+      warning: "offsite_backup_config_transaction_cleanup_pending",
     };
     invokeMock.mockResolvedValue(outcome);
 
@@ -133,11 +138,40 @@ describe("tauriOffsiteBackupService", () => {
     ).resolves.toEqual(outcome);
   });
 
+  it("preserves a target mutation that requires disk recovery", async () => {
+    const outcome = { status: "recoveryRequired" as const };
+    invokeMock.mockResolvedValue(outcome);
+
+    await expect(
+      tauriOffsiteBackupService.removeTarget(
+        "target-1",
+        "one-time-authorization",
+      ),
+    ).resolves.toBe(outcome);
+  });
+
+  it("preserves the remote deletion count while local removal needs recovery", async () => {
+    const outcome = {
+      status: "recoveryRequired" as const,
+      deletedVersionCount: 7,
+    };
+    invokeMock.mockResolvedValue(outcome);
+
+    await expect(
+      tauriOffsiteBackupService.deleteAllAndRemoveTarget(
+        "target-1",
+        "Backblaze B2",
+        "one-time-authorization",
+      ),
+    ).resolves.toBe(outcome);
+  });
+
   it("returns committed snapshot deletion with a local proof warning", async () => {
     const outcome = {
+      status: "committed" as const,
       snapshotDeleted: true as const,
       restoreDrillProofInvalidated: false,
-      error: "offsite_backup_snapshot_deleted_proof_update_failed" as const,
+      warning: "offsite_backup_snapshot_deleted_proof_update_failed" as const,
     };
     invokeMock.mockResolvedValue(outcome);
 
