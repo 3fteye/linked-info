@@ -1009,13 +1009,15 @@ describe("App recovery transaction boundary", () => {
     const recoveryMessage = recoveryBanner.textContent;
     expect(recoveryBanner.textContent).toMatch(/deleted|删除/);
     expect(deleteSnapshot).toHaveBeenCalledOnce();
-    expect(document.querySelectorAll(".offsite-entry-actions")).toHaveLength(2);
+    expect(document.querySelectorAll(".offsite-entry-actions")).toHaveLength(0);
     expect(document.querySelector(".app-status-toast")).toBeNull();
 
     const refresh = await findButton(/刷新|Refresh/);
     expect(refresh.disabled).toBe(false);
     await clickButton(/刷新|Refresh/);
-    await waitUntil(() => !refresh.disabled);
+    await waitUntil(
+      () => document.querySelectorAll(".offsite-entry-actions").length === 2,
+    );
     expect((await find("offsite-config-recovery-message")).textContent).toBe(
       recoveryMessage,
     );
