@@ -4530,12 +4530,7 @@ pub(crate) fn write_atomically_commit_aware(
     target: &Path,
     contents: &[u8],
 ) -> io::Result<AtomicWriteStatus> {
-    write_atomically_commit_aware_with(
-        target,
-        contents,
-        replace_file,
-        sync_parent_directory,
-    )
+    write_atomically_commit_aware_with(target, contents, replace_file, sync_parent_directory)
 }
 
 fn write_atomically_commit_aware_with(
@@ -5367,13 +5362,11 @@ mod tests {
         let target = directory.join("recovery-required.json");
         fs::write(&target, b"previous").unwrap();
 
-        let status = write_atomically_commit_aware_with(
-            &target,
-            b"replacement",
-            replace_file,
-            |_| Err(io::Error::other("injected parent-directory sync failure")),
-        )
-        .unwrap();
+        let status =
+            write_atomically_commit_aware_with(&target, b"replacement", replace_file, |_| {
+                Err(io::Error::other("injected parent-directory sync failure"))
+            })
+            .unwrap();
 
         assert_eq!(status, AtomicWriteStatus::RecoveryRequired);
         assert_eq!(fs::read(&target).unwrap(), b"replacement".to_vec());
@@ -5387,13 +5380,9 @@ mod tests {
         let target = directory.join("committed.json");
         fs::write(&target, b"previous").unwrap();
 
-        let status = write_atomically_commit_aware_with(
-            &target,
-            b"replacement",
-            replace_file,
-            |_| Ok(()),
-        )
-        .unwrap();
+        let status =
+            write_atomically_commit_aware_with(&target, b"replacement", replace_file, |_| Ok(()))
+                .unwrap();
 
         assert_eq!(status, AtomicWriteStatus::Committed);
         assert_eq!(fs::read(&target).unwrap(), b"replacement".to_vec());

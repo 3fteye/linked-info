@@ -182,10 +182,7 @@ fn latch_commit_recovery<T>(latch: &AtomicBool, outcome: &CommitOutcome<T>) {
     }
 }
 
-fn latch_recovery_error<T>(
-    latch: &AtomicBool,
-    result: Result<T, String>,
-) -> Result<T, String> {
+fn latch_recovery_error<T>(latch: &AtomicBool, result: Result<T, String>) -> Result<T, String> {
     if result
         .as_ref()
         .err()
@@ -434,7 +431,9 @@ pub enum CreateOffsiteBackupOutcome {
         snapshot: BackupSnapshotMetadata,
         warning: Option<String>,
     },
-    RecoveryRequired { snapshot: BackupSnapshotMetadata },
+    RecoveryRequired {
+        snapshot: BackupSnapshotMetadata,
+    },
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -448,7 +447,9 @@ pub enum VerifyOffsiteBackupOutcome {
         verification: BackupVerification,
         warning: Option<String>,
     },
-    RecoveryRequired { verification: BackupVerification },
+    RecoveryRequired {
+        verification: BackupVerification,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -484,7 +485,9 @@ pub enum DeleteOffsiteBackupOutcome {
         restore_drill_proof_invalidated: bool,
         warning: Option<String>,
     },
-    RecoveryRequired { snapshot_deleted: bool },
+    RecoveryRequired {
+        snapshot_deleted: bool,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -722,17 +725,12 @@ fn committed_snapshot_deletion_outcome(
             }
         }
         proof_update => {
-            let proof_update_succeeded = matches!(
-                proof_update,
-                Ok(CommitOutcome::Committed(()))
-            );
+            let proof_update_succeeded = matches!(proof_update, Ok(CommitOutcome::Committed(())));
             DeleteOffsiteBackupOutcome::Committed {
                 snapshot_deleted: true,
-                restore_drill_proof_invalidated: was_restore_drill_proof
-                    && proof_update_succeeded,
-                warning: (was_restore_drill_proof && !proof_update_succeeded).then(|| {
-                    "offsite_backup_snapshot_deleted_proof_update_failed".to_owned()
-                }),
+                restore_drill_proof_invalidated: was_restore_drill_proof && proof_update_succeeded,
+                warning: (was_restore_drill_proof && !proof_update_succeeded)
+                    .then(|| "offsite_backup_snapshot_deleted_proof_update_failed".to_owned()),
             }
         }
     }
@@ -826,9 +824,9 @@ pub async fn update_offsite_backup_automatic_settings(
     .await
     .map_err(|error| error.to_string())??;
     Ok(match summary.1 {
-        AtomicWriteStatus::Committed => BackupTargetMutationOutcome::Committed {
-            target: summary.0,
-        },
+        AtomicWriteStatus::Committed => {
+            BackupTargetMutationOutcome::Committed { target: summary.0 }
+        }
         AtomicWriteStatus::RecoveryRequired => BackupTargetMutationOutcome::RecoveryRequired,
     })
 }
@@ -883,9 +881,9 @@ pub async fn update_offsite_backup_retention_settings(
     .map_err(|error| error.to_string())??;
     // A lock after admission must not report an already committed rule as failed.
     Ok(match summary.1 {
-        AtomicWriteStatus::Committed => BackupTargetMutationOutcome::Committed {
-            target: summary.0,
-        },
+        AtomicWriteStatus::Committed => {
+            BackupTargetMutationOutcome::Committed { target: summary.0 }
+        }
         AtomicWriteStatus::RecoveryRequired => BackupTargetMutationOutcome::RecoveryRequired,
     })
 }
@@ -1506,7 +1504,8 @@ pub async fn delete_all_offsite_backups_and_remove_target(
             });
         }
     };
-    match remove_target_config_and_credential(&app, &backup_state, &config, target_id, permit).await {
+    match remove_target_config_and_credential(&app, &backup_state, &config, target_id, permit).await
+    {
         Ok(commit) => Ok(delete_all_outcome(deleted_version_count, commit)),
         Err(error) if error == "offsite_backup_config_recovery_required" => {
             Ok(DeleteAllOffsiteBackupsOutcome::RecoveryRequired {
@@ -1514,12 +1513,10 @@ pub async fn delete_all_offsite_backups_and_remove_target(
             })
         }
         Err(_) => Ok(DeleteAllOffsiteBackupsOutcome::Committed {
-                deleted_version_count,
-                target_removed: false,
-                warning: Some(
-                    "offsite_backup_remote_purge_succeeded_config_update_failed".to_owned(),
-                ),
-            }),
+            deleted_version_count,
+            target_removed: false,
+            warning: Some("offsite_backup_remote_purge_succeeded_config_update_failed".to_owned()),
+        }),
     }
 }
 
@@ -1571,21 +1568,22 @@ pub async fn create_offsite_backup(
             Ok(CreateOffsiteBackupOutcome::RecoveryRequired { snapshot: metadata })
         }
         Ok(CommitOutcome::Committed(())) => {
-            run_retention_cleanup(&app, &backup_state, &vault_state, permit, target_id).await;
-            Ok(CreateOffsiteBackupOutcome::Committed {
-                snapshot: metadata,
-                warning: None,
-            })
+            if run_retention_cleanup(&app, &backup_state, &vault_state, permit, target_id).await {
+                Ok(CreateOffsiteBackupOutcome::RecoveryRequired { snapshot: metadata })
+            } else {
+                Ok(CreateOffsiteBackupOutcome::Committed {
+                    snapshot: metadata,
+                    warning: None,
+                })
+            }
         }
         Err(error) if error == "offsite_backup_config_recovery_required" => {
             Ok(CreateOffsiteBackupOutcome::RecoveryRequired { snapshot: metadata })
         }
         Err(_) => Ok(CreateOffsiteBackupOutcome::Committed {
-                snapshot: metadata,
-                warning: Some(
-                    "offsite_backup_upload_succeeded_local_status_update_failed".to_owned(),
-                ),
-            }),
+            snapshot: metadata,
+            warning: Some("offsite_backup_upload_succeeded_local_status_update_failed".to_owned()),
+        }),
     }
 }
 
@@ -1678,11 +1676,11 @@ pub async fn verify_offsite_backup(
             VerifyOffsiteBackupOutcome::RecoveryRequired { verification }
         }
         Err(_) => VerifyOffsiteBackupOutcome::Committed {
-                verification,
-                warning: Some(
-                    "offsite_backup_verification_succeeded_local_status_update_failed".to_owned(),
-                ),
-            },
+            verification,
+            warning: Some(
+                "offsite_backup_verification_succeeded_local_status_update_failed".to_owned(),
+            ),
+        },
     })
 }
 
@@ -1868,10 +1866,10 @@ async fn remove_target_config_and_credential(
                 write_config_unchecked(&path, &config)
             },
             || {
-                let cleanup = classify_target_credential_cleanup(
-                    credential_referenced_elsewhere,
-                    || delete_credential(&current.credential_id),
-                );
+                let cleanup =
+                    classify_target_credential_cleanup(credential_referenced_elsewhere, || {
+                        delete_credential(&current.credential_id)
+                    });
                 finish_committed_config_transaction(cleanup, || {
                     clear_config_transaction(&transaction_path, &transaction)
                 })
@@ -2041,11 +2039,17 @@ async fn run_automatic_upload(
             uploaded: true,
         },
         Ok(CommitOutcome::Committed(())) => {
-            run_retention_cleanup(app, state, vault_state, permit, target_id).await;
-            AutomaticBackupOutcome::Committed {
-                target_id,
-                uploaded: true,
-                error: None,
+            if run_retention_cleanup(app, state, vault_state, permit, target_id).await {
+                AutomaticBackupOutcome::RecoveryRequired {
+                    target_id,
+                    uploaded: true,
+                }
+            } else {
+                AutomaticBackupOutcome::Committed {
+                    target_id,
+                    uploaded: true,
+                    error: None,
+                }
             }
         }
         Err(error) if error == "offsite_backup_config_recovery_required" => {
@@ -2086,7 +2090,7 @@ async fn run_retention_cleanup(
     vault_state: &WorkspaceVaultState,
     permit: Option<WorkspaceAccessPermit>,
     target_id: Uuid,
-) {
+) -> bool {
     let result = async {
         let operation_guard = WorkspaceBackupOperationGuard::new_with_latch(
             vault_state,
@@ -2125,12 +2129,18 @@ async fn run_retention_cleanup(
             }
         }
         ensure_workspace_access(app, vault_state, permit)?;
-        update_target_status(app, state, target_id, move |target| {
+        match update_target_status(app, state, target_id, move |target| {
             target.last_retention_cleanup_at_ms = Some(now);
             target.last_retention_error = None;
             Ok(())
         })
-        .await
+        .await?
+        {
+            CommitOutcome::Committed(()) => Ok(()),
+            CommitOutcome::RecoveryRequired => {
+                Err("offsite_backup_config_recovery_required".to_owned())
+            }
+        }
     }
     .await;
 
@@ -2144,6 +2154,7 @@ async fn run_retention_cleanup(
             .await;
         }
     }
+    state.config_recovery_latched.load(Ordering::Acquire)
 }
 
 fn retention_candidates(
@@ -2230,7 +2241,7 @@ async fn update_target_status(
         update(target)?;
         let write_status = write_config(&path, &config)?;
         latch_atomic_recovery(&recovery_latch, write_status);
-        Ok(match write_status {
+        Ok::<CommitOutcome<()>, String>(match write_status {
             AtomicWriteStatus::Committed => CommitOutcome::Committed(()),
             AtomicWriteStatus::RecoveryRequired => CommitOutcome::RecoveryRequired,
         })
@@ -2436,9 +2447,7 @@ fn write_config_migration(
     key: &[u8],
 ) -> Result<AtomicWriteStatus, String> {
     validate_config(&migration.config)?;
-    if migration.format != CONFIG_MIGRATION_FORMAT
-        || migration.version != CONFIG_MIGRATION_VERSION
-    {
+    if migration.format != CONFIG_MIGRATION_FORMAT || migration.version != CONFIG_MIGRATION_VERSION {
         return Err("offsite_backup_invalid_config_migration".to_owned());
     }
     let envelope = AuthenticatedOffsiteBackupConfigMigration {
@@ -2501,7 +2510,11 @@ fn clear_config_transaction(
 }
 
 fn remove_config_transaction_file(path: &Path) -> Result<(), String> {
-    remove_config_transaction_file_with(path, fs::remove_file, sync_config_parent_directory)
+    remove_config_transaction_file_with(
+        path,
+        |target| fs::remove_file(target),
+        |parent| sync_config_parent_directory(parent),
+    )
 }
 
 fn remove_config_transaction_file_with(
@@ -2816,10 +2829,7 @@ fn read_config_without_transaction(path: &Path) -> Result<OffsiteBackupConfig, S
     Ok(config)
 }
 
-fn write_config(
-    path: &Path,
-    config: &OffsiteBackupConfig,
-) -> Result<AtomicWriteStatus, String> {
+fn write_config(path: &Path, config: &OffsiteBackupConfig) -> Result<AtomicWriteStatus, String> {
     ensure_no_pending_config_transaction(path)?;
     write_config_unchecked(path, config)
 }
@@ -3064,7 +3074,8 @@ fn load_config_auth_key() -> Result<Zeroizing<Vec<u8>>, String> {
 
 fn generate_config_auth_key() -> Result<Zeroizing<Vec<u8>>, String> {
     let mut key = [0_u8; CONFIG_AUTH_KEY_BYTES];
-    getrandom::fill(&mut key).map_err(|_| "offsite_backup_config_authentication_failed".to_owned())?;
+    getrandom::fill(&mut key)
+        .map_err(|_| "offsite_backup_config_authentication_failed".to_owned())?;
     Ok(Zeroizing::new(key.to_vec()))
 }
 
@@ -3215,7 +3226,8 @@ mod tests {
 
         let mut metadata_only_update = tampered;
         metadata_only_update.kind = ConfigTransactionKind::Update;
-        metadata_only_update.previous_credential_id = metadata_only_update.next_credential_id.clone();
+        metadata_only_update.previous_credential_id =
+            metadata_only_update.next_credential_id.clone();
         assert_eq!(validate_config_transaction(&metadata_only_update), Ok(()));
         assert!(
             !serde_json::to_value(&metadata_only_update)
@@ -3277,10 +3289,7 @@ mod tests {
 
         let target = target_summary(&s3_target("linked-info/v1")).unwrap();
         let serialized = serde_json::to_value(target_configuration_outcome(
-            CommitOutcome::Committed((
-                target.clone(),
-                CommittedConfigCleanup::TransactionPending,
-            )),
+            CommitOutcome::Committed((target.clone(), CommittedConfigCleanup::TransactionPending)),
         ))
         .unwrap();
         assert_eq!(serialized["status"], "committed");
@@ -3293,27 +3302,29 @@ mod tests {
             "offsite_backup_config_transaction_cleanup_pending"
         );
         let serialized = serde_json::to_value(target_configuration_outcome(
-            CommitOutcome::Committed((
-                target.clone(),
-                CommittedConfigCleanup::DurabilityPending,
-            )),
+            CommitOutcome::Committed((target.clone(), CommittedConfigCleanup::DurabilityPending)),
         ))
         .unwrap();
-        assert_eq!(serialized, serde_json::json!({ "status": "recoveryRequired" }));
+        assert_eq!(
+            serialized,
+            serde_json::json!({ "status": "recoveryRequired" })
+        );
 
-        let serialized = serde_json::to_value(target_update_outcome(
-            CommitOutcome::RecoveryRequired,
-        ))
+        let serialized =
+            serde_json::to_value(target_update_outcome(CommitOutcome::RecoveryRequired)).unwrap();
+        assert_eq!(
+            serialized,
+            serde_json::json!({ "status": "recoveryRequired" })
+        );
+        let serialized = serde_json::to_value(target_update_outcome(CommitOutcome::Committed((
+            target,
+            CommittedConfigCleanup::DurabilityPending,
+        ))))
         .unwrap();
-        assert_eq!(serialized, serde_json::json!({ "status": "recoveryRequired" }));
-        let serialized = serde_json::to_value(target_update_outcome(
-            CommitOutcome::Committed((
-                target,
-                CommittedConfigCleanup::DurabilityPending,
-            )),
-        ))
-        .unwrap();
-        assert_eq!(serialized, serde_json::json!({ "status": "recoveryRequired" }));
+        assert_eq!(
+            serialized,
+            serde_json::json!({ "status": "recoveryRequired" })
+        );
 
         assert_eq!(
             delete_all_outcome(7, CommitOutcome::RecoveryRequired),
@@ -3357,16 +3368,11 @@ mod tests {
             }
         );
         assert_eq!(
-            committed_snapshot_deletion_outcome(
-                true,
-                Err("injected write failure".to_owned()),
-            ),
+            committed_snapshot_deletion_outcome(true, Err("injected write failure".to_owned()),),
             DeleteOffsiteBackupOutcome::Committed {
                 snapshot_deleted: true,
                 restore_drill_proof_invalidated: false,
-                warning: Some(
-                    "offsite_backup_snapshot_deleted_proof_update_failed".to_owned(),
-                ),
+                warning: Some("offsite_backup_snapshot_deleted_proof_update_failed".to_owned(),),
             }
         );
     }
@@ -3496,8 +3502,13 @@ mod tests {
         };
 
         assert_eq!(
-            write_config_unchecked_with(&config_path, &config, &[3; CONFIG_AUTH_KEY_BYTES], injected_write)
-                .unwrap(),
+            write_config_unchecked_with(
+                &config_path,
+                &config,
+                &[3; CONFIG_AUTH_KEY_BYTES],
+                injected_write,
+            )
+            .unwrap(),
             AtomicWriteStatus::RecoveryRequired
         );
         assert!(config_path.exists());
@@ -3621,9 +3632,7 @@ mod tests {
             phase: ConfigTransactionPhase::Prepared,
             kind: ConfigTransactionKind::Remove,
             target_id: Uuid::parse_str("00000000-0000-4000-8000-000000000003").unwrap(),
-            previous_credential_id: Some(
-                "00000000-0000-4000-8000-000000000004".to_owned(),
-            ),
+            previous_credential_id: Some("00000000-0000-4000-8000-000000000004".to_owned()),
             next_credential_id: None,
             target: None,
         };
@@ -4192,11 +4201,8 @@ mod tests {
         let state = WorkspaceVaultState::default();
         let permit = state.issue_test_access_permit();
         let recovery_latch = AtomicBool::new(false);
-        let guard = WorkspaceBackupOperationGuard::new_with_latch(
-            &state,
-            Some(permit),
-            &recovery_latch,
-        );
+        let guard =
+            WorkspaceBackupOperationGuard::new_with_latch(&state, Some(permit), &recovery_latch);
 
         assert_eq!(guard.check(), Ok(()));
         recovery_latch.store(true, Ordering::Release);
