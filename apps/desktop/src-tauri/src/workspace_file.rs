@@ -13,7 +13,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering},
     },
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -42,7 +42,7 @@ const RECOVERY_SWAP_RECOVERY_FILE_NAME: &str = "workspace.recovery.v1.json";
 const ENCRYPTED_WORKSPACE_FORMAT: &str = "linked-info-encrypted-workspace";
 const ENCRYPTED_EXPORT_FORMAT: &str = "linked-info-encrypted-workspace-export";
 const WORKSPACE_EXPORT_FORMAT: &str = "linked-info-workspace";
-const CURRENT_WORKSPACE_STORAGE_VERSION: u64 = 5;
+const CURRENT_WORKSPACE_STORAGE_VERSION: u64 = 6;
 const VAULT_FORMAT: &str = "linked-info-workspace-vault";
 const DATA_KEY_ROTATION_FORMAT: &str = "linked-info-data-key-rotation";
 const RECOVERY_SWAP_FORMAT: &str = "linked-info-recovery-swap";
@@ -69,6 +69,8 @@ const MAXIMUM_CANVAS_NAME_CHARACTERS: usize = 128;
 const MAXIMUM_CANVAS_BOOKMARK_COUNT: usize = 4_096;
 const MAXIMUM_CANVAS_BOOKMARK_NAME_CHARACTERS: usize = 128;
 const MAXIMUM_TOTAL_CANVAS_PLACEMENTS: usize = 1_000_000;
+const MAXIMUM_TIMELINE_CAPTURE_MILLISECONDS: i64 = 253_402_300_799_999;
+const MAXIMUM_TIMELINE_UTC_OFFSET_MINUTES: i64 = 840;
 const DEFAULT_CANVAS_ID: &str = "00000000-0000-4000-8000-000000000001";
 const DEFAULT_CANVAS_NAME: &str = "Main";
 const MAXIMUM_EXACT_JSON_INTEGER: u64 = 9_007_199_254_740_991;
@@ -108,6 +110,9 @@ const SYSTEM_UNLOCK_KEY_AAD_PREFIX: &[u8] = b"linked-info-system-unlock-v1\0";
 const EXPORT_PAYLOAD_AAD: &[u8] = b"linked-info-workspace-export-v1";
 static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 pub const WORKSPACE_LOCKED_EVENT: &str = "workspace-security-locked";
+const LOCK_SAVE_IDLE: u8 = 0;
+const LOCK_SAVE_PENDING: u8 = 1;
+const LOCK_SAVE_RECOVERY_REQUIRED: u8 = 2;
 
 fn default_idle_timeout_minutes() -> Option<u32> {
     Some(DEFAULT_IDLE_TIMEOUT_MINUTES)
@@ -382,6 +387,7 @@ pub struct WorkspaceVaultState {
     data_key: Arc<Mutex<Option<Zeroizing<[u8; DATA_KEY_BYTES]>>>>,
     operation_lock: Arc<Mutex<()>>,
     access_generation: Arc<AtomicU64>,
+    lock_save_state: Arc<AtomicU8>,
     idle_timeout_milliseconds: AtomicU64,
     last_activity_milliseconds: AtomicU64,
     sensitive_authorization: Mutex<Option<SensitiveAuthorization>>,
@@ -396,6 +402,7 @@ impl Default for WorkspaceVaultState {
             data_key: Arc::new(Mutex::new(None)),
             operation_lock: Arc::new(Mutex::new(())),
             access_generation: Arc::new(AtomicU64::new(0)),
+            lock_save_state: Arc::new(AtomicU8::new(LOCK_SAVE_IDLE)),
             idle_timeout_milliseconds: AtomicU64::new(minutes_to_milliseconds(
                 DEFAULT_IDLE_TIMEOUT_MINUTES,
             )),
@@ -436,6 +443,79 @@ struct SensitiveAuthorization {
     expires_at_milliseconds: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LockSnapshotOutcome {
+    Saved,
+    Failed,
+    RecoveryRequired,
+}
+
+impl LockSnapshotOutcome {
+    fn reason(self) -> &'static str {
+        match self {
+            Self::Saved => "workspace_lock_save_completed",
+            Self::Failed => "workspace_lock_save_failed",
+            Self::RecoveryRequired => "workspace_lock_save_recovery_required",
+        }
+    }
+}
+
+fn ensure_lock_save_idle(barrier: &AtomicU8) -> Result<(), String> {
+    match barrier.load(Ordering::Acquire) {
+        LOCK_SAVE_IDLE => Ok(()),
+        LOCK_SAVE_PENDING => Err("workspace_vault_lock_save_pending".to_owned()),
+        _ => Err("workspace_vault_lock_save_recovery_required".to_owned()),
+    }
+}
+
+/// Only this private, once-admitted ticket may write its snapshot after lock.
+/// Its data key is copied at admission, never obtained from a newer session.
+struct AdmittedLockSnapshot {
+    data_key: Option<Zeroizing<[u8; DATA_KEY_BYTES]>>,
+    encrypted: bool,
+    barrier: Arc<AtomicU8>,
+    app: Option<AppHandle>,
+    settled: bool,
+}
+
+impl AdmittedLockSnapshot {
+    fn finish(&mut self, outcome: LockSnapshotOutcome) {
+        self.data_key = None;
+        self.barrier.store(
+            if outcome == LockSnapshotOutcome::RecoveryRequired {
+                LOCK_SAVE_RECOVERY_REQUIRED
+            } else {
+                LOCK_SAVE_IDLE
+            },
+            Ordering::Release,
+        );
+        // A terminal-event probe must observe the new barrier state.
+        if let Some(app) = &self.app {
+            let _ = app.emit(WORKSPACE_LOCKED_EVENT, outcome.reason());
+        }
+        self.settled = true;
+    }
+}
+
+impl Drop for AdmittedLockSnapshot {
+    fn drop(&mut self) {
+        if !self.settled {
+            self.barrier
+                .store(LOCK_SAVE_RECOVERY_REQUIRED, Ordering::Release);
+            if let Some(app) = &self.app {
+                let emitted = revoke_workspace_access(app, "workspace_lock_save_recovery_required");
+                crate::secret_clipboard::clear_active(app);
+                if !emitted {
+                    let _ = app.emit(
+                        WORKSPACE_LOCKED_EVENT,
+                        "workspace_lock_save_recovery_required",
+                    );
+                }
+            }
+        }
+    }
+}
+
 impl WorkspaceVaultState {
     fn advance_access_generation(&self) -> Result<(), String> {
         self.access_generation
@@ -461,6 +541,7 @@ impl WorkspaceVaultState {
     }
 
     fn data_key(&self) -> Result<Zeroizing<[u8; DATA_KEY_BYTES]>, String> {
+        self.ensure_no_lock_save()?;
         self.data_key
             .lock()
             .map_err(|_| "workspace_vault_state_unavailable".to_owned())?
@@ -470,7 +551,21 @@ impl WorkspaceVaultState {
     }
 
     fn replace_data_key(&self, key: [u8; DATA_KEY_BYTES]) -> Result<(), String> {
+        self.replace_data_key_at_generation(key, None)
+    }
+
+    fn replace_data_key_at_generation(
+        &self,
+        key: [u8; DATA_KEY_BYTES],
+        expected_generation: Option<u64>,
+    ) -> Result<(), String> {
         let mut slot = self.lock_data_key_for_transition()?;
+        self.ensure_no_lock_save()?;
+        if expected_generation
+            .is_some_and(|expected| self.access_generation.load(Ordering::Acquire) != expected)
+        {
+            return Err("workspace_vault_session_expired".to_owned());
+        }
         self.advance_access_generation()?;
         *slot = Some(Zeroizing::new(key));
         drop(slot);
@@ -478,7 +573,53 @@ impl WorkspaceVaultState {
         Ok(())
     }
 
+    fn ensure_no_lock_save(&self) -> Result<(), String> {
+        ensure_lock_save_idle(&self.lock_save_state)
+    }
+
+    fn begin_unlock_generation(&self) -> Result<u64, String> {
+        let _slot = self.lock_data_key_for_transition()?;
+        self.ensure_no_lock_save()?;
+        let generation = self.access_generation.load(Ordering::Acquire);
+        if generation == u64::MAX {
+            return Err("workspace_vault_access_generation_exhausted".to_owned());
+        }
+        Ok(generation)
+    }
+
+    fn admit_lock_snapshot(
+        &self,
+        permit: Option<WorkspaceAccessPermit>,
+        generation: u64,
+        encrypted: bool,
+    ) -> Result<AdmittedLockSnapshot, String> {
+        let slot = self.lock_data_key_for_transition()?;
+        self.ensure_no_lock_save()?;
+        if generation == u64::MAX
+            || self.access_generation.load(Ordering::Acquire) != generation
+            || encrypted != permit.is_some()
+            || permit.is_some_and(|permit| permit.generation != generation || slot.is_none())
+        {
+            return Err("workspace_vault_session_expired".to_owned());
+        }
+        let data_key = if encrypted {
+            slot.as_ref().map(|key| Zeroizing::new(**key))
+        } else {
+            None
+        };
+        self.lock_save_state
+            .store(LOCK_SAVE_PENDING, Ordering::Release);
+        Ok(AdmittedLockSnapshot {
+            data_key,
+            encrypted,
+            barrier: Arc::clone(&self.lock_save_state),
+            app: None,
+            settled: false,
+        })
+    }
+
     fn optional_data_key(&self) -> Result<Option<Zeroizing<[u8; DATA_KEY_BYTES]>>, String> {
+        self.ensure_no_lock_save()?;
         self.data_key
             .lock()
             .map_err(|_| "workspace_vault_state_unavailable".to_owned())
@@ -513,6 +654,7 @@ impl WorkspaceVaultState {
             .data_key
             .lock()
             .map_err(|_| "workspace_vault_state_unavailable".to_owned())?;
+        self.ensure_no_lock_save()?;
         let generation = self.access_generation.load(Ordering::Acquire);
         if generation == u64::MAX {
             return Err("workspace_vault_access_generation_exhausted".to_owned());
@@ -532,6 +674,10 @@ impl WorkspaceVaultState {
 
     pub(crate) fn access_generation(&self) -> Arc<AtomicU64> {
         Arc::clone(&self.access_generation)
+    }
+
+    pub(crate) fn operation_lock(&self) -> Arc<Mutex<()>> {
+        Arc::clone(&self.operation_lock)
     }
 
     pub(crate) fn next_access_generation(&self) -> Result<u64, String> {
@@ -572,6 +718,7 @@ impl WorkspaceVaultState {
             .data_key
             .lock()
             .map_err(|_| "workspace_vault_state_unavailable".to_owned())?;
+        self.ensure_no_lock_save()?;
         if permit.generation == u64::MAX
             || self.access_generation.load(Ordering::Acquire) != permit.generation
             || slot.is_none()
@@ -888,15 +1035,19 @@ pub async fn read_workspace_file(
     app: AppHandle,
     state: tauri::State<'_, WorkspaceVaultState>,
     slot: WorkspaceFileSlot,
+    owner_id: String,
 ) -> Result<Option<String>, String> {
-    let permit = begin_workspace_access(&app, &state)?;
+    let authority = crate::capsule::owner_authority(&app, &owner_id)?;
     let store = workspace_store(&app).map_err(|error| error.to_string())?;
     let operation_lock = Arc::clone(&state.operation_lock);
     let data_key = state.optional_data_key()?;
+    let app_for_read = app.clone();
+    let authority_for_read = authority.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
         let _guard = operation_lock
             .lock()
             .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
+        crate::capsule::ensure_owner(&app_for_read, &authority_for_read)?;
         recover_pending_migration(&store)?;
         let active_key = match store.encryption_configured() {
             true => Some(
@@ -910,7 +1061,7 @@ pub async fn read_workspace_file(
     })
     .await
     .map_err(|error| error.to_string())??;
-    ensure_workspace_access(&app, &state, permit)?;
+    crate::capsule::ensure_owner(&app, &authority)?;
     Ok(result)
 }
 
@@ -920,17 +1071,20 @@ pub async fn write_workspace_file(
     state: tauri::State<'_, WorkspaceVaultState>,
     slot: WorkspaceFileSlot,
     contents: String,
+    owner_id: String,
 ) -> Result<(), String> {
-    let permit = begin_workspace_access(&app, &state)?;
+    let authority = crate::capsule::owner_authority(&app, &owner_id)?;
     let store = workspace_store(&app).map_err(|error| error.to_string())?;
     let operation_lock = Arc::clone(&state.operation_lock);
-    let access_generation = state.access_generation();
     let data_key = state.optional_data_key()?;
+    let app_for_write = app.clone();
+    let authority_for_write = authority.clone();
+    let contents = Zeroizing::new(contents);
     tauri::async_runtime::spawn_blocking(move || {
         let _guard = operation_lock
             .lock()
             .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
-        ensure_access_generation(&access_generation, permit)?;
+        crate::capsule::ensure_owner(&app_for_write, &authority_for_write)?;
         recover_pending_migration(&store)?;
         let active_key = match store.encryption_configured() {
             true => Some(
@@ -944,7 +1098,192 @@ pub async fn write_workspace_file(
     })
     .await
     .map_err(|error| error.to_string())??;
-    ensure_workspace_access(&app, &state, permit)
+    crate::capsule::ensure_owner(&app, &authority)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CapsuleCommitStatus {
+    Committed,
+    CommittedLocked,
+    RecoveryRequired,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CapsuleCommitResult {
+    status: CapsuleCommitStatus,
+}
+
+impl CapsuleCommitResult {
+    pub(crate) fn already_committed() -> Self {
+        Self {
+            status: CapsuleCommitStatus::Committed,
+        }
+    }
+}
+
+fn capsule_commit_status(status: AtomicWriteStatus, receipt_valid: bool) -> CapsuleCommitStatus {
+    match (status, receipt_valid) {
+        (AtomicWriteStatus::Committed, true) => CapsuleCommitStatus::Committed,
+        (AtomicWriteStatus::Committed, false) => CapsuleCommitStatus::CommittedLocked,
+        (AtomicWriteStatus::RecoveryRequired, _) => CapsuleCommitStatus::RecoveryRequired,
+    }
+}
+
+struct CapsuleCommitGuard {
+    app: AppHandle,
+    settled: bool,
+}
+
+impl Drop for CapsuleCommitGuard {
+    fn drop(&mut self) {
+        if !self.settled {
+            // This guard drops before the filesystem operation lock. Even an
+            // unwind during replacement must quarantine later queued writes.
+            crate::capsule::quarantine(&self.app);
+        }
+    }
+}
+
+fn validate_capsule_commit(
+    contents: &str,
+    input: &crate::capsule::CapsuleNoteInput,
+) -> Result<(), String> {
+    let value: serde_json::Value =
+        serde_json::from_str(contents).map_err(|_| "capsule_invalid_commit".to_owned())?;
+    let expected_name = if input.name.trim().is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::Value::String(input.name.trim().to_owned())
+    };
+    let expected_content = if input.content.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::Value::String(input.content.clone())
+    };
+    let note_matches = value["nodes"].as_array().is_some_and(|nodes| {
+        nodes.iter().any(|node| {
+            node["id"].as_str() == Some(input.node_id.as_str())
+                && node["name"] == expected_name
+                && node["content"] == expected_content
+        })
+    });
+    let capture_matches = value["view"]["timeline"]["captures"]
+        .as_array()
+        .is_some_and(|captures| {
+            captures.iter().any(|capture| {
+                capture["nodeId"].as_str() == Some(input.node_id.as_str())
+                    && capture["capturedAtMs"].as_u64() == Some(input.captured_at_ms)
+                    && capture["utcOffsetMinutes"].as_i64()
+                        == Some(i64::from(input.utc_offset_minutes))
+            })
+        });
+    if note_matches && capture_matches {
+        Ok(())
+    } else {
+        Err("capsule_invalid_commit".to_owned())
+    }
+}
+
+pub(crate) async fn commit_capsule_contents(
+    app: &AppHandle,
+    authority: &crate::capsule::OwnerAuthority,
+    input: crate::capsule::CapsuleNoteInput,
+    contents: String,
+) -> Result<CapsuleCommitResult, String> {
+    crate::capsule::ensure_submission(app, authority, &input.node_id)?;
+    let state = app.state::<WorkspaceVaultState>();
+    let store = workspace_store(app).map_err(|error| error.to_string())?;
+    let operation_lock = state.operation_lock();
+    let data_key = state.optional_data_key()?;
+    let app_for_commit = app.clone();
+    let authority_for_commit = authority.clone();
+    let node_id = input.node_id.clone();
+    let contents = Zeroizing::new(contents);
+    let write_result = tauri::async_runtime::spawn_blocking(move || {
+        let _guard = operation_lock
+            .lock()
+            .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
+        if let Err(error) = crate::capsule::ensure_submission(
+            &app_for_commit,
+            &authority_for_commit,
+            &input.node_id,
+        ) {
+            if crate::capsule::ensure_saved_submission(
+                &app_for_commit,
+                &authority_for_commit,
+                &input.node_id,
+            )
+            .is_ok()
+            {
+                return Ok(AtomicWriteStatus::Committed);
+            }
+            return Err(error);
+        }
+        recover_pending_migration(&store)?;
+        let active_key = active_workspace_key(&store, data_key.as_deref())?;
+        let normalized = Zeroizing::new(
+            normalize_storage_envelope(&contents)
+                .map_err(|_| "capsule_invalid_commit".to_owned())?,
+        );
+        validate_capsule_commit(&normalized, &input)?;
+        let serialized = Zeroizing::new(serialize_workspace_for_slot(
+            &normalized,
+            WorkspaceFileSlot::Primary,
+            active_key,
+        )?);
+        fs::create_dir_all(&store.base_directory).map_err(|error| error.to_string())?;
+        // The request is admitted using its original authority. Revocation is
+        // independent of this I/O queue; an admitted write may finish locked,
+        // but a new owner cannot activate until this operation releases it.
+        crate::capsule::ensure_submission(&app_for_commit, &authority_for_commit, &input.node_id)?;
+        let mut commit_guard = CapsuleCommitGuard {
+            app: app_for_commit.clone(),
+            settled: false,
+        };
+        let result = write_atomically_commit_aware(
+            &store.path(WorkspaceFileSlot::Primary),
+            serialized.as_bytes(),
+        );
+        let status = match result {
+            Ok(status) => status,
+            Err(error) => {
+                commit_guard.settled = true;
+                return Err(error.to_string());
+            }
+        };
+        if status == AtomicWriteStatus::RecoveryRequired {
+            crate::capsule::quarantine(&app_for_commit);
+        }
+        crate::capsule::finish_submission(
+            &app_for_commit,
+            &authority_for_commit,
+            &input.node_id,
+            true,
+        );
+        commit_guard.settled = true;
+        Ok::<_, String>(status)
+    })
+    .await;
+    let status = match write_result {
+        Ok(Ok(AtomicWriteStatus::Committed)) => capsule_commit_status(
+            AtomicWriteStatus::Committed,
+            crate::capsule::ensure_owner_context(app, authority).is_ok(),
+        ),
+        Ok(Err(error)) => {
+            crate::capsule::finish_submission(app, authority, &node_id, false);
+            return Err(error);
+        }
+        Ok(Ok(AtomicWriteStatus::RecoveryRequired)) | Err(_) => {
+            // A worker failure can be after replacement. Never call that a
+            // failed save or permit another snapshot to overwrite the result.
+            crate::capsule::quarantine(app);
+            lock_workspace_runtime_with_terminal_event(app, "capsule_recovery_required");
+            capsule_commit_status(AtomicWriteStatus::RecoveryRequired, false)
+        }
+    };
+    Ok(CapsuleCommitResult { status })
 }
 
 enum WorkspaceRecoverySwapOperation {
@@ -962,17 +1301,20 @@ enum WorkspaceRecoverySwapPreparation {
 pub async fn swap_workspace_recovery_files(
     app: AppHandle,
     state: tauri::State<'_, WorkspaceVaultState>,
+    owner_id: String,
 ) -> Result<WorkspaceRecoverySwapResult, String> {
-    let permit = begin_workspace_access(&app, &state)?;
+    let authority = crate::capsule::owner_authority(&app, &owner_id)?;
+    crate::capsule::suspend_owner(&app, &authority)?;
     let store = workspace_store(&app).map_err(|error| error.to_string())?;
     let operation_lock = Arc::clone(&state.operation_lock);
-    let access_generation = state.access_generation();
     let data_key = state.optional_data_key()?;
+    let app_for_swap = app.clone();
+    let authority_for_swap = authority.clone();
     let operation = tauri::async_runtime::spawn_blocking(move || {
         let _guard = operation_lock
             .lock()
             .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
-        ensure_access_generation(&access_generation, permit)?;
+        crate::capsule::ensure_owner(&app_for_swap, &authority_for_swap)?;
         recover_pending_encryption_migration(&store)?;
         let recovered_existing = finish_pending_workspace_recovery_swap(&store)?;
         if store.data_key_rotation_directory().exists() {
@@ -1002,7 +1344,7 @@ pub async fn swap_workspace_recovery_files(
 
     match operation {
         WorkspaceRecoverySwapOperation::Committed(contents) => {
-            if ensure_workspace_access(&app, &state, permit).is_ok() {
+            if crate::capsule::ensure_owner(&app, &authority).is_ok() {
                 Ok(WorkspaceRecoverySwapResult {
                     status: WorkspaceRecoverySwapStatus::Committed,
                     contents: Some(contents),
@@ -1095,19 +1437,23 @@ pub async fn inspect_workspace_security(
     state: tauri::State<'_, WorkspaceVaultState>,
     system_unlock_state: tauri::State<'_, SystemUnlockState>,
 ) -> Result<WorkspaceSecurityStatus, String> {
+    state.ensure_no_lock_save()?;
     let store = workspace_store(&app).map_err(|error| error.to_string())?;
     let operation_lock = Arc::clone(&state.operation_lock);
+    let lock_save_state = Arc::clone(&state.lock_save_state);
     let provider = system_unlock_state.provider();
     let provider_for_recovery = Arc::clone(&provider);
     let metadata = tauri::async_runtime::spawn_blocking(move || {
         let _guard = operation_lock
             .lock()
             .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
+        ensure_lock_save_idle(&lock_save_state)?;
         recover_pending_workspace_transactions(&store, provider_for_recovery.as_ref())?;
         store.read_vault_metadata()
     })
     .await
     .map_err(|error| error.to_string())??;
+    state.ensure_no_lock_save()?;
     let encrypted = metadata.is_some();
     let idle_timeout_minutes = metadata
         .as_ref()
@@ -1130,9 +1476,11 @@ pub async fn unlock_workspace(
     system_unlock_state: tauri::State<'_, SystemUnlockState>,
     password: String,
 ) -> Result<WorkspaceSecurityStatus, String> {
+    let unlock_generation = state.begin_unlock_generation()?;
     state.check_password_attempt_allowed()?;
     let store = workspace_store(&app).map_err(|error| error.to_string())?;
     let operation_lock = Arc::clone(&state.operation_lock);
+    let lock_save_state = Arc::clone(&state.lock_save_state);
     let password = Zeroizing::new(password);
     let provider = system_unlock_state.provider();
     let provider_for_unlock = Arc::clone(&provider);
@@ -1140,6 +1488,7 @@ pub async fn unlock_workspace(
         let _guard = operation_lock
             .lock()
             .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
+        ensure_lock_save_idle(&lock_save_state)?;
         recover_pending_workspace_transactions(&store, provider_for_unlock.as_ref())?;
         let metadata = store
             .read_vault_metadata()?
@@ -1166,7 +1515,8 @@ pub async fn unlock_workspace(
         }
     };
     state.set_idle_timeout(idle_timeout_minutes);
-    state.replace_data_key(data_key)?;
+    state.replace_data_key_at_generation(data_key, Some(unlock_generation))?;
+    crate::capsule::revoke(&app);
     state.reset_password_failures();
     Ok(WorkspaceSecurityStatus {
         encrypted: true,
@@ -1184,18 +1534,22 @@ pub async fn unlock_workspace_with_system(
     system_unlock_state: tauri::State<'_, SystemUnlockState>,
     message: String,
 ) -> Result<WorkspaceSecurityStatus, String> {
+    let unlock_generation = state.begin_unlock_generation()?;
     let store = workspace_store(&app).map_err(|error| error.to_string())?;
     let operation_lock = Arc::clone(&state.operation_lock);
+    let lock_save_state = Arc::clone(&state.lock_save_state);
     let provider = system_unlock_state.provider();
     if !provider.available() {
         return Err("system_unlock_unavailable".to_owned());
     }
     crate::system_unlock::verify_user_presence(&app, message).await?;
+    state.ensure_no_lock_save()?;
     let provider_for_unlock = Arc::clone(&provider);
     let (data_key, idle_timeout_minutes) = tauri::async_runtime::spawn_blocking(move || {
         let _guard = operation_lock
             .lock()
             .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
+        ensure_lock_save_idle(&lock_save_state)?;
         recover_pending_workspace_transactions(&store, provider_for_unlock.as_ref())?;
         let metadata = store
             .read_vault_metadata()?
@@ -1207,7 +1561,8 @@ pub async fn unlock_workspace_with_system(
     .await
     .map_err(|error| error.to_string())??;
     state.set_idle_timeout(idle_timeout_minutes);
-    state.replace_data_key(data_key)?;
+    state.replace_data_key_at_generation(data_key, Some(unlock_generation))?;
+    crate::capsule::revoke(&app);
     state.reset_password_failures();
     Ok(WorkspaceSecurityStatus {
         encrypted: true,
@@ -1231,6 +1586,7 @@ pub async fn enable_workspace_encryption(
     password: String,
 ) -> Result<WorkspaceSecurityStatus, String> {
     validate_new_password(&password)?;
+    state.ensure_no_lock_save()?;
     // Encryption changes the confidentiality boundary. Revoke the current
     // session before any cleanup that can fail; only the committed migration
     // below may establish a fresh authorization.
@@ -1240,10 +1596,12 @@ pub async fn enable_workspace_encryption(
     let store = workspace_store(&app).map_err(|error| error.to_string())?;
     let operation_lock = Arc::clone(&state.operation_lock);
     let password = Zeroizing::new(password);
+    let lock_save_state = Arc::clone(&state.lock_save_state);
     let data_key = tauri::async_runtime::spawn_blocking(move || {
         let _guard = operation_lock
             .lock()
             .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
+        ensure_lock_save_idle(&lock_save_state)?;
         recover_pending_migration(&store)?;
         if store.encryption_configured() {
             return Err("workspace_vault_already_configured".to_owned());
@@ -1252,6 +1610,7 @@ pub async fn enable_workspace_encryption(
     })
     .await
     .map_err(|error| error.to_string())??;
+    crate::capsule::revoke(&app);
     state.replace_data_key(data_key)?;
     if let Err(error) = crate::vector_cache::purge_for_encryption(&app, &vector_cache_state).await {
         // The encrypted vault is already committed.  If the final derived
@@ -1371,6 +1730,7 @@ pub async fn rotate_workspace_data_key(
     let previous_data_key = state.data_key()?;
     let store = workspace_store(&app).map_err(|error| error.to_string())?;
     let operation_lock = Arc::clone(&state.operation_lock);
+    let lock_save_state = Arc::clone(&state.lock_save_state);
     let provider = system_unlock_state.provider();
     let password = Zeroizing::new(password);
 
@@ -1382,6 +1742,7 @@ pub async fn rotate_workspace_data_key(
             let extension_runtime = app.state::<crate::extension_runtime::ExtensionRuntimeState>();
             extension_runtime.revoke_all(state.next_access_generation().unwrap_or(u64::MAX));
             let revoke_result = state.revoke_access();
+            crate::capsule::revoke(&app);
             extension_runtime.revoke_all(state.access_generation().load(Ordering::Acquire));
             let _ = app.emit(
                 WORKSPACE_LOCKED_EVENT,
@@ -1400,6 +1761,7 @@ pub async fn rotate_workspace_data_key(
             let _guard = operation_lock
                 .lock()
                 .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
+            ensure_lock_save_idle(&lock_save_state)?;
             recover_pending_workspace_transactions(&store, provider.as_ref())?;
             rotate_encrypted_store(&store, &previous_data_key, &password, provider.as_ref())
         })
@@ -1699,10 +2061,12 @@ pub async fn destroy_workspace(
     let store = workspace_store(&app).map_err(|error| error.to_string())?;
     let operation_lock = Arc::clone(&state.operation_lock);
     let provider = system_unlock_state.provider();
+    let lock_save_state = Arc::clone(&state.lock_save_state);
     let destruction_result = tauri::async_runtime::spawn_blocking(move || {
         let _guard = operation_lock
             .lock()
             .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
+        ensure_lock_save_idle(&lock_save_state)?;
         recover_pending_migration(&store)?;
         let metadata = store.read_vault_metadata()?;
         if let Some(credential) = metadata.and_then(|metadata| metadata.system_unlock)
@@ -1737,6 +2101,133 @@ pub async fn lock_workspace(
 ) -> Result<WorkspaceSecurityStatus, String> {
     lock_workspace_runtime(&app, "manual");
     inspect_workspace_security(app, state, system_unlock_state).await
+}
+
+fn persist_admitted_lock_snapshot(
+    store: &WorkspaceFileStore,
+    admission: &AdmittedLockSnapshot,
+    contents: &str,
+    write: impl FnOnce(&Path, &[u8]) -> io::Result<AtomicWriteStatus>,
+) -> Result<AtomicWriteStatus, String> {
+    if store.encryption_configured() != admission.encrypted {
+        return Err("workspace_lock_save_boundary_changed".to_owned());
+    }
+    let normalized = Zeroizing::new(
+        normalize_storage_envelope(contents)
+            .map_err(|_| "workspace_lock_save_invalid".to_owned())?,
+    );
+    let serialized = Zeroizing::new(serialize_workspace_for_slot(
+        &normalized,
+        WorkspaceFileSlot::Primary,
+        admission.data_key.as_deref(),
+    )?);
+    fs::create_dir_all(&store.base_directory).map_err(|error| error.to_string())?;
+    write(
+        &store.path(WorkspaceFileSlot::Primary),
+        serialized.as_bytes(),
+    )
+    .map_err(|_| "workspace_lock_save_failed".to_owned())
+}
+
+fn lock_snapshot_outcome(result: &Result<AtomicWriteStatus, String>) -> LockSnapshotOutcome {
+    match result {
+        Ok(AtomicWriteStatus::Committed) => LockSnapshotOutcome::Saved,
+        Ok(AtomicWriteStatus::RecoveryRequired) => LockSnapshotOutcome::RecoveryRequired,
+        Err(_) => LockSnapshotOutcome::Failed,
+    }
+}
+
+#[tauri::command]
+pub async fn lock_workspace_with_snapshot(
+    app: AppHandle,
+    state: tauri::State<'_, WorkspaceVaultState>,
+    system_unlock_state: tauri::State<'_, SystemUnlockState>,
+    owner_id: String,
+    contents: String,
+) -> Result<WorkspaceSecurityStatus, String> {
+    let contents = Zeroizing::new(contents);
+    // An encrypted owner's original permit proves the admitted key mode.
+    // Do not query the filesystem before revocation: a slow disk must not
+    // delay the lock. The worker rechecks the actual storage boundary later.
+    let admission = crate::capsule::with_owner_authority(&app, &owner_id, |authority| {
+        // Lock order is capsule-owner mutex -> data-key mutex, with only
+        // bounded key copying and barrier installation in this closure.
+        state.admit_lock_snapshot(
+            authority.permit,
+            authority.generation,
+            authority.permit.is_some(),
+        )
+    });
+
+    let mut ticket = match admission {
+        Ok(mut ticket) => {
+            ticket.app = Some(app.clone());
+            lock_workspace_runtime_with_terminal_event(&app, "workspace_lock_save_started");
+            ticket
+        }
+        Err(_) => {
+            // Even an expired owner or an invalid save admission must not
+            // make a user's lock request leave the vault authorized.
+            lock_workspace_runtime_with_terminal_event(&app, "workspace_lock_save_started");
+            if let Err(error) = state.ensure_no_lock_save() {
+                if error == "workspace_vault_lock_save_recovery_required" {
+                    let _ = app.emit(
+                        WORKSPACE_LOCKED_EVENT,
+                        "workspace_lock_save_recovery_required",
+                    );
+                }
+                return Err(error);
+            }
+            let _ = app.emit(WORKSPACE_LOCKED_EVENT, "workspace_lock_save_failed");
+            return Err("workspace_lock_save_failed".to_owned());
+        }
+    };
+
+    let operation_lock = Arc::clone(&state.operation_lock);
+    let provider = system_unlock_state.provider();
+    let idle_timeout_minutes = state.idle_timeout_minutes();
+    // Revocation and the start event above happen before the first await.
+    // Only this once-admitted immutable snapshot crosses that revocation.
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = (|| {
+            let _operation = operation_lock
+                .lock()
+                .map_err(|_| "workspace_lock_save_failed".to_owned())?;
+            let store =
+                workspace_store(&app).map_err(|_| "workspace_lock_save_failed".to_owned())?;
+            let metadata = store.read_vault_metadata()?;
+            let status = WorkspaceSecurityStatus {
+                encrypted: ticket.encrypted,
+                locked: ticket.encrypted,
+                system_unlock_available: provider.available(),
+                system_unlock_enabled: system_unlock_enabled(metadata.as_ref(), provider.as_ref()),
+                idle_timeout_minutes,
+            };
+            let written = persist_admitted_lock_snapshot(
+                &store,
+                &ticket,
+                &contents,
+                write_atomically_commit_aware,
+            )?;
+            Ok::<_, String>((written, status))
+        })();
+        let outcome = match &result {
+            Ok((written, _)) => lock_snapshot_outcome(&Ok(*written)),
+            Err(_) => LockSnapshotOutcome::Failed,
+        };
+        ticket.finish(outcome);
+        match result {
+            Ok((AtomicWriteStatus::Committed, status)) => Ok(status),
+            Ok((AtomicWriteStatus::RecoveryRequired, _)) => {
+                Err("workspace_lock_save_recovery_required".to_owned())
+            }
+            Err(_) => Err("workspace_lock_save_failed".to_owned()),
+        }
+    })
+    .await
+    // A worker panic may occur after replacement. Ticket Drop retains the
+    // process recovery barrier and emits the terminal event before this result.
+    .map_err(|_| "workspace_lock_save_recovery_required".to_owned())?
 }
 
 #[tauri::command]
@@ -1982,6 +2473,7 @@ pub async fn prepare_workspace_restore(
     contents: String,
     password: String,
 ) -> Result<PreparedWorkspaceRestorePreview, String> {
+    state.ensure_no_lock_save()?;
     if workspace_encryption_configured(&app) {
         return Err("workspace_restore_requires_unconfigured_vault".to_owned());
     }
@@ -2082,6 +2574,7 @@ pub async fn commit_workspace_restore(
     system_unlock_state: tauri::State<'_, SystemUnlockState>,
     restore_id: uuid::Uuid,
 ) -> Result<WorkspaceSecurityTransactionResult, String> {
+    state.ensure_no_lock_save()?;
     // Take the prepared payload before ordinary locking. `shutdown()` clears
     // the in-memory preparation as part of its normal lock semantics; keeping
     // this one verified payload in a local variable lets the explicit restore
@@ -2096,11 +2589,13 @@ pub async fn commit_workspace_restore(
     let store = workspace_store(&app).map_err(|error| error.to_string())?;
     let store_for_install = store.clone();
     let operation_lock = Arc::clone(&state.operation_lock);
+    let lock_save_state = Arc::clone(&state.lock_save_state);
     let prepared_data_key = *prepared.data_key;
     let install_task = tauri::async_runtime::spawn_blocking(move || {
         let _guard = operation_lock
             .lock()
             .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
+        ensure_lock_save_idle(&lock_save_state)?;
         if recover_before_prepared_restore(&store_for_install) {
             return Ok::<_, String>(None);
         }
@@ -2155,6 +2650,7 @@ pub async fn commit_workspace_restore(
         }
     };
     state.set_idle_timeout(default_idle_timeout_minutes());
+    crate::capsule::revoke(&app);
     if state.replace_data_key(data_key).is_err()
         || crate::vector_cache::purge_for_encryption(&app, &vector_cache_state)
             .await
@@ -2192,6 +2688,7 @@ pub fn begin_workspace_access(
     app: &AppHandle,
     state: &WorkspaceVaultState,
 ) -> Result<Option<WorkspaceAccessPermit>, String> {
+    state.ensure_no_lock_save()?;
     if workspace_encryption_configured(app) {
         state.access_permit().map(Some)
     } else {
@@ -2204,6 +2701,7 @@ pub fn ensure_workspace_access(
     state: &WorkspaceVaultState,
     permit: Option<WorkspaceAccessPermit>,
 ) -> Result<(), String> {
+    state.ensure_no_lock_save()?;
     match permit {
         Some(permit) => state.ensure_access_permit(permit),
         None if workspace_encryption_configured(app) => {
@@ -2229,6 +2727,20 @@ pub(crate) fn ensure_access_generation(
     }
 }
 
+fn should_emit_workspace_revocation_event(
+    was_unlocked: bool,
+    had_owner: bool,
+    encrypted: bool,
+    reason: &str,
+) -> bool {
+    let explicit_plaintext_transaction = !encrypted
+        && matches!(
+            reason,
+            "workspace_encryption_enable" | "workspace_restore_commit"
+        );
+    was_unlocked || (had_owner && !explicit_plaintext_transaction)
+}
+
 pub fn revoke_workspace_access(app: &AppHandle, reason: &str) -> bool {
     let state = app.state::<WorkspaceVaultState>();
     let extension_runtime = app.state::<crate::extension_runtime::ExtensionRuntimeState>();
@@ -2237,11 +2749,21 @@ pub fn revoke_workspace_access(app: &AppHandle, reason: &str) -> bool {
     // pipe I/O can only target the old host that revoke terminates independently.
     extension_runtime.revoke_all(state.next_access_generation().unwrap_or(u64::MAX));
     let was_unlocked = state.shutdown();
+    let had_owner = crate::capsule::revoke(app);
     extension_runtime.revoke_all(state.access_generation().load(Ordering::Acquire));
-    if was_unlocked {
+    // A plaintext enable/restore caller is already in an exclusive transaction.
+    // Revoke the owner and capsule immediately, but keep that caller mounted
+    // until its explicit outcome instead of triggering an early owner reload.
+    // Unknown vault-path status is not evidence for this narrow exception.
+    let encrypted = workspace_store(app)
+        .map(|store| store.vault_path().try_exists().unwrap_or(true))
+        .unwrap_or(true);
+    let emit_event =
+        should_emit_workspace_revocation_event(was_unlocked, had_owner, encrypted, reason);
+    if emit_event {
         let _ = app.emit(WORKSPACE_LOCKED_EVENT, reason);
     }
-    was_unlocked
+    emit_event
 }
 
 pub fn cleanup_locked_workspace(app: &AppHandle) {
@@ -4083,10 +4605,203 @@ fn validate_workspace_layout(
     Ok(layout.len())
 }
 
+fn workspace_timeline_day_number(value: &str) -> Option<i64> {
+    let bytes = value.as_bytes();
+    if bytes.len() != 10
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || bytes
+            .iter()
+            .enumerate()
+            .any(|(index, byte)| !matches!(index, 4 | 7) && !byte.is_ascii_digit())
+    {
+        return None;
+    }
+    let year = value[..4].parse::<i64>().ok()?;
+    let month = value[5..7].parse::<usize>().ok()?;
+    let day = value[8..].parse::<i64>().ok()?;
+    if !(1..=9_999).contains(&year) || !(1..=12).contains(&month) {
+        return None;
+    }
+    let leap_year = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let month_lengths = [
+        31,
+        if leap_year { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
+    if !(1..=month_lengths[month - 1]).contains(&day) {
+        return None;
+    }
+    let previous_year = year - 1;
+    let days_before_year =
+        previous_year * 365 + previous_year / 4 - previous_year / 100 + previous_year / 400;
+    let days_before_month: i64 = month_lengths[..month - 1].iter().sum();
+    Some(days_before_year + days_before_month + day - 1 - 719_162)
+}
+
+fn bounded_workspace_integer(
+    value: Option<&serde_json::Value>,
+    minimum: i64,
+    maximum: i64,
+) -> Option<i64> {
+    // JSON 1.0 与 1 在 TypeScript 边界都是整数，不能只依赖 serde 的整数表示。
+    finite_json_number(value)
+        .filter(|value| {
+            value.fract() == 0.0 && *value >= minimum as f64 && *value <= maximum as f64
+        })
+        .map(|value| value as i64)
+}
+
+fn validate_workspace_timeline(
+    value: &serde_json::Value,
+    node_ids: &HashSet<String>,
+    canvas_ids: &HashSet<String>,
+) -> io::Result<()> {
+    if value.is_null() {
+        return Ok(());
+    }
+    let timeline = value
+        .as_object()
+        .ok_or_else(|| invalid_workspace_data("workspace timeline must be an object or null"))?;
+    if timeline.len() != 3
+        || !timeline.contains_key("canvasId")
+        || !timeline.contains_key("days")
+        || !timeline.contains_key("captures")
+    {
+        return Err(invalid_workspace_data("workspace timeline is invalid"));
+    }
+    let canvas_id = canonical_workspace_node_id(
+        timeline
+            .get("canvasId")
+            .expect("validated timeline canvas id field"),
+    )
+    .ok_or_else(|| invalid_workspace_data("workspace timeline canvas id is invalid"))?;
+    if !canvas_ids.contains(&canvas_id) {
+        return Err(invalid_workspace_data(
+            "workspace timeline canvas does not exist",
+        ));
+    }
+    let days = timeline
+        .get("days")
+        .and_then(serde_json::Value::as_array)
+        .filter(|days| days.len() <= node_ids.len())
+        .ok_or_else(|| invalid_workspace_data("workspace timeline days are invalid"))?;
+    let captures = timeline
+        .get("captures")
+        .and_then(serde_json::Value::as_array)
+        .filter(|captures| captures.len() <= node_ids.len())
+        .ok_or_else(|| invalid_workspace_data("workspace timeline captures are invalid"))?;
+    if days.len() > node_ids.len() - captures.len() {
+        return Err(invalid_workspace_data(
+            "workspace contains too many timeline entries",
+        ));
+    }
+    let mut dates = HashSet::with_capacity(days.len());
+    let mut day_node_ids = HashSet::with_capacity(days.len());
+    for day in days {
+        let day = day
+            .as_object()
+            .ok_or_else(|| invalid_workspace_data("workspace timeline day must be an object"))?;
+        if day.len() != 2 || !day.contains_key("date") || !day.contains_key("nodeId") {
+            return Err(invalid_workspace_data("workspace timeline day is invalid"));
+        }
+        let date = day
+            .get("date")
+            .and_then(serde_json::Value::as_str)
+            .filter(|date| workspace_timeline_day_number(date).is_some())
+            .ok_or_else(|| invalid_workspace_data("workspace timeline date is invalid"))?;
+        let node_id = canonical_workspace_node_id(
+            day.get("nodeId")
+                .expect("validated timeline day node id field"),
+        )
+        .ok_or_else(|| invalid_workspace_data("workspace timeline day node id is invalid"))?;
+        if !node_ids.contains(&node_id) || !dates.insert(date) || !day_node_ids.insert(node_id) {
+            return Err(invalid_workspace_data(
+                "workspace timeline day identity is invalid",
+            ));
+        }
+    }
+    let mut capture_node_ids = HashSet::with_capacity(captures.len());
+    for capture in captures {
+        let capture = capture.as_object().ok_or_else(|| {
+            invalid_workspace_data("workspace timeline capture must be an object")
+        })?;
+        if capture.len() != 4
+            || !capture.contains_key("nodeId")
+            || !capture.contains_key("capturedAtMs")
+            || !capture.contains_key("utcOffsetMinutes")
+            || !capture.contains_key("day")
+        {
+            return Err(invalid_workspace_data(
+                "workspace timeline capture is invalid",
+            ));
+        }
+        let node_id = canonical_workspace_node_id(
+            capture
+                .get("nodeId")
+                .expect("validated timeline capture node id field"),
+        )
+        .ok_or_else(|| invalid_workspace_data("workspace timeline capture node id is invalid"))?;
+        if !node_ids.contains(&node_id)
+            || day_node_ids.contains(&node_id)
+            || !capture_node_ids.insert(node_id)
+        {
+            return Err(invalid_workspace_data(
+                "workspace timeline capture identity is invalid",
+            ));
+        }
+        let captured_at_ms = bounded_workspace_integer(
+            capture.get("capturedAtMs"),
+            0,
+            MAXIMUM_TIMELINE_CAPTURE_MILLISECONDS,
+        )
+        .ok_or_else(|| invalid_workspace_data("workspace timeline capture timestamp is invalid"))?;
+        let utc_offset_minutes = bounded_workspace_integer(
+            capture.get("utcOffsetMinutes"),
+            -MAXIMUM_TIMELINE_UTC_OFFSET_MINUTES,
+            MAXIMUM_TIMELINE_UTC_OFFSET_MINUTES,
+        )
+        .ok_or_else(|| {
+            invalid_workspace_data("workspace timeline capture UTC offset is invalid")
+        })?;
+        let day = capture
+            .get("day")
+            .and_then(serde_json::Value::as_str)
+            .filter(|day| dates.contains(day))
+            .ok_or_else(|| {
+                invalid_workspace_data("workspace timeline capture day does not exist")
+            })?;
+        let local_day = (captured_at_ms + utc_offset_minutes * 60_000).div_euclid(86_400_000);
+        if workspace_timeline_day_number(day) != Some(local_day) {
+            return Err(invalid_workspace_data(
+                "workspace timeline capture day does not match timestamp",
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_workspace_snapshot(value: &serde_json::Value, version: u64) -> io::Result<()> {
     let workspace = value
         .as_object()
         .ok_or_else(|| invalid_workspace_data("workspace snapshot must be an object"))?;
+    if workspace
+        .get("version")
+        .is_some_and(|value| finite_json_number(Some(value)) != Some(version as f64))
+    {
+        return Err(invalid_workspace_data(
+            "workspace snapshot version does not match envelope version",
+        ));
+    }
     let allowed_fields: &[&str] = match version {
         1 => &["version", "nodes", "layout", "references", "viewport"],
         2 | 3 => &[
@@ -4097,7 +4812,7 @@ fn validate_workspace_snapshot(value: &serde_json::Value, version: u64) -> io::R
             "viewport",
             "view",
         ],
-        4 | CURRENT_WORKSPACE_STORAGE_VERSION => &["version", "nodes", "references", "view"],
+        4 | 5 | CURRENT_WORKSPACE_STORAGE_VERSION => &["version", "nodes", "references", "view"],
         _ => return Err(invalid_workspace_data("workspace version is unsupported")),
     };
     if workspace
@@ -4189,7 +4904,8 @@ fn validate_workspace_snapshot(value: &serde_json::Value, version: u64) -> io::R
                 2 => 1,
                 3 => 2,
                 4 => 4,
-                CURRENT_WORKSPACE_STORAGE_VERSION => 5,
+                5 => 5,
+                CURRENT_WORKSPACE_STORAGE_VERSION => 6,
                 _ => 0,
             };
             if view.len() != expected_fields
@@ -4269,7 +4985,7 @@ fn validate_workspace_snapshot(value: &serde_json::Value, version: u64) -> io::R
                         "workspace active canvas does not exist",
                     ));
                 }
-                if version == CURRENT_WORKSPACE_STORAGE_VERSION {
+                if version >= 5 {
                     let bookmarks = view
                         .get("bookmarks")
                         .and_then(serde_json::Value::as_array)
@@ -4345,6 +5061,15 @@ fn validate_workspace_snapshot(value: &serde_json::Value, version: u64) -> io::R
                         }
                     }
                 }
+                if version == CURRENT_WORKSPACE_STORAGE_VERSION {
+                    validate_workspace_timeline(
+                        view.get("timeline").ok_or_else(|| {
+                            invalid_workspace_data("workspace timeline metadata is missing")
+                        })?,
+                        &node_ids,
+                        &canvas_ids,
+                    )?;
+                }
             }
             let processors = view
                 .get("contentProcessorByNodeId")
@@ -4395,19 +5120,47 @@ fn validate_storage_envelope(contents: &str) -> io::Result<()> {
     normalize_storage_envelope(contents).map(|_| ())
 }
 
-fn migrate_workspace_object_to_v5(
+fn migrate_workspace_object_to_v6(
     workspace: &mut serde_json::Map<String, serde_json::Value>,
     version: u64,
 ) -> io::Result<()> {
     if version == CURRENT_WORKSPACE_STORAGE_VERSION {
+        let timeline = workspace
+            .get_mut("view")
+            .and_then(|view| view.get_mut("timeline"))
+            .expect("validated timeline metadata field");
+        if let Some(timeline) = timeline.as_object_mut() {
+            let canvas_id = canonical_workspace_node_id(
+                timeline
+                    .get("canvasId")
+                    .expect("validated timeline canvas id field"),
+            )
+            .expect("validated timeline canvas id");
+            timeline.insert("canvasId".to_owned(), serde_json::Value::String(canvas_id));
+            for field in ["days", "captures"] {
+                for entry in timeline
+                    .get_mut(field)
+                    .and_then(serde_json::Value::as_array_mut)
+                    .expect("validated timeline entries")
+                {
+                    entry["nodeId"] = serde_json::Value::String(
+                        canonical_workspace_node_id(&entry["nodeId"])
+                            .expect("validated timeline node id"),
+                    );
+                }
+            }
+        }
         return Ok(());
     }
-    if version == 4 {
-        workspace
+    if version >= 4 {
+        let view = workspace
             .get_mut("view")
             .and_then(serde_json::Value::as_object_mut)
-            .ok_or_else(|| invalid_workspace_data("workspace view metadata is invalid"))?
-            .insert("bookmarks".to_owned(), serde_json::json!([]));
+            .ok_or_else(|| invalid_workspace_data("workspace view metadata is invalid"))?;
+        if version == 4 {
+            view.insert("bookmarks".to_owned(), serde_json::json!([]));
+        }
+        view.insert("timeline".to_owned(), serde_json::Value::Null);
         return Ok(());
     }
     if version == 1 {
@@ -4449,6 +5202,7 @@ fn migrate_workspace_object_to_v5(
         }]),
     );
     view.insert("bookmarks".to_owned(), serde_json::json!([]));
+    view.insert("timeline".to_owned(), serde_json::Value::Null);
     Ok(())
 }
 
@@ -4458,7 +5212,7 @@ fn normalize_storage_envelope(contents: &str) -> io::Result<String> {
     let version = value.get("version").and_then(serde_json::Value::as_u64);
     if !matches!(
         version,
-        Some(1) | Some(2) | Some(3) | Some(4) | Some(CURRENT_WORKSPACE_STORAGE_VERSION)
+        Some(1) | Some(2) | Some(3) | Some(4) | Some(5) | Some(CURRENT_WORKSPACE_STORAGE_VERSION)
     ) {
         return Err(invalid_workspace_data(
             "workspace storage envelope version is unsupported",
@@ -4466,7 +5220,7 @@ fn normalize_storage_envelope(contents: &str) -> io::Result<String> {
     }
     let version = version.expect("validated workspace storage version");
     validate_workspace_snapshot(&value, version)?;
-    migrate_workspace_object_to_v5(
+    migrate_workspace_object_to_v6(
         value
             .as_object_mut()
             .ok_or_else(|| invalid_workspace_data("workspace snapshot must be an object"))?,
@@ -4485,7 +5239,12 @@ fn workspace_storage_from_export(contents: &str) -> io::Result<String> {
     if document.get("format").and_then(serde_json::Value::as_str) != Some(WORKSPACE_EXPORT_FORMAT)
         || !matches!(
             document.get("version").and_then(serde_json::Value::as_u64),
-            Some(1) | Some(2) | Some(3) | Some(4) | Some(CURRENT_WORKSPACE_STORAGE_VERSION)
+            Some(1)
+                | Some(2)
+                | Some(3)
+                | Some(4)
+                | Some(5)
+                | Some(CURRENT_WORKSPACE_STORAGE_VERSION)
         )
         || document
             .get("exportedAt")
@@ -4508,7 +5267,7 @@ fn workspace_storage_from_export(contents: &str) -> io::Result<String> {
         .as_object()
         .cloned()
         .ok_or_else(|| invalid_workspace_data("workspace export payload must be an object"))?;
-    migrate_workspace_object_to_v5(&mut storage, export_version)?;
+    migrate_workspace_object_to_v6(&mut storage, export_version)?;
     storage.insert(
         "version".to_owned(),
         serde_json::Value::from(CURRENT_WORKSPACE_STORAGE_VERSION),
@@ -4769,7 +5528,8 @@ mod tests {
                 }],
                 "contentProcessorByNodeId": {},
                 "extensionMetadata": {},
-                "bookmarks": []
+                "bookmarks": [],
+                "timeline": null
             }
         })
         .to_string()
@@ -4789,6 +5549,241 @@ mod tests {
             "workspace": workspace
         })
         .to_string()
+    }
+
+    fn timeline_workspace() -> serde_json::Value {
+        let mut value: serde_json::Value =
+            serde_json::from_str(&workspace("timeline day")).unwrap();
+        value["nodes"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "id": "22222222-2222-4222-8222-222222222222",
+                "name": null,
+                "content": "capture"
+            }));
+        value["view"]["canvases"][0]["layout"] = serde_json::json!([]);
+        value["view"]["timeline"] = serde_json::json!({
+            "canvasId": DEFAULT_CANVAS_ID,
+            "days": [{
+                "date": "1970-01-01",
+                "nodeId": "11111111-1111-4111-8111-111111111111"
+            }],
+            "captures": [{
+                "nodeId": "22222222-2222-4222-8222-222222222222",
+                "capturedAtMs": 0,
+                "utcOffsetMinutes": 0,
+                "day": "1970-01-01"
+            }]
+        });
+        value
+    }
+
+    #[test]
+    fn capsule_commit_requires_the_original_node_content_and_capture_identity() {
+        let input = crate::capsule::CapsuleNoteInput {
+            node_id: "22222222-2222-4222-8222-222222222222".to_owned(),
+            name: String::new(),
+            content: "capture".to_owned(),
+            captured_at_ms: 0,
+            utc_offset_minutes: 0,
+        };
+        let value = timeline_workspace();
+        assert!(validate_capsule_commit(&value.to_string(), &input).is_ok());
+        let mut changed = value.clone();
+        changed["nodes"][1]["content"] = "another submission".into();
+        assert!(validate_capsule_commit(&changed.to_string(), &input).is_err());
+        let mut changed = value.clone();
+        changed["view"]["timeline"]["captures"][0]["capturedAtMs"] = 1.into();
+        assert!(validate_capsule_commit(&changed.to_string(), &input).is_err());
+        let mut changed = value;
+        changed["view"]["timeline"] = serde_json::Value::Null;
+        assert!(validate_capsule_commit(&changed.to_string(), &input).is_err());
+    }
+
+    #[test]
+    fn capsule_commit_never_reports_a_completed_write_as_unsaved_after_lock() {
+        assert_eq!(
+            capsule_commit_status(AtomicWriteStatus::Committed, true),
+            CapsuleCommitStatus::Committed
+        );
+        assert_eq!(
+            capsule_commit_status(AtomicWriteStatus::Committed, false),
+            CapsuleCommitStatus::CommittedLocked
+        );
+        assert_eq!(
+            capsule_commit_status(AtomicWriteStatus::RecoveryRequired, true),
+            CapsuleCommitStatus::RecoveryRequired
+        );
+        assert_eq!(
+            capsule_commit_status(AtomicWriteStatus::RecoveryRequired, false),
+            CapsuleCommitStatus::RecoveryRequired
+        );
+    }
+
+    #[test]
+    fn timeline_dates_require_canonical_gregorian_days() {
+        for (date, expected) in [
+            ("0001-01-01", -719_162),
+            ("1969-12-31", -1),
+            ("1970-01-01", 0),
+            ("2000-02-29", 11_016),
+            ("9999-12-31", 2_932_896),
+        ] {
+            assert_eq!(
+                workspace_timeline_day_number(date),
+                Some(expected),
+                "{date}"
+            );
+        }
+        for date in [
+            "0000-01-01",
+            "10000-01-01",
+            "1900-02-29",
+            "2023-02-29",
+            "2024-04-31",
+            "2024-00-01",
+            "2024-13-01",
+            "2024-01-00",
+            "2024-1-01",
+            "2024-01-01 ",
+            "２０２４-01-01",
+        ] {
+            assert_eq!(workspace_timeline_day_number(date), None, "{date}");
+        }
+    }
+
+    #[test]
+    fn timeline_capture_dates_use_recorded_offsets_without_requiring_layout_or_references() {
+        for (timestamp, offset, day) in [
+            (0, 0, "1970-01-01"),
+            (0, -840, "1969-12-31"),
+            (86_399_999, 840, "1970-01-02"),
+            (MAXIMUM_TIMELINE_CAPTURE_MILLISECONDS, 0, "9999-12-31"),
+            (MAXIMUM_TIMELINE_CAPTURE_MILLISECONDS, -840, "9999-12-31"),
+        ] {
+            let mut value = timeline_workspace();
+            value["view"]["timeline"]["days"][0]["date"] = serde_json::json!(day);
+            value["view"]["timeline"]["captures"][0] = serde_json::json!({
+                "nodeId": "22222222-2222-4222-8222-222222222222",
+                "capturedAtMs": timestamp,
+                "utcOffsetMinutes": offset,
+                "day": day
+            });
+            assert!(
+                validate_storage_envelope(&value.to_string()).is_ok(),
+                "{day}"
+            );
+        }
+
+        let mut floating_integers = timeline_workspace();
+        floating_integers["view"]["timeline"]["captures"][0]["capturedAtMs"] =
+            serde_json::json!(1.0);
+        floating_integers["view"]["timeline"]["captures"][0]["utcOffsetMinutes"] =
+            serde_json::json!(-0.0);
+        assert!(validate_storage_envelope(&floating_integers.to_string()).is_ok());
+
+        for (field, invalid_number) in [
+            ("capturedAtMs", serde_json::json!(-1)),
+            ("capturedAtMs", serde_json::json!(0.5)),
+            (
+                "capturedAtMs",
+                serde_json::json!(MAXIMUM_TIMELINE_CAPTURE_MILLISECONDS + 1),
+            ),
+            ("utcOffsetMinutes", serde_json::json!(-841)),
+            ("utcOffsetMinutes", serde_json::json!(841)),
+            ("utcOffsetMinutes", serde_json::json!(0.5)),
+        ] {
+            let mut value = timeline_workspace();
+            value["view"]["timeline"]["captures"][0][field] = invalid_number;
+            assert!(
+                validate_storage_envelope(&value.to_string()).is_err(),
+                "{field}"
+            );
+        }
+
+        let mut mismatched_day = timeline_workspace();
+        mismatched_day["view"]["timeline"]["captures"][0]["utcOffsetMinutes"] =
+            serde_json::json!(-1);
+        assert!(validate_storage_envelope(&mismatched_day.to_string()).is_err());
+    }
+
+    #[test]
+    fn timeline_normalization_preserves_metadata_and_canonicalizes_ids() {
+        let mut value = timeline_workspace();
+        let canvas_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        let day_node_id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+        let capture_node_id = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+        value["nodes"][0]["id"] = serde_json::json!(day_node_id);
+        value["nodes"][1]["id"] = serde_json::json!(capture_node_id);
+        value["view"]["activeCanvasId"] = serde_json::json!(canvas_id);
+        value["view"]["canvases"][0]["id"] = serde_json::json!(canvas_id);
+        value["view"]["timeline"]["canvasId"] = serde_json::json!(canvas_id.to_uppercase());
+        value["view"]["timeline"]["days"][0]["nodeId"] =
+            serde_json::json!(day_node_id.to_uppercase());
+        value["view"]["timeline"]["captures"][0]["nodeId"] =
+            serde_json::json!(capture_node_id.to_uppercase());
+
+        let normalized = normalize_storage_envelope(&value.to_string()).unwrap();
+        let normalized: serde_json::Value = serde_json::from_str(&normalized).unwrap();
+        value["view"]["timeline"]["canvasId"] = serde_json::json!(canvas_id);
+        value["view"]["timeline"]["days"][0]["nodeId"] = serde_json::json!(day_node_id);
+        value["view"]["timeline"]["captures"][0]["nodeId"] = serde_json::json!(capture_node_id);
+        assert_eq!(normalized, value);
+    }
+
+    #[test]
+    fn legacy_workspaces_migrate_to_v6_without_creating_a_timeline() {
+        for version in 1..=5 {
+            let mut value: serde_json::Value = serde_json::from_str(&workspace("legacy")).unwrap();
+            value["version"] = serde_json::json!(version);
+            value["view"].as_object_mut().unwrap().remove("timeline");
+            if version < 5 {
+                value["view"].as_object_mut().unwrap().remove("bookmarks");
+            }
+            if version < 4 {
+                value["layout"] = value["view"]["canvases"][0]["layout"].clone();
+                value["viewport"] = serde_json::Value::Null;
+                value["view"].as_object_mut().unwrap().remove("canvases");
+                value["view"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("activeCanvasId");
+            }
+            if version < 3 {
+                value["view"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("extensionMetadata");
+            }
+            if version == 1 {
+                value.as_object_mut().unwrap().remove("view");
+            }
+
+            let normalized = normalize_storage_envelope(&value.to_string()).unwrap();
+            let normalized: serde_json::Value = serde_json::from_str(&normalized).unwrap();
+            assert_eq!(normalized["version"], CURRENT_WORKSPACE_STORAGE_VERSION);
+            assert_eq!(
+                normalized["view"].get("timeline"),
+                Some(&serde_json::Value::Null)
+            );
+            assert_eq!(normalized["view"]["bookmarks"], serde_json::json!([]));
+            assert!(validate_storage_envelope(&normalized.to_string()).is_ok());
+        }
+    }
+
+    #[test]
+    fn v5_still_requires_bookmarks_and_v6_requires_timeline() {
+        let mut value: serde_json::Value = serde_json::from_str(&workspace("legacy")).unwrap();
+        value["version"] = serde_json::json!(5);
+        value["view"].as_object_mut().unwrap().remove("bookmarks");
+        assert!(validate_storage_envelope(&value.to_string()).is_err());
+
+        let mut value: serde_json::Value = serde_json::from_str(&workspace("current")).unwrap();
+        value["view"].as_object_mut().unwrap().remove("timeline");
+        assert!(validate_storage_envelope(&value.to_string()).is_err());
+        value["view"]["unknown"] = serde_json::Value::Null;
+        assert!(validate_storage_envelope(&value.to_string()).is_err());
     }
 
     #[test]
@@ -4949,6 +5944,15 @@ mod tests {
                     normalized["version"], CURRENT_WORKSPACE_STORAGE_VERSION,
                     "fixture {name} must migrate to the current version"
                 );
+                if fixture["storage"]["version"].as_u64().unwrap()
+                    < CURRENT_WORKSPACE_STORAGE_VERSION
+                {
+                    assert_eq!(
+                        normalized["view"].get("timeline"),
+                        Some(&serde_json::Value::Null),
+                        "fixture {name} must migrate without creating a timeline"
+                    );
+                }
             }
         }
     }
@@ -4963,6 +5967,30 @@ mod tests {
         assert_eq!(storage_value["version"], CURRENT_WORKSPACE_STORAGE_VERSION);
         assert_eq!(storage_value["nodes"][0]["name"], "restored-from-offsite");
         assert!(validate_storage_envelope(&export).is_err());
+    }
+
+    #[test]
+    fn export_conversion_rejects_mismatched_embedded_versions() {
+        let mut export: serde_json::Value =
+            serde_json::from_str(&workspace_export("embedded-version")).unwrap();
+        for invalid_version in [
+            serde_json::json!(5),
+            serde_json::Value::Null,
+            serde_json::json!("6"),
+            serde_json::json!(7),
+            serde_json::json!(6.5),
+            serde_json::json!(true),
+        ] {
+            export["workspace"]["version"] = invalid_version;
+            assert!(workspace_storage_from_export(&export.to_string()).is_err());
+        }
+
+        for valid_version in [serde_json::json!(6), serde_json::json!(6.0)] {
+            export["workspace"]["version"] = valid_version;
+            let storage = workspace_storage_from_export(&export.to_string()).unwrap();
+            let storage: serde_json::Value = serde_json::from_str(&storage).unwrap();
+            assert_eq!(storage["version"], CURRENT_WORKSPACE_STORAGE_VERSION);
+        }
     }
 
     #[test]
@@ -5002,6 +6030,216 @@ mod tests {
                 "cleanup_plaintext_runtimes"
             ]
         );
+    }
+
+    fn admitted_lock_fixture() -> (
+        WorkspaceVaultState,
+        WorkspaceFileStore,
+        [u8; DATA_KEY_BYTES],
+        WorkspaceAccessPermit,
+    ) {
+        let store = WorkspaceFileStore::new(test_directory());
+        store
+            .write_plaintext(WorkspaceFileSlot::Primary, &workspace("before-lock"))
+            .unwrap();
+        let key = migrate_plaintext_store(&store, "synthetic lock-save password").unwrap();
+        let state = WorkspaceVaultState::default();
+        state.replace_data_key(key).unwrap();
+        let permit = state.access_permit().unwrap();
+        (state, store, key, permit)
+    }
+
+    #[test]
+    fn manual_lock_admits_latest_snapshot_without_waiting_for_the_file_queue() {
+        let (state, store, key, permit) = admitted_lock_fixture();
+        let file_queue = state.operation_lock.lock().unwrap();
+        let mut ticket = state
+            .admit_lock_snapshot(Some(permit), permit.generation, true)
+            .unwrap();
+        assert!(state.shutdown());
+        assert!(!state.is_unlocked().unwrap());
+        assert_eq!(
+            state.ensure_no_lock_save().unwrap_err(),
+            "workspace_vault_lock_save_pending"
+        );
+        assert!(state.ensure_access_permit(permit).is_err());
+        // Locking already completed while a different file operation still
+        // owns the queue. The one accepted snapshot is persisted afterwards.
+        drop(file_queue);
+        let result = persist_admitted_lock_snapshot(
+            &store,
+            &ticket,
+            &workspace("latest-edit"),
+            write_atomically_commit_aware,
+        );
+        assert_eq!(lock_snapshot_outcome(&result), LockSnapshotOutcome::Saved);
+        ticket.finish(lock_snapshot_outcome(&result));
+        assert!(ticket.data_key.is_none());
+        assert!(!state.is_unlocked().unwrap());
+        assert!(state.ensure_no_lock_save().is_ok());
+        let saved = store
+            .read(WorkspaceFileSlot::Primary, Some(&key))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&saved).unwrap()["nodes"][0]["name"],
+            "latest-edit"
+        );
+        assert_eq!(
+            state.ensure_access_permit(permit).unwrap_err(),
+            "workspace_vault_session_expired"
+        );
+        fs::remove_dir_all(&store.base_directory).unwrap();
+    }
+
+    #[test]
+    fn pending_final_snapshot_blocks_unlock_and_replacement_even_when_the_queue_is_free() {
+        let state = WorkspaceVaultState::default();
+        state.replace_data_key([17; DATA_KEY_BYTES]).unwrap();
+        let permit = state.access_permit().unwrap();
+        let old_unlock_generation = state.begin_unlock_generation().unwrap();
+        let mut ticket = state
+            .admit_lock_snapshot(Some(permit), permit.generation, true)
+            .unwrap();
+        state.shutdown();
+        let queued_transition = state.operation_lock.lock().unwrap();
+        assert_eq!(
+            ensure_lock_save_idle(&state.lock_save_state).unwrap_err(),
+            "workspace_vault_lock_save_pending"
+        );
+        assert_eq!(
+            state.begin_unlock_generation().unwrap_err(),
+            "workspace_vault_lock_save_pending"
+        );
+        assert_eq!(
+            state.replace_data_key([18; DATA_KEY_BYTES]).unwrap_err(),
+            "workspace_vault_lock_save_pending"
+        );
+        assert!(
+            state
+                .admit_lock_snapshot(Some(permit), permit.generation, true)
+                .is_err()
+        );
+        drop(queued_transition);
+        ticket.finish(LockSnapshotOutcome::Saved);
+        assert_eq!(
+            state
+                .replace_data_key_at_generation([17; DATA_KEY_BYTES], Some(old_unlock_generation))
+                .unwrap_err(),
+            "workspace_vault_session_expired"
+        );
+        assert!(!state.is_unlocked().unwrap());
+        let explicit_unlock_generation = state.begin_unlock_generation().unwrap();
+        state
+            .replace_data_key_at_generation([17; DATA_KEY_BYTES], Some(explicit_unlock_generation))
+            .unwrap();
+        assert!(state.is_unlocked().unwrap());
+    }
+
+    #[test]
+    fn plaintext_owner_admission_also_installs_the_lock_save_barrier() {
+        let state = WorkspaceVaultState::default();
+        let mut ticket = state.admit_lock_snapshot(None, 0, false).unwrap();
+        state.shutdown();
+        assert_eq!(
+            state.ensure_no_lock_save().unwrap_err(),
+            "workspace_vault_lock_save_pending"
+        );
+        assert!(state.admit_lock_snapshot(None, 0, false).is_err());
+        ticket.finish(LockSnapshotOutcome::Saved);
+        assert!(state.ensure_no_lock_save().is_ok());
+        assert!(state.admit_lock_snapshot(None, 0, false).is_err());
+    }
+
+    #[test]
+    fn lock_snapshot_precommit_failure_keeps_old_file_and_does_not_restore_authority() {
+        let (state, store, key, permit) = admitted_lock_fixture();
+        let mut ticket = state
+            .admit_lock_snapshot(Some(permit), permit.generation, true)
+            .unwrap();
+        state.shutdown();
+        let result =
+            persist_admitted_lock_snapshot(&store, &ticket, &workspace("unsaved-edit"), |_, _| {
+                Err(io::Error::other("injected before replacement"))
+            });
+        assert_eq!(lock_snapshot_outcome(&result), LockSnapshotOutcome::Failed);
+        ticket.finish(lock_snapshot_outcome(&result));
+        assert_eq!(
+            LockSnapshotOutcome::Failed.reason(),
+            "workspace_lock_save_failed"
+        );
+        assert!(!state.is_unlocked().unwrap());
+        assert!(state.ensure_no_lock_save().is_ok());
+        let saved = store
+            .read(WorkspaceFileSlot::Primary, Some(&key))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&saved).unwrap()["nodes"][0]["name"],
+            "before-lock"
+        );
+        fs::remove_dir_all(&store.base_directory).unwrap();
+    }
+
+    #[test]
+    fn lock_snapshot_after_commit_uncertainty_retains_saved_file_and_a_process_barrier() {
+        let (state, store, key, permit) = admitted_lock_fixture();
+        let mut ticket = state
+            .admit_lock_snapshot(Some(permit), permit.generation, true)
+            .unwrap();
+        state.shutdown();
+        let result = persist_admitted_lock_snapshot(
+            &store,
+            &ticket,
+            &workspace("committed-edit"),
+            |path, bytes| {
+                write_atomically_commit_aware_with(path, bytes, replace_file, |_| {
+                    Err(io::Error::other("injected after replacement"))
+                })
+            },
+        );
+        assert_eq!(
+            lock_snapshot_outcome(&result),
+            LockSnapshotOutcome::RecoveryRequired
+        );
+        ticket.finish(lock_snapshot_outcome(&result));
+        assert!(!state.is_unlocked().unwrap());
+        assert_eq!(
+            state.ensure_no_lock_save().unwrap_err(),
+            "workspace_vault_lock_save_recovery_required"
+        );
+        assert_eq!(
+            state.begin_unlock_generation().unwrap_err(),
+            "workspace_vault_lock_save_recovery_required"
+        );
+        assert!(state.replace_data_key(key).is_err());
+        let saved = store
+            .read(WorkspaceFileSlot::Primary, Some(&key))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&saved).unwrap()["nodes"][0]["name"],
+            "committed-edit"
+        );
+        fs::remove_dir_all(&store.base_directory).unwrap();
+    }
+
+    #[test]
+    fn an_unsettled_lock_snapshot_cannot_silently_release_its_barrier() {
+        let state = WorkspaceVaultState::default();
+        state.replace_data_key([19; DATA_KEY_BYTES]).unwrap();
+        let permit = state.access_permit().unwrap();
+        let ticket = state
+            .admit_lock_snapshot(Some(permit), permit.generation, true)
+            .unwrap();
+        state.shutdown();
+        drop(ticket);
+        assert!(!state.is_unlocked().unwrap());
+        assert_eq!(
+            state.ensure_no_lock_save().unwrap_err(),
+            "workspace_vault_lock_save_recovery_required"
+        );
+        assert!(state.replace_data_key([19; DATA_KEY_BYTES]).is_err());
     }
 
     #[test]
@@ -5079,6 +6317,40 @@ mod tests {
         emit_terminal_lock_event_if_needed(true, || emitted.set(true));
 
         assert!(!emitted.get());
+    }
+
+    #[test]
+    fn plaintext_explicit_transactions_revoke_without_reloading_their_owner_early() {
+        for reason in ["workspace_encryption_enable", "workspace_restore_commit"] {
+            assert!(!should_emit_workspace_revocation_event(
+                false, true, false, reason
+            ));
+            assert!(should_emit_workspace_revocation_event(
+                true, true, true, reason
+            ));
+            assert!(should_emit_workspace_revocation_event(
+                false, true, true, reason
+            ));
+        }
+    }
+
+    #[test]
+    fn plaintext_system_and_terminal_locks_still_notify_the_main_security_gate() {
+        for reason in [
+            "windows_session_lock",
+            "windows_suspend",
+            "manual",
+            "idle_timeout",
+            "workspace_restore_committed_locked",
+            "workspace_restore_recovery_required",
+        ] {
+            assert!(should_emit_workspace_revocation_event(
+                false, true, false, reason
+            ));
+        }
+        assert!(!should_emit_workspace_revocation_event(
+            false, false, false, "manual"
+        ));
     }
 
     #[test]

@@ -69,7 +69,7 @@ flowchart LR
 - 工作区至少有一个画布；同一节点可以不出现在任何画布，也可以在多个画布中各有一个独立布局，但单个画布内不得重复放置同一节点。
 - 引用的源节点和目标节点必须存在，同一对引用不能重复。
 - 画布视口属于工作区视图数据，不属于节点领域模型。
-- `view.extensionMetadata` 自工作区 v3 起按扩展 ID 隔离，v5 继续保留；扩展记录具有独立 `schemaVersion`、工作区级对象和按节点 ID 索引的对象。外层节点 ID 必须存在，未知扩展的数据仍被保留。v5 还在 `view.bookmarks` 中保存跨画布的位置书签。
+- `view.extensionMetadata` 自工作区 v3 起按扩展 ID 隔离，v6 继续保留；扩展记录具有独立 `schemaVersion`、工作区级对象和按节点 ID 索引的对象。外层节点 ID 必须存在，未知扩展的数据仍被保留。v5 还在 `view.bookmarks` 中保存跨画布的位置书签。
 
 节点引用是有方向的。两个节点之间的专属信息应放入第三个普通关系节点，由关系节点同时引用所有参与方。多引用筛选使用 AND 语义。
 
@@ -85,7 +85,15 @@ flowchart LR
 - 桌面端保持单实例；第二次启动只显示并聚焦已有主窗口。
 - 浏览器开发模式使用 `localStorage`，并作为旧版桌面数据的一次性迁移来源。
 
-桌面端现已在 `WorkspacePersistence` 与文件适配器之间实现 Rust 可选加密封装：随机数据密钥加密工作区，Argon2id 从用户密码派生密钥来保护数据密钥，XChaCha20-Poly1305 提供保密性和认证。未启用加密的工作区仍以明文保存；启用后，正式工作区、恢复副本、正常导出和不可读数据导出都写成版本化密文。当前工作区存储与导出版本为 v5；v1 会补全整个视图，v2 会保留处理器选择并补入空扩展元数据容器，v3 会把顶层布局和视口迁入一个默认画布，v4 会补入空的位置书签列表，之后新保存、导出、恢复和异机备份统一写 v5。React 会在解锁表单中短暂持有密码字符串，但不把密码或数据密钥持久化。桌面端仍未连接任何远端同步后端；现有 Worker/D1 节点 API 不能直接承载密码保护工作区的同步，后续需要独立的密文封装契约。
+悬浮胶囊已实现独立窗口和主窗口写入所有权；正式 EXE 的首轮完整原生自动验收已通过，最新 CI、云端审查、已有 Edge 波动与尚待人工验证的边界统一见[胶囊验证记录](docs/capsule-notes.md#验证记录)。本机软件更新及 PR 合并仍未进行。主窗口通过 Rust 签发的 `ownerId` 独占正式工作区快照、保存队列与历史；读、写和恢复交换必须携带原 owner，不能由旧 React 实例重新取得 permit。胶囊是独立入口和独立窗口，只持有当前有界草稿，不加载整个工作区。Rust 同时核对真实窗口与 WebView label，以专属白名单隔离胶囊和主窗口命令。
+
+胶囊失焦或 `Ctrl+Enter` 后把稳定记录身份交给 Rust 的单条请求中转，主窗口从权威快照准备时间画布事务，再通过 `commit_capsule_note` 落盘；Rust 复验原 owner、context、permit、访问代次及节点/时间索引匹配，持久化确认后才返回成功并进入一次历史事务。明确失败保留可编辑草稿；提交结果未知时禁止自动重提及旧快照回写，`recoveryRequired` 进入需真正重启应用进程检查的失败关闭状态。主窗口专属 `restart_application` 复用退出的撤权、秘密剪贴板与模型/扩展清理后执行原生重启；WebView 刷新或 `location.reload()` 不能清除 Rust 进程级隔离。普通轮询不算用户活动。
+
+owner 打开使用 `requestId + requestSequence` 排序与取消：仅非秘密计数写入主窗口 `sessionStorage`，Rust 在等待文件队列前登记高水位，旧打开和旧卸载不能覆盖新 owner。手动锁定通过当前 owner 的 `lock_workspace_with_snapshot` 接纳最新普通编辑或已准备的胶囊事务；Rust 先撤权，再以一次原密钥授权完成该快照的提交感知写入。期间新 owner、解锁、恢复和密钥替换均被屏障拒绝；替换前失败仍锁定，替换后持久性不确定要求进程重启。恢复交换及其他非胶囊批量事务仍立即锁定，但不附加可能陈旧的快照。完整状态表见[最后快照协议](docs/capsule-notes.md#手动锁定的最后快照)，本轮 CI 与审查证据见同页验证记录。
+
+未提交草稿仅驻留内存，收起保留并提示未保存；有草稿或未解决请求时禁用界面隐藏按钮。锁定、工作区替换及退出清理旧草稿和请求，系统锁定不等待胶囊保存；胶囊原生关闭只隐藏，主窗口仍按既有 flush 后统一退出流程工作，首版没有托盘驻留。未加密工作区显示明文保存提示。窗口尺寸、命令协议和仍待执行的验证清单见 [悬浮胶囊便签实施基线](docs/capsule-notes.md)。
+
+桌面端现已在 `WorkspacePersistence` 与文件适配器之间实现 Rust 可选加密封装：随机数据密钥加密工作区，Argon2id 从用户密码派生密钥来保护数据密钥，XChaCha20-Poly1305 提供保密性和认证。未启用加密的工作区仍以明文保存；启用后，正式工作区、恢复副本、正常导出和不可读数据导出都写成版本化密文。当前工作区存储与导出版本为 v6；v1 会补全整个视图，v2 会保留处理器选择并补入空扩展元数据容器，v3 会把顶层布局和视口迁入一个默认画布，v4 会补入空的位置书签列表，v5 补入空的时间画布索引，之后新保存、导出、恢复和异机备份统一写 v6。React 会在解锁表单中短暂持有密码字符串，但不把密码或数据密钥持久化。桌面端仍未连接任何远端同步后端；现有 Worker/D1 节点 API 不能直接承载密码保护工作区的同步，后续需要独立的密文封装契约。
 
 普通修改主密码只重新封装现有数据密钥；独立的数据密钥轮换会先推进 Rust 访问代次并卸载明文工作区，再生成新的随机数据密钥。撤销完成后立即发送开始锁定事件来卸载 React 明文状态；缓存清理、线程启动和文件轮换的全部结果随后进入唯一终态出口，成功、清理待定、跨平台清理跳过或失败都会再发送对应终态事件。Rust 在 `.workspace.data-key-rotation.v1.pending` 中准备新的正式文件、恢复副本、历史和 vault：`preparing` 阶段中断时删除待提交数据与新设备凭据，`ready` 阶段中断时由下次安全状态检查幂等完成提交。正式 vault 最后替换，是事务提交点；在此之前任何普通工作区命令看到待处理事务都会失败关闭，不能越过恢复流程。提交后清理进入 `committed_cleanup_pending` 状态时，旧设备凭据或事务目录删除失败只保留可重试告警，不阻断新 vault 的启动和解锁。若 vault 已经提交但清理阶段标记写入失败，恢复会用正式 vault 与待提交 vault 的字节一致性确认提交点，放行新 vault 并在后续检查继续重试；无法证明提交的 `ready` 事务仍然阻断。跨系统恢复时不把旧平台 credential ID 交给当前系统删除，冗余轮换目录清理后返回 `CleanupSkipped`，原平台凭据需在原设备处理。系统快速解锁启用时一并生成新设备密钥和凭据，只有新 vault 提交后才删除旧凭据。轮换命令成功或失败都不恢复已经撤销的明文会话。
 
@@ -157,7 +165,7 @@ flowchart LR
 - 脚本默认只能预览。执行必须经 Rust 权限代理和独立进程，默认无文件、网络、环境变量或其他秘密访问权，并具有超时、取消、输出上限和退出回收。
 - 内置处理器继续经过仓库审查；第三方处理器只能通过受管理 `.liext`、逐项能力授权和隔离进程接入，不能向 WebView 注入任意 JavaScript。
 
-当前工作区逻辑格式为 v5：节点和引用仍属于整个工作区；画布集合、当前画布、各画布布局与视口以及位置书签统一位于 `view`，不进入 `InformationNode` 或 `Reference`。同一节点可以出现在多个画布，也允许没有位置；单个画布内同一节点最多一个位置。引用只在两个端点都位于当前画布时绘制，但筛选、导出和持久化继续使用全部正式引用。位置书签保存稳定名称、目标画布和视口坐标，只改变视图，不进入节点、引用或扩展元数据。v5 导出必须显式携带 `view.bookmarks`，即使列表为空；仅应用内部的无版本快照允许省略该字段并按空列表语义处理。v1～v3 的顶层布局与视口确定性迁移到一个默认画布，v4 确定性迁移为空书签列表，之后不再在内部同时维护旧顶层字段和新画布结构。TypeScript 和 Rust 共同读取 `fixtures/workspace-contract.json`，对合法多画布、位置书签、旧版本迁移、重复名称、悬空引用、布局、视口、处理器选择和扩展元数据执行同一组边界测试。
+当前工作区逻辑格式为 v6：节点和引用仍属于整个工作区；画布集合、当前画布、各画布布局与视口以及位置书签统一位于 `view`，不进入 `InformationNode` 或 `Reference`。同一节点可以出现在多个画布，也允许没有位置；单个画布内同一节点最多一个位置。引用只在两个端点都位于当前画布时绘制，但筛选、导出和持久化继续使用全部正式引用。位置书签保存稳定名称、目标画布和视口坐标，只改变视图，不进入节点、引用或扩展元数据。v5 导出仍必须显式携带 `view.bookmarks`，v6 还必须显式携带 `view.timeline`，即使两者分别为空列表和 `null`；仅应用内部的无版本快照允许省略该字段并按空列表语义处理。v1～v3 的顶层布局与视口确定性迁移到一个默认画布，v4 确定性迁移为空书签列表，v5 补入 `timeline:null`，之后不再在内部同时维护旧顶层字段和新画布结构。TypeScript 和 Rust 共同读取 `fixtures/workspace-contract.json`，对合法多画布、位置书签、旧版本迁移、重复名称、悬空引用、布局、视口、处理器选择和扩展元数据执行同一组边界测试。
 
 跨画布操作使用应用内、会话级的位置剪贴板。它只捕获来源画布的 `NodeLayout` 与节点 ID，不读取或复制节点名称、正文、敏感标记内容和引用，也不写入系统剪贴板、工作区、导出或备份。粘贴由纯 `canvasTransfer` 操作完成：过滤已删除节点，保留选区内部相对几何，跳过目标画布已有位置；剪切时在同一个不可分割工作区快照中移除来源位置并添加目标位置。React Flow 只负责提供选择、目标坐标和聚焦请求，不能自行修改跨画布数据。
 
@@ -204,11 +212,11 @@ node scripts/prepare-public-document-import-benchmark.mjs docred <train_annotate
 
 公开标注只覆盖特定任务：CLUENER 不提供引用答案，DocRED 也不是个人笔记。不要把这些结果单独当作产品准确率；变更模型或提示词时应同时比较固定合成夹具和公开补充集。第三方原文、转换结果及模型预测不得提交到仓库。
 
-2026-08-31 已按架构审查确认的基线完成数据密钥轮换提交后清理、扩展锁定代数门控、向量缓存写入复验、离站配置提交感知事务、版本化 S3 删除验证和 D1 引用原子 batch。Draft PR [#15](https://github.com/3fteye/linked-info/pull/15) 的提交 `ff240ce` 已通过 [Windows CI 33352139368](https://github.com/3fteye/linked-info/actions/runs/33352139368)，覆盖 Rust 格式/lint/测试、桌面编译与生命周期、前端工作区回归、Edge 交互和生产构建；当前头部的云端审查证据以 PR 会话为准。真实系统密钥环故障、版本化 S3 桶、D1 并发和目标平台进程生命周期仍需外部验证；Cloudflare Worker 身份及工作区隔离仍是未来公开/同步部署的前置闸门。
+2026-08-31 已按架构审查确认的基线完成数据密钥轮换提交后清理、扩展锁定代数门控、向量缓存写入复验、离站配置提交感知事务、版本化 S3 删除验证和 D1 引用原子 batch。PR [#15](https://github.com/3fteye/linked-info/pull/15) 已 squash 合并为 `main@2b41083`；[Windows CI 33354555574](https://github.com/3fteye/linked-info/actions/runs/33354555574) 和 [Desktop packages 33354594566](https://github.com/3fteye/linked-info/actions/runs/33354594566) 均通过，PR 最终 head `5e4fd20` 的普通与安全审查没有新的未解决发现。真实系统密钥环故障、版本化 S3 桶、D1 并发和目标平台进程生命周期仍需外部验证；Cloudflare Worker 身份及工作区隔离仍是未来公开/同步部署的前置闸门。
 
 ## 开发环境
 
-2026-08-19 的只读全面架构审查及逐项证据见 [docs/architecture-review-2026-08-19.md](docs/architecture-review-2026-08-19.md)。该报告没有要求推翻 `Node + Reference`、端口/适配器或本地优先方向，但在继续内容功能扩展前，必须先按依赖顺序收口跨文件事务、提交结果、容量、异步 revision 和大工作区热路径。Finding 只有在对应回归、故障注入或性能预算通过后才能标记完成，不能仅靠重写文档关闭。
+2026-08-19 的只读全面架构审查及逐项证据见 [docs/architecture-review-2026-08-19.md](docs/architecture-review-2026-08-19.md)。该报告没有要求推翻 `Node + Reference`、端口/适配器或本地优先方向；其中阻断内容扩展的跨文件事务、提交结果、容量、异步 revision 和大工作区热路径已通过后续实现、回归、故障注入与 PR #15 复审收口。真实服务和目标平台外部验证继续保留，但不再把已经关闭的 Finding 重复描述为功能扩展总闸门。
 
 CI 当前使用：
 
@@ -249,6 +257,8 @@ pnpm build
 
 Windows Hello、会话锁定、Rust 文件原子写入和系统安全存储不属于浏览器适配器能力，继续由 Rust/Tauri 测试与 Windows 实机验收负责；浏览器回归通过不能替代这些平台边界验证。
 
+胶囊原生回归另由 Windows 打包工作流在独立 GitHub-hosted runner 执行：启动正式 EXE，通过 WebView2 CDP 与限定 PID 的 Win32 helper 检查实际窗口和保存/锁定链路，不在用户账号下复制启动应用、不截图或上传工作区。三重 CI 防误运行检查有独立自动测试。首次运行状态、临时调试策略和“通知注入不等于真实休眠”的边界见 [原生自动验收](docs/capsule-native-validation.md)。
+
 ### Rust 检查
 
 ```powershell
@@ -257,6 +267,12 @@ cargo test -p linked-info-contracts -p linked-info-domain -p linked-info-storage
 cargo check -p linked-info-desktop
 cargo test -p linked-info-desktop --lib
 ```
+
+上述命令描述检查目标；本项目当前执行约定仍为 GitHub Actions，不在用户机器构建或跑测试。Windows CI 的 `.github/scripts/test-windows-desktop.ps1` 只调用一次 Cargo，并为本次命令配置绝对路径的测试 runner。Cargo 完成链接和 DLL 搜索环境准备后，把唯一测试 EXE 交给 `run-windows-desktop-test.ps1`；runner 严格校验路径，用 Windows SDK `mt.exe` 嵌入并验证 Common Controls v6 清单，再直接执行同一 EXE 和原参数。不能先补清单后再次调用 Cargo，否则重新链接可能覆盖清单。Tauri 自动资源只覆盖正式 binary；真实 AppHandle 路径把 `TaskDialogIndirect` 引入 lib-test 后，缺少该清单会在测试开始前发生入口加载错误。只修改临时测试 EXE，不改变生产构建、测试函数或发布包。依据 [TaskDialogIndirect 要求](https://learn.microsoft.com/en-us/windows/win32/api/commctrl/nf-commctrl-taskdialogindirect) 与 [Windows 清单工具](https://learn.microsoft.com/en-us/windows/win32/sbscs/mt-exe)。
+
+仅测试 EXE 返回明确的 `STATUS_ENTRYPOINT_NOT_FOUND` 数值状态时，runner 才对该精确 EXE 收集 PE 导入表与匹配的 Windows 事件，并保留原测试退出码。普通断言失败或编译错误不运行加载诊断，不按修改时间选择可能陈旧的二进制文件。
+
+`.github/scripts/test-windows-desktop-fixtures.ps1` 在 Windows CI 的 Rust 安装之前运行命令替身回归，覆盖单次 Cargo/绝对 runner、清单处理顺序、精确 EXE 与参数、非法产物拒绝、退出码保留、普通失败不诊断，以及缺少 dumpbin 时仍筛选 Windows 事件。夹具不调用编译器、SDK 工具、实际测试 EXE 或系统事件日志，不引入第三方测试框架。
 
 Worker 的 wasm 检查：
 

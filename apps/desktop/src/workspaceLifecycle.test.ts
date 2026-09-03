@@ -57,4 +57,39 @@ describe("createTauriWorkspaceLifecycle", () => {
     expect(application.exit).not.toHaveBeenCalled();
     expect(onFailure).toHaveBeenCalledOnce();
   });
+
+  it("restarts the native process without flushing a quarantined workspace", async () => {
+    const application = new MemoryCloseApplication();
+    const restart = vi.fn(async () => undefined);
+    const lifecycle = createTauriWorkspaceLifecycle({
+      exit: application.exit,
+      onCloseRequested: application.onCloseRequested.bind(application),
+      restart,
+    });
+    const flush = vi.fn(async () => {
+      throw new Error("a quarantined workspace must not flush on restart");
+    });
+    await lifecycle.registerCloseFlush(flush, vi.fn());
+
+    await lifecycle.restart?.();
+
+    expect(restart).toHaveBeenCalledOnce();
+    expect(flush).not.toHaveBeenCalled();
+    expect(application.exit).not.toHaveBeenCalled();
+  });
+
+  it("preserves restart failure and leaves restart unavailable for legacy bridges", async () => {
+    const application = new MemoryCloseApplication();
+    expect(createTauriWorkspaceLifecycle(application).restart).toBeUndefined();
+    const lifecycle = createTauriWorkspaceLifecycle({
+      exit: application.exit,
+      onCloseRequested: application.onCloseRequested.bind(application),
+      async restart() {
+        throw new Error("synthetic native restart failure");
+      },
+    });
+
+    await expect(lifecycle.restart?.()).rejects.toThrow("synthetic native restart failure");
+    expect(application.exit).not.toHaveBeenCalled();
+  });
 });

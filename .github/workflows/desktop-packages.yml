@@ -22,6 +22,10 @@ jobs:
 
       - name: Cache Rust build data
         uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+        with:
+          # Native smoke failures must not discard a successful release build.
+          # Only Cargo data is cached, never app data or WebView profiles.
+          cache-on-failure: true
 
       - name: Check Rust lockfile consistency
         shell: pwsh
@@ -74,6 +78,24 @@ jobs:
       - name: Assemble Windows portable runtime
         shell: pwsh
         run: Copy-Item -LiteralPath apps/desktop/src-tauri/resources/llama-runtime -Destination target/release/llama-runtime -Recurse -Force
+
+      - name: Test native capsule runner safety gates
+        run: node --test scripts/native-capsule-safety.test.mjs
+
+      - name: Exercise native capsule in isolated Windows runner
+        timeout-minutes: 6
+        shell: pwsh
+        working-directory: apps/desktop
+        run: node scripts/native-capsule-smoke.mjs --executable "$env:GITHUB_WORKSPACE\target\release\linked-info-desktop.exe" --report "$env:GITHUB_WORKSPACE\artifacts\native-capsule-summary.json"
+
+      - name: Upload native capsule assertion summary
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: native-capsule-summary
+          path: artifacts/native-capsule-summary.json
+          if-no-files-found: ignore
+          retention-days: 3
 
       - name: Write package checksum
         shell: pwsh

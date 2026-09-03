@@ -3,6 +3,7 @@ import {
   migrateWorkspaceSnapshotV2,
   migrateWorkspaceSnapshotV3,
   migrateWorkspaceSnapshotV4,
+  migrateWorkspaceSnapshotV5,
   parseWorkspaceSnapshot,
   type WorkspaceSnapshot,
 } from "./workspaceData";
@@ -41,6 +42,9 @@ export {
   type WorkspaceCanvas,
   type WorkspaceExtensionMetadata,
   type WorkspaceViewMetadata,
+  type WorkspaceTimeline,
+  type WorkspaceTimelineDay,
+  type WorkspaceTimelineCapture,
 } from "./workspaceData";
 
 export type WorkspaceLoadResult =
@@ -65,7 +69,7 @@ export type WorkspaceStorageSlot = "primary" | "recovery";
 
 const workspaceStorageKey = "linked-info.workspace.v1";
 const workspaceRecoveryStorageKey = "linked-info.workspace.recovery.v1";
-export const currentWorkspaceStorageVersion = 5;
+export const currentWorkspaceStorageVersion = 6;
 
 function storageKey(slot: WorkspaceStorageSlot): string {
   return slot === "primary" ? workspaceStorageKey : workspaceRecoveryStorageKey;
@@ -92,9 +96,11 @@ export function parseStoredWorkspaceText(raw: string): WorkspaceLoadResult {
           ? migrateWorkspaceSnapshotV3(stored)
           : stored.version === 4
             ? migrateWorkspaceSnapshotV4(stored)
-        : stored.version === currentWorkspaceStorageVersion
-          ? parseWorkspaceSnapshot(stored)
-          : null;
+            : stored.version === 5
+              ? migrateWorkspaceSnapshotV5(stored)
+              : stored.version === currentWorkspaceStorageVersion
+                ? parseWorkspaceSnapshot(stored)
+                : null;
   return workspace === null
     ? { status: "invalid", raw }
     : { status: "ready", workspace };
@@ -111,6 +117,7 @@ export function serializeStoredWorkspace(workspace: WorkspaceSnapshot): string {
     view: {
       ...validated.view,
       bookmarks: validated.view.bookmarks ?? [],
+      timeline: validated.view.timeline ?? null,
     },
   });
 }

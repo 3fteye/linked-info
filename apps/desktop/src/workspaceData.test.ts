@@ -5,6 +5,7 @@ import {
   isNodeNameAvailable,
   migrateWorkspaceSnapshotV3,
   migrateWorkspaceSnapshotV4,
+  migrateWorkspaceSnapshotV5,
   moveNodeLayoutToFront,
   parseWorkspaceSnapshot,
   persistedNodeNameFromDraft,
@@ -42,6 +43,7 @@ function validWorkspace(): WorkspaceSnapshot {
       ],
       contentProcessorByNodeId: {},
       extensionMetadata: {},
+      timeline: null,
     },
   };
 }
@@ -49,6 +51,74 @@ function validWorkspace(): WorkspaceSnapshot {
 function layout(workspace: WorkspaceSnapshot) {
   return activeWorkspaceCanvas(workspace).layout;
 }
+
+function timelineWorkspace(): WorkspaceSnapshot {
+  const workspace = validWorkspace();
+  workspace.view.timeline = {
+    canvasId: defaultCanvasId,
+    days: [{ date: "1970-01-01", nodeId: accountId }],
+    captures: [
+      { nodeId: serviceId, capturedAtMs: 0, utcOffsetMinutes: 0, day: "1970-01-01" },
+    ],
+  };
+  return workspace;
+}
+
+describe("workspace timeline metadata", () => {
+  it("normalizes missing and undefined in-memory timeline metadata to null", () => {
+    const workspace = validWorkspace();
+    delete workspace.view.timeline;
+    expect(parseWorkspaceSnapshot(workspace)?.view.timeline).toBeNull();
+    workspace.view.timeline = undefined;
+    expect(parseWorkspaceSnapshot(workspace)?.view.timeline).toBeNull();
+  });
+
+  it("requires timeline and bookmarks in a version 6 snapshot", () => {
+    const workspace = validWorkspace();
+    const storage = { version: 6, ...workspace };
+    expect(parseWorkspaceSnapshot(storage)).toBeNull();
+    storage.view.bookmarks = [];
+    expect(parseWorkspaceSnapshot(storage)?.view.timeline).toBeNull();
+    delete storage.view.timeline;
+    expect(parseWorkspaceSnapshot(storage)).toBeNull();
+  });
+
+  it("keeps the version 5 bookmarks boundary strict during migration", () => {
+    const workspace = validWorkspace();
+    delete workspace.view.timeline;
+    expect(migrateWorkspaceSnapshotV5(workspace)).toBeNull();
+    workspace.view.bookmarks = [];
+    expect(migrateWorkspaceSnapshotV5(workspace)?.view.timeline).toBeNull();
+    workspace.view.timeline = null;
+    expect(migrateWorkspaceSnapshotV5(workspace)).toBeNull();
+  });
+
+  it("retains capture metadata after placements and visible references are removed", () => {
+    const workspace = timelineWorkspace();
+    workspace.view.canvases[0].layout = [];
+    workspace.references = [];
+    expect(parseWorkspaceSnapshot(workspace)?.view.timeline).toEqual(workspace.view.timeline);
+  });
+
+  it("removes only deleted capture metadata while retaining its date", () => {
+    const workspace = timelineWorkspace();
+    const view = removeNodesFromWorkspaceView(workspace.view, new Set([serviceId]));
+    expect(view.timeline).toEqual({
+      canvasId: defaultCanvasId,
+      days: [{ date: "1970-01-01", nodeId: accountId }],
+      captures: [],
+    });
+    expect(workspace.view.timeline?.captures).toHaveLength(1);
+  });
+
+  it("drops dependent capture metadata when deleting a date but retains capture placements", () => {
+    const workspace = timelineWorkspace();
+    const view = removeNodesFromWorkspaceView(workspace.view, new Set([accountId]));
+    expect(view.timeline).toEqual({ canvasId: defaultCanvasId, days: [], captures: [] });
+    expect(view.canvases[0].layout).toEqual([{ nodeId: serviceId, x: 30, y: 40 }]);
+    expect(removeNodesFromWorkspaceView(view, new Set())).toBe(view);
+  });
+});
 
 describe("parseWorkspaceSnapshot", () => {
   it("normalizes UUID casing before validating nodes, layout, and references", () => {
@@ -402,6 +472,7 @@ describe("removeNodesFromWorkspaceView", () => {
           byNodeId: { [serviceId]: { collapsed: false } },
         },
       },
+      timeline: null,
     });
   });
 });

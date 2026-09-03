@@ -56,7 +56,8 @@ export interface WorkspaceSecurity {
   rotateDataKey(password: string, authorization: string): Promise<void>;
   clearRecoveryData(authorization: string): Promise<void>;
   destroyWorkspace(authorization: string): Promise<void>;
-  lock(): Promise<WorkspaceSecurityStatus>;
+  /** A last-edit snapshot must be accepted by the currently mounted owner. */
+  lock(contents?: string): Promise<WorkspaceSecurityStatus>;
   setIdleTimeout(minutes: number | null): Promise<WorkspaceSecurityStatus>;
   recordActivity(): Promise<void>;
   subscribeLocked(listener: (reason: string) => void): Promise<() => void>;
@@ -128,7 +129,10 @@ export const tauriWorkspaceSecurity: WorkspaceSecurity = {
   destroyWorkspace(authorization) {
     return invoke<void>("destroy_workspace", { authorization });
   },
-  lock() {
+  lock(contents) {
+    if (contents !== undefined) {
+      return Promise.reject(new Error("workspace_lock_snapshot_owner_required"));
+    }
     return invoke<WorkspaceSecurityStatus>("lock_workspace");
   },
   setIdleTimeout(minutes) {

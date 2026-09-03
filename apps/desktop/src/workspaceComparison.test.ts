@@ -40,6 +40,45 @@ function workspace(): WorkspaceSnapshot {
 }
 
 describe("workspace replacement comparison", () => {
+  it("includes timeline changes in metadata and highlights affected retained nodes", () => {
+    const current = workspace();
+    const replacement = structuredClone(current);
+    replacement.view.timeline = {
+      canvasId: defaultCanvasId,
+      days: [{ date: "1970-01-01", nodeId: firstId }],
+      captures: [
+        { nodeId: secondId, capturedAtMs: 0, utcOffsetMinutes: 0, day: "1970-01-01" },
+      ],
+    };
+    expect(compareWorkspaces(current, replacement)).toMatchObject({
+      identical: false,
+      viewMetadataChanged: true,
+      modifiedNodes: 2,
+    });
+    expect(createWorkspaceViewMetadataComparison(current, replacement).nodeEqual(firstId)).toBe(false);
+  });
+
+  it("compares capture timestamps and normalizes absent timeline metadata", () => {
+    const current = workspace();
+    const replacement = structuredClone(current);
+    replacement.view.timeline = null;
+    expect(compareWorkspaces(current, replacement).identical).toBe(true);
+    current.view.timeline = {
+      canvasId: defaultCanvasId,
+      days: [{ date: "1970-01-01", nodeId: firstId }],
+      captures: [
+        { nodeId: secondId, capturedAtMs: 0, utcOffsetMinutes: 0, day: "1970-01-01" },
+      ],
+    };
+    replacement.view.timeline = structuredClone(current.view.timeline);
+    replacement.view.timeline.captures[0].capturedAtMs = 1;
+    expect(compareWorkspaces(current, replacement)).toMatchObject({
+      modifiedNodes: 1,
+      viewMetadataChanged: true,
+      identical: false,
+    });
+  });
+
   it("recognizes an identical workspace", () => {
     const current = workspace();
     expect(compareWorkspaces(current, structuredClone(current))).toEqual({

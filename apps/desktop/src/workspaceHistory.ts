@@ -44,6 +44,7 @@ export function captureWorkspaceHistory(
       contentProcessorByNodeId: workspace.view.contentProcessorByNodeId,
       extensionMetadata: workspace.view.extensionMetadata,
       bookmarks: workspace.view.bookmarks ?? [],
+      timeline: workspace.view.timeline ?? null,
     },
   };
 }
@@ -56,6 +57,7 @@ export function workspaceHistoryStatesEqual(
     ...state,
     view: {
       ...state.view,
+      timeline: state.view.timeline ?? null,
       canvases: state.view.canvases.map(({ viewport: _viewport, ...canvas }) =>
         canvas,
       ),
@@ -149,6 +151,7 @@ export function restoreWorkspaceHistory(
       contentProcessorByNodeId: state.view.contentProcessorByNodeId,
       extensionMetadata: state.view.extensionMetadata,
       bookmarks: state.view.bookmarks ?? currentView.bookmarks ?? [],
+      timeline: state.view.timeline ?? null,
     },
   };
 }

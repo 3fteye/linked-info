@@ -53,6 +53,8 @@ import {
 } from "./appearancePreferences";
 import DocumentImportDialog from "./DocumentImportDialog";
 import ExtensionSettings from "./ExtensionSettings";
+import { unavailableCapsuleHost, type CapsuleHost } from "./capsuleHost";
+import { captureTimelineNote, TimelineCaptureError } from "./timelineWorkspace";
 import {
   commitExtensionInstall,
   extensionManagerAvailable,
@@ -130,6 +132,7 @@ import {
   maximumWorkspaceCanvasCount,
   normalizeNodeName,
   parseStoredWorkspaceText,
+  serializeStoredWorkspace,
   persistedNodeNameFromDraft,
   replaceWorkspaceExtensionMetadata,
   removeNodesFromWorkspaceView,
@@ -304,6 +307,7 @@ type PendingOffsiteSensitiveAction =
     };
 
 interface AppProps {
+  capsuleHost?: CapsuleHost;
   documentImportLlmGateway: DocumentImportLlmGateway;
   embeddingGateway: EmbeddingGateway;
   embeddingVectorCache: EmbeddingVectorCache;
@@ -496,6 +500,7 @@ function extensionMetadataSchemaVersions(
 }
 
 function App({
+  capsuleHost = unavailableCapsuleHost,
   documentImportLlmGateway,
   embeddingGateway,
   embeddingVectorCache,
@@ -523,7 +528,10 @@ function App({
   const workspaceRef = useRef(workspace);
   const extensionWorkspaceRevisionRef = useRef(0);
   const workspaceSaveTimerRef = useRef<number | null>(null);
-  const pendingWorkspaceCommitRef = useRef<WorkspaceSnapshot | null>(null);
+  const pendingWorkspaceCommitRef = useRef<{
+    kind: "capsule" | "extension";
+    workspace: WorkspaceSnapshot;
+  } | null>(null);
   const skipUnmountFlushRef = useRef(false);
   const workspaceReplacementGenerationRef = useRef(0);
   const documentImportCancelledRef = useRef(false);
@@ -548,6 +556,13 @@ function App({
   const workspaceReplacementApplyBusyRef = useRef(false);
   const extensionProposalApplyBusyRef = useRef(false);
   const workspaceMutationBlockedRef = useRef(false);
+  const capsuleTaskRef = useRef<Promise<void> | null>(null);
+  const capsuleNeedsDrainRef = useRef(false);
+  const workspaceRestartPendingRef = useRef(false);
+  const [workspaceRestartBusy, setWorkspaceRestartBusy] = useState(false);
+  const capsuleSuspendedRef = useRef(false);
+  const capsuleOwnerAliveRef = useRef(true);
+  const capsuleProcessRef = useRef<() => void>(() => {});
   const [historyAvailability, setHistoryAvailability] = useState({
     canUndo: false,
     canRedo: false,
@@ -1464,6 +1479,11 @@ function App({
   }, [activeView, offsiteBackup, selectedOffsiteTarget, selectedOffsiteTargetId, t]);
 
   useEffect(() => {
+    capsuleOwnerAliveRef.current = true;
+    return () => { capsuleOwnerAliveRef.current = false; };
+  }, []);
+
+  useEffect(() => {
     let active = true;
 
     async function initializePersistence() {
@@ -1507,6 +1527,133 @@ function App({
       active = false;
     };
   }, [persistence]);
+
+  capsuleProcessRef.current = () => {
+    if (!capsuleOwnerAliveRef.current) return;
+    if (capsuleTaskRef.current !== null) {
+      capsuleNeedsDrainRef.current = true;
+      return;
+    }
+    capsuleNeedsDrainRef.current = false;
+    const task = processCapsuleNote();
+    capsuleTaskRef.current = task;
+    void task.finally(() => {
+      if (capsuleTaskRef.current === task) {
+        capsuleTaskRef.current = null;
+        if (capsuleNeedsDrainRef.current) capsuleProcessRef.current();
+      }
+    });
+  };
+
+  useEffect(() => {
+    if (!capsuleHost.available || !persistenceReady) return;
+    let active = true;
+    let unsubscribe: (() => void) | undefined;
+    void capsuleHost.subscribePending(() => {
+      if (active) capsuleProcessRef.current();
+    }).then(async (dispose) => {
+      if (!active) { dispose(); return; }
+      unsubscribe = dispose;
+      await capsuleHost.setReady(true);
+      if (active) capsuleProcessRef.current();
+    }).catch(() => {
+      if (active) showAppNotice(t("capsule.unavailable"));
+    });
+    return () => {
+      active = false;
+      unsubscribe?.();
+      void capsuleHost.setReady(false).catch(() => {});
+    };
+    // A language change must not revoke a live input context.
+  }, [capsuleHost, persistenceReady]);
+
+  async function processCapsuleNote(): Promise<void> {
+    let nodeId: string | null = null;
+    let mutationOwned = false;
+    let committed = false;
+    let commitAttempted = false;
+    let recoveryRequired = false;
+    try {
+      const request = await capsuleHost.take();
+      if (request === null || !capsuleOwnerAliveRef.current) return;
+      nodeId = request.nodeId;
+      if (
+        !persistenceReady || workspaceMutationBlockedRef.current ||
+        capsuleSuspendedRef.current || editingNodeIdRef.current !== null ||
+        securityBusy ||
+        pendingWorkspaceReplacement !== null || workspaceReplacementApplyBusyRef.current ||
+        workspaceReplacementHistoryBusyRef.current
+      ) {
+        await capsuleHost.reject(nodeId, "busy");
+        return;
+      }
+      workspaceMutationBlockedRef.current = true;
+      mutationOwned = true;
+      if (workspaceSaveTimerRef.current !== null) {
+        window.clearTimeout(workspaceSaveTimerRef.current);
+        workspaceSaveTimerRef.current = null;
+      }
+      const before = workspaceRef.current;
+      const prepared = captureTimelineNote(before, request, {
+        canvasName: t("capsule.timelineName"),
+        dateNodeName: (date) => date,
+      }, () => crypto.randomUUID());
+      // A lock can preserve this validated submission even while an earlier
+      // ordinary save is still draining; it must not wait for that queue.
+      pendingWorkspaceCommitRef.current = { kind: "capsule", workspace: prepared.workspace };
+      // Drain existing saves before using the broker's commit-aware write.
+      await persistence.save(before);
+      if (!capsuleOwnerAliveRef.current) return;
+      commitAttempted = true;
+      const result = await capsuleHost.commit(nodeId, serializeStoredWorkspace(prepared.workspace));
+      committed = true;
+      if (!capsuleOwnerAliveRef.current) return;
+      if (result.status !== "committed") {
+        recoveryRequired = true;
+        return;
+      }
+      const authoritative = await persistence.load();
+      if (!capsuleOwnerAliveRef.current) return;
+      if (authoritative.status !== "ready") {
+        recoveryRequired = true;
+        return;
+      }
+      const next = authoritative.workspace;
+      if (!prepared.duplicate) {
+        recordHistory(captureWorkspaceHistory(before), captureWorkspaceHistory(next));
+        workspaceChangedInSessionRef.current = true;
+        automaticOffsiteRevisionRef.current += 1;
+        extensionWorkspaceRevisionRef.current += 1;
+      }
+      workspaceRef.current = next;
+      setWorkspace(next);
+      showAppNotice(t("capsule.saved"));
+    } catch (error) {
+      if (!capsuleOwnerAliveRef.current) return;
+      if (committed || (commitAttempted && error !== "capsule_commit_not_saved")) {
+        // Never flush the old React snapshot over a committed capsule record.
+        recoveryRequired = true;
+      } else if (nodeId !== null) {
+        const reason = error instanceof TimelineCaptureError
+          ? error.reason === "duplicate-name" ? "duplicateName"
+            : error.reason === "empty-note" ? "empty" : "invalid"
+          : "saveFailed";
+        await capsuleHost.reject(nodeId, reason).catch(() => {});
+        showAppNotice(t("capsule.saveFailed"));
+      }
+    } finally {
+      pendingWorkspaceCommitRef.current = null;
+      if (mutationOwned && capsuleOwnerAliveRef.current) {
+        if (recoveryRequired) {
+          skipUnmountFlushRef.current = true;
+          setPersistenceRecoveryRequired(true);
+          setPersistenceReady(false);
+        } else {
+          workspaceMutationBlockedRef.current = false;
+        }
+      }
+    }
+  }
 
   useEffect(
     () => () => {
@@ -1863,7 +2010,7 @@ function App({
   );
 
   useEffect(() => {
-    if (!persistenceReady) {
+    if (!persistenceReady || workspaceMutationBlockedRef.current) {
       return;
     }
     workspaceRef.current = workspace;
@@ -1924,8 +2071,15 @@ function App({
     let active = true;
     let unregister: (() => void) | null = null;
     const flushLocalWorkspace = async () => {
+      await capsuleTaskRef.current;
+      if (
+        !capsuleOwnerAliveRef.current || skipUnmountFlushRef.current ||
+        workspaceMutationBlockedRef.current
+      ) {
+        throw new Error("workspace_flush_not_authorized");
+      }
       await persistence.save(
-        pendingWorkspaceCommitRef.current ?? workspaceRef.current,
+        pendingWorkspaceCommitRef.current?.workspace ?? workspaceRef.current,
       );
       if (!workspaceChangedInSessionRef.current || !workspaceBackupHistory.available) {
         return;
@@ -1942,9 +2096,19 @@ function App({
         }
       }
     };
+    const flushBeforeExit = async () => {
+      capsuleSuspendedRef.current = true;
+      await capsuleTaskRef.current;
+      await capsuleHost.setReady(false);
+      await flushLocalWorkspace();
+    };
     void lifecycle
-      .registerCloseFlush(flushLocalWorkspace, () => {
+      .registerCloseFlush(flushBeforeExit, () => {
         if (active) {
+          if (!skipUnmountFlushRef.current && !workspaceMutationBlockedRef.current) {
+            capsuleSuspendedRef.current = false;
+            void capsuleHost.setReady(true).catch(() => {});
+          }
           setBackupStatus(t("storage.saveFailed"));
         }
       })
@@ -1965,10 +2129,10 @@ function App({
       active = false;
       unregister?.();
       if (!skipUnmountFlushRef.current) {
-        void flushLocalWorkspace();
+        void flushLocalWorkspace().catch(() => {});
       }
     };
-  }, [lifecycle, persistence, persistenceReady, t, workspaceBackupHistory]);
+  }, [capsuleHost, lifecycle, persistence, persistenceReady, t, workspaceBackupHistory]);
 
   function changeLanguage(language: SupportedLanguage) {
     void i18n.changeLanguage(language);
@@ -1994,7 +2158,7 @@ function App({
   async function submitSecurityDialog(
     authenticationMethod: "password" | "system" = "password",
   ) {
-    if (securityDialog === null || securityBusy) {
+    if (securityDialog === null || securityBusy || workspaceMutationBlockedRef.current) {
       return;
     }
     if (
@@ -2025,6 +2189,17 @@ function App({
     }
     setSecurityBusy(true);
     setSecurityMessage(null);
+    let encryptionAttempted = false;
+    let encryptionCommitted = false;
+    if (securityDialog === "enable") {
+      workspaceMutationBlockedRef.current = true;
+      capsuleSuspendedRef.current = true;
+      skipUnmountFlushRef.current = true;
+      if (workspaceSaveTimerRef.current !== null) {
+        window.clearTimeout(workspaceSaveTimerRef.current);
+        workspaceSaveTimerRef.current = null;
+      }
+    }
     try {
       await persistence.save(workspaceRef.current);
       if (securityDialog === "enable") {
@@ -2036,10 +2211,29 @@ function App({
           setEmbeddingSettings(localOnly);
           setRemoteEmbeddingToken("");
         }
-        const status = await workspaceSecurity.enable(securityPassword);
+        const enabled = await persistence.runExclusiveTransaction(async () => {
+          encryptionAttempted = true;
+          const securityStatus = await workspaceSecurity.enable(securityPassword);
+          encryptionCommitted = true;
+          return { status: "committed" as const, securityStatus };
+        });
+        if (!capsuleOwnerAliveRef.current) return;
+        const authoritative = await persistence.load();
+        if (!capsuleOwnerAliveRef.current) return;
+        if (authoritative.status !== "ready") {
+          setPersistenceRecoveryRequired(true);
+          setPersistenceReady(false);
+          return;
+        }
+        workspaceRef.current = authoritative.workspace;
+        setWorkspace(authoritative.workspace);
+        workspaceMutationBlockedRef.current = false;
+        capsuleSuspendedRef.current = false;
+        skipUnmountFlushRef.current = false;
+        updateWorkspaceSecurityStatus(enabled.securityStatus);
+        await capsuleHost.setReady(true).catch(() => {});
         embeddingAnalyzer.clearCache();
         setVectorCacheStatus(await embeddingVectorCache.inspect());
-        updateWorkspaceSecurityStatus(status);
         showAppNotice(t("security.enableSuccess"));
       } else {
         const sensitiveOperation =
@@ -2377,6 +2571,25 @@ function App({
       setSecurityPassword("");
       setSecurityPasswordConfirmation("");
     } catch (error) {
+      if (securityDialog === "enable" && workspaceMutationBlockedRef.current) {
+        const reason = errorReason(error);
+        const rejectedPassword = !encryptionCommitted && [
+          "workspace_vault_password_blocked", "workspace_vault_password_too_short",
+          "workspace_vault_password_too_long",
+        ].includes(reason);
+        if (encryptionAttempted && !rejectedPassword) {
+          // Enable revokes ownership before migration. An ambiguous response
+          // must not resume the plaintext owner, even if status can be read.
+          skipUnmountFlushRef.current = true;
+          setPersistenceRecoveryRequired(true);
+          setPersistenceReady(false);
+        } else {
+          workspaceMutationBlockedRef.current = false;
+          capsuleSuspendedRef.current = false;
+          skipUnmountFlushRef.current = false;
+          await capsuleHost.setReady(true).catch(() => {});
+        }
+      }
       if (isOffsiteConfigRecoveryError(error)) {
         await reconcileOffsiteConfiguration();
         return;
@@ -2403,19 +2616,51 @@ function App({
   }
 
   async function lockEncryptedWorkspace() {
-    if (securityBusy) {
+    if (securityBusy || !capsuleOwnerAliveRef.current) {
       return;
+    }
+    let contents: string | undefined;
+    let snapshotInvalid = false;
+    const pendingCommit = pendingWorkspaceCommitRef.current;
+    const replacementInProgress = workspaceReplacementApplyBusyRef.current ||
+      workspaceReplacementHistoryBusyRef.current;
+    const finalSnapshot = replacementInProgress ? null
+      : pendingCommit?.kind === "capsule" ? pendingCommit.workspace
+      : !workspaceMutationBlockedRef.current && pendingCommit === null ? workspaceRef.current
+      : null;
+    if (finalSnapshot !== null) {
+      try {
+        contents = serializeStoredWorkspace(finalSnapshot);
+      } catch {
+        // Even an invalid in-memory snapshot must not prevent native revocation.
+        snapshotInvalid = true;
+      }
     }
     setSecurityBusy(true);
     setSecurityMessage(null);
+    capsuleSuspendedRef.current = true;
+    skipUnmountFlushRef.current = true;
+    workspaceMutationBlockedRef.current = true;
+    capsuleOwnerAliveRef.current = false;
+    if (workspaceSaveTimerRef.current !== null) {
+      window.clearTimeout(workspaceSaveTimerRef.current);
+      workspaceSaveTimerRef.current = null;
+    }
     try {
-      await persistence.save(workspaceRef.current);
+      // An admitted replacement may already have changed disk authority while
+      // React still holds the previous workspace. Lock immediately without a
+      // final write in that case; only a prepared capsule may finish its note.
+      const locking = workspaceSecurity.lock(contents);
       embeddingAnalyzer.clearCache();
       setRemoteEmbeddingToken("");
-      skipUnmountFlushRef.current = true;
-      updateWorkspaceSecurityStatus(await workspaceSecurity.lock());
+      updateWorkspaceSecurityStatus(await locking);
+      if (snapshotInvalid) {
+        setPersistenceRecoveryRequired(true);
+        setPersistenceReady(false);
+      }
     } catch (error) {
-      skipUnmountFlushRef.current = false;
+      setPersistenceRecoveryRequired(true);
+      setPersistenceReady(false);
       setSecurityMessage(t("security.lockFailed", { reason: errorReason(error) }));
       setSecurityBusy(false);
     }
@@ -3265,7 +3510,7 @@ function App({
   }
 
   function undoWorkspace() {
-    if (editingNodeId !== null) {
+    if (editingNodeId !== null || workspaceMutationBlockedRef.current) {
       return;
     }
     const step = stepWorkspaceHistoryBackward(historyTimelineRef.current);
@@ -3281,7 +3526,7 @@ function App({
   }
 
   function redoWorkspace() {
-    if (editingNodeId !== null) {
+    if (editingNodeId !== null || workspaceMutationBlockedRef.current) {
       return;
     }
     const step = stepWorkspaceHistoryForward(historyTimelineRef.current);
@@ -3616,7 +3861,7 @@ function App({
         }
         next = view === current.view ? current : { ...current, view };
         if (next !== current) {
-          pendingWorkspaceCommitRef.current = next;
+          pendingWorkspaceCommitRef.current = { kind: "extension", workspace: next };
           await persistence.save(next);
           migratedWorkspacePersisted = true;
         }
@@ -3686,7 +3931,7 @@ function App({
       window.clearTimeout(workspaceSaveTimerRef.current);
       workspaceSaveTimerRef.current = null;
     }
-    pendingWorkspaceCommitRef.current = next;
+    pendingWorkspaceCommitRef.current = { kind: "extension", workspace: next };
     try {
       await persistence.save(next);
       recordHistory(captureWorkspaceHistory(current), captureWorkspaceHistory(next));
@@ -3827,7 +4072,7 @@ function App({
 
   async function confirmExtensionProposal() {
     const pending = pendingExtensionProposal;
-    if (pending === null || extensionProposalApplyBusyRef.current) {
+    if (pending === null || extensionProposalApplyBusyRef.current || workspaceMutationBlockedRef.current) {
       return;
     }
     extensionProposalApplyBusyRef.current = true;
@@ -3844,7 +4089,7 @@ function App({
         pending.result,
         pending.createdNodeIds,
       );
-      pendingWorkspaceCommitRef.current = prepared.workspace;
+      pendingWorkspaceCommitRef.current = { kind: "extension", workspace: prepared.workspace };
       await persistence.save(prepared.workspace);
       recordHistory(
         captureWorkspaceHistory(current),
@@ -4445,6 +4690,9 @@ function App({
           bookmarks: (workspace.view.bookmarks ?? []).filter(
             (bookmark) => bookmark.canvasId !== canvasId,
           ),
+          timeline: workspace.view.timeline?.canvasId === canvasId
+            ? null
+            : workspace.view.timeline ?? null,
         },
       }),
       { flushImmediately: true, recordHistory: true },
@@ -5442,15 +5690,23 @@ function App({
   async function applyWorkspaceReplacement() {
     if (
       pendingWorkspaceReplacement === null ||
-      workspaceReplacementApplyBusyRef.current
+      workspaceReplacementApplyBusyRef.current || workspaceMutationBlockedRef.current
     ) {
       return;
     }
 
     workspaceReplacementApplyBusyRef.current = true;
+    workspaceMutationBlockedRef.current = true;
+    capsuleSuspendedRef.current = true;
+    if (workspaceSaveTimerRef.current !== null) {
+      window.clearTimeout(workspaceSaveTimerRef.current);
+      workspaceSaveTimerRef.current = null;
+    }
     let bootstrapStarted = false;
     let bootstrapCommitted = false;
+    let resumeCapsule = true;
     try {
+      await capsuleHost.setReady(false);
       let replacementWorkspace = pendingWorkspaceReplacement.workspace;
       if (pendingWorkspaceReplacement.kind === "bootstrapRestore") {
         const preparedRestoreId = pendingWorkspaceReplacement.preparedRestoreId;
@@ -5467,15 +5723,18 @@ function App({
         );
         bootstrapCommitted = true;
         if (result.status === "recoveryRequired") {
+          resumeCapsule = false;
           setPersistenceRecoveryRequired(true);
           return;
         }
         updateWorkspaceSecurityStatus(result.securityStatus);
         if (result.status === "committedLocked") {
+          resumeCapsule = false;
           return;
         }
         const authoritative = await persistence.load();
         if (authoritative.status !== "ready") {
+          resumeCapsule = false;
           setPersistenceRecoveryRequired(true);
           return;
         }
@@ -5526,6 +5785,7 @@ function App({
       }
     } catch {
       if (bootstrapCommitted) {
+        resumeCapsule = false;
         // Rust has crossed its durable commit point. Keep stale React state
         // unmounted and require recovery instead of reporting a false import
         // failure that would allow the old snapshot to be saved again.
@@ -5541,18 +5801,25 @@ function App({
       }
     } finally {
       workspaceReplacementApplyBusyRef.current = false;
+      if (resumeCapsule && capsuleOwnerAliveRef.current) {
+        workspaceMutationBlockedRef.current = false;
+        capsuleSuspendedRef.current = false;
+        void capsuleHost.setReady(true).catch(() => {});
+      }
     }
   }
 
   async function swapWorkspaceWithRecovery(direction: "undo" | "redo") {
     if (
       editingNodeIdRef.current !== null ||
+      workspaceMutationBlockedRef.current ||
       workspaceReplacementHistoryBusyRef.current ||
       workspaceReplacementHistoryBoundaryRef.current !== direction
     ) {
       return;
     }
     workspaceReplacementHistoryBusyRef.current = true;
+    capsuleSuspendedRef.current = true;
     workspaceMutationBlockedRef.current = true;
     skipUnmountFlushRef.current = true;
     workspaceReplacementHistoryBoundaryRef.current = null;
@@ -5613,6 +5880,10 @@ function App({
       setBackupStatus(t("backup.replacementUndoFailed"));
     } finally {
       workspaceReplacementHistoryBusyRef.current = false;
+      if (!workspaceMutationBlockedRef.current && capsuleOwnerAliveRef.current) {
+        capsuleSuspendedRef.current = false;
+        void capsuleHost.setReady(true).catch(() => {});
+      }
       syncHistoryAvailability();
     }
   }
@@ -5709,12 +5980,29 @@ function App({
             <div className="storage-problem-actions">
               <button
                 className="primary-button"
-                onClick={() => window.location.reload()}
+                disabled={workspaceRestartBusy}
+                onClick={() => {
+                  if (workspaceRestartPendingRef.current) return;
+                  workspaceRestartPendingRef.current = true;
+                  setWorkspaceRestartBusy(true);
+                  skipUnmountFlushRef.current = true;
+                  workspaceMutationBlockedRef.current = true;
+                  if (lifecycle.restart === undefined) {
+                    window.location.reload();
+                  } else {
+                    void lifecycle.restart().catch(() => {
+                      workspaceRestartPendingRef.current = false;
+                      setWorkspaceRestartBusy(false);
+                      setStorageProblemStatus(t("storageProblem.restartFailed"));
+                    });
+                  }
+                }}
                 type="button"
               >
                 {t("storageProblem.restart")}
               </button>
             </div>
+            {storageProblemStatus !== null && <p role="alert">{storageProblemStatus}</p>}
           </section>
         ) : primaryStorageProblem === null ? (
           <section className="storage-problem-card" aria-live="polite">
@@ -5915,6 +6203,18 @@ function App({
         </nav>
 
         <div className="sidebar-footer">
+          {capsuleHost.available && (
+            <button
+              className="nav-item"
+              data-testid="capsule-open"
+              disabled={pendingWorkspaceReplacement !== null || !persistenceReady}
+              onClick={() => void capsuleHost.open().catch(() => showAppNotice(t("capsule.unavailable")))}
+              type="button"
+            >
+              <Pencil size={18} />
+              <span>{t("capsule.open")}</span>
+            </button>
+          )}
           <div className="storage-status" title={t("storage.title")}>
             <Database size={15} />
             <span>{t("storage.local")}</span>

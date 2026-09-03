@@ -3,12 +3,14 @@ import {
   migrateWorkspaceSnapshotV2,
   migrateWorkspaceSnapshotV3,
   migrateWorkspaceSnapshotV4,
+  migrateWorkspaceSnapshotV5,
   parseWorkspaceSnapshot,
+  parseWorkspaceSnapshotV6,
   type WorkspaceSnapshot,
 } from "./workspaceData";
 
 const exportFormat = "linked-info-workspace";
-const exportVersion = 5;
+const exportVersion = 6;
 
 export type WorkspaceImportFailure =
   | "invalidJson"
@@ -47,6 +49,7 @@ export function serializeWorkspaceExport(workspace: WorkspaceSnapshot): string {
         view: {
           ...validated.view,
           bookmarks: validated.view.bookmarks ?? [],
+          timeline: validated.view.timeline ?? null,
         },
       },
     },
@@ -71,6 +74,7 @@ export function parseWorkspaceExport(text: string): WorkspaceImportResult {
     document.version !== 2 &&
     document.version !== 3 &&
     document.version !== 4 &&
+    document.version !== 5 &&
     document.version !== exportVersion
   ) {
     return { ok: false, reason: "unsupportedVersion" };
@@ -82,7 +86,7 @@ export function parseWorkspaceExport(text: string): WorkspaceImportResult {
     return { ok: false, reason: "invalidFormat" };
   }
   if (
-    document.version === exportVersion &&
+    (document.version === 5 || document.version === exportVersion) &&
     (!isRecord(document.workspace) ||
       !isRecord(document.workspace.view) ||
       !Object.prototype.hasOwnProperty.call(
@@ -102,7 +106,9 @@ export function parseWorkspaceExport(text: string): WorkspaceImportResult {
           ? migrateWorkspaceSnapshotV3(document.workspace)
           : document.version === 4
             ? migrateWorkspaceSnapshotV4(document.workspace)
-        : parseWorkspaceSnapshot(document.workspace);
+            : document.version === 5
+              ? migrateWorkspaceSnapshotV5(document.workspace)
+              : parseWorkspaceSnapshotV6(document.workspace);
   if (workspace === null) {
     return { ok: false, reason: "invalidWorkspace" };
   }

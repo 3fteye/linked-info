@@ -38,7 +38,7 @@ wasmparser = "0.256"
 wit-component = "0.256"
 wit-bindgen = "0.57.1"
 wit-parser = "0.256"
-wasmtime = { version = "47.0.3", default-features = false, features = ["anyhow", "component-model", "cranelift", "runtime", "std"] }
+wasmtime = { version = "47.0.4", default-features = false, features = ["anyhow", "component-model", "cranelift", "runtime", "std"] }
 wasmprinter = "0.256"
 wat = "1"
 zip = { version = "8.6", default-features = false, features = ["deflate"] }

@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   localWorkspacePersistence,
   parseStoredWorkspaceText,
+  serializeStoredWorkspace,
 } from "./workspaceStore";
 import {
   activeWorkspaceCanvas,
@@ -58,6 +59,7 @@ function validWorkspace(): WorkspaceSnapshot {
       ],
       contentProcessorByNodeId: {},
       extensionMetadata: {},
+      timeline: null,
     },
   };
 }
@@ -77,6 +79,32 @@ beforeEach(() => {
 });
 
 describe("localWorkspacePersistence", () => {
+  it("writes the complete version 6 view even when optional in-memory fields are absent", () => {
+    const workspace = validWorkspace();
+    delete workspace.view.timeline;
+    const stored = JSON.parse(serializeStoredWorkspace(workspace)) as {
+      version: number;
+      view: { bookmarks: unknown[]; timeline: unknown };
+    };
+    expect(stored.version).toBe(6);
+    expect(stored.view.bookmarks).toEqual([]);
+    expect(stored.view.timeline).toBeNull();
+  });
+
+  it("keeps timeline identity and date metadata across storage and recovery", async () => {
+    const workspace = validWorkspace();
+    workspace.view.timeline = {
+      canvasId: defaultCanvasId,
+      days: [{ date: "1970-01-01", nodeId }],
+      captures: [],
+    };
+    await localWorkspacePersistence.preserveForRecovery(workspace);
+    await localWorkspacePersistence.save(validWorkspace());
+    const swapped = await localWorkspacePersistence.swapWithRecovery();
+    expect(swapped).toEqual({ status: "committed", workspace });
+    expect(await localWorkspacePersistence.load()).toEqual({ status: "ready", workspace });
+  });
+
   it("distinguishes missing data from a valid empty workspace", async () => {
     expect(await localWorkspacePersistence.load()).toEqual({ status: "missing" });
 
@@ -98,7 +126,7 @@ describe("localWorkspacePersistence", () => {
     });
   });
 
-  it("migrates version 1 storage through the complete version 5 view", () => {
+  it("migrates version 1 storage through the complete version 6 view", () => {
     const workspace = validWorkspace();
     const result = parseStoredWorkspaceText(
       JSON.stringify({ version: 1, ...legacyWorkspace(workspace) }),
@@ -132,7 +160,7 @@ describe("localWorkspacePersistence", () => {
   });
 
   it("preserves an unsupported local format version for recovery", async () => {
-    const raw = JSON.stringify({ version: 6, ...validWorkspace() });
+    const raw = JSON.stringify({ version: 7, ...validWorkspace() });
     localStorage.setItem(workspaceKey, raw);
 
     expect(await localWorkspacePersistence.load()).toEqual({

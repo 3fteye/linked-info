@@ -1,4 +1,5 @@
 export interface WorkspaceLifecycle {
+  restart?(): Promise<void>;
   registerCloseFlush(
     flush: () => Promise<void>,
     onFailure: () => void,
@@ -11,6 +12,7 @@ export interface CloseRequestEvent {
 
 export interface CloseApplicationBridge {
   exit(): Promise<void>;
+  restart?(): Promise<void>;
   onCloseRequested(
     handler: (event: CloseRequestEvent) => void | Promise<void>,
   ): Promise<() => void>;
@@ -19,7 +21,9 @@ export interface CloseApplicationBridge {
 export function createTauriWorkspaceLifecycle(
   application: CloseApplicationBridge,
 ): WorkspaceLifecycle {
+  const restart = application.restart?.bind(application);
   return {
+    ...(restart === undefined ? {} : { restart }),
     registerCloseFlush(flush, onFailure) {
       let closeInProgress = false;
       return application.onCloseRequested(async (event) => {

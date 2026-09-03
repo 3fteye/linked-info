@@ -86,12 +86,26 @@ export interface WorkspaceViewMetadataComparison {
   nodeEqual(nodeId: string): boolean;
 }
 
+function indexTimelineNodeMetadata(
+  workspace: WorkspaceSnapshot,
+): Map<string, unknown> {
+  const timeline = workspace.view.timeline;
+  return new Map<string, unknown>(
+    [...(timeline?.days ?? []), ...(timeline?.captures ?? [])].map((entry) => [
+      entry.nodeId,
+      entry,
+    ]),
+  );
+}
+
 export function createWorkspaceViewMetadataComparison(
   current: WorkspaceSnapshot,
   replacement: WorkspaceSnapshot,
 ): WorkspaceViewMetadataComparison {
   const currentByNodeId = indexNodeExtensionMetadata(current);
   const replacementByNodeId = indexNodeExtensionMetadata(replacement);
+  const currentTimelineByNodeId = indexTimelineNodeMetadata(current);
+  const replacementTimelineByNodeId = indexTimelineNodeMetadata(replacement);
   const nodeEqualityCache = new Map<string, boolean>();
   return {
     nodeEqual(nodeId) {
@@ -104,6 +118,10 @@ export function createWorkspaceViewMetadataComparison(
       const equal =
         current.view.contentProcessorByNodeId[nodeId] ===
           replacement.view.contentProcessorByNodeId[nodeId] &&
+        jsonValuesEqual(
+          currentTimelineByNodeId.get(nodeId),
+          replacementTimelineByNodeId.get(nodeId),
+        ) &&
         (currentMetadata?.size ?? 0) === (replacementMetadata?.size ?? 0) &&
         [...(currentMetadata?.entries() ?? [])].every(
           ([extensionId, payload]) =>
@@ -275,7 +293,11 @@ export function compareWorkspaces(
       current.view.canvases.map(({ id, name }) => ({ id, name })),
       replacement.view.canvases.map(({ id, name }) => ({ id, name })),
     ) ||
-    !jsonValuesEqual(current.view.bookmarks ?? [], replacement.view.bookmarks ?? []);
+    !jsonValuesEqual(current.view.bookmarks ?? [], replacement.view.bookmarks ?? []) ||
+    !jsonValuesEqual(
+      current.view.timeline ?? null,
+      replacement.view.timeline ?? null,
+    );
   const identical =
     addedNodes === 0 &&
     removedNodes === 0 &&

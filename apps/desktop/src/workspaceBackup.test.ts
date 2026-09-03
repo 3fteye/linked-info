@@ -24,6 +24,7 @@ function validWorkspace(): WorkspaceSnapshot {
       ],
       contentProcessorByNodeId: {},
       extensionMetadata: {},
+      timeline: null,
     },
   };
 }
@@ -54,6 +55,41 @@ function legacyWorkspace(workspace: WorkspaceSnapshot) {
 }
 
 describe("workspace backup", () => {
+  it("retains timeline metadata in portable version 6 exports", () => {
+    const workspace = validWorkspace();
+    workspace.view.timeline = {
+      canvasId: defaultCanvasId,
+      days: [{ date: "1970-01-01", nodeId }],
+      captures: [],
+    };
+    expect(parseWorkspaceExport(serializeWorkspaceExport(workspace))).toMatchObject({
+      ok: true,
+      workspace,
+    });
+  });
+
+  it("rejects version 6 exports with no timeline and version 5 exports with no bookmarks", () => {
+    const envelope = JSON.parse(serializeWorkspaceExport(validWorkspace())) as {
+      version: number;
+      workspace: { view: { bookmarks?: unknown[]; timeline?: unknown } };
+    };
+    delete envelope.workspace.view.timeline;
+    expect(parseWorkspaceExport(JSON.stringify(envelope))).toEqual({
+      ok: false,
+      reason: "invalidWorkspace",
+    });
+    envelope.version = 5;
+    expect(parseWorkspaceExport(JSON.stringify(envelope))).toMatchObject({
+      ok: true,
+      workspace: { view: { timeline: null } },
+    });
+    delete envelope.workspace.view.bookmarks;
+    expect(parseWorkspaceExport(JSON.stringify(envelope))).toEqual({
+      ok: false,
+      reason: "invalidWorkspace",
+    });
+  });
+
   it("round-trips a complete workspace", () => {
     const workspace = validWorkspace();
     const parsed = parseWorkspaceExport(serializeWorkspaceExport(workspace));
@@ -64,7 +100,7 @@ describe("workspace backup", () => {
     }
   });
 
-  it("exports and imports position bookmarks in version 5", () => {
+  it("exports and imports position bookmarks in version 6", () => {
     const workspace = workspaceWithBookmark();
     const serialized = serializeWorkspaceExport(workspace);
     const envelope = JSON.parse(serialized) as {
@@ -72,14 +108,14 @@ describe("workspace backup", () => {
       workspace: { view: { bookmarks?: unknown[] } };
     };
 
-    expect(envelope.version).toBe(5);
+    expect(envelope.version).toBe(6);
     expect(envelope.workspace.view.bookmarks).toHaveLength(1);
 
     const parsed = parseWorkspaceExport(serialized);
     expect(parsed).toMatchObject({ ok: true, workspace });
   });
 
-  it("rejects version 5 exports that omit the required bookmarks field", () => {
+  it("rejects version 6 exports that omit the required bookmarks field", () => {
     const envelope = JSON.parse(
       serializeWorkspaceExport(workspaceWithBookmark()),
     ) as {
@@ -133,7 +169,7 @@ describe("workspace backup", () => {
       parseWorkspaceExport(
         JSON.stringify({
           format: "linked-info-workspace",
-          version: 6,
+          version: 7,
           exportedAt: new Date().toISOString(),
           workspace: validWorkspace(),
         }),

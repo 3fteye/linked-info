@@ -5,6 +5,12 @@ import path from "node:path";
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 export const sensitiveSourcePaths = [
+  "apps/desktop/src-tauri/src/capsule.rs",
+  "apps/desktop/src/CapsuleNote.tsx",
+  "apps/desktop/src/capsuleBridge.ts",
+  "apps/desktop/src/capsuleHost.ts",
+  "apps/desktop/src/desktopWorkspaceSession.ts",
+  "apps/desktop/src/MainWorkspace.tsx",
   "apps/desktop/src-tauri/src/embedding.rs",
   "apps/desktop/src-tauri/src/extension_runtime.rs",
   "apps/desktop/src-tauri/src/extension_runtime_content.rs",
@@ -36,6 +42,7 @@ export const sensitiveSourcePaths = [
   "apps/desktop/src/secretClipboard.ts",
   "apps/desktop/src/totp.ts",
   "apps/desktop/src/totpContent.tsx",
+  "apps/desktop/src/timelineWorkspace.ts",
   "apps/desktop/src/workspaceSecurity.ts",
 ];
 
