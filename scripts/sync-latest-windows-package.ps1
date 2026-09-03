@@ -13,6 +13,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 $scriptDirectory = Split-Path -Parent $MyInvocation.MyCommand.Path
+. (Join-Path $scriptDirectory 'windows-package-validation.ps1')
 $repositoryRoot = Split-Path -Parent $scriptDirectory
 if ([string]::IsNullOrWhiteSpace($ArtifactsRoot)) {
     $ArtifactsRoot = Join-Path $repositoryRoot "artifacts"
@@ -44,33 +45,14 @@ function Remove-ManagedLink([string]$Path) {
 function Resolve-Package([string]$Directory) {
     $resolvedDirectory = (Resolve-Path -LiteralPath $Directory).Path
     Assert-PathInsideArtifacts $resolvedDirectory
-    $executables = @(Get-ChildItem -LiteralPath $resolvedDirectory -Recurse -File -Filter "linked-info-desktop.exe")
-    if ($executables.Count -ne 1) {
-        throw "Expected exactly one linked-info-desktop.exe in $resolvedDirectory"
-    }
-    $releaseDirectory = $executables[0].Directory.FullName
-    $checksumPath = Join-Path $releaseDirectory "linked-info-windows.sha256"
-    $runtimePath = Join-Path $releaseDirectory "llama-runtime\llama-server.exe"
-    if (-not (Test-Path -LiteralPath $checksumPath -PathType Leaf)) {
-        throw "Package checksum is missing: $checksumPath"
-    }
-    if (-not (Test-Path -LiteralPath $runtimePath -PathType Leaf)) {
-        throw "Packaged local LLM runtime is missing: $runtimePath"
-    }
-    $expectedHash = ((Get-Content -LiteralPath $checksumPath -Raw).Trim() -split "\s+")[0].ToLowerInvariant()
-    $actualHash = (Get-FileHash -LiteralPath $executables[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-    if ($actualHash -ne $expectedHash) {
-        throw "Package checksum verification failed"
-    }
-    return [pscustomobject]@{
-        ReleaseDirectory = $releaseDirectory
-        Executable = $executables[0].FullName
-        Sha256 = $actualHash
-    }
+    return Test-WindowsPortablePackage -Directory $resolvedDirectory
 }
 
 if ($ValidateOnly) {
-    [pscustomobject]@{ valid = $true } | ConvertTo-Json
+    if ([string]::IsNullOrWhiteSpace($SourceDirectory)) {
+        throw 'SourceDirectory is required for ValidateOnly'
+    }
+    Resolve-Package $SourceDirectory | ConvertTo-Json -Depth 4
     exit 0
 }
 
@@ -159,6 +141,7 @@ $metadataPath = Join-Path $ArtifactsRoot "linked-info-current.json"
     commit = $Commit
     runId = if ([string]::IsNullOrWhiteSpace($RunId)) { $null } else { $RunId }
     sha256 = $package.Sha256
+    binaryHashes = $package.BinaryHashes
     releaseDirectory = $package.ReleaseDirectory
     synchronizedAt = [DateTimeOffset]::Now.ToString("o")
 } | ConvertTo-Json | Set-Content -LiteralPath $metadataPath -Encoding UTF8
@@ -182,6 +165,7 @@ if ($Launch) {
 [pscustomobject]@{
     commit = $Commit
     currentExecutable = (Join-Path $currentLink "linked-info-desktop.exe")
+    captureExecutable = (Join-Path $currentLink "linked-info-capture.exe")
     sha256 = $package.Sha256
     shortcut = if ([string]::IsNullOrWhiteSpace($ShortcutPath)) { $null } else { $ShortcutPath }
     launched = [bool]$Launch

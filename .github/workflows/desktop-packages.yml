@@ -75,6 +75,10 @@ jobs:
       - name: Build isolated extension host
         run: cargo build -p linked-info-extension-host --release
 
+      - name: Build independent plaintext capture application
+        working-directory: apps/capture
+        run: ../desktop/node_modules/.bin/tauri.cmd build --no-bundle
+
       - name: Assemble Windows portable runtime
         shell: pwsh
         run: Copy-Item -LiteralPath apps/desktop/src-tauri/resources/llama-runtime -Destination target/release/llama-runtime -Recurse -Force
@@ -83,10 +87,10 @@ jobs:
         run: node --test scripts/native-capsule-safety.test.mjs
 
       - name: Exercise native capsule in isolated Windows runner
-        timeout-minutes: 6
+        timeout-minutes: 10
         shell: pwsh
         working-directory: apps/desktop
-        run: node scripts/native-capsule-smoke.mjs --executable "$env:GITHUB_WORKSPACE\target\release\linked-info-desktop.exe" --report "$env:GITHUB_WORKSPACE\artifacts\native-capsule-summary.json"
+        run: node scripts/native-capsule-smoke.mjs --executable "$env:GITHUB_WORKSPACE\target\release\linked-info-desktop.exe" --capture-executable "$env:GITHUB_WORKSPACE\target\release\linked-info-capture.exe" --report "$env:GITHUB_WORKSPACE\artifacts\native-capsule-summary.json"
 
       - name: Upload native capsule assertion summary
         if: always()
@@ -102,6 +106,7 @@ jobs:
         run: |
           $files = @(
             "linked-info-desktop.exe",
+            "linked-info-capture.exe",
             "linked-info-extension-host.exe"
           )
           $checksums = foreach ($file in $files) {
@@ -116,6 +121,7 @@ jobs:
           name: linked-info-windows
           path: |
             target/release/linked-info-desktop.exe
+            target/release/linked-info-capture.exe
             target/release/linked-info-extension-host.exe
             target/release/linked-info-windows.sha256
             target/release/llama-runtime/**

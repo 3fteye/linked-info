@@ -49,10 +49,14 @@ try {
     }
     $repositoryPath = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
     $workspacePath = [IO.Path]::GetFullPath($env:GITHUB_WORKSPACE)
-    $expectedExecutable = [IO.Path]::GetFullPath(
-        (Join-Path $repositoryPath 'target/release/linked-info-desktop.exe')
-    )
     $resolvedExecutable = [IO.Path]::GetFullPath($ExecutablePath)
+    $executableName = [IO.Path]::GetFileName($resolvedExecutable)
+    if ($executableName -cnotin @('linked-info-desktop.exe', 'linked-info-capture.exe')) {
+        throw 'native_capsule_debug_invalid_executable'
+    }
+    $expectedExecutable = [IO.Path]::GetFullPath(
+        (Join-Path $repositoryPath ('target/release/' + $executableName))
+    )
     if (-not [string]::Equals($repositoryPath, $workspacePath, [StringComparison]::OrdinalIgnoreCase) -or
         -not [string]::Equals($resolvedExecutable, $expectedExecutable, [StringComparison]::OrdinalIgnoreCase)) {
         throw 'native_capsule_debug_invalid_executable'
@@ -69,7 +73,7 @@ try {
             throw 'native_capsule_debug_invalid_executable'
         }
     }
-    if ($item.PSIsContainer -or $item.Name -cne 'linked-info-desktop.exe') {
+    if ($item.PSIsContainer -or $item.Name -cne $executableName) {
         throw 'native_capsule_debug_invalid_executable'
     }
 
@@ -85,7 +89,7 @@ try {
     }
 
     $subkey = 'SOFTWARE\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments'
-    $valueName = 'linked-info-desktop.exe'
+    $valueName = $executableName
     $expectedValue = '--remote-debugging-port=' + $Port + ' --remote-debugging-address=127.0.0.1'
     $registryBase = [Microsoft.Win32.RegistryKey]::OpenBaseKey(
         [Microsoft.Win32.RegistryHive]::LocalMachine,
