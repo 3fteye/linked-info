@@ -1186,10 +1186,98 @@ fn validate_capsule_commit(
     }
 }
 
+/// This is called only while the workspace file-operation lock is held and
+/// before the new owner is installed or allowed to load its primary snapshot.
+pub(crate) fn recover_capture_archive(app: &AppHandle) -> Result<(), String> {
+    let state = app.state::<WorkspaceVaultState>();
+    let store = workspace_store(app).map_err(|_| "capture_inbox_unavailable".to_owned())?;
+    recover_pending_migration(&store)?;
+    let data_key = state.optional_data_key()?;
+    let active_key = active_workspace_key(&store, data_key.as_deref())?;
+    crate::capture_archive::with_inbox(app, |inbox| {
+        reconcile_capture_archive(&store, inbox, active_key)
+    })
+}
+
+fn reconcile_capture_archive(
+    store: &WorkspaceFileStore,
+    inbox: &mut linked_info_capture_inbox::Inbox,
+    active_key: Option<&[u8; DATA_KEY_BYTES]>,
+) -> Result<(), String> {
+    crate::capture_archive::recover(
+        &store.base_directory,
+        &store.path(WorkspaceFileSlot::Primary),
+        inbox,
+        |input| {
+            let contents = Zeroizing::new(
+                store.read(WorkspaceFileSlot::Primary, active_key)?
+                    .ok_or_else(|| "capsule_invalid_commit".to_owned())?,
+            );
+            validate_capsule_commit(&contents, input)
+        },
+    )
+}
+
+/// The local recovery intent, primary replacement and inbox acknowledgement
+/// share one file-operation critical section. Errors after replacement cannot
+/// be downgraded to an ordinary failed save by a delayed owner response.
+fn write_capture_archive(
+    store: &WorkspaceFileStore,
+    inbox: &mut linked_info_capture_inbox::Inbox,
+    claim: &crate::capture_archive::CaptureClaim,
+    input: &crate::capsule::CapsuleNoteInput,
+    serialized: &[u8],
+    active_key: Option<&[u8; DATA_KEY_BYTES]>,
+    write: impl FnOnce(&Path, &[u8]) -> io::Result<AtomicWriteStatus>,
+) -> Result<AtomicWriteStatus, String> {
+    let journal = match crate::capture_archive::prepare(
+        &store.base_directory,
+        &store.path(WorkspaceFileSlot::Primary),
+        inbox,
+        claim,
+        input,
+        serialized,
+    ) {
+        Ok(journal) => journal,
+        Err(error) => {
+            // prepare never writes the primary. Reconcile its interrupted
+            // journal before permitting any later ordinary workspace writes.
+            return if reconcile_capture_archive(store, inbox, active_key).is_ok() {
+                Err(error)
+            } else {
+                Ok(AtomicWriteStatus::RecoveryRequired)
+            };
+        }
+    };
+    match write(&store.path(WorkspaceFileSlot::Primary), serialized) {
+        Ok(AtomicWriteStatus::Committed) => {
+            if crate::capture_archive::confirm(&store.base_directory, inbox, &journal).is_ok() {
+                Ok(AtomicWriteStatus::Committed)
+            } else {
+                crate::capture_archive::mark_uncertain(inbox, &journal);
+                Ok(AtomicWriteStatus::RecoveryRequired)
+            }
+        }
+        Ok(AtomicWriteStatus::RecoveryRequired) => {
+            crate::capture_archive::mark_uncertain(inbox, &journal);
+            Ok(AtomicWriteStatus::RecoveryRequired)
+        }
+        Err(_) => {
+            if reconcile_capture_archive(store, inbox, active_key).is_ok() {
+                Err("capsule_commit_not_saved".to_owned())
+            } else {
+                crate::capture_archive::mark_uncertain(inbox, &journal);
+                Ok(AtomicWriteStatus::RecoveryRequired)
+            }
+        }
+    }
+}
+
 pub(crate) async fn commit_capsule_contents(
     app: &AppHandle,
     authority: &crate::capsule::OwnerAuthority,
     input: crate::capsule::CapsuleNoteInput,
+    claim: crate::capture_archive::CaptureClaim,
     contents: String,
 ) -> Result<CapsuleCommitResult, String> {
     crate::capsule::ensure_submission(app, authority, &input.node_id)?;
@@ -1242,15 +1330,22 @@ pub(crate) async fn commit_capsule_contents(
             app: app_for_commit.clone(),
             settled: false,
         };
-        let result = write_atomically_commit_aware(
-            &store.path(WorkspaceFileSlot::Primary),
-            serialized.as_bytes(),
-        );
+        let result = crate::capture_archive::with_inbox(&app_for_commit, |inbox| {
+            write_capture_archive(
+                &store,
+                inbox,
+                &claim,
+                &input,
+                serialized.as_bytes(),
+                active_key,
+                write_atomically_commit_aware,
+            )
+        });
         let status = match result {
             Ok(status) => status,
             Err(error) => {
                 commit_guard.settled = true;
-                return Err(error.to_string());
+                return Err(error);
             }
         };
         if status == AtomicWriteStatus::RecoveryRequired {
@@ -2149,7 +2244,7 @@ pub async fn lock_workspace_with_snapshot(
     // An encrypted owner's original permit proves the admitted key mode.
     // Do not query the filesystem before revocation: a slow disk must not
     // delay the lock. The worker rechecks the actual storage boundary later.
-    let admission = crate::capsule::with_owner_authority(&app, &owner_id, |authority| {
+    let admission = crate::capsule::with_lock_snapshot_authority(&app, &owner_id, |authority| {
         // Lock order is capsule-owner mutex -> data-key mutex, with only
         // bounded key copying and barrier installation in this closure.
         state.admit_lock_snapshot(
@@ -2159,11 +2254,11 @@ pub async fn lock_workspace_with_snapshot(
         )
     });
 
-    let mut ticket = match admission {
-        Ok(mut ticket) => {
+    let (mut ticket, capture) = match admission {
+        Ok((mut ticket, capture)) => {
             ticket.app = Some(app.clone());
             lock_workspace_runtime_with_terminal_event(&app, "workspace_lock_save_started");
-            ticket
+            (ticket, capture)
         }
         Err(_) => {
             // Even an expired owner or an invalid save admission must not
@@ -2203,12 +2298,46 @@ pub async fn lock_workspace_with_snapshot(
                 system_unlock_enabled: system_unlock_enabled(metadata.as_ref(), provider.as_ref()),
                 idle_timeout_minutes,
             };
+            // A prior admitted capture can become uncertain while this lock
+            // ticket waits on the file queue. Never overwrite its after-image.
+            if crate::capsule::is_quarantined(&app) {
+                return Ok((AtomicWriteStatus::RecoveryRequired, status));
+            }
             let written = persist_admitted_lock_snapshot(
                 &store,
                 &ticket,
                 &contents,
-                write_atomically_commit_aware,
+                |path, serialized| {
+                    let capture = capture.as_ref().filter(|(_, input)| {
+                        validate_capsule_commit(&contents, input).is_ok()
+                    });
+                    let Some((claim, input)) = capture else {
+                        return write_atomically_commit_aware(path, serialized);
+                    };
+                    crate::capture_archive::with_inbox(&app, |inbox| {
+                        if inbox.archived_revision(&claim.id)
+                            .map_err(crate::capture_archive::inbox_error)? == Some(claim.revision)
+                        {
+                            // An earlier ordinary commit already acknowledged
+                            // this capture; the lock snapshot is just a save.
+                            return write_atomically_commit_aware(path, serialized)
+                                .map_err(|_| "workspace_lock_save_failed".to_owned());
+                        }
+                        write_capture_archive(
+                            &store,
+                            inbox,
+                            claim,
+                            input,
+                            serialized,
+                            ticket.data_key.as_deref(),
+                            write_atomically_commit_aware,
+                        )
+                    }).map_err(io::Error::other)
+                },
             )?;
+            if written == AtomicWriteStatus::RecoveryRequired {
+                crate::capsule::quarantine(&app);
+            }
             Ok::<_, String>((written, status))
         })();
         let outcome = match &result {
@@ -5369,12 +5498,12 @@ fn replace_file(source: &Path, target: &Path) -> io::Result<()> {
 }
 
 #[cfg(unix)]
-fn sync_parent_directory(parent: &Path) -> io::Result<()> {
+pub(crate) fn sync_parent_directory(parent: &Path) -> io::Result<()> {
     File::open(parent)?.sync_all()
 }
 
 #[cfg(not(unix))]
-fn sync_parent_directory(_parent: &Path) -> io::Result<()> {
+pub(crate) fn sync_parent_directory(_parent: &Path) -> io::Result<()> {
     Ok(())
 }
 
@@ -5619,6 +5748,100 @@ mod tests {
             capsule_commit_status(AtomicWriteStatus::RecoveryRequired, false),
             CapsuleCommitStatus::RecoveryRequired
         );
+    }
+
+    fn capture_archive_fixture() -> (
+        WorkspaceFileStore,
+        linked_info_capture_inbox::Inbox,
+        crate::capture_archive::CaptureClaim,
+        crate::capsule::CapsuleNoteInput,
+        String,
+    ) {
+        let directory = test_directory();
+        fs::create_dir_all(&directory).unwrap();
+        let store = WorkspaceFileStore::new(directory.clone());
+        fs::write(store.path(WorkspaceFileSlot::Primary), workspace("before")).unwrap();
+        let mut inbox = linked_info_capture_inbox::Inbox::open(directory.join("capture")).unwrap();
+        let draft = inbox.create_draft(String::new(), "capture".to_owned()).unwrap();
+        inbox.submit(&draft.id, draft.revision, 0, 0).unwrap();
+        let claimed = inbox.claim_next().unwrap().unwrap();
+        let (claim, input) = crate::capture_archive::claimed_input(&claimed).unwrap();
+        let mut candidate = timeline_workspace();
+        candidate["nodes"][1]["id"] = input.node_id.clone().into();
+        candidate["view"]["timeline"]["captures"][0]["nodeId"] = input.node_id.clone().into();
+        let candidate = normalize_storage_envelope(&candidate.to_string()).unwrap();
+        (store, inbox, claim, input, candidate)
+    }
+
+    #[test]
+    fn capture_archive_before_replace_failure_preserves_primary_and_body() {
+        let (store, mut inbox, claim, input, candidate) = capture_archive_fixture();
+        let before = fs::read(store.path(WorkspaceFileSlot::Primary)).unwrap();
+        let result = write_capture_archive(
+            &store,
+            &mut inbox,
+            &claim,
+            &input,
+            candidate.as_bytes(),
+            None,
+            |_, _| Err(io::Error::other("synthetic before-replace failure")),
+        );
+        assert!(result.is_err());
+        assert_eq!(fs::read(store.path(WorkspaceFileSlot::Primary)).unwrap(), before);
+        assert_eq!(inbox.get(&claim.id).unwrap().unwrap().content, "capture");
+        assert!(inbox.archived_revision(&claim.id).unwrap().is_none());
+        assert!(inbox.claim_next().unwrap().is_some());
+        drop(inbox);
+        fs::remove_dir_all(store.base_directory).unwrap();
+    }
+
+    #[test]
+    fn capture_archive_after_replace_unknown_recovers_using_fixed_node_and_time() {
+        let (store, mut inbox, claim, input, candidate) = capture_archive_fixture();
+        let result = write_capture_archive(
+            &store,
+            &mut inbox,
+            &claim,
+            &input,
+            candidate.as_bytes(),
+            None,
+            |path, bytes| {
+                write_atomically(path, bytes)?;
+                Ok(AtomicWriteStatus::RecoveryRequired)
+            },
+        ).unwrap();
+        assert_eq!(result, AtomicWriteStatus::RecoveryRequired);
+        assert_eq!(inbox.get(&claim.id).unwrap().unwrap().content, "capture");
+        assert!(inbox.claim_next().unwrap().is_none());
+        drop(inbox);
+        let mut reopened = linked_info_capture_inbox::Inbox::open(store.base_directory.join("capture")).unwrap();
+        reconcile_capture_archive(&store, &mut reopened, None).unwrap();
+        assert_eq!(reopened.archived_revision(&claim.id).unwrap(), Some(claim.revision));
+        assert!(reopened.get(&claim.id).unwrap().unwrap().content.is_empty());
+        let actual = store.read(WorkspaceFileSlot::Primary, None).unwrap().unwrap();
+        validate_capsule_commit(&actual, &input).unwrap();
+        drop(reopened);
+        fs::remove_dir_all(store.base_directory).unwrap();
+    }
+
+    #[test]
+    fn final_lock_snapshot_archives_the_fixed_claim_before_normal_commit_starts() {
+        let (store, mut inbox, claim, input, candidate) = capture_archive_fixture();
+        let state = WorkspaceVaultState::default();
+        let ticket = state.admit_lock_snapshot(None, state.access_generation().load(Ordering::Acquire), false).unwrap();
+        let result = persist_admitted_lock_snapshot(&store, &ticket, &candidate, |_, bytes| {
+            validate_capsule_commit(&candidate, &input).unwrap();
+            write_capture_archive(&store, &mut inbox, &claim, &input, bytes, None, write_atomically_commit_aware)
+                .map_err(io::Error::other)
+        }).unwrap();
+        assert_eq!(result, AtomicWriteStatus::Committed);
+        assert_eq!(inbox.archived_revision(&claim.id).unwrap(), Some(claim.revision));
+        // The old ordinary commit cannot claim it again after the final save.
+        assert!(inbox.claim_next().unwrap().is_none());
+        validate_capsule_commit(&store.read(WorkspaceFileSlot::Primary, None).unwrap().unwrap(), &input).unwrap();
+        drop(ticket);
+        drop(inbox);
+        fs::remove_dir_all(store.base_directory).unwrap();
     }
 
     #[test]

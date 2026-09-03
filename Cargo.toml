@@ -1,10 +1,12 @@
 [workspace]
 resolver = "2"
 members = [
+    "apps/capture/src-tauri",
     "apps/cloudflare-worker",
     "apps/desktop/src-tauri",
     "crates/application",
     "crates/backup-port",
+    "crates/capture-inbox",
     "crates/contracts",
     "crates/domain",
     "crates/extension-contracts",

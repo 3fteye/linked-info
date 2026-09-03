@@ -4,11 +4,11 @@ use std::sync::{Mutex, atomic::Ordering};
 use tauri::{AppHandle, Emitter, Manager};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
+use crate::capture_archive::{self, CaptureClaim};
 use crate::workspace_file::{self, WorkspaceAccessPermit, WorkspaceVaultState};
 
 const CAPSULE_LABEL: &str = "capsule";
 const STATE_CHANGED_EVENT: &str = "capsule-state-changed";
-const NOTE_PENDING_EVENT: &str = "capsule-note-pending";
 
 #[derive(Clone)]
 pub(crate) struct OwnerAuthority {
@@ -43,7 +43,7 @@ pub struct CapsuleNoteInput {
 }
 
 impl CapsuleNoteInput {
-    fn fingerprint(&self) -> Result<[u8; 32], String> {
+    pub(crate) fn fingerprint(&self) -> Result<[u8; 32], String> {
         let id =
             uuid::Uuid::parse_str(&self.node_id).map_err(|_| "capsule_invalid_input".to_owned())?;
         if id.to_string() != self.node_id
@@ -92,15 +92,6 @@ pub struct SubmissionResult {
     reason: Option<RejectionReason>,
 }
 
-impl SubmissionResult {
-    fn unknown() -> Self {
-        Self {
-            status: SubmissionStatus::Unknown,
-            reason: None,
-        }
-    }
-}
-
 struct Submission {
     authority: OwnerAuthority,
     context_id: String,
@@ -109,6 +100,7 @@ struct Submission {
     input: Option<CapsuleNoteInput>,
     result: SubmissionResult,
     committing: bool,
+    claim: Option<CaptureClaim>,
 }
 
 #[derive(Default)]
@@ -175,6 +167,41 @@ pub(crate) fn with_owner_authority<T>(
         .filter(|owner| owner.authority.owner_id == owner_id)
         .ok_or_else(|| "workspace_owner_expired".to_owned())?;
     accept(&owner.authority)
+}
+
+/// Retain only the fixed in-flight capture alongside the lock snapshot ticket.
+/// The caller's admission remains memory-only, in owner -> data-key lock order.
+pub(crate) fn with_lock_snapshot_authority<T>(
+    app: &AppHandle,
+    owner_id: &str,
+    accept: impl FnOnce(&OwnerAuthority) -> Result<T, String>,
+) -> Result<(T, Option<(CaptureClaim, CapsuleNoteInput)>), String> {
+    let state = runtime(app);
+    let guard = state
+        .runtime
+        .lock()
+        .map_err(|_| "capsule_state_unavailable".to_owned())?;
+    let owner = guard
+        .owner
+        .as_ref()
+        .filter(|owner| owner.authority.owner_id == owner_id)
+        .ok_or_else(|| "workspace_owner_expired".to_owned())?;
+    let capture = guard.submission.as_ref().and_then(|submission| {
+        (submission.authority.owner_id == owner_id
+            && submission.context_id == owner.context_id
+            && submission.result.status == SubmissionStatus::Processing)
+            .then(|| Some((submission.claim.clone()?, submission.input.clone()?)))
+            .flatten()
+    });
+    Ok((accept(&owner.authority)?, capture))
+}
+
+pub(crate) fn is_quarantined(app: &AppHandle) -> bool {
+    runtime(app)
+        .runtime
+        .lock()
+        .map(|guard| guard.quarantined)
+        .unwrap_or(true)
 }
 
 pub(crate) fn ensure_owner(app: &AppHandle, authority: &OwnerAuthority) -> Result<(), String> {
@@ -418,6 +445,17 @@ pub async fn open_workspace_owner(
             permit,
             context_id: None,
         };
+        // No owner may load a snapshot until a prior process's fixed capture
+        // has been reconciled under the same file-operation lock as writes.
+        ensure_authority(&app_for_open, &authority)?;
+        if let Err(error) = workspace_file::recover_capture_archive(&app_for_open) {
+            ensure_authority(&app_for_open, &authority)?;
+            if error != "capture_busy" {
+                quarantine(&app_for_open);
+                return Err("workspace_owner_recovery_required".to_owned());
+            }
+            return Err(error);
+        }
         let state = runtime(&app_for_open);
         let mut guard = state
             .runtime
@@ -496,6 +534,8 @@ pub struct CapsuleStatus {
     encrypted: bool,
 }
 
+/// Existing owner status remains main-only. No capture application command can
+/// reach this runtime or receive workspace authority through the shared inbox.
 #[tauri::command]
 pub fn inspect_capsule(app: AppHandle) -> Result<CapsuleStatus, String> {
     let state = runtime(&app);
@@ -562,105 +602,102 @@ fn enqueue_note(
         input: Some(input),
         result: result.clone(),
         committing: false,
+        claim: None,
     });
     Ok(result)
 }
 
 #[tauri::command]
-pub fn submit_capsule_note(
-    app: AppHandle,
-    owner_id: String,
-    context_id: String,
-    input: CapsuleNoteInput,
-) -> Result<SubmissionResult, String> {
-    let state = runtime(&app);
-    let mut guard = state
-        .runtime
-        .lock()
-        .map_err(|_| "capsule_state_unavailable".to_owned())?;
-    let owner = ready_context(&guard, &owner_id, &context_id)
-        .ok_or_else(|| "capsule_not_ready".to_owned())?;
-    ensure_authority(&app, &owner.authority)?;
-    let authority = owner.authority.clone();
-    let result = enqueue_note(&mut guard, authority, context_id, input)?;
-    drop(guard);
-    if result.status == SubmissionStatus::Queued {
-        app.state::<WorkspaceVaultState>().record_activity();
-        let _ = app.emit_to("main", NOTE_PENDING_EVENT, ());
-    }
-    Ok(result)
-}
-
-#[tauri::command]
-pub fn inspect_capsule_submission(
-    app: AppHandle,
-    owner_id: String,
-    context_id: String,
-    node_id: String,
-) -> Result<SubmissionResult, String> {
-    let state = runtime(&app);
-    let guard = state
-        .runtime
-        .lock()
-        .map_err(|_| "capsule_state_unavailable".to_owned())?;
-    let Some(owner) = ready_context(&guard, &owner_id, &context_id) else {
-        return Ok(SubmissionResult::unknown());
-    };
-    if ensure_authority(&app, &owner.authority).is_err() {
-        return Ok(SubmissionResult::unknown());
-    }
-    Ok(guard
-        .submission
-        .as_ref()
-        .filter(|submission| submission.node_id == node_id && submission.context_id == context_id)
-        .map(|submission| submission.result.clone())
-        .unwrap_or_else(SubmissionResult::unknown))
-}
-
-#[tauri::command]
-pub fn capsule_record_activity(
-    app: AppHandle,
-    owner_id: String,
-    context_id: String,
-) -> Result<(), String> {
-    let state = runtime(&app);
-    let guard = state
-        .runtime
-        .lock()
-        .map_err(|_| "capsule_state_unavailable".to_owned())?;
-    let owner = ready_context(&guard, &owner_id, &context_id)
-        .ok_or_else(|| "capsule_not_ready".to_owned())?;
-    ensure_authority(&app, &owner.authority)?;
-    app.state::<WorkspaceVaultState>().record_activity();
-    Ok(())
-}
-
-#[tauri::command]
-pub fn take_capsule_note(
+pub async fn take_capsule_note(
     app: AppHandle,
     owner_id: String,
 ) -> Result<Option<CapsuleNoteInput>, String> {
-    let authority = owner_authority(&app, &owner_id)?;
-    let state = runtime(&app);
-    let mut guard = state
-        .runtime
-        .lock()
-        .map_err(|_| "capsule_state_unavailable".to_owned())?;
-    let owner = guard
-        .owner
-        .as_ref()
-        .filter(|owner| owner.ready && matches_owner(Some(owner), &authority))
-        .ok_or_else(|| "capsule_not_ready".to_owned())?;
-    ensure_authority(&app, &authority)?;
-    let context_id = owner.context_id.clone();
-    let Some(submission) = guard.submission.as_mut().filter(|submission| {
-        submission.context_id == context_id && submission.result.status == SubmissionStatus::Queued
-    }) else {
-        return Ok(None);
-    };
-    ensure_authority(&app, &submission.authority)?;
-    submission.result.status = SubmissionStatus::Processing;
-    Ok(submission.input.clone())
+    let mut authority = owner_authority(&app, &owner_id)?;
+    {
+        let state = runtime(&app);
+        let guard = state
+            .runtime
+            .lock()
+            .map_err(|_| "capsule_state_unavailable".to_owned())?;
+        let owner = guard
+            .owner
+            .as_ref()
+            .filter(|owner| owner.ready && matches_owner(Some(owner), &authority))
+            .ok_or_else(|| "capsule_not_ready".to_owned())?;
+        authority.context_id = Some(owner.context_id.clone());
+    }
+    let operation_lock = app.state::<WorkspaceVaultState>().operation_lock();
+    let app_for_take = app.clone();
+    let authority_for_take = authority.clone();
+    let input = tauri::async_runtime::spawn_blocking(move || {
+        let _operation = operation_lock
+            .lock()
+            .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
+        ensure_owner_context(&app_for_take, &authority_for_take)?;
+        {
+            let state = runtime(&app_for_take);
+            let guard = state
+                .runtime
+                .lock()
+                .map_err(|_| "capsule_state_unavailable".to_owned())?;
+            if guard.submission.as_ref().is_some_and(|submission| {
+                matches!(submission.result.status, SubmissionStatus::Processing | SubmissionStatus::Unknown)
+            }) {
+                return Ok(None);
+            }
+        }
+        // A context suspended before commit leaves its durable claim intact.
+        // No worker can still write it while this file lock is held.
+        if let Err(error) = workspace_file::recover_capture_archive(&app_for_take) {
+            ensure_owner_context(&app_for_take, &authority_for_take)?;
+            if error == "capture_busy" {
+                return Ok(None);
+            }
+            quarantine(&app_for_take);
+            workspace_file::lock_workspace_runtime(&app_for_take, "capsule_recovery_required");
+            return Err(error);
+        }
+        let claimed = capture_archive::with_inbox(&app_for_take, |inbox| {
+            inbox.claim_next().map_err(capture_archive::inbox_error)
+        })?;
+        let Some(claimed) = claimed else {
+            return Ok(None);
+        };
+        let (claim, input) = capture_archive::claimed_input(&claimed)?;
+        let accepted = (|| {
+            let state = runtime(&app_for_take);
+            let mut guard = state
+                .runtime
+                .lock()
+                .map_err(|_| "capsule_state_unavailable".to_owned())?;
+            if !owner_context_matches(guard.owner.as_ref(), &authority_for_take) {
+                return Err("capsule_submission_expired".to_owned());
+            }
+            ensure_authority(&app_for_take, &authority_for_take)?;
+            guard.submission = None;
+            enqueue_note(
+                &mut guard,
+                authority_for_take.clone(),
+                authority_for_take.context_id.clone().expect("ready context"),
+                input.clone(),
+            )?;
+            let submission = guard.submission.as_mut().expect("enqueued capture");
+            submission.claim = Some(claim.clone());
+            submission.result.status = SubmissionStatus::Processing;
+            Ok(Some(input))
+        })();
+        if accepted.is_err() {
+            let _ = capture_archive::with_inbox(&app_for_take, |inbox| {
+                inbox.release_claim(&claim.id, claim.revision, &claim.claim_id)
+                    .map_err(capture_archive::inbox_error)
+            });
+        }
+        accepted
+    })
+    .await
+    .map_err(|_| "capsule_state_unavailable".to_owned())??;
+    ensure_owner_context(&app, &authority)?;
+    Ok(input)
 }
 
 fn claim_processing_commit(submission: &mut Submission) -> Result<(), String> {
@@ -676,7 +713,7 @@ pub(crate) fn submission_authority(
     owner_id: &str,
     node_id: &str,
     claim_commit: bool,
-) -> Result<(OwnerAuthority, CapsuleNoteInput), String> {
+) -> Result<(OwnerAuthority, CapsuleNoteInput, CaptureClaim), String> {
     let state = runtime(app);
     let mut guard = state
         .runtime
@@ -701,10 +738,14 @@ pub(crate) fn submission_authority(
         .input
         .clone()
         .ok_or_else(|| "capsule_submission_expired".to_owned())?;
+    let claim = submission
+        .claim
+        .clone()
+        .ok_or_else(|| "capsule_submission_expired".to_owned())?;
     if claim_commit {
         claim_processing_commit(guard.submission.as_mut().expect("validated submission"))?;
     }
-    Ok((authority, input))
+    Ok((authority, input, claim))
 }
 
 pub(crate) fn ensure_submission(
@@ -712,7 +753,7 @@ pub(crate) fn ensure_submission(
     authority: &OwnerAuthority,
     node_id: &str,
 ) -> Result<(), String> {
-    let (current, _) = submission_authority(app, &authority.owner_id, node_id, false)?;
+    let (current, _, _) = submission_authority(app, &authority.owner_id, node_id, false)?;
     if current.generation != authority.generation || current.context_id != authority.context_id {
         return Err("capsule_submission_expired".to_owned());
     }
@@ -811,8 +852,8 @@ pub async fn commit_capsule_note(
             return Ok(workspace_file::CapsuleCommitResult::already_committed());
         }
     }
-    let (authority, input) = submission_authority(&app, &owner_id, &node_id, true)?;
-    let result = workspace_file::commit_capsule_contents(&app, &authority, input, contents).await;
+    let (authority, input, claim) = submission_authority(&app, &owner_id, &node_id, true)?;
+    let result = workspace_file::commit_capsule_contents(&app, &authority, input, claim, contents).await;
     if result.is_err() {
         finish_submission(&app, &authority, &node_id, false);
     }
@@ -820,105 +861,83 @@ pub async fn commit_capsule_note(
 }
 
 #[tauri::command]
-pub fn reject_capsule_note(
+pub async fn reject_capsule_note(
     app: AppHandle,
     owner_id: String,
     node_id: String,
     reason: RejectionReason,
 ) -> Result<(), String> {
-    let (authority, _) = submission_authority(&app, &owner_id, &node_id, false)?;
-    let state = runtime(&app);
-    let mut guard = state
-        .runtime
-        .lock()
-        .map_err(|_| "capsule_state_unavailable".to_owned())?;
-    if !matches_owner(guard.owner.as_ref(), &authority) {
-        return Err("workspace_owner_expired".to_owned());
-    }
-    ensure_authority(&app, &authority)?;
-    if guard
-        .submission
-        .as_ref()
-        .is_some_and(|submission| submission.committing)
-    {
-        return Err("capsule_commit_unknown".to_owned());
-    }
-    transition_processing_submission(
-        &mut guard,
-        &authority,
-        &node_id,
-        SubmissionResult {
-            status: SubmissionStatus::Failed,
-            reason: Some(reason),
-        },
-    )?;
-    drop(guard);
+    let (authority, _, claim) = submission_authority(&app, &owner_id, &node_id, false)?;
+    let operation_lock = app.state::<WorkspaceVaultState>().operation_lock();
+    let app_for_reject = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _operation = operation_lock
+            .lock()
+            .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
+        // Reserve the broker slot before SQLite I/O without holding the owner
+        // mutex on disk. A racing commit can no longer admit this revision.
+        submission_authority(&app_for_reject, &authority.owner_id, &node_id, true)?;
+        capture_archive::with_inbox(&app_for_reject, |inbox| {
+            let result = if matches!(reason, RejectionReason::Busy) {
+                inbox.release_claim(&claim.id, claim.revision, &claim.claim_id)
+            } else {
+                inbox.fail_claim(&claim.id, claim.revision, &claim.claim_id, capture_archive::failure_code(reason))
+            };
+            result.map_err(capture_archive::inbox_error)
+        })?;
+        let state = runtime(&app_for_reject);
+        let mut guard = state
+            .runtime
+            .lock()
+            .map_err(|_| "capsule_state_unavailable".to_owned())?;
+        // Revocation may already have cleared the in-memory broker. The
+        // persisted result still belongs only to the captured claim/revision.
+        let _ = transition_processing_submission(
+            &mut guard,
+            &authority,
+            &node_id,
+            SubmissionResult { status: SubmissionStatus::Failed, reason: Some(reason) },
+        );
+        Ok::<_, String>(())
+    })
+    .await
+    .map_err(|_| "capsule_state_unavailable".to_owned())??;
     emit_state_changed(&app);
     Ok(())
 }
 
 #[tauri::command]
-pub async fn open_capsule_window(app: AppHandle) -> Result<(), String> {
-    let window = match app.get_webview_window(CAPSULE_LABEL) {
-        Some(window) => window,
-        None => {
-            let builder = tauri::WebviewWindowBuilder::new(
-                &app,
-                CAPSULE_LABEL,
-                tauri::WebviewUrl::App("index.html?capsule".into()),
-            )
-            .title("Linked Info")
-            .inner_size(220.0, 56.0)
-            .resizable(false)
-            .decorations(false)
-            .always_on_top(true)
-            .skip_taskbar(true);
-            // The current native target is Windows. Keep the opaque fallback
-            // elsewhere without opting macOS into private transparency APIs.
-            #[cfg(windows)]
-            let builder = builder.transparent(true);
-            let window = builder
-                .build()
-                .map_err(|_| "capsule_window_unavailable".to_owned())?;
-            let handle = window.clone();
-            window.on_window_event(move |event| {
-                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                    api.prevent_close();
-                    let _ = handle.hide();
-                }
-            });
-            window
-        }
-    };
-    window
-        .show()
-        .map_err(|_| "capsule_window_unavailable".to_owned())?;
-    window
-        .set_focus()
-        .map_err(|_| "capsule_window_unavailable".to_owned())
-}
-
-#[tauri::command]
-pub fn set_capsule_expanded(app: AppHandle, expanded: bool) -> Result<(), String> {
-    let window = app
-        .get_webview_window(CAPSULE_LABEL)
-        .ok_or_else(|| "capsule_window_unavailable".to_owned())?;
-    let (width, height) = if expanded {
-        (420.0, 360.0)
-    } else {
-        (220.0, 56.0)
-    };
-    window
-        .set_size(tauri::LogicalSize::new(width, height))
-        .map_err(|_| "capsule_window_unavailable".to_owned())
-}
-
-#[tauri::command]
-pub fn hide_capsule_window(app: AppHandle) -> Result<(), String> {
-    app.get_webview_window(CAPSULE_LABEL)
+pub async fn open_capsule_window() -> Result<(), String> {
+    let executable = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(std::path::Path::to_path_buf))
         .ok_or_else(|| "capsule_window_unavailable".to_owned())?
-        .hide()
-        .map_err(|_| "capsule_window_unavailable".to_owned())
+        .join(if cfg!(windows) {
+            "linked-info-capture.exe"
+        } else {
+            "linked-info-capture"
+        });
+    // No shell, caller-provided path, workspace argument or parent-exit kill
+    // handle. The independent application's single-instance plugin focuses it.
+    let mut command = std::process::Command::new(executable);
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW: no console helper.
+    }
+    let mut child = command
+        .spawn()
+        .map_err(|_| "capsule_window_unavailable".to_owned())?;
+    // Reap on Unix while the main process lives, without coupling exits: this
+    // detached thread is neither joined nor used to terminate the capture app.
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
 }
 
 #[tauri::command]
@@ -937,20 +956,12 @@ pub fn focus_main_window(app: AppHandle) -> Result<(), String> {
         .map_err(|_| "capsule_main_unavailable".to_owned())
 }
 
-#[tauri::command]
-pub fn drag_capsule_window(app: AppHandle) -> Result<(), String> {
-    app.get_webview_window(CAPSULE_LABEL)
-        .ok_or_else(|| "capsule_window_unavailable".to_owned())?
-        .start_dragging()
-        .map_err(|_| "capsule_window_unavailable".to_owned())
-}
-
 pub(crate) fn command_allowed(window_label: &str, webview_label: &str, command: &str) -> bool {
     if window_label != webview_label {
         return false;
     }
-    match window_label {
-        "main" => !matches!(
+    window_label == "main"
+        && !matches!(
             command,
             "submit_capsule_note"
                 | "inspect_capsule_submission"
@@ -958,20 +969,7 @@ pub(crate) fn command_allowed(window_label: &str, webview_label: &str, command: 
                 | "hide_capsule_window"
                 | "drag_capsule_window"
                 | "capsule_record_activity"
-        ),
-        CAPSULE_LABEL => matches!(
-            command,
-            "inspect_capsule"
-                | "submit_capsule_note"
-                | "inspect_capsule_submission"
-                | "set_capsule_expanded"
-                | "hide_capsule_window"
-                | "focus_main_window"
-                | "drag_capsule_window"
-                | "capsule_record_activity"
-        ),
-        _ => false,
-    }
+        )
 }
 
 #[cfg(test)]
@@ -1022,7 +1020,7 @@ mod tests {
             assert!(!command_allowed("capsule", "capsule", command));
             assert!(command_allowed("main", "main", command));
         }
-        assert!(command_allowed("capsule", "capsule", "submit_capsule_note"));
+        assert!(!command_allowed("capsule", "capsule", "submit_capsule_note"));
         assert!(!command_allowed("main", "capsule", "read_workspace_file"));
         assert!(!command_allowed(
             "untrusted",

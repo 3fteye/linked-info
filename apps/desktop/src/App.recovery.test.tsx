@@ -499,7 +499,7 @@ describe("App recovery transaction boundary", () => {
     expect((await find("canvas-select") as HTMLSelectElement).options).toHaveLength(1);
     expect(runtime.disk.workspace.nodes).toEqual(initial.nodes);
     expect(canvasHarness.canUndo).toBe(false);
-    expect(document.querySelector(".app-status-toast")?.textContent ?? "").not.toMatch(/Saved|已保存/);
+    expect(document.querySelector(".app-status-toast")?.textContent ?? "").not.toMatch(/Archived|已归档/);
     expect(runtime.host.reject).not.toHaveBeenCalled();
     await act(async () => { canvasHarness.editName?.("Blocked edit while committing"); });
     expect((await find("mock-canvas")).textContent).toBe("Current workspace");
@@ -518,7 +518,7 @@ describe("App recovery transaction boundary", () => {
     expect(runtime.disk.workspace.view.timeline?.captures).toHaveLength(1);
     expect(runtime.disk.workspace.view.timeline?.days).toHaveLength(1);
     expect(runtime.disk.workspace.references).toHaveLength(1);
-    expect(document.querySelector(".app-status-toast")?.textContent).toMatch(/Saved|已保存/);
+    expect(document.querySelector(".app-status-toast")?.textContent).toMatch(/Archived|已归档/);
     const committed = runtime.disk.workspace;
 
     await act(async () => { canvasHarness.undo?.(); });

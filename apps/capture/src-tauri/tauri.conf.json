@@ -1,0 +1,57 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "关联信息便签",
+  "version": "0.1.0",
+  "identifier": "com.linkedinfo.capture",
+  "build": {
+    "beforeDevCommand": "pnpm --dir ../desktop dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "pnpm --dir ../desktop build:capture",
+    "frontendDist": "../../desktop/dist-capture"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "capture",
+        "url": "capture.html",
+        "title": "关联信息便签",
+        "width": 220,
+        "height": 56,
+        "resizable": false,
+        "decorations": false,
+        "alwaysOnTop": true
+      }
+    ],
+    "security": {
+      "csp": {
+        "default-src": "'self'",
+        "base-uri": "'none'",
+        "connect-src": "ipc: http://ipc.localhost",
+        "font-src": "'self'",
+        "form-action": "'none'",
+        "frame-src": "'none'",
+        "img-src": "'self' data:",
+        "object-src": "'none'",
+        "script-src": "'self'",
+        "style-src": "'self' 'unsafe-inline'"
+      },
+      "devCsp": {
+        "default-src": "'self'",
+        "base-uri": "'none'",
+        "connect-src": "ipc: http://ipc.localhost http://localhost:1420 ws://localhost:1420",
+        "font-src": "'self'",
+        "form-action": "'none'",
+        "frame-src": "'none'",
+        "img-src": "'self' data:",
+        "object-src": "'none'",
+        "script-src": "'self'",
+        "style-src": "'self' 'unsafe-inline'"
+      }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": ["../../desktop/src-tauri/icons/icon.ico"]
+  }
+}

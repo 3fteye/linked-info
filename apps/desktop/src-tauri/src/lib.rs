@@ -1,4 +1,5 @@
 mod capsule;
+mod capture_archive;
 mod embedding;
 mod extension_manager;
 mod extension_runtime;
@@ -77,6 +78,7 @@ pub fn run() {
 
     builder
         .manage(capsule::CapsuleState::default())
+        .manage(capture_archive::CaptureArchiveState::default())
         .manage(embedding::EmbeddingState::default())
         .manage(extension_runtime::ExtensionRuntimeState::default())
         .manage(extension_manager::ExtensionManagerState::default())
@@ -120,17 +122,11 @@ pub fn run() {
                 capsule::close_workspace_owner,
                 capsule::set_workspace_owner_ready,
                 capsule::inspect_capsule,
-                capsule::submit_capsule_note,
-                capsule::inspect_capsule_submission,
                 capsule::take_capsule_note,
                 capsule::commit_capsule_note,
                 capsule::reject_capsule_note,
                 capsule::open_capsule_window,
-                capsule::set_capsule_expanded,
-                capsule::hide_capsule_window,
                 capsule::focus_main_window,
-                capsule::drag_capsule_window,
-                capsule::capsule_record_activity,
                 embedding::cancel_local_embedding_download,
                 embedding::embed_local_texts,
                 embedding::embed_remote_texts,

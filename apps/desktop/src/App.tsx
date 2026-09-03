@@ -1557,7 +1557,7 @@ function App({
       await capsuleHost.setReady(true);
       if (active) capsuleProcessRef.current();
     }).catch(() => {
-      if (active) showAppNotice(t("capsule.unavailable"));
+      if (active) showAppNotice(t("capture.archiveUnavailable"));
     });
     return () => {
       active = false;
@@ -1574,6 +1574,14 @@ function App({
     let commitAttempted = false;
     let recoveryRequired = false;
     try {
+      // Do not claim a persistent inbox item while an ordinary editor or a
+      // security/recovery transaction already owns the workspace boundary.
+      if (
+        !persistenceReady || workspaceMutationBlockedRef.current ||
+        capsuleSuspendedRef.current || editingNodeIdRef.current !== null ||
+        securityBusy || pendingWorkspaceReplacement !== null ||
+        workspaceReplacementApplyBusyRef.current || workspaceReplacementHistoryBusyRef.current
+      ) return;
       const request = await capsuleHost.take();
       if (request === null || !capsuleOwnerAliveRef.current) return;
       nodeId = request.nodeId;
@@ -1627,7 +1635,7 @@ function App({
       }
       workspaceRef.current = next;
       setWorkspace(next);
-      showAppNotice(t("capsule.saved"));
+      showAppNotice(t("capture.state.archived"));
     } catch (error) {
       if (!capsuleOwnerAliveRef.current) return;
       if (committed || (commitAttempted && error !== "capsule_commit_not_saved")) {
@@ -6208,7 +6216,7 @@ function App({
               className="nav-item"
               data-testid="capsule-open"
               disabled={pendingWorkspaceReplacement !== null || !persistenceReady}
-              onClick={() => void capsuleHost.open().catch(() => showAppNotice(t("capsule.unavailable")))}
+              onClick={() => void capsuleHost.open().catch(() => showAppNotice(t("capture.openFailed")))}
               type="button"
             >
               <Pencil size={18} />

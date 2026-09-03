@@ -26,7 +26,7 @@ function Invoke-WindowsDesktopTestRunner {
     $testDirectory = [IO.Path]::GetFullPath((Join-Path $repoRoot 'target/debug/deps'))
     $resolvedBinary = Get-Item -LiteralPath $BinaryPath
     if ($resolvedBinary.PSIsContainer -or $resolvedBinary.DirectoryName -ne $testDirectory -or
-        $resolvedBinary.Name -notmatch '^linked_info_desktop_lib-[0-9a-f]+\.exe$' -or
+        $resolvedBinary.Name -notmatch '^linked_info_(?:desktop|capture)_lib-[0-9a-f]+\.exe$' -or
         ($resolvedBinary.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
         throw 'windows_desktop_test_artifact_invalid'
     }
