@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { act } from "react";
+import { act, useEffect } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import WorkspaceSecurityGate from "./WorkspaceSecurityGate";
@@ -53,6 +53,7 @@ describe("WorkspaceSecurityGate", () => {
   afterEach(() => {
     act(() => root.unmount());
     container.remove();
+    vi.restoreAllMocks();
   });
 
   it("unmounts unlocked content immediately after a Rust lock event", async () => {
@@ -94,6 +95,130 @@ describe("WorkspaceSecurityGate", () => {
       container.querySelector('[data-testid="workspace-security-recovery-required"]'),
     ).not.toBeNull();
     expect(container.querySelector("#workspace-unlock-password")).toBeNull();
+  });
+
+  it("recreates an unencrypted owner after session revocation without a password prompt", async () => {
+    const listenerRef = { current: null as ((reason: string) => void) | null };
+    const workspaceSecurity = security(listenerRef);
+    vi.mocked(workspaceSecurity.inspect).mockResolvedValue({ ...unlocked, encrypted: false });
+    const mounted = vi.fn();
+    const unmounted = vi.fn();
+    function Owner() {
+      useEffect(() => { mounted(); return () => { unmounted(); }; }, []);
+      return <div data-testid="plaintext-owner" />;
+    }
+    await act(async () => {
+      root.render(<WorkspaceSecurityGate security={workspaceSecurity}>{() => <Owner />}</WorkspaceSecurityGate>);
+    });
+    await act(async () => { listenerRef.current?.("windows_session_locked"); });
+    expect(mounted).toHaveBeenCalledTimes(2);
+    expect(unmounted).toHaveBeenCalledTimes(1);
+    expect(container.querySelector('[data-testid="plaintext-owner"]')).not.toBeNull();
+    expect(container.querySelector("#workspace-unlock-password")).toBeNull();
+  });
+
+  it("keeps capsule durability recovery closed even in plaintext mode", async () => {
+    const listenerRef = { current: null as ((reason: string) => void) | null };
+    const workspaceSecurity = security(listenerRef);
+    vi.mocked(workspaceSecurity.inspect).mockResolvedValue({ ...unlocked, encrypted: false });
+    await act(async () => {
+      root.render(<WorkspaceSecurityGate security={workspaceSecurity}>{() => <div data-testid="plaintext-owner" />}</WorkspaceSecurityGate>);
+    });
+    await act(async () => { listenerRef.current?.("capsule_recovery_required"); });
+    expect(container.querySelector('[data-testid="plaintext-owner"]')).toBeNull();
+    expect(container.querySelector('[data-testid="workspace-security-recovery-required"]')).not.toBeNull();
+  });
+
+  it("uses a native process restart instead of reloading the quarantined WebView", async () => {
+    const listenerRef = { current: null as ((reason: string) => void) | null };
+    const workspaceSecurity = security(listenerRef);
+    const restart = vi.fn(async () => undefined);
+    const reload = vi.spyOn(window.location, "reload").mockImplementation(() => {});
+    await act(async () => {
+      root.render(
+        <WorkspaceSecurityGate
+          lifecycle={{ restart, registerCloseFlush: async () => () => {} }}
+          security={workspaceSecurity}
+        >
+          {() => <div data-testid="secret-content" />}
+        </WorkspaceSecurityGate>,
+      );
+    });
+    await act(async () => { listenerRef.current?.("capsule_recovery_required"); });
+    const button = container.querySelector<HTMLButtonElement>(
+      '[data-testid="workspace-security-recovery-required"] button',
+    );
+    if (button === null) throw new Error("missing recovery restart button");
+
+    await act(async () => {
+      button.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(restart).toHaveBeenCalledOnce();
+    expect(reload).not.toHaveBeenCalled();
+    expect(container.querySelector('[data-testid="secret-content"]')).toBeNull();
+  });
+
+  it("keeps recovery closed and shows a retryable message when native restart fails", async () => {
+    const listenerRef = { current: null as ((reason: string) => void) | null };
+    const workspaceSecurity = security(listenerRef);
+    let rejectRestart: (reason: Error) => void = () => {};
+    const restart = vi.fn(() => new Promise<void>((_resolve, reject) => {
+      rejectRestart = reject;
+    }));
+    const reload = vi.spyOn(window.location, "reload").mockImplementation(() => {});
+    await act(async () => {
+      root.render(
+        <WorkspaceSecurityGate
+          lifecycle={{ restart, registerCloseFlush: async () => () => {} }}
+          security={workspaceSecurity}
+        >
+          {() => <div data-testid="secret-content" />}
+        </WorkspaceSecurityGate>,
+      );
+    });
+    await act(async () => { listenerRef.current?.("workspace_owner_recovery_required"); });
+    const button = container.querySelector<HTMLButtonElement>(
+      '[data-testid="workspace-security-recovery-required"] button',
+    );
+    if (button === null) throw new Error("missing recovery restart button");
+    act(() => {
+      button.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      button.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(restart).toHaveBeenCalledOnce();
+    expect(button.disabled).toBe(true);
+
+    await act(async () => { rejectRestart(new Error("synthetic restart failure")); });
+
+    expect(button.disabled).toBe(false);
+    expect(container.querySelector('[role="alert"]')?.textContent)
+      .toContain("could not restart automatically");
+    expect(container.querySelector('[data-testid="secret-content"]')).toBeNull();
+    expect(reload).not.toHaveBeenCalled();
+  });
+
+  it("retains reload as the browser fallback when no native restart exists", async () => {
+    const listenerRef = { current: null as ((reason: string) => void) | null };
+    const workspaceSecurity = security(listenerRef);
+    const reload = vi.spyOn(window.location, "reload").mockImplementation(() => {});
+    await act(async () => {
+      root.render(
+        <WorkspaceSecurityGate security={workspaceSecurity}>
+          {() => <div data-testid="secret-content" />}
+        </WorkspaceSecurityGate>,
+      );
+    });
+    await act(async () => { listenerRef.current?.("capsule_recovery_required"); });
+    const button = container.querySelector<HTMLButtonElement>(
+      '[data-testid="workspace-security-recovery-required"] button',
+    );
+    if (button === null) throw new Error("missing recovery restart button");
+    await act(async () => {
+      button.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(reload).toHaveBeenCalledOnce();
   });
 
   it("tells the user that a committed password change requires the new password", async () => {

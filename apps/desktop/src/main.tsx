@@ -1,136 +1,25 @@
-import React from "react";
+import React, { lazy, Suspense } from "react";
 import ReactDOM from "react-dom/client";
-import { invoke, isTauri } from "@tauri-apps/api/core";
+import { isTauri } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import App from "./App";
-import WorkspaceSecurityGate from "./WorkspaceSecurityGate";
 import "./i18n";
-import { localWorkspacePersistence } from "./workspaceStore";
-import { tauriWorkspacePersistence } from "./workspaceTauriPersistence";
-import {
-  browserWorkspaceLifecycle,
-  createTauriWorkspaceLifecycle,
-} from "./workspaceLifecycle";
-import {
-  tauriEmbeddingGateway,
-  tauriEmbeddingVectorCache,
-  tauriLocalEmbeddingRuntime,
-  unavailableEmbeddingGateway,
-  unavailableLocalEmbeddingRuntime,
-} from "./embeddingBridge";
-import { unavailableEmbeddingVectorCache } from "./embeddingCache";
-import { localEmbeddingSettingsStore } from "./embeddingSettings";
-import {
-  tauriDocumentImportLlmGateway,
-  tauriLlmGateway,
-  tauriLocalLlmRuntime,
-  unavailableDocumentImportLlmGateway,
-  unavailableLlmGateway,
-  unavailableLocalLlmRuntime,
-} from "./llmBridge";
-import { localLlmSettingsStore } from "./llmSettings";
-import {
-  tauriWorkspaceSecurity,
-  unavailableWorkspaceSecurity,
-} from "./workspaceSecurity";
-import {
-  tauriWorkspaceBackupHistory,
-  unavailableWorkspaceBackupHistory,
-} from "./workspaceBackupHistory";
-import {
-  tauriSecretClipboard,
-  unavailableSecretClipboard,
-} from "./secretClipboard";
-import {
-  tauriOffsiteBackupService,
-  unavailableOffsiteBackupService,
-} from "./offsiteBackup";
-import {
-  memoryOnlySmartReferenceResultCache,
-  tauriSmartReferenceResultCache,
-} from "./smartReferenceCache";
 import { loadAppearanceTheme } from "./appearancePreferences";
+import { tauriCapsuleBridge } from "./capsuleBridge";
 
+const MainWorkspace = lazy(() => import("./MainWorkspace"));
+const CapsuleNote = lazy(() => import("./CapsuleNote"));
+const label = isTauri() ? getCurrentWindow().label : "main";
+document.documentElement.dataset.window = label;
 document.documentElement.dataset.theme = loadAppearanceTheme(
   typeof localStorage === "undefined" ? null : localStorage,
 );
-
-document.addEventListener(
-  "contextmenu",
-  (event) => event.preventDefault(),
-  { capture: true },
-);
-
-const runningInTauri = isTauri();
-const persistence = runningInTauri
-  ? tauriWorkspacePersistence
-  : localWorkspacePersistence;
-const lifecycle = runningInTauri
-  ? createTauriWorkspaceLifecycle({
-      exit() {
-        return invoke<void>("exit_application");
-      },
-      onCloseRequested(handler) {
-        return getCurrentWindow().onCloseRequested(handler);
-      },
-    })
-  : browserWorkspaceLifecycle;
-const embeddingGateway = runningInTauri
-  ? tauriEmbeddingGateway
-  : unavailableEmbeddingGateway;
-const embeddingVectorCache = runningInTauri
-  ? tauriEmbeddingVectorCache
-  : unavailableEmbeddingVectorCache;
-const localEmbeddingRuntime = runningInTauri
-  ? tauriLocalEmbeddingRuntime
-  : unavailableLocalEmbeddingRuntime;
-const llmGateway = runningInTauri ? tauriLlmGateway : unavailableLlmGateway;
-const documentImportLlmGateway = runningInTauri
-  ? tauriDocumentImportLlmGateway
-  : unavailableDocumentImportLlmGateway;
-const localLlmRuntime = runningInTauri
-  ? tauriLocalLlmRuntime
-  : unavailableLocalLlmRuntime;
-const workspaceSecurity = runningInTauri
-  ? tauriWorkspaceSecurity
-  : unavailableWorkspaceSecurity;
-const workspaceBackupHistory = runningInTauri
-  ? tauriWorkspaceBackupHistory
-  : unavailableWorkspaceBackupHistory;
-const secretClipboard = runningInTauri
-  ? tauriSecretClipboard
-  : unavailableSecretClipboard;
-const offsiteBackup = runningInTauri
-  ? tauriOffsiteBackupService
-  : unavailableOffsiteBackupService;
-const smartReferenceResultCache = runningInTauri
-  ? tauriSmartReferenceResultCache
-  : memoryOnlySmartReferenceResultCache;
+document.addEventListener("contextmenu", (event) => event.preventDefault(), { capture: true });
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
-    <WorkspaceSecurityGate security={workspaceSecurity}>
-      {(workspaceSecurityStatus, updateWorkspaceSecurityStatus) => (
-        <App
-          documentImportLlmGateway={documentImportLlmGateway}
-          embeddingGateway={embeddingGateway}
-          embeddingVectorCache={embeddingVectorCache}
-          embeddingSettingsStore={localEmbeddingSettingsStore}
-          llmGateway={llmGateway}
-          llmSettingsStore={localLlmSettingsStore}
-          localEmbeddingRuntime={localEmbeddingRuntime}
-          localLlmRuntime={localLlmRuntime}
-          lifecycle={lifecycle}
-          offsiteBackup={offsiteBackup}
-          persistence={persistence}
-          secretClipboard={secretClipboard}
-          smartReferenceResultCache={smartReferenceResultCache}
-          updateWorkspaceSecurityStatus={updateWorkspaceSecurityStatus}
-          workspaceBackupHistory={workspaceBackupHistory}
-          workspaceSecurity={workspaceSecurity}
-          workspaceSecurityStatus={workspaceSecurityStatus}
-        />
-      )}
-    </WorkspaceSecurityGate>
+    <Suspense fallback={null}>
+      {label === "main" ? <MainWorkspace /> :
+        label === "capsule" ? <CapsuleNote bridge={tauriCapsuleBridge} /> : null}
+    </Suspense>
   </React.StrictMode>,
 );

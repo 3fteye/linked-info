@@ -1,3 +1,4 @@
+mod capsule;
 mod embedding;
 mod extension_manager;
 mod extension_runtime;
@@ -17,14 +18,11 @@ mod workspace_file;
 
 use tauri::Manager;
 
-#[tauri::command]
-fn exit_application(
-    app: tauri::AppHandle,
-    embedding_state: tauri::State<'_, embedding::EmbeddingState>,
-    extension_runtime_state: tauri::State<'_, extension_runtime::ExtensionRuntimeState>,
-    llm_state: tauri::State<'_, llm::LlmState>,
-    vault_state: tauri::State<'_, workspace_file::WorkspaceVaultState>,
-) {
+fn prepare_application_shutdown(app: &tauri::AppHandle) {
+    let embedding_state = app.state::<embedding::EmbeddingState>();
+    let extension_runtime_state = app.state::<extension_runtime::ExtensionRuntimeState>();
+    let llm_state = app.state::<llm::LlmState>();
+    let vault_state = app.state::<workspace_file::WorkspaceVaultState>();
     // Revoke plaintext authority before waiting for any model or extension
     // process cleanup. Application exit is not an exception to lock ordering.
     workspace_file::run_workspace_lock_transition(
@@ -32,15 +30,34 @@ fn exit_application(
             extension_runtime_state
                 .revoke_all(vault_state.next_access_generation().unwrap_or(u64::MAX));
             vault_state.shutdown();
+            capsule::revoke(app);
         },
-        || secret_clipboard::clear_active(&app),
+        || secret_clipboard::clear_active(app),
         || {
             extension_runtime_state.shutdown();
             let _ = embedding_state.shutdown();
             llm_state.shutdown();
         },
     );
+}
+
+#[tauri::command]
+fn exit_application(app: tauri::AppHandle) {
+    prepare_application_shutdown(&app);
     app.exit(0);
+}
+
+#[tauri::command]
+async fn restart_application(app: tauri::AppHandle) -> Result<(), String> {
+    // Tauri's restart waits for Exit on a non-main thread. Keep both model
+    // cleanup and that wait off the window event loop; a WebView reload cannot
+    // release the process-level persistence quarantine.
+    tauri::async_runtime::spawn_blocking(move || -> () {
+        prepare_application_shutdown(&app);
+        app.restart();
+    })
+    .await
+    .map_err(|_| "application_restart_failed".to_owned())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -59,6 +76,7 @@ pub fn run() {
     }
 
     builder
+        .manage(capsule::CapsuleState::default())
         .manage(embedding::EmbeddingState::default())
         .manage(extension_runtime::ExtensionRuntimeState::default())
         .manage(extension_manager::ExtensionManagerState::default())
@@ -87,7 +105,32 @@ pub fn run() {
             });
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![
+        .invoke_handler(|invoke| {
+            let webview = invoke.message.webview_ref();
+            if !capsule::command_allowed(
+                webview.window().label(),
+                webview.label(),
+                invoke.message.command(),
+            ) {
+                invoke.resolver.reject("capsule_command_forbidden");
+                return true;
+            }
+            let handler = tauri::generate_handler![
+            capsule::open_workspace_owner,
+            capsule::close_workspace_owner,
+            capsule::set_workspace_owner_ready,
+            capsule::inspect_capsule,
+            capsule::submit_capsule_note,
+            capsule::inspect_capsule_submission,
+            capsule::take_capsule_note,
+            capsule::commit_capsule_note,
+            capsule::reject_capsule_note,
+            capsule::open_capsule_window,
+            capsule::set_capsule_expanded,
+            capsule::hide_capsule_window,
+            capsule::focus_main_window,
+            capsule::drag_capsule_window,
+            capsule::capsule_record_activity,
             embedding::cancel_local_embedding_download,
             embedding::embed_local_texts,
             embedding::embed_remote_texts,
@@ -144,6 +187,7 @@ pub fn run() {
             workspace_file::clear_workspace_recovery_data,
             workspace_file::commit_workspace_restore,
             exit_application,
+            restart_application,
             workspace_file::authorize_sensitive_operation,
             workspace_file::change_workspace_password,
             workspace_file::decrypt_workspace_export,
@@ -165,7 +209,9 @@ pub fn run() {
             workspace_file::unlock_workspace,
             workspace_file::unlock_workspace_with_system,
             workspace_file::write_workspace_file
-        ])
+            ];
+            handler(invoke)
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import {
   AlertTriangle,
   Fingerprint,
@@ -11,12 +11,14 @@ import type {
   WorkspaceSecurity,
   WorkspaceSecurityStatus,
 } from "./workspaceSecurity";
+import type { WorkspaceLifecycle } from "./workspaceLifecycle";
 
 interface WorkspaceSecurityGateProps {
   children: (
     status: WorkspaceSecurityStatus,
     updateStatus: (status: WorkspaceSecurityStatus) => void,
   ) => ReactNode;
+  lifecycle?: WorkspaceLifecycle;
   security: WorkspaceSecurity;
 }
 
@@ -26,6 +28,7 @@ function errorReason(error: unknown): string {
 
 export default function WorkspaceSecurityGate({
   children,
+  lifecycle,
   security,
 }: WorkspaceSecurityGateProps) {
   const { t } = useTranslation();
@@ -35,7 +38,13 @@ export default function WorkspaceSecurityGate({
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [recoveryRequired, setRecoveryRequired] = useState(false);
+  const [restartBusy, setRestartBusy] = useState(false);
+  const [restartFailed, setRestartFailed] = useState(false);
+  const restartPendingRef = useRef(false);
   const [retryGeneration, setRetryGeneration] = useState(0);
+  const [childSessionGeneration, setChildSessionGeneration] = useState(0);
+  const currentStatusRef = useRef(status);
+  currentStatusRef.current = status;
   const lockLatchedRef = useRef(false);
   const statusProbeGenerationRef = useRef(0);
   const updateStatusFromWorkspace = useCallback(
@@ -89,12 +98,16 @@ export default function WorkspaceSecurityGate({
           return;
         }
         lockLatchedRef.current = true;
+        const mayReopenPlaintext = currentStatusRef.current?.encrypted !== true;
+        setChildSessionGeneration((generation) => generation + 1);
         const probeGeneration = statusProbeGenerationRef.current + 1;
         statusProbeGenerationRef.current = probeGeneration;
         if (
           reason === "workspace_password_change_recovery_required" ||
           reason === "workspace_restore_recovery_required" ||
-          reason === "workspace_recovery_swap_pending"
+          reason === "workspace_recovery_swap_pending" ||
+          reason === "capsule_recovery_required" ||
+          reason === "workspace_owner_recovery_required"
         ) {
           setRecoveryRequired(true);
         }
@@ -126,6 +139,11 @@ export default function WorkspaceSecurityGate({
               active &&
               statusProbeGenerationRef.current === probeGeneration
             ) {
+              if (mayReopenPlaintext && !next.encrypted) {
+                // There is no password to unlock an unencrypted workspace.
+                // Recreate its owner after revocation; encrypted sessions stay latched.
+                lockLatchedRef.current = false;
+              }
               updateStatusFromWorkspace(next);
             }
           })
@@ -227,6 +245,27 @@ export default function WorkspaceSecurityGate({
     );
   }
 
+  async function restartApplication() {
+    if (restartPendingRef.current) {
+      return;
+    }
+    restartPendingRef.current = true;
+    setRestartBusy(true);
+    setRestartFailed(false);
+    try {
+      if (lifecycle?.restart !== undefined) {
+        await lifecycle.restart();
+      } else {
+        window.location.reload();
+      }
+    } catch {
+      setRestartFailed(true);
+    } finally {
+      restartPendingRef.current = false;
+      setRestartBusy(false);
+    }
+  }
+
   if (recoveryRequired) {
     return (
       <main className="security-gate" data-testid="workspace-security-recovery-required">
@@ -235,18 +274,24 @@ export default function WorkspaceSecurityGate({
         <p>{t("storageProblem.recoveryRequiredDescription")}</p>
         <button
           className="primary-button"
-          onClick={() => window.location.reload()}
+          disabled={restartBusy}
+          onClick={() => void restartApplication()}
           type="button"
         >
           <RotateCcw aria-hidden="true" size={16} />
           {t("storageProblem.restart")}
         </button>
+        {restartFailed && (
+          <p className="security-error" role="alert">
+            {t("storageProblem.restartFailed")}
+          </p>
+        )}
       </main>
     );
   }
 
   if (status !== null && !status.locked) {
-    return <>{children(status, updateStatusFromWorkspace)}</>;
+    return <Fragment key={childSessionGeneration}>{children(status, updateStatusFromWorkspace)}</Fragment>;
   }
 
   if (status === null && error === null) {

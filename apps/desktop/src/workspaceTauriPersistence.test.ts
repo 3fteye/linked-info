@@ -311,7 +311,7 @@ describe("createTauriWorkspacePersistence", () => {
     });
   });
 
-  it("drops stale saves queued while Rust owns the recovery transaction", async () => {
+  it("explicitly rejects stale saves queued while Rust owns the recovery transaction", async () => {
     const files = new Map<WorkspaceStorageSlot, string>();
     let signalSwapStarted: () => void = () => {};
     const swapStarted = new Promise<void>((resolve) => {
@@ -353,12 +353,15 @@ describe("createTauriWorkspacePersistence", () => {
     const swapping = persistence.swapWithRecovery();
     await swapStarted;
     const staleSave = persistence.save(stalePrimary);
+    const staleRejected = expect(staleSave).rejects.toThrow(
+      "workspace_persistence_stale_operation",
+    );
     releaseSwap();
     await expect(swapping).resolves.toEqual({
       status: "committed",
       workspace: recovery,
     });
-    await staleSave;
+    await staleRejected;
 
     expect(await persistence.load()).toEqual({
       status: "ready",
@@ -502,5 +505,81 @@ describe("createTauriWorkspacePersistence", () => {
       workspace: { ...restored, view: { ...restored.view, bookmarks: [] } },
     });
     await expect(persistence.save(restored)).resolves.toBeUndefined();
+  });
+
+  it("does not release transaction quarantine through a read before commit", async () => {
+    const bridge = new MemoryFileBridge();
+    const persistence = createTauriWorkspacePersistence(bridge, new MemoryLegacySource());
+    const workspace = validWorkspace();
+    await persistence.save(workspace);
+
+    await persistence.runExclusiveTransaction(async () => {
+      await expect(persistence.load()).rejects.toThrow(
+        "workspace_persistence_transaction_in_progress",
+      );
+      await expect(persistence.loadRecovery()).rejects.toThrow(
+        "workspace_persistence_transaction_in_progress",
+      );
+      await expect(persistence.save(workspace)).rejects.toThrow(
+        "workspace_persistence_reload_required",
+      );
+      return { status: "committed" };
+    });
+    await expect(persistence.save(workspace)).rejects.toThrow(
+      "workspace_persistence_reload_required",
+    );
+    await persistence.load();
+    await expect(persistence.save(workspace)).resolves.toBeUndefined();
+  });
+
+  it("rejects a late plaintext read after disposal without consulting legacy data", async () => {
+    let releaseRead: (value: string | null) => void = () => {};
+    const bridge: WorkspaceFileBridge = {
+      read: () => new Promise((resolve) => { releaseRead = resolve; }),
+      async swap() { throw new Error("unused"); },
+      async write() { throw new Error("must not migrate a disposed read"); },
+    };
+    const legacy = new MemoryLegacySource();
+    legacy.values.set("primary", { status: "ready", workspace: validWorkspace() });
+    const persistence = createTauriWorkspacePersistence(bridge, legacy);
+    const read = persistence.load();
+    const rejected = expect(read).rejects.toThrow("workspace_session_disposed");
+    persistence.dispose();
+    releaseRead(null);
+
+    await rejected;
+    expect(legacy.removed).toEqual([]);
+    await expect(persistence.load()).rejects.toThrow("workspace_session_disposed");
+    await expect(persistence.save(validWorkspace())).rejects.toThrow("workspace_session_disposed");
+    await expect(persistence.swapWithRecovery()).rejects.toThrow("workspace_session_disposed");
+  });
+
+  it("captures each queued write authorization before waiting for the previous write", async () => {
+    const bridge = new MemoryFileBridge();
+    let authorization = "first-owner";
+    const captured: string[] = [];
+    const written: string[] = [];
+    const authorizedBridge: WorkspaceFileBridge = {
+      read: (slot) => bridge.read(slot),
+      swap: () => bridge.swap(),
+      write: (slot, contents) => bridge.write(slot, contents),
+      captureWrite() {
+        const owner = authorization;
+        captured.push(owner);
+        return async (slot, contents) => {
+          written.push(owner);
+          await bridge.write(slot, contents);
+        };
+      },
+    };
+    const persistence = createTauriWorkspacePersistence(authorizedBridge, new MemoryLegacySource());
+    const first = persistence.save(validWorkspace("First"));
+    authorization = "second-owner";
+    const second = persistence.save(validWorkspace("Second"));
+    authorization = "must-not-be-resigned";
+    expect(captured).toEqual(["first-owner", "second-owner"]);
+
+    await Promise.all([first, second]);
+    expect(written).toEqual(["first-owner", "second-owner"]);
   });
 });
