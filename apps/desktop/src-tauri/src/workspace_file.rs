@@ -976,7 +976,9 @@ pub struct CapsuleCommitResult {
 
 impl CapsuleCommitResult {
     pub(crate) fn already_committed() -> Self {
-        Self { status: CapsuleCommitStatus::Committed }
+        Self {
+            status: CapsuleCommitStatus::Committed,
+        }
     }
 }
 
@@ -1003,25 +1005,44 @@ impl Drop for CapsuleCommitGuard {
     }
 }
 
-fn validate_capsule_commit(contents: &str, input: &crate::capsule::CapsuleNoteInput) -> Result<(), String> {
-    let value: serde_json::Value = serde_json::from_str(contents)
-        .map_err(|_| "capsule_invalid_commit".to_owned())?;
-    let expected_name = if input.name.trim().is_empty() { serde_json::Value::Null }
-        else { serde_json::Value::String(input.name.trim().to_owned()) };
-    let expected_content = if input.content.is_empty() { serde_json::Value::Null }
-        else { serde_json::Value::String(input.content.clone()) };
-    let note_matches = value["nodes"].as_array().is_some_and(|nodes| nodes.iter().any(|node| {
-        node["id"].as_str() == Some(input.node_id.as_str())
-            && node["name"] == expected_name && node["content"] == expected_content
-    }));
-    let capture_matches = value["view"]["timeline"]["captures"].as_array()
-        .is_some_and(|captures| captures.iter().any(|capture| {
-            capture["nodeId"].as_str() == Some(input.node_id.as_str())
-                && capture["capturedAtMs"].as_u64() == Some(input.captured_at_ms)
-                && capture["utcOffsetMinutes"].as_i64() == Some(i64::from(input.utc_offset_minutes))
-        }));
-    if note_matches && capture_matches { Ok(()) }
-        else { Err("capsule_invalid_commit".to_owned()) }
+fn validate_capsule_commit(
+    contents: &str,
+    input: &crate::capsule::CapsuleNoteInput,
+) -> Result<(), String> {
+    let value: serde_json::Value =
+        serde_json::from_str(contents).map_err(|_| "capsule_invalid_commit".to_owned())?;
+    let expected_name = if input.name.trim().is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::Value::String(input.name.trim().to_owned())
+    };
+    let expected_content = if input.content.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::Value::String(input.content.clone())
+    };
+    let note_matches = value["nodes"].as_array().is_some_and(|nodes| {
+        nodes.iter().any(|node| {
+            node["id"].as_str() == Some(input.node_id.as_str())
+                && node["name"] == expected_name
+                && node["content"] == expected_content
+        })
+    });
+    let capture_matches = value["view"]["timeline"]["captures"]
+        .as_array()
+        .is_some_and(|captures| {
+            captures.iter().any(|capture| {
+                capture["nodeId"].as_str() == Some(input.node_id.as_str())
+                    && capture["capturedAtMs"].as_u64() == Some(input.captured_at_ms)
+                    && capture["utcOffsetMinutes"].as_i64()
+                        == Some(i64::from(input.utc_offset_minutes))
+            })
+        });
+    if note_matches && capture_matches {
+        Ok(())
+    } else {
+        Err("capsule_invalid_commit".to_owned())
+    }
 }
 
 pub(crate) async fn commit_capsule_contents(
@@ -1040,30 +1061,49 @@ pub(crate) async fn commit_capsule_contents(
     let node_id = input.node_id.clone();
     let contents = Zeroizing::new(contents);
     let write_result = tauri::async_runtime::spawn_blocking(move || {
-        let _guard = operation_lock.lock()
+        let _guard = operation_lock
+            .lock()
             .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
-        if let Err(error) = crate::capsule::ensure_submission(&app_for_commit, &authority_for_commit, &input.node_id) {
-            if crate::capsule::ensure_saved_submission(&app_for_commit, &authority_for_commit, &input.node_id).is_ok() {
+        if let Err(error) = crate::capsule::ensure_submission(
+            &app_for_commit,
+            &authority_for_commit,
+            &input.node_id,
+        ) {
+            if crate::capsule::ensure_saved_submission(
+                &app_for_commit,
+                &authority_for_commit,
+                &input.node_id,
+            )
+            .is_ok()
+            {
                 return Ok(AtomicWriteStatus::Committed);
             }
             return Err(error);
         }
         recover_pending_migration(&store)?;
         let active_key = active_workspace_key(&store, data_key.as_deref())?;
-        let normalized = Zeroizing::new(normalize_storage_envelope(&contents)
-            .map_err(|_| "capsule_invalid_commit".to_owned())?);
+        let normalized = Zeroizing::new(
+            normalize_storage_envelope(&contents)
+                .map_err(|_| "capsule_invalid_commit".to_owned())?,
+        );
         validate_capsule_commit(&normalized, &input)?;
         let serialized = Zeroizing::new(serialize_workspace_for_slot(
-            &normalized, WorkspaceFileSlot::Primary, active_key,
+            &normalized,
+            WorkspaceFileSlot::Primary,
+            active_key,
         )?);
         fs::create_dir_all(&store.base_directory).map_err(|error| error.to_string())?;
         // The request is admitted using its original authority. Revocation is
         // independent of this I/O queue; an admitted write may finish locked,
         // but a new owner cannot activate until this operation releases it.
         crate::capsule::ensure_submission(&app_for_commit, &authority_for_commit, &input.node_id)?;
-        let mut commit_guard = CapsuleCommitGuard { app: app_for_commit.clone(), settled: false };
+        let mut commit_guard = CapsuleCommitGuard {
+            app: app_for_commit.clone(),
+            settled: false,
+        };
         let result = write_atomically_commit_aware(
-            &store.path(WorkspaceFileSlot::Primary), serialized.as_bytes(),
+            &store.path(WorkspaceFileSlot::Primary),
+            serialized.as_bytes(),
         );
         let status = match result {
             Ok(status) => status,
@@ -1075,15 +1115,21 @@ pub(crate) async fn commit_capsule_contents(
         if status == AtomicWriteStatus::RecoveryRequired {
             crate::capsule::quarantine(&app_for_commit);
         }
-        crate::capsule::finish_submission(&app_for_commit, &authority_for_commit, &input.node_id, true);
+        crate::capsule::finish_submission(
+            &app_for_commit,
+            &authority_for_commit,
+            &input.node_id,
+            true,
+        );
         commit_guard.settled = true;
         Ok::<_, String>(status)
-    }).await;
+    })
+    .await;
     let status = match write_result {
-        Ok(Ok(AtomicWriteStatus::Committed)) => {
-            capsule_commit_status(AtomicWriteStatus::Committed,
-                crate::capsule::ensure_owner_context(app, authority).is_ok())
-        }
+        Ok(Ok(AtomicWriteStatus::Committed)) => capsule_commit_status(
+            AtomicWriteStatus::Committed,
+            crate::capsule::ensure_owner_context(app, authority).is_ok(),
+        ),
         Ok(Err(error)) => {
             crate::capsule::finish_submission(app, authority, &node_id, false);
             return Err(error);
@@ -2396,7 +2442,10 @@ fn should_emit_workspace_revocation_event(
     reason: &str,
 ) -> bool {
     let explicit_plaintext_transaction = !encrypted
-        && matches!(reason, "workspace_encryption_enable" | "workspace_restore_commit");
+        && matches!(
+            reason,
+            "workspace_encryption_enable" | "workspace_restore_commit"
+        );
     was_unlocked || (had_owner && !explicit_plaintext_transaction)
 }
 
@@ -2417,7 +2466,8 @@ pub fn revoke_workspace_access(app: &AppHandle, reason: &str) -> bool {
     let encrypted = workspace_store(app)
         .map(|store| store.vault_path().try_exists().unwrap_or(true))
         .unwrap_or(true);
-    let emit_event = should_emit_workspace_revocation_event(was_unlocked, had_owner, encrypted, reason);
+    let emit_event =
+        should_emit_workspace_revocation_event(was_unlocked, had_owner, encrypted, reason);
     if emit_event {
         let _ = app.emit(WORKSPACE_LOCKED_EVENT, reason);
     }
@@ -5261,10 +5311,22 @@ mod tests {
 
     #[test]
     fn capsule_commit_never_reports_a_completed_write_as_unsaved_after_lock() {
-        assert_eq!(capsule_commit_status(AtomicWriteStatus::Committed, true), CapsuleCommitStatus::Committed);
-        assert_eq!(capsule_commit_status(AtomicWriteStatus::Committed, false), CapsuleCommitStatus::CommittedLocked);
-        assert_eq!(capsule_commit_status(AtomicWriteStatus::RecoveryRequired, true), CapsuleCommitStatus::RecoveryRequired);
-        assert_eq!(capsule_commit_status(AtomicWriteStatus::RecoveryRequired, false), CapsuleCommitStatus::RecoveryRequired);
+        assert_eq!(
+            capsule_commit_status(AtomicWriteStatus::Committed, true),
+            CapsuleCommitStatus::Committed
+        );
+        assert_eq!(
+            capsule_commit_status(AtomicWriteStatus::Committed, false),
+            CapsuleCommitStatus::CommittedLocked
+        );
+        assert_eq!(
+            capsule_commit_status(AtomicWriteStatus::RecoveryRequired, true),
+            CapsuleCommitStatus::RecoveryRequired
+        );
+        assert_eq!(
+            capsule_commit_status(AtomicWriteStatus::RecoveryRequired, false),
+            CapsuleCommitStatus::RecoveryRequired
+        );
     }
 
     #[test]
@@ -5758,19 +5820,35 @@ mod tests {
     #[test]
     fn plaintext_explicit_transactions_revoke_without_reloading_their_owner_early() {
         for reason in ["workspace_encryption_enable", "workspace_restore_commit"] {
-            assert!(!should_emit_workspace_revocation_event(false, true, false, reason));
-            assert!(should_emit_workspace_revocation_event(true, true, true, reason));
-            assert!(should_emit_workspace_revocation_event(false, true, true, reason));
+            assert!(!should_emit_workspace_revocation_event(
+                false, true, false, reason
+            ));
+            assert!(should_emit_workspace_revocation_event(
+                true, true, true, reason
+            ));
+            assert!(should_emit_workspace_revocation_event(
+                false, true, true, reason
+            ));
         }
     }
 
     #[test]
     fn plaintext_system_and_terminal_locks_still_notify_the_main_security_gate() {
-        for reason in ["windows_session_lock", "windows_suspend", "manual", "idle_timeout",
-            "workspace_restore_committed_locked", "workspace_restore_recovery_required"] {
-            assert!(should_emit_workspace_revocation_event(false, true, false, reason));
+        for reason in [
+            "windows_session_lock",
+            "windows_suspend",
+            "manual",
+            "idle_timeout",
+            "workspace_restore_committed_locked",
+            "workspace_restore_recovery_required",
+        ] {
+            assert!(should_emit_workspace_revocation_event(
+                false, true, false, reason
+            ));
         }
-        assert!(!should_emit_workspace_revocation_event(false, false, false, "manual"));
+        assert!(!should_emit_workspace_revocation_event(
+            false, false, false, "manual"
+        ));
     }
 
     #[test]
