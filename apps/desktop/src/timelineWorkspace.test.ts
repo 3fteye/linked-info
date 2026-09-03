@@ -67,6 +67,20 @@ describe("timeline note transactions", () => {
     expect(second.workspace.references).not.toContainEqual({ sourceNodeId: id(10), targetNodeId: id(11) });
   });
 
+  it("preserves a user-created chain gap when inserting an older date", () => {
+    const newId = ids();
+    const first = captureTimelineNote(emptyWorkspace(), input(10, "2026-09-01T03:00:00Z"), labels, newId);
+    const third = captureTimelineNote(first.workspace, input(12), labels, newId);
+    const disconnected = { ...third.workspace, references: third.workspace.references.filter((ref) =>
+      ref.sourceNodeId !== first.dayNodeId || ref.targetNodeId !== third.dayNodeId,
+    ) };
+    const second = captureTimelineNote(disconnected, input(11, "2026-09-02T03:00:00Z"), labels, newId);
+    expect(second.workspace.references).toEqual([
+      ...disconnected.references,
+      { sourceNodeId: id(11), targetNodeId: second.dayNodeId },
+    ]);
+  });
+
   it("is idempotent for a lost acknowledgement and rejects reuse with different content", () => {
     const newId = ids();
     const request = input(10);

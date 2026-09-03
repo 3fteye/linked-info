@@ -204,13 +204,18 @@ export function captureTimelineNote(
     const index = days.findIndex((item) => item.date === day);
     const before = days[index - 1];
     const after = days[index + 1];
-    if (before !== undefined && after !== undefined) {
+    const linkedNeighbors = before !== undefined && after !== undefined &&
+      references.some((ref) => ref.sourceNodeId === before.nodeId && ref.targetNodeId === after.nodeId);
+    if (linkedNeighbors) {
       references = references.filter((ref: NodeReference) =>
         ref.sourceNodeId !== before.nodeId || ref.targetNodeId !== after.nodeId,
       );
     }
-    if (before !== undefined) ensureReference(before.nodeId, dayNodeId);
-    if (after !== undefined) ensureReference(dayNodeId, after.nodeId);
+    // A gap is user data too: inserting an older day must not reconnect it.
+    if (before === undefined || after === undefined || linkedNeighbors) {
+      if (before !== undefined) ensureReference(before.nodeId, dayNodeId);
+      if (after !== undefined) ensureReference(dayNodeId, after.nodeId);
+    }
   }
   let datePlacement = layout.find((item) => item.nodeId === dayNodeId);
   if (datePlacement === undefined && previousDay === undefined) {
