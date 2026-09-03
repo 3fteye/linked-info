@@ -130,7 +130,6 @@ jobs:
         run: node scripts/check-sensitive-logging.mjs
 
       - name: Test native capsule runner safety gates
-        working-directory: apps/desktop
         run: node --test scripts/native-capsule-safety.test.mjs
 
       - name: Check dependency licenses and Rust sources

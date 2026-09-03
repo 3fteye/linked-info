@@ -4,7 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
-const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
+const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const desktop = path.join(repository, "apps/desktop");
 const tools = [
   {

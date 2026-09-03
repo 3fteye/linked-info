@@ -76,7 +76,6 @@ jobs:
         run: Copy-Item -LiteralPath apps/desktop/src-tauri/resources/llama-runtime -Destination target/release/llama-runtime -Recurse -Force
 
       - name: Test native capsule runner safety gates
-        working-directory: apps/desktop
         run: node --test scripts/native-capsule-safety.test.mjs
 
       - name: Exercise native capsule in isolated Windows runner
