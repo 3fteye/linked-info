@@ -272,6 +272,8 @@ cargo test -p linked-info-desktop --lib
 
 仅测试 EXE 返回明确的 `STATUS_ENTRYPOINT_NOT_FOUND` 数值状态时，runner 才对该精确 EXE 收集 PE 导入表与匹配的 Windows 事件，并保留原测试退出码。普通断言失败或编译错误不运行加载诊断，不按修改时间选择可能陈旧的二进制文件。
 
+`.github/scripts/test-windows-desktop-fixtures.ps1` 在 Windows CI 的 Rust 安装之前运行命令替身回归，覆盖单次 Cargo/绝对 runner、清单处理顺序、精确 EXE 与参数、非法产物拒绝、退出码保留、普通失败不诊断，以及缺少 dumpbin 时仍筛选 Windows 事件。夹具不调用编译器、SDK 工具、实际测试 EXE 或系统事件日志，不引入第三方测试框架。
+
 Worker 的 wasm 检查：
 
 ```powershell
