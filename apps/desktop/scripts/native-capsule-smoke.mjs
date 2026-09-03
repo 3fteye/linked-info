@@ -377,8 +377,28 @@ async function run() {
       requireCondition(initial.version === 6 && initial.nodeCount === 0, "native_capsule_workspace_not_empty");
       initialCanvasId = initial.activeCanvasId;
       const collapsed = await windowInfo("capsule");
-      requireCondition(collapsed.visible && collapsed.topmost && !collapsed.captionStyle,
+      report.summary.collapsedWindow = {
+        visible: collapsed.visible,
+        topmost: collapsed.topmost,
+        captionStyle: collapsed.captionStyle,
+        styleBits: collapsed.styleBits,
+        extendedStyleBits: collapsed.extendedStyleBits,
+        width: collapsed.width,
+        height: collapsed.height,
+        clientWidth: collapsed.clientWidth,
+        clientHeight: collapsed.clientHeight,
+        clientTopInset: collapsed.clientTopInset,
+        dpi: collapsed.dpi,
+      };
+      requireCondition(collapsed.visible && collapsed.topmost,
         "native_capsule_window_style_invalid");
+      // Tao 0.35 keeps WS_CAPTION for top-level undecorated windows and
+      // removes the caption through WM_NCCALCSIZE. Windows 11 may retain a
+      // one-DIP shadow inset; inspect the actual client top, not that flag.
+      requireCondition(
+        collapsed.clientTopInset >= 0 && collapsed.clientTopInset <= Math.ceil(collapsed.dpi / 96) + 1,
+        "native_capsule_native_caption_present",
+      );
       requireCondition(
         Math.abs(collapsed.clientWidth * 96 / collapsed.dpi - 220) <= 4 &&
           Math.abs(collapsed.clientHeight * 96 / collapsed.dpi - 56) <= 4,
@@ -388,9 +408,16 @@ async function run() {
       await capsule.locator(".capsule-toggle").click();
       await capsule.locator(".capsule-editor textarea").waitFor({ state: "visible" });
       const expanded = await windowInfo("capsule");
+      report.summary.expandedWindow = {
+        clientWidth: expanded.clientWidth,
+        clientHeight: expanded.clientHeight,
+        clientTopInset: expanded.clientTopInset,
+        dpi: expanded.dpi,
+      };
       requireCondition(
         Math.abs(expanded.clientWidth * 96 / expanded.dpi - 420) <= 4 &&
-          Math.abs(expanded.clientHeight * 96 / expanded.dpi - 360) <= 4,
+          Math.abs(expanded.clientHeight * 96 / expanded.dpi - 360) <= 4 &&
+          expanded.clientTopInset >= 0 && expanded.clientTopInset <= Math.ceil(expanded.dpi / 96) + 1,
         "native_capsule_expanded_size_invalid",
       );
       await native("Drag", "capsule");

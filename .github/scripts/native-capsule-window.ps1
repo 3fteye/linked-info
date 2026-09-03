@@ -175,9 +175,12 @@ namespace LinkedInfo.CiCapsule {
         public int height { get; set; }
         public int clientWidth { get; set; }
         public int clientHeight { get; set; }
+        public int clientTopInset { get; set; }
         public bool visible { get; set; }
         public bool topmost { get; set; }
         public bool captionStyle { get; set; }
+        public long styleBits { get; set; }
+        public long extendedStyleBits { get; set; }
         public uint dpi { get; set; }
     }
 
@@ -287,6 +290,9 @@ namespace LinkedInfo.CiCapsule {
             Rect bounds, client;
             if (!GetWindowRect(window, out bounds) || !GetClientRect(window, out client))
                 throw new InvalidOperationException("native_capsule_geometry_unavailable");
+            var clientOrigin = new Point();
+            if (!ClientToScreen(window, ref clientOrigin))
+                throw new InvalidOperationException("native_capsule_geometry_unavailable");
             uint dpi = GetDpiForWindow(window);
             if (dpi == 0)
                 throw new InvalidOperationException("native_capsule_dpi_unavailable");
@@ -294,8 +300,11 @@ namespace LinkedInfo.CiCapsule {
                 role = role, handle = window.ToInt64(), x = bounds.Left, y = bounds.Top,
                 width = bounds.Right - bounds.Left, height = bounds.Bottom - bounds.Top,
                 clientWidth = client.Right - client.Left, clientHeight = client.Bottom - client.Top,
+                clientTopInset = clientOrigin.Y - bounds.Top,
                 visible = IsWindowVisible(window), topmost = (Style(window, -20) & 0x8) != 0,
-                captionStyle = (Style(window, -16) & 0x00c00000) != 0, dpi = dpi
+                captionStyle = (Style(window, -16) & 0x00c00000) != 0, dpi = dpi,
+                styleBits = Style(window, -16) & 0xffffffffL,
+                extendedStyleBits = Style(window, -20) & 0xffffffffL
             };
         }
 

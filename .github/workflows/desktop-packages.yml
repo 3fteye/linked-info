@@ -22,6 +22,10 @@ jobs:
 
       - name: Cache Rust build data
         uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+        with:
+          # Native smoke failures must not discard a successful release build.
+          # Only Cargo data is cached, never app data or WebView profiles.
+          cache-on-failure: true
 
       - name: Check Rust lockfile consistency
         shell: pwsh
