@@ -85,7 +85,7 @@ flowchart LR
 - 桌面端保持单实例；第二次启动只显示并聚焦已有主窗口。
 - 浏览器开发模式使用 `localStorage`，并作为旧版桌面数据的一次性迁移来源。
 
-悬浮胶囊运行时代码 `8150a63` 已通过本轮两项 Windows CI 作业，普通与安全审查结果及一项已有 Edge 用例的重试波动见[胶囊验证记录](docs/capsule-notes.md#验证记录)。原生 Windows 实机验收、本机软件更新及 PR 合并仍未完成。主窗口通过 Rust 签发的 `ownerId` 独占正式工作区快照、保存队列与历史；读、写和恢复交换必须携带原 owner，不能由旧 React 实例重新取得 permit。胶囊是独立入口和独立窗口，只持有当前有界草稿，不加载整个工作区。Rust 同时核对真实窗口与 WebView label，以专属白名单隔离胶囊和主窗口命令。
+悬浮胶囊已实现独立窗口和主窗口写入所有权；正式 EXE 的首轮完整原生自动验收已通过，最新 CI、云端审查、已有 Edge 波动与尚待人工验证的边界统一见[胶囊验证记录](docs/capsule-notes.md#验证记录)。本机软件更新及 PR 合并仍未进行。主窗口通过 Rust 签发的 `ownerId` 独占正式工作区快照、保存队列与历史；读、写和恢复交换必须携带原 owner，不能由旧 React 实例重新取得 permit。胶囊是独立入口和独立窗口，只持有当前有界草稿，不加载整个工作区。Rust 同时核对真实窗口与 WebView label，以专属白名单隔离胶囊和主窗口命令。
 
 胶囊失焦或 `Ctrl+Enter` 后把稳定记录身份交给 Rust 的单条请求中转，主窗口从权威快照准备时间画布事务，再通过 `commit_capsule_note` 落盘；Rust 复验原 owner、context、permit、访问代次及节点/时间索引匹配，持久化确认后才返回成功并进入一次历史事务。明确失败保留可编辑草稿；提交结果未知时禁止自动重提及旧快照回写，`recoveryRequired` 进入需真正重启应用进程检查的失败关闭状态。主窗口专属 `restart_application` 复用退出的撤权、秘密剪贴板与模型/扩展清理后执行原生重启；WebView 刷新或 `location.reload()` 不能清除 Rust 进程级隔离。普通轮询不算用户活动。
 
@@ -267,6 +267,10 @@ cargo test -p linked-info-contracts -p linked-info-domain -p linked-info-storage
 cargo check -p linked-info-desktop
 cargo test -p linked-info-desktop --lib
 ```
+
+上述命令描述检查目标；本项目当前执行约定仍为 GitHub Actions，不在用户机器构建或跑测试。Windows CI 的 lib-test harness 通过 `.github/scripts/test-windows-desktop.ps1` 先用 Cargo JSON 输出确定唯一测试 EXE，再用 Windows SDK `mt.exe` 给该 EXE 嵌入并验证与 Tauri 默认一致的 Common Controls v6 清单，最后执行同一套 `cargo test`。Tauri 自动资源只覆盖正式 binary；新增真实 AppHandle 路径把 `TaskDialogIndirect` 引入测试后，缺少该清单会在测试开始前发生入口加载错误。只修改临时测试 EXE，不改变生产构建、测试函数或发布包。依据 [TaskDialogIndirect 要求](https://learn.microsoft.com/en-us/windows/win32/api/commctrl/nf-commctrl-taskdialogindirect) 与 [Windows 清单工具](https://learn.microsoft.com/en-us/windows/win32/sbscs/mt-exe)。
+
+若 Cargo 报明确的 `STATUS_ENTRYPOINT_NOT_FOUND`，wrapper 才对错误中那个精确测试 EXE 收集 PE 导入表与匹配的 Windows 事件，并保留原测试退出码。普通断言失败或编译错误不运行加载诊断，不按修改时间选择可能陈旧的二进制文件。
 
 Worker 的 wasm 检查：
 

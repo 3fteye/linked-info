@@ -1,3 +1,5 @@
+param([string]$TestBinary)
+
 $ErrorActionPreference = 'Stop'
 
 # Only inspect synthetic CI test binaries; never run this on a user machine.
@@ -6,11 +8,14 @@ if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hoste
 }
 
 $repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
-$testDirectory = Join-Path $repoRoot 'target/debug/deps'
-$testBinary = Get-ChildItem -LiteralPath $testDirectory -Filter 'linked_info_desktop_lib-*.exe' -File |
-    Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
-if ($null -eq $testBinary) { throw 'windows_test_loader_binary_missing' }
-Write-Output "test-loader-binary=$($testBinary.Name)"
+$testDirectory = [IO.Path]::GetFullPath((Join-Path $repoRoot 'target/debug/deps'))
+$resolvedTestBinary = Get-Item -LiteralPath $TestBinary
+if ($resolvedTestBinary.PSIsContainer -or $resolvedTestBinary.DirectoryName -ne $testDirectory -or
+    $resolvedTestBinary.Name -notmatch '^linked_info_desktop_lib-[0-9a-f]+\.exe$' -or
+    ($resolvedTestBinary.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+    throw 'windows_test_loader_binary_invalid'
+}
+Write-Output "test-loader-binary=$($resolvedTestBinary.Name)"
 
 $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
 $installations = & $vswhere -all -prerelease -products '*' -format json | ConvertFrom-Json
@@ -28,9 +33,9 @@ foreach ($installation in $installations) {
 # Missing diagnostic tools must not suppress Windows' own loader events.
 if ($null -ne $dumpbin) {
     # PE imports contain binary/symbol names, not application payloads.
-    & $dumpbin /imports $testBinary.FullName
+    & $dumpbin /imports $resolvedTestBinary.FullName
     Write-Output "test-loader-imports-exit=$LASTEXITCODE"
-    & $dumpbin /headers $testBinary.FullName
+    & $dumpbin /headers $resolvedTestBinary.FullName
     Write-Output "test-loader-headers-exit=$LASTEXITCODE"
 } else {
     Write-Output 'test-loader-dumpbin-unavailable'
@@ -46,7 +51,7 @@ foreach ($logName in @('Application', 'System')) {
     } -MaxEvents 200 -ErrorAction SilentlyContinue
     foreach ($event in $events) {
         if ($event.ProviderName -in @('Application Error', 'Application Popup', 'Windows Error Reporting') -and
-            $event.Message -like "*$($testBinary.Name)*") {
+            $event.Message -like "*$($resolvedTestBinary.Name)*") {
             $eventCount += 1
             Write-Output "test-loader-event=$($event.Id) provider=$($event.ProviderName)"
             Write-Output $event.Message
