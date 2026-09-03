@@ -268,9 +268,9 @@ cargo check -p linked-info-desktop
 cargo test -p linked-info-desktop --lib
 ```
 
-上述命令描述检查目标；本项目当前执行约定仍为 GitHub Actions，不在用户机器构建或跑测试。Windows CI 的 lib-test harness 通过 `.github/scripts/test-windows-desktop.ps1` 先用 Cargo JSON 输出确定唯一测试 EXE，再用 Windows SDK `mt.exe` 给该 EXE 嵌入并验证与 Tauri 默认一致的 Common Controls v6 清单，最后执行同一套 `cargo test`。Tauri 自动资源只覆盖正式 binary；新增真实 AppHandle 路径把 `TaskDialogIndirect` 引入测试后，缺少该清单会在测试开始前发生入口加载错误。只修改临时测试 EXE，不改变生产构建、测试函数或发布包。依据 [TaskDialogIndirect 要求](https://learn.microsoft.com/en-us/windows/win32/api/commctrl/nf-commctrl-taskdialogindirect) 与 [Windows 清单工具](https://learn.microsoft.com/en-us/windows/win32/sbscs/mt-exe)。
+上述命令描述检查目标；本项目当前执行约定仍为 GitHub Actions，不在用户机器构建或跑测试。Windows CI 的 `.github/scripts/test-windows-desktop.ps1` 只调用一次 Cargo，并为本次命令配置绝对路径的测试 runner。Cargo 完成链接和 DLL 搜索环境准备后，把唯一测试 EXE 交给 `run-windows-desktop-test.ps1`；runner 严格校验路径，用 Windows SDK `mt.exe` 嵌入并验证 Common Controls v6 清单，再直接执行同一 EXE 和原参数。不能先补清单后再次调用 Cargo，否则重新链接可能覆盖清单。Tauri 自动资源只覆盖正式 binary；真实 AppHandle 路径把 `TaskDialogIndirect` 引入 lib-test 后，缺少该清单会在测试开始前发生入口加载错误。只修改临时测试 EXE，不改变生产构建、测试函数或发布包。依据 [TaskDialogIndirect 要求](https://learn.microsoft.com/en-us/windows/win32/api/commctrl/nf-commctrl-taskdialogindirect) 与 [Windows 清单工具](https://learn.microsoft.com/en-us/windows/win32/sbscs/mt-exe)。
 
-若 Cargo 报明确的 `STATUS_ENTRYPOINT_NOT_FOUND`，wrapper 才对错误中那个精确测试 EXE 收集 PE 导入表与匹配的 Windows 事件，并保留原测试退出码。普通断言失败或编译错误不运行加载诊断，不按修改时间选择可能陈旧的二进制文件。
+仅测试 EXE 返回明确的 `STATUS_ENTRYPOINT_NOT_FOUND` 数值状态时，runner 才对该精确 EXE 收集 PE 导入表与匹配的 Windows 事件，并保留原测试退出码。普通断言失败或编译错误不运行加载诊断，不按修改时间选择可能陈旧的二进制文件。
 
 Worker 的 wasm 检查：
 
