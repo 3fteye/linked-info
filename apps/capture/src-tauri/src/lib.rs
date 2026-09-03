@@ -37,7 +37,10 @@ async fn capture_get(
 async fn capture_create(state: State<'_, CaptureInbox>) -> Result<CaptureRecord, String> {
     // Allocate an empty durable identity before the editor accepts text. A lost
     // creation response cannot duplicate or lose an already-confirmed body.
-    with_inbox(state, |inbox| inbox.create_draft(String::new(), String::new())).await
+    with_inbox(state, |inbox| {
+        inbox.create_draft(String::new(), String::new())
+    })
+    .await
 }
 
 #[tauri::command]

@@ -4,7 +4,9 @@ use std::{
     time::Duration,
 };
 
-use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::{
+    Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
+};
 
 use crate::{
     CaptureRecord, CaptureState, CaptureSummary, ClaimedCapture, CommitIntent, DATABASE_FILE_NAME,
@@ -114,7 +116,7 @@ impl Inbox {
                 "UPDATE captures SET revision = ?2, state = 'draft', name = ?3,
                     content = ?4, captured_at_ms = NULL, utc_offset_minutes = NULL, failure = NULL
                  WHERE id = ?1",
-                params![id, revision, name, content],
+                params![id, sql_integer(revision)?, name, content],
             )?;
             Ok(required_stored(transaction, id)?.record)
         })
@@ -141,7 +143,12 @@ impl Inbox {
             transaction.execute(
                 "UPDATE captures SET revision = ?2, state = 'pending', captured_at_ms = ?3,
                     utc_offset_minutes = ?4, failure = NULL WHERE id = ?1",
-                params![id, revision, captured_at_ms, utc_offset_minutes],
+                params![
+                    id,
+                    sql_integer(revision)?,
+                    sql_integer(captured_at_ms)?,
+                    utc_offset_minutes
+                ],
             )?;
             Ok(required_stored(transaction, id)?.record)
         })
@@ -159,10 +166,13 @@ impl Inbox {
             while let Some(row) = rows.next()? {
                 let summary = CaptureSummary {
                     id: row.get(0)?,
-                    revision: row.get(1)?,
+                    revision: unsigned_from_sql(row.get(1)?)?,
                     state: CaptureState::parse(&row.get::<_, String>(2)?)?,
                     name: row.get(3)?,
-                    captured_at_ms: row.get(4)?,
+                    captured_at_ms: row
+                        .get::<_, Option<i64>>(4)?
+                        .map(unsigned_from_sql)
+                        .transpose()?,
                     utc_offset_minutes: row.get(5)?,
                     failure: row
                         .get::<_, Option<String>>(6)?
@@ -183,16 +193,18 @@ impl Inbox {
             if let Some(stored) = read_stored(transaction, id)? {
                 return Ok(Some(stored.record));
             }
-            Ok(receipt_revision(transaction, id)?.map(|revision| CaptureRecord {
-                id: id.to_owned(),
-                revision,
-                state: CaptureState::Archived,
-                name: String::new(),
-                content: String::new(),
-                captured_at_ms: None,
-                utc_offset_minutes: None,
-                failure: None,
-            }))
+            Ok(
+                receipt_revision(transaction, id)?.map(|revision| CaptureRecord {
+                    id: id.to_owned(),
+                    revision,
+                    state: CaptureState::Archived,
+                    name: String::new(),
+                    content: String::new(),
+                    captured_at_ms: None,
+                    utc_offset_minutes: None,
+                    failure: None,
+                }),
+            )
         })
     }
 
@@ -349,7 +361,7 @@ impl Inbox {
             matching_intent(transaction, intent)?;
             transaction.execute(
                 "INSERT INTO receipts (id, revision) VALUES (?1, ?2)",
-                params![intent.id, intent.revision],
+                params![intent.id, sql_integer(intent.revision)?],
             )?;
             transaction.execute("DELETE FROM captures WHERE id = ?1", [&intent.id])?;
             Ok(())
@@ -399,11 +411,14 @@ fn read_stored(connection: &Connection, id: &str) -> Result<Option<StoredCapture
     };
     let record = CaptureRecord {
         id: row.get(0)?,
-        revision: row.get(1)?,
+        revision: unsigned_from_sql(row.get(1)?)?,
         state: CaptureState::parse(&row.get::<_, String>(2)?)?,
         name: row.get(3)?,
         content: row.get(4)?,
-        captured_at_ms: row.get(5)?,
+        captured_at_ms: row
+            .get::<_, Option<i64>>(5)?
+            .map(unsigned_from_sql)
+            .transpose()?,
         utc_offset_minutes: row.get(6)?,
         failure: row
             .get::<_, Option<String>>(7)?
@@ -424,7 +439,11 @@ fn read_stored(connection: &Connection, id: &str) -> Result<Option<StoredCapture
     };
     validate_summary(&summary).map_err(|_| InboxError::Corrupt)?;
     model::validate_text(&record.name, &record.content).map_err(|_| InboxError::Corrupt)?;
-    if matches!(record.state, CaptureState::Claimed | CaptureState::Uncertain) != claim_id.is_some() {
+    if matches!(
+        record.state,
+        CaptureState::Claimed | CaptureState::Uncertain
+    ) != claim_id.is_some()
+    {
         return Err(InboxError::Corrupt);
     }
     if let Some(claim_id) = &claim_id {
@@ -535,15 +554,27 @@ fn outstanding(connection: &Transaction<'_>) -> Result<Option<OutstandingCapture
 }
 
 fn receipt_revision(connection: &Connection, id: &str) -> Result<Option<u64>> {
-    let revision: Option<u64> = connection
+    let revision: Option<i64> = connection
         .query_row("SELECT revision FROM receipts WHERE id = ?1", [id], |row| {
             row.get(0)
         })
         .optional()?;
-    if let Some(revision) = revision {
-        model::validate_revision(revision).map_err(|_| InboxError::Corrupt)?;
-    }
-    Ok(revision)
+    revision
+        .map(|revision| {
+            let revision = unsigned_from_sql(revision)?;
+            model::validate_revision(revision).map_err(|_| InboxError::Corrupt)?;
+            Ok(revision)
+        })
+        .transpose()
+}
+
+// SQLite INTEGER 是有符号 64 位；公共 DTO 仍使用有界无符号整数。
+fn sql_integer(value: u64) -> Result<i64> {
+    i64::try_from(value).map_err(|_| InboxError::InvalidInput)
+}
+
+fn unsigned_from_sql(value: i64) -> Result<u64> {
+    u64::try_from(value).map_err(|_| InboxError::Corrupt)
 }
 
 fn validate_identity(id: &str, revision: u64) -> Result<()> {

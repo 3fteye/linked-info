@@ -61,7 +61,8 @@ pub(crate) fn initialize(transaction: &Transaction<'_>) -> Result<()> {
 
 pub(crate) fn validate(connection: &Connection) -> Result<()> {
     let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    let application: i64 = connection.pragma_query_value(None, "application_id", |row| row.get(0))?;
+    let application: i64 =
+        connection.pragma_query_value(None, "application_id", |row| row.get(0))?;
     if version != SCHEMA_VERSION || application != APPLICATION_ID {
         return Err(InboxError::SchemaUnsupported);
     }
@@ -71,7 +72,7 @@ pub(crate) fn validate(connection: &Connection) -> Result<()> {
         [],
         |row| row.get(0),
     )?;
-    if count != OBJECTS.len() as i64 {
+    if size_from_sql(count)? != OBJECTS.len() {
         return Err(InboxError::Corrupt);
     }
     for (name, expected_sql) in OBJECTS {
@@ -92,9 +93,9 @@ pub(crate) fn validate(connection: &Connection) -> Result<()> {
         [],
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     )?;
-    if records > MAX_UNARCHIVED_RECORDS as i64
-        || bytes > MAX_TOTAL_BYTES as i64
-        || largest > MAX_RECORD_BYTES as i64
+    if size_from_sql(records)? > MAX_UNARCHIVED_RECORDS
+        || size_from_sql(bytes)? > MAX_TOTAL_BYTES
+        || size_from_sql(largest)? > MAX_RECORD_BYTES
     {
         return Err(InboxError::Corrupt);
     }
@@ -115,13 +116,14 @@ pub(crate) fn check_capacity(
     new_bytes: usize,
     adding: bool,
 ) -> Result<()> {
-    let (records, bytes): (usize, usize) = connection.query_row(
+    let (records, bytes): (i64, i64) = connection.query_row(
         "SELECT count(*), coalesce(sum(length(CAST(name AS BLOB))
             + length(CAST(content AS BLOB))), 0) FROM captures",
         [],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
-    let total = bytes
+    let records = size_from_sql(records)?;
+    let total = size_from_sql(bytes)?
         .checked_sub(replaced_bytes)
         .and_then(|bytes| bytes.checked_add(new_bytes))
         .ok_or(InboxError::Corrupt)?;
@@ -129,4 +131,8 @@ pub(crate) fn check_capacity(
         return Err(InboxError::Capacity);
     }
     Ok(())
+}
+
+fn size_from_sql(value: i64) -> Result<usize> {
+    usize::try_from(value).map_err(|_| InboxError::Corrupt)
 }

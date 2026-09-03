@@ -46,7 +46,9 @@ impl From<rusqlite::Error> for InboxError {
     fn from(error: rusqlite::Error) -> Self {
         match error {
             rusqlite::Error::SqliteFailure(error, _) => match error.code {
-                rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked => Self::Busy,
+                rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked => {
+                    Self::Busy
+                }
                 rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase => {
                     Self::Corrupt
                 }

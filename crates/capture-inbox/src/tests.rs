@@ -8,8 +8,8 @@ use std::{
 use rusqlite::{Connection, params};
 
 use crate::{
-    CaptureRecord, CaptureState, ClaimedCapture, CommitIntent, DATABASE_FILE_NAME, FailureCode, Inbox,
-    InboxError, MAX_CONTENT_CHARACTERS, MAX_NAME_CHARACTERS, MAX_UNARCHIVED_RECORDS,
+    CaptureRecord, CaptureState, ClaimedCapture, CommitIntent, DATABASE_FILE_NAME, FailureCode,
+    Inbox, InboxError, MAX_CONTENT_CHARACTERS, MAX_NAME_CHARACTERS, MAX_UNARCHIVED_RECORDS,
 };
 
 struct SyntheticDirectory(PathBuf);
@@ -112,7 +112,12 @@ fn stale_autosave_cannot_overwrite_new_revision_or_resubmit_pending() {
         .unwrap();
     assert_eq!(
         inbox
-            .save_draft(&original.id, original.revision, String::new(), String::new())
+            .save_draft(
+                &original.id,
+                original.revision,
+                String::new(),
+                String::new()
+            )
             .err(),
         Some(InboxError::Conflict)
     );
@@ -439,7 +444,9 @@ fn original_capture_time_controls_queue_order_and_survives_restarts() {
     let earlier = {
         let mut inbox = directory.open();
         let first = draft(&mut inbox);
-        inbox.submit(&first.id, first.revision, 10_000, 480).unwrap();
+        inbox
+            .submit(&first.id, first.revision, 10_000, 480)
+            .unwrap();
         let earlier = draft(&mut inbox);
         inbox
             .submit(&earlier.id, earlier.revision, 1_000, -840)
@@ -476,11 +483,107 @@ fn single_record_and_timestamp_boundaries_are_validated_before_writes() {
     let record = draft(&mut inbox);
     for (time, offset) in [(253_402_300_800_000, 0), (0, 841), (0, -841)] {
         assert_eq!(
-            inbox.submit(&record.id, record.revision, time, offset).err(),
+            inbox
+                .submit(&record.id, record.revision, time, offset)
+                .err(),
             Some(InboxError::InvalidInput)
         );
     }
+    assert_eq!(
+        inbox
+            .submit(&record.id, record.revision, u64::MAX, 0)
+            .err(),
+        Some(InboxError::InvalidInput)
+    );
     assert!(inbox.get(&record.id).unwrap().unwrap() == record);
+}
+
+#[test]
+fn maximum_contract_integers_round_trip_through_sqlite_and_receipts() {
+    let directory = SyntheticDirectory::new();
+    let mut inbox = directory.open();
+    let record = draft(&mut inbox);
+    let initial_revision = crate::MAX_REVISION - 2;
+    directory
+        .raw()
+        .execute(
+            "UPDATE captures SET revision = ?1 WHERE id = ?2",
+            params![i64::try_from(initial_revision).unwrap(), record.id],
+        )
+        .unwrap();
+    let updated = inbox
+        .save_draft(
+            &record.id,
+            initial_revision,
+            record.name,
+            record.content,
+        )
+        .unwrap();
+    let maximum_time = 253_402_300_799_999;
+    let pending = inbox
+        .submit(&updated.id, updated.revision, maximum_time, 840)
+        .unwrap();
+    assert_eq!(pending.revision, crate::MAX_REVISION);
+    assert_eq!(pending.captured_at_ms, Some(253_402_300_799_999));
+    let summary = inbox.list().unwrap().remove(0);
+    assert_eq!(summary.revision, pending.revision);
+    assert_eq!(summary.captured_at_ms, pending.captured_at_ms);
+    let claimed = inbox.claim_next().unwrap().unwrap();
+    let intent = prepare(&mut inbox, &claimed);
+    inbox.confirm_archived(&intent).unwrap();
+    assert_eq!(
+        inbox.archived_revision(&intent.id).unwrap(),
+        Some(crate::MAX_REVISION)
+    );
+}
+
+#[test]
+fn negative_and_out_of_contract_sql_integers_fail_closed_without_rewriting() {
+    for statement in [
+        "UPDATE captures SET revision = ?1 WHERE id = ?2",
+        "UPDATE captures SET captured_at_ms = ?1 WHERE id = ?2",
+    ] {
+        for invalid in [-1_i64, i64::MAX] {
+            let directory = SyntheticDirectory::new();
+            let mut inbox = directory.open();
+            let record = pending(&mut inbox);
+            let raw = directory.raw();
+            raw.pragma_update(None, "ignore_check_constraints", true)
+                .unwrap();
+            raw.execute(statement, params![invalid, record.id])
+                .unwrap();
+            assert_eq!(inbox.list().err(), Some(InboxError::Corrupt));
+            assert_eq!(inbox.get(&record.id).err(), Some(InboxError::Corrupt));
+            let (revision, time): (i64, i64) = raw
+                .query_row(
+                    "SELECT revision, captured_at_ms FROM captures WHERE id = ?1",
+                    [&record.id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert!(revision == invalid || time == invalid);
+        }
+    }
+    for invalid in [-1_i64, i64::MAX] {
+        let directory = SyntheticDirectory::new();
+        let mut inbox = directory.open();
+        let claimed = claim(&mut inbox);
+        let intent = prepare(&mut inbox, &claimed);
+        inbox.confirm_archived(&intent).unwrap();
+        let raw = directory.raw();
+        raw.pragma_update(None, "ignore_check_constraints", true)
+            .unwrap();
+        raw.execute(
+            "UPDATE receipts SET revision = ?1 WHERE id = ?2",
+            params![invalid, intent.id],
+        )
+        .unwrap();
+        assert_eq!(
+            inbox.archived_revision(&intent.id).err(),
+            Some(InboxError::Corrupt)
+        );
+        assert_eq!(inbox.get(&intent.id).err(), Some(InboxError::Corrupt));
+    }
 }
 
 #[test]
@@ -547,7 +650,10 @@ fn total_utf8_budget_failure_does_not_partially_change_draft() {
 fn unknown_versions_extra_schema_and_corrupt_rows_fail_closed() {
     let unknown = SyntheticDirectory::new();
     drop(unknown.open());
-    unknown.raw().pragma_update(None, "user_version", 2).unwrap();
+    unknown
+        .raw()
+        .pragma_update(None, "user_version", 2)
+        .unwrap();
     assert_eq!(
         Inbox::open(unknown.0.clone()).err(),
         Some(InboxError::SchemaUnsupported)
@@ -608,7 +714,7 @@ fn incomplete_sqlite_transaction_rolls_back_on_connection_drop() {
             .unwrap();
         raw.execute(
             "INSERT INTO receipts (id, revision) VALUES (?1, ?2)",
-            params![record.id, record.revision],
+            params![record.id, i64::try_from(record.revision).unwrap()],
         )
         .unwrap();
         // 模拟在正文删除与回执写入后、COMMIT 前丢失连接。
@@ -638,6 +744,12 @@ fn invalid_digest_and_revision_cannot_prepare_or_confirm_a_commit() {
         );
     }
     let intent = prepare(&mut inbox, &claimed);
+    let mut oversized = intent.clone();
+    oversized.revision = u64::MAX;
+    assert_eq!(
+        inbox.confirm_archived(&oversized).err(),
+        Some(InboxError::InvalidInput)
+    );
     let mut stale = intent.clone();
     stale.revision += 1;
     assert_eq!(
@@ -661,5 +773,8 @@ fn public_dtos_reject_unknown_fields_and_use_stable_state_names() {
         serde_json::to_value(FailureCode::DuplicateName).unwrap(),
         "duplicateName"
     );
-    assert_eq!(InboxError::Conflict.to_string(), InboxError::Conflict.code());
+    assert_eq!(
+        InboxError::Conflict.to_string(),
+        InboxError::Conflict.code()
+    );
 }

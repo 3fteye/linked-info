@@ -641,7 +641,10 @@ pub async fn take_capsule_note(
                 .lock()
                 .map_err(|_| "capsule_state_unavailable".to_owned())?;
             if guard.submission.as_ref().is_some_and(|submission| {
-                matches!(submission.result.status, SubmissionStatus::Processing | SubmissionStatus::Unknown)
+                matches!(
+                    submission.result.status,
+                    SubmissionStatus::Processing | SubmissionStatus::Unknown
+                )
             }) {
                 return Ok(None);
             }
@@ -678,7 +681,10 @@ pub async fn take_capsule_note(
             enqueue_note(
                 &mut guard,
                 authority_for_take.clone(),
-                authority_for_take.context_id.clone().expect("ready context"),
+                authority_for_take
+                    .context_id
+                    .clone()
+                    .expect("ready context"),
                 input.clone(),
             )?;
             let submission = guard.submission.as_mut().expect("enqueued capture");
@@ -688,7 +694,8 @@ pub async fn take_capsule_note(
         })();
         if accepted.is_err() {
             let _ = capture_archive::with_inbox(&app_for_take, |inbox| {
-                inbox.release_claim(&claim.id, claim.revision, &claim.claim_id)
+                inbox
+                    .release_claim(&claim.id, claim.revision, &claim.claim_id)
                     .map_err(capture_archive::inbox_error)
             });
         }
@@ -853,7 +860,8 @@ pub async fn commit_capsule_note(
         }
     }
     let (authority, input, claim) = submission_authority(&app, &owner_id, &node_id, true)?;
-    let result = workspace_file::commit_capsule_contents(&app, &authority, input, claim, contents).await;
+    let result =
+        workspace_file::commit_capsule_contents(&app, &authority, input, claim, contents).await;
     if result.is_err() {
         finish_submission(&app, &authority, &node_id, false);
     }
@@ -881,7 +889,12 @@ pub async fn reject_capsule_note(
             let result = if matches!(reason, RejectionReason::Busy) {
                 inbox.release_claim(&claim.id, claim.revision, &claim.claim_id)
             } else {
-                inbox.fail_claim(&claim.id, claim.revision, &claim.claim_id, capture_archive::failure_code(reason))
+                inbox.fail_claim(
+                    &claim.id,
+                    claim.revision,
+                    &claim.claim_id,
+                    capture_archive::failure_code(reason),
+                )
             };
             result.map_err(capture_archive::inbox_error)
         })?;
@@ -896,7 +909,10 @@ pub async fn reject_capsule_note(
             &mut guard,
             &authority,
             &node_id,
-            SubmissionResult { status: SubmissionStatus::Failed, reason: Some(reason) },
+            SubmissionResult {
+                status: SubmissionStatus::Failed,
+                reason: Some(reason),
+            },
         );
         Ok::<_, String>(())
     })
@@ -1020,7 +1036,11 @@ mod tests {
             assert!(!command_allowed("capsule", "capsule", command));
             assert!(command_allowed("main", "main", command));
         }
-        assert!(!command_allowed("capsule", "capsule", "submit_capsule_note"));
+        assert!(!command_allowed(
+            "capsule",
+            "capsule",
+            "submit_capsule_note"
+        ));
         assert!(!command_allowed("main", "capsule", "read_workspace_file"));
         assert!(!command_allowed(
             "untrusted",

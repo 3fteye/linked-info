@@ -1210,7 +1210,8 @@ fn reconcile_capture_archive(
         inbox,
         |input| {
             let contents = Zeroizing::new(
-                store.read(WorkspaceFileSlot::Primary, active_key)?
+                store
+                    .read(WorkspaceFileSlot::Primary, active_key)?
                     .ok_or_else(|| "capsule_invalid_commit".to_owned())?,
             );
             validate_capsule_commit(&contents, input)
@@ -2303,20 +2304,19 @@ pub async fn lock_workspace_with_snapshot(
             if crate::capsule::is_quarantined(&app) {
                 return Ok((AtomicWriteStatus::RecoveryRequired, status));
             }
-            let written = persist_admitted_lock_snapshot(
-                &store,
-                &ticket,
-                &contents,
-                |path, serialized| {
-                    let capture = capture.as_ref().filter(|(_, input)| {
-                        validate_capsule_commit(&contents, input).is_ok()
-                    });
+            let written =
+                persist_admitted_lock_snapshot(&store, &ticket, &contents, |path, serialized| {
+                    let capture = capture
+                        .as_ref()
+                        .filter(|(_, input)| validate_capsule_commit(&contents, input).is_ok());
                     let Some((claim, input)) = capture else {
                         return write_atomically_commit_aware(path, serialized);
                     };
                     crate::capture_archive::with_inbox(&app, |inbox| {
-                        if inbox.archived_revision(&claim.id)
-                            .map_err(crate::capture_archive::inbox_error)? == Some(claim.revision)
+                        if inbox
+                            .archived_revision(&claim.id)
+                            .map_err(crate::capture_archive::inbox_error)?
+                            == Some(claim.revision)
                         {
                             // An earlier ordinary commit already acknowledged
                             // this capture; the lock snapshot is just a save.
@@ -2332,9 +2332,9 @@ pub async fn lock_workspace_with_snapshot(
                             ticket.data_key.as_deref(),
                             write_atomically_commit_aware,
                         )
-                    }).map_err(io::Error::other)
-                },
-            )?;
+                    })
+                    .map_err(io::Error::other)
+                })?;
             if written == AtomicWriteStatus::RecoveryRequired {
                 crate::capsule::quarantine(&app);
             }
@@ -5762,7 +5762,9 @@ mod tests {
         let store = WorkspaceFileStore::new(directory.clone());
         fs::write(store.path(WorkspaceFileSlot::Primary), workspace("before")).unwrap();
         let mut inbox = linked_info_capture_inbox::Inbox::open(directory.join("capture")).unwrap();
-        let draft = inbox.create_draft(String::new(), "capture".to_owned()).unwrap();
+        let draft = inbox
+            .create_draft(String::new(), "capture".to_owned())
+            .unwrap();
         inbox.submit(&draft.id, draft.revision, 0, 0).unwrap();
         let claimed = inbox.claim_next().unwrap().unwrap();
         let (claim, input) = crate::capture_archive::claimed_input(&claimed).unwrap();
@@ -5787,7 +5789,10 @@ mod tests {
             |_, _| Err(io::Error::other("synthetic before-replace failure")),
         );
         assert!(result.is_err());
-        assert_eq!(fs::read(store.path(WorkspaceFileSlot::Primary)).unwrap(), before);
+        assert_eq!(
+            fs::read(store.path(WorkspaceFileSlot::Primary)).unwrap(),
+            before
+        );
         assert_eq!(inbox.get(&claim.id).unwrap().unwrap().content, "capture");
         assert!(inbox.archived_revision(&claim.id).unwrap().is_none());
         assert!(inbox.claim_next().unwrap().is_some());
@@ -5809,16 +5814,24 @@ mod tests {
                 write_atomically(path, bytes)?;
                 Ok(AtomicWriteStatus::RecoveryRequired)
             },
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(result, AtomicWriteStatus::RecoveryRequired);
         assert_eq!(inbox.get(&claim.id).unwrap().unwrap().content, "capture");
         assert!(inbox.claim_next().unwrap().is_none());
         drop(inbox);
-        let mut reopened = linked_info_capture_inbox::Inbox::open(store.base_directory.join("capture")).unwrap();
+        let mut reopened =
+            linked_info_capture_inbox::Inbox::open(store.base_directory.join("capture")).unwrap();
         reconcile_capture_archive(&store, &mut reopened, None).unwrap();
-        assert_eq!(reopened.archived_revision(&claim.id).unwrap(), Some(claim.revision));
+        assert_eq!(
+            reopened.archived_revision(&claim.id).unwrap(),
+            Some(claim.revision)
+        );
         assert!(reopened.get(&claim.id).unwrap().unwrap().content.is_empty());
-        let actual = store.read(WorkspaceFileSlot::Primary, None).unwrap().unwrap();
+        let actual = store
+            .read(WorkspaceFileSlot::Primary, None)
+            .unwrap()
+            .unwrap();
         validate_capsule_commit(&actual, &input).unwrap();
         drop(reopened);
         fs::remove_dir_all(store.base_directory).unwrap();
@@ -5828,17 +5841,42 @@ mod tests {
     fn final_lock_snapshot_archives_the_fixed_claim_before_normal_commit_starts() {
         let (store, mut inbox, claim, input, candidate) = capture_archive_fixture();
         let state = WorkspaceVaultState::default();
-        let ticket = state.admit_lock_snapshot(None, state.access_generation().load(Ordering::Acquire), false).unwrap();
+        let ticket = state
+            .admit_lock_snapshot(
+                None,
+                state.access_generation().load(Ordering::Acquire),
+                false,
+            )
+            .unwrap();
         let result = persist_admitted_lock_snapshot(&store, &ticket, &candidate, |_, bytes| {
             validate_capsule_commit(&candidate, &input).unwrap();
-            write_capture_archive(&store, &mut inbox, &claim, &input, bytes, None, write_atomically_commit_aware)
-                .map_err(io::Error::other)
-        }).unwrap();
+            write_capture_archive(
+                &store,
+                &mut inbox,
+                &claim,
+                &input,
+                bytes,
+                None,
+                write_atomically_commit_aware,
+            )
+            .map_err(io::Error::other)
+        })
+        .unwrap();
         assert_eq!(result, AtomicWriteStatus::Committed);
-        assert_eq!(inbox.archived_revision(&claim.id).unwrap(), Some(claim.revision));
+        assert_eq!(
+            inbox.archived_revision(&claim.id).unwrap(),
+            Some(claim.revision)
+        );
         // The old ordinary commit cannot claim it again after the final save.
         assert!(inbox.claim_next().unwrap().is_none());
-        validate_capsule_commit(&store.read(WorkspaceFileSlot::Primary, None).unwrap().unwrap(), &input).unwrap();
+        validate_capsule_commit(
+            &store
+                .read(WorkspaceFileSlot::Primary, None)
+                .unwrap()
+                .unwrap(),
+            &input,
+        )
+        .unwrap();
         drop(ticket);
         drop(inbox);
         fs::remove_dir_all(store.base_directory).unwrap();
