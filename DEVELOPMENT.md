@@ -89,7 +89,7 @@ flowchart LR
 
 胶囊失焦或 `Ctrl+Enter` 后把稳定记录身份交给 Rust 的单条请求中转，主窗口从权威快照准备时间画布事务，再通过 `commit_capsule_note` 落盘；Rust 复验原 owner、context、permit、访问代次及节点/时间索引匹配，持久化确认后才返回成功并进入一次历史事务。明确失败保留可编辑草稿；提交结果未知时禁止自动重提及旧快照回写，`recoveryRequired` 进入需真正重启应用进程检查的失败关闭状态。主窗口专属 `restart_application` 复用退出的撤权、秘密剪贴板与模型/扩展清理后执行原生重启；WebView 刷新或 `location.reload()` 不能清除 Rust 进程级隔离。普通轮询不算用户活动。
 
-owner 打开使用 `requestId + requestSequence` 排序与取消：仅非秘密计数写入主窗口 `sessionStorage`，Rust 在等待文件队列前登记高水位，旧打开和旧卸载不能覆盖新 owner。手动锁定通过当前 owner 的 `lock_workspace_with_snapshot` 接纳最新普通编辑或已准备的胶囊事务；Rust 先撤权，再以一次原密钥授权完成该快照的提交感知写入。期间新 owner、解锁、恢复和密钥替换均被屏障拒绝；替换前失败仍锁定，替换后持久性不确定要求进程重启。完整状态表和系统强制锁定的保存限制见[最后快照协议](docs/capsule-notes.md#手动锁定的最后快照)。这些追加修复仍待新 head 的 CI 与审查，不沿用旧成功结论。
+owner 打开使用 `requestId + requestSequence` 排序与取消：仅非秘密计数写入主窗口 `sessionStorage`，Rust 在等待文件队列前登记高水位，旧打开和旧卸载不能覆盖新 owner。手动锁定通过当前 owner 的 `lock_workspace_with_snapshot` 接纳最新普通编辑或已准备的胶囊事务；Rust 先撤权，再以一次原密钥授权完成该快照的提交感知写入。期间新 owner、解锁、恢复和密钥替换均被屏障拒绝；替换前失败仍锁定，替换后持久性不确定要求进程重启。恢复交换及其他非胶囊批量事务仍立即锁定，但不附加可能陈旧的快照。完整状态表见[最后快照协议](docs/capsule-notes.md#手动锁定的最后快照)，本轮 CI 与审查证据见同页验证记录。
 
 未提交草稿仅驻留内存，收起保留并提示未保存；有草稿或未解决请求时禁用界面隐藏按钮。锁定、工作区替换及退出清理旧草稿和请求，系统锁定不等待胶囊保存；胶囊原生关闭只隐藏，主窗口仍按既有 flush 后统一退出流程工作，首版没有托盘驻留。未加密工作区显示明文保存提示。窗口尺寸、命令协议和仍待执行的验证清单见 [悬浮胶囊便签实施基线](docs/capsule-notes.md)。
 

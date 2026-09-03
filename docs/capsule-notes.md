@@ -106,16 +106,18 @@ Windows 会话锁定、休眠和硬件中断仍不能保证保存尚未送到 Ru
 
 ## 验证记录
 
-本节冻结 2026-09-03 的运行时代码与验证状态；后续文档提交不改变这里标明的代码基线。
+本节冻结 2026-09-03 的已验证代码基线 [`8739dba`](https://github.com/3fteye/linked-info/commit/8739dbaa5179cf336eda1cdea0e571bc45107a26)；此后的纯说明文档提交不改变该执行代码。
 
-当前追加了原生验收与两项会话修复。下方旧基线成功不代表追加变更已全部验证：
+- [CI 33739685795](https://github.com/3fteye/linked-info/actions/runs/33739685795) 的两个 Windows 作业均成功，覆盖 Rust 格式、lint、核心/桌面测试、Worker、外部扩展样例、依赖审计、许可证、SBOM、前端和生产构建。
+- 桌面 Rust 为 202 passed、0 failed；测试驱动的纯命令替身回归为 14 passed、0 failed。前端 57 个文件、474 项测试通过，包含已准入恢复交换与同帧锁定、扩展候选隔离、最后编辑和旧会话回归。
+- Edge 共 48 项：47 项首次通过、1 项重试通过，最终 0 failed、1 flaky。已有自动排版用例波动仍在 [BACKLOG](../BACKLOG.md#桌面便签与时间视图)，没有通过放宽断言或超时把它宣称为已修复。
+- [Windows package 33737491604](https://github.com/3fteye/linked-info/actions/runs/33737491604) 对 `5b38892` 正式 EXE 的原生验收为 14 passed、0 failed、0 page errors，测试进程正常退出码 0。`5b38892` 至本节基线只修改 CI 驱动、测试和开发说明，产品源码未变。产物包含 `linked-info-windows` 和独立 `native-capsule-summary`，不包含测试工作区或 WebView 用户目录。
+- [普通 Code Review](https://github.com/3fteye/linked-info/pull/16#issuecomment-5523732430) 对 `8739dba` 未发现重大问题；[Security Review](https://github.com/3fteye/linked-info/pull/16#issuecomment-5523494744) 对最后一笔产品安全行为提交 `7a4a1c6` 未发现安全问题，后续只调整 CI 测试驱动和文档，没有重复请求安全审查。7 条历史审查线程均已按相应证据处理并关闭。
 
-- [`244ddff`](https://github.com/3fteye/linked-info/commit/244ddff1e7f2352a622a1e653c4a397aafb601c4) 的 [Windows package 33735471628](https://github.com/3fteye/linked-info/actions/runs/33735471628) 成功，正式 EXE 原生验收 14 项通过、0 失败、0 页面错误，正常退出码 0。已验证真实失焦、拖动及手动锁定最后快照读回；系统锁定/休眠是消息注入，不是实际操作系统锁定或休眠。
-- 同 head 的 [CI 33735461919](https://github.com/3fteye/linked-info/actions/runs/33735461919) 尚未通过：Rust 格式差异已按 CI 输出机械应用；桌面测试 EXE 编译成功，但启动时出现 `STATUS_ENTRYPOINT_NOT_FOUND`，没有执行到测试断言。`29c14ec` 加入临时 runner 中的 PE 导入表/对应系统事件诊断，新的 CI 与两条审查链仍待收口。
-- 之前的原生失焦失败来自 Playwright 默认焦点模拟；关闭模拟后保留原断言，已在上述正式 EXE 验收中通过。未在用户机器运行、更新软件或截图，PR 仍为 Draft。
+### 失败轨迹与边界
 
-- 运行时代码为 [`8150a633dff8558c8d97de477eb9b45562916d23`](https://github.com/3fteye/linked-info/commit/8150a633dff8558c8d97de477eb9b45562916d23)。[CI 33727244706](https://github.com/3fteye/linked-info/actions/runs/33727244706) 的 `Windows desktop check` 与 `Windows core, frontend and Worker` 均成功。
-- 该次 CI 中，Rust 桌面测试 189 项通过；前端 57 个测试文件、455 项测试通过；生产前端 `tsc + vite` 构建成功。
-- Edge 共 48 项：47 项首次通过；已有用例 `smart arrangement normalizes width and saves one undoable layout step` 在 5 秒 predicate 等待超时后重试通过。最终为 0 failed、1 flaky，不能描述成零波动通过。该波动已登记到 [BACKLOG](../BACKLOG.md#桌面便签与时间视图)，另行定位，不扩大本轮胶囊代码范围。
-- 对行为实现基线 `cdf4f70` 的[普通 Code Review](https://github.com/3fteye/linked-info/pull/16#issuecomment-5522038355) 未发现重大问题；同一 head 的[Security Review](https://github.com/3fteye/linked-info/pull/16#issuecomment-5522083763) 未发现安全问题。`8150a63` 仅增加 CI 所需的类型标注并应用 Rust 格式差异，不改变运行行为，因此没有重复请求这两项审查；不能将它表述为另一次针对 `8150a63` 的独立审查。
-- [PR #16](https://github.com/3fteye/linked-info/pull/16) 仍未合并。原生 Windows 实机验收、本机安装包更新均未进行；CI 和云端审查不替代这些交付及平台验收步骤。
+- 手动锁定丢失最后编辑、旧 owner 乱序覆盖，以及恢复交换后旧快照写回均已修复并增加回归。没有为了等待保存而推迟撤权；非胶囊批量事务改走无快照立即锁定。
+- 原生失焦检查的早期失败来自 Playwright 默认焦点模拟；关闭模拟后保留原断言，先在 [33735471628](https://github.com/3fteye/linked-info/actions/runs/33735471628) 通过，再由上方最终产品构建复验。
+- lib-test 的 `STATUS_ENTRYPOINT_NOT_FOUND` 经 CI 导入表确认与缺少 Common Controls v6 清单相符。单纯在两次 Cargo 之间嵌入资源会被再次链接覆盖；最终使用 Cargo target runner 在链接后嵌入并验证，然后直接执行同一 EXE。`2df0974` 首次跑通 202 项测试，最终基线再次通过且补齐 14 项驱动夹具；生产安全逻辑没有为绕过测试而删减。
+- 原生已验证置顶、拖动、真实失焦、锁定和关闭；Windows 会话锁定/休眠只验证消息处理链。真实操作系统锁定、用户切换、硬件休眠、Windows Hello、多屏及显示缩放仍需人工验证。
+- [PR #16](https://github.com/3fteye/linked-info/pull/16) 保持 Draft，尚未合并或更新本机应用。本轮没有本机测试、构建、格式化、截图、读取真实秘密工作区或改动本机快捷方式。
