@@ -984,6 +984,132 @@ describe("App recovery transaction boundary", () => {
     expect(canvasHarness.canUndo).toBe(false);
   });
 
+  it("locks without a final snapshot while an admitted recovery swap is still pending, preserving both disk slots", async () => {
+    const workspaceA = workspace(currentNodeId, "Workspace A");
+    const workspaceB = workspace(recoveryNodeId, "Workspace B");
+    let primary = workspaceB;
+    let recovery = workspaceA;
+    const swapRelease = deferred<void>();
+    const swapFinished = deferred<void>();
+    let swapAdmitted = false;
+    const save = vi.fn<WorkspacePersistence["save"]>(async (next) => { primary = next; });
+    const persistence: WorkspacePersistence = {
+      async load() { return { status: "ready", workspace: primary }; },
+      async loadRecovery() { return { status: "ready", workspace: recovery }; },
+      async preserveForRecovery(next) { recovery = next; },
+      runExclusiveTransaction(transaction) { return transaction(); },
+      save,
+      async swapWithRecovery() {
+        // Model an operation that passed native owner admission before locking.
+        const nextPrimary = recovery;
+        const nextRecovery = primary;
+        swapAdmitted = true;
+        await swapRelease.promise;
+        primary = nextPrimary;
+        recovery = nextRecovery;
+        swapFinished.resolve(undefined);
+        return { status: "committed", workspace: primary };
+      },
+    };
+    const status = encryptedStatus();
+    const locked = { ...status, locked: true };
+    const lock = vi.fn<WorkspaceSecurity["lock"]>(async (contents) => {
+      if (contents !== undefined) {
+        // A wrongly admitted final write would run after the native swap and
+        // overwrite B with React's old A, leaving A in both primary/recovery.
+        await swapRelease.promise;
+        const parsed = parseStoredWorkspaceText(contents);
+        if (parsed.status !== "ready") throw new Error("invalid synthetic final lock snapshot");
+        primary = parsed.workspace;
+      }
+      return locked;
+    });
+    const updateStatus = vi.fn();
+    await renderApp({ persistence, security: { ...encryptedSecurity(status), lock }, status, updateStatus });
+    await openDataSecuritySettings();
+    await click("restore-recovery-workspace");
+    await click("workspace-restore-confirm");
+    expect((await find("mock-canvas")).textContent).toBe("Workspace A");
+    expect(primary.nodes).toEqual(workspaceA.nodes);
+    expect(recovery.nodes).toEqual(workspaceB.nodes);
+    await openDataSecuritySettings();
+    const undo = await find("app-notice-action");
+    const lockButton = await findButton(/Lock now|立即锁定/);
+    const savesBeforeLock = save.mock.calls.length;
+    try {
+      await act(async () => {
+        // Both genuine DOM handlers run before React replaces the old settings
+        // screen with the swap's loading screen. Native admission is already done.
+        undo.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        expect(swapAdmitted).toBe(true);
+        lockButton.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        await Promise.resolve();
+      });
+      expect(lock).toHaveBeenCalledOnce();
+      expect(lock).toHaveBeenCalledWith(undefined);
+      expect(updateStatus).toHaveBeenCalledWith(locked);
+      expect(primary.nodes).toEqual(workspaceA.nodes);
+      await act(async () => {
+        // The real security gate unmounts the owner on the native lock event.
+        root.render(<></>);
+        swapRelease.resolve(undefined);
+        await swapFinished.promise;
+      });
+      expect(primary.nodes).toEqual(workspaceB.nodes);
+      expect(recovery.nodes).toEqual(workspaceA.nodes);
+      expect(save.mock.calls).toHaveLength(savesBeforeLock);
+    } finally {
+      swapRelease.resolve(undefined);
+    }
+  });
+
+  it("does not treat a prepared extension metadata commit as a capsule lock snapshot", async () => {
+    const initial = workspace(currentNodeId, "Synthetic encrypted node");
+    initial.view.extensionMetadata["app.synthetic.metadata"] = {
+      schemaVersion: 1, workspace: { synthetic: true }, byNodeId: {},
+    };
+    const runtime = capsuleRuntime(initial);
+    const saveRelease = deferred<void>();
+    const status = encryptedStatus();
+    const locked = { ...status, locked: true };
+    const lock = vi.fn<WorkspaceSecurity["lock"]>(async () => locked);
+    const updateStatus = vi.fn();
+    await renderApp({
+      capsuleHost: runtime.host,
+      persistence: runtime.persistence,
+      security: { ...encryptedSecurity(status), lock },
+      status,
+      updateStatus,
+    });
+    await click("settings-navigation");
+    await click("settings-tab-extensions");
+    await clickButton(/^Clear metadata$|^清除元数据$/);
+    const savesBeforeClear = vi.mocked(runtime.persistence.save).mock.calls.length;
+    vi.mocked(runtime.persistence.save).mockImplementation(async (next) => {
+      await saveRelease.promise;
+      runtime.disk.workspace = next;
+    });
+    try {
+      await clickButton(/^Click again to confirm clearing$|^再次点击确认清除$/);
+      expect(vi.mocked(runtime.persistence.save).mock.calls).toHaveLength(savesBeforeClear + 1);
+      const prepared = vi.mocked(runtime.persistence.save).mock.calls[savesBeforeClear][0];
+      expect(prepared.view.extensionMetadata["app.synthetic.metadata"]).toBeUndefined();
+      await click("settings-tab-dataSecurity");
+      await clickButton(/Lock now|立即锁定/);
+
+      expect(lock).toHaveBeenCalledOnce();
+      expect(lock).toHaveBeenCalledWith(undefined);
+      expect(updateStatus).toHaveBeenCalledWith(locked);
+      await act(async () => {
+        root.render(<></>);
+        saveRelease.resolve(undefined);
+      });
+      expect(vi.mocked(runtime.persistence.save).mock.calls).toHaveLength(savesBeforeClear + 1);
+    } finally {
+      saveRelease.resolve(undefined);
+    }
+  });
+
   it("blocks a real workspace edit while a disk undo swap is pending", async () => {
     let primary = workspace(currentNodeId, "Current workspace");
     let recovery = workspace(recoveryNodeId, "Recovery workspace");

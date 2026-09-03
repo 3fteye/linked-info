@@ -528,7 +528,10 @@ function App({
   const workspaceRef = useRef(workspace);
   const extensionWorkspaceRevisionRef = useRef(0);
   const workspaceSaveTimerRef = useRef<number | null>(null);
-  const pendingWorkspaceCommitRef = useRef<WorkspaceSnapshot | null>(null);
+  const pendingWorkspaceCommitRef = useRef<{
+    kind: "capsule" | "extension";
+    workspace: WorkspaceSnapshot;
+  } | null>(null);
   const skipUnmountFlushRef = useRef(false);
   const workspaceReplacementGenerationRef = useRef(0);
   const documentImportCancelledRef = useRef(false);
@@ -1597,7 +1600,7 @@ function App({
       }, () => crypto.randomUUID());
       // A lock can preserve this validated submission even while an earlier
       // ordinary save is still draining; it must not wait for that queue.
-      pendingWorkspaceCommitRef.current = prepared.workspace;
+      pendingWorkspaceCommitRef.current = { kind: "capsule", workspace: prepared.workspace };
       // Drain existing saves before using the broker's commit-aware write.
       await persistence.save(before);
       if (!capsuleOwnerAliveRef.current) return;
@@ -2076,7 +2079,7 @@ function App({
         throw new Error("workspace_flush_not_authorized");
       }
       await persistence.save(
-        pendingWorkspaceCommitRef.current ?? workspaceRef.current,
+        pendingWorkspaceCommitRef.current?.workspace ?? workspaceRef.current,
       );
       if (!workspaceChangedInSessionRef.current || !workspaceBackupHistory.available) {
         return;
@@ -2618,13 +2621,20 @@ function App({
     }
     let contents: string | undefined;
     let snapshotInvalid = false;
-    try {
-      contents = serializeStoredWorkspace(
-        pendingWorkspaceCommitRef.current ?? workspaceRef.current,
-      );
-    } catch {
-      // Even an invalid in-memory snapshot must not prevent native revocation.
-      snapshotInvalid = true;
+    const pendingCommit = pendingWorkspaceCommitRef.current;
+    const replacementInProgress = workspaceReplacementApplyBusyRef.current ||
+      workspaceReplacementHistoryBusyRef.current;
+    const finalSnapshot = replacementInProgress ? null
+      : pendingCommit?.kind === "capsule" ? pendingCommit.workspace
+      : !workspaceMutationBlockedRef.current && pendingCommit === null ? workspaceRef.current
+      : null;
+    if (finalSnapshot !== null) {
+      try {
+        contents = serializeStoredWorkspace(finalSnapshot);
+      } catch {
+        // Even an invalid in-memory snapshot must not prevent native revocation.
+        snapshotInvalid = true;
+      }
     }
     setSecurityBusy(true);
     setSecurityMessage(null);
@@ -2637,8 +2647,9 @@ function App({
       workspaceSaveTimerRef.current = null;
     }
     try {
-      // The owner-bound native command accepts the latest snapshot, revokes
-      // plaintext access immediately, and only then finishes persistence.
+      // An admitted replacement may already have changed disk authority while
+      // React still holds the previous workspace. Lock immediately without a
+      // final write in that case; only a prepared capsule may finish its note.
       const locking = workspaceSecurity.lock(contents);
       embeddingAnalyzer.clearCache();
       setRemoteEmbeddingToken("");
@@ -3850,7 +3861,7 @@ function App({
         }
         next = view === current.view ? current : { ...current, view };
         if (next !== current) {
-          pendingWorkspaceCommitRef.current = next;
+          pendingWorkspaceCommitRef.current = { kind: "extension", workspace: next };
           await persistence.save(next);
           migratedWorkspacePersisted = true;
         }
@@ -3920,7 +3931,7 @@ function App({
       window.clearTimeout(workspaceSaveTimerRef.current);
       workspaceSaveTimerRef.current = null;
     }
-    pendingWorkspaceCommitRef.current = next;
+    pendingWorkspaceCommitRef.current = { kind: "extension", workspace: next };
     try {
       await persistence.save(next);
       recordHistory(captureWorkspaceHistory(current), captureWorkspaceHistory(next));
@@ -4078,7 +4089,7 @@ function App({
         pending.result,
         pending.createdNodeIds,
       );
-      pendingWorkspaceCommitRef.current = prepared.workspace;
+      pendingWorkspaceCommitRef.current = { kind: "extension", workspace: prepared.workspace };
       await persistence.save(prepared.workspace);
       recordHistory(
         captureWorkspaceHistory(current),
