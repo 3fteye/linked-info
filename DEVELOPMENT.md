@@ -255,6 +255,8 @@ pnpm build
 
 Windows Hello、会话锁定、Rust 文件原子写入和系统安全存储不属于浏览器适配器能力，继续由 Rust/Tauri 测试与 Windows 实机验收负责；浏览器回归通过不能替代这些平台边界验证。
 
+胶囊原生回归另由 Windows 打包工作流在独立 GitHub-hosted runner 执行：启动正式 EXE，通过 WebView2 CDP 与限定 PID 的 Win32 helper 检查实际窗口和保存/锁定链路，不在用户账号下复制启动应用、不截图或上传工作区。三重 CI 防误运行检查有独立自动测试。首次运行状态、临时调试策略和“通知注入不等于真实休眠”的边界见 [原生自动验收](docs/capsule-native-validation.md)。
+
 ### Rust 检查
 
 ```powershell

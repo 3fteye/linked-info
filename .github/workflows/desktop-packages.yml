@@ -75,6 +75,25 @@ jobs:
         shell: pwsh
         run: Copy-Item -LiteralPath apps/desktop/src-tauri/resources/llama-runtime -Destination target/release/llama-runtime -Recurse -Force
 
+      - name: Test native capsule runner safety gates
+        working-directory: apps/desktop
+        run: node --test scripts/native-capsule-safety.test.mjs
+
+      - name: Exercise native capsule in isolated Windows runner
+        timeout-minutes: 6
+        shell: pwsh
+        working-directory: apps/desktop
+        run: node scripts/native-capsule-smoke.mjs --executable "$env:GITHUB_WORKSPACE\target\release\linked-info-desktop.exe" --report "$env:GITHUB_WORKSPACE\artifacts\native-capsule-summary.json"
+
+      - name: Upload native capsule assertion summary
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: native-capsule-summary
+          path: artifacts/native-capsule-summary.json
+          if-no-files-found: ignore
+          retention-days: 3
+
       - name: Write package checksum
         shell: pwsh
         run: |
