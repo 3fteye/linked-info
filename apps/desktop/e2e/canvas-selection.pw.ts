@@ -631,8 +631,9 @@ test("the built-in JSON adapter persists one undoable namespaced preference", as
   await expect
     .poll(() => storedWorkspace(page))
     .toMatchObject({
-      version: 5,
+      version: 6,
       view: {
+        timeline: null,
         contentProcessorByNodeId: { [jsonNode.id]: processorId },
         extensionMetadata: {
           [extensionId]: {
