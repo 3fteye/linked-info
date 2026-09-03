@@ -267,8 +267,8 @@ pub struct WorkspaceOwnerReceipt {
 }
 
 fn parse_owner_request(request_id: &str, sequence: &str) -> Result<u64, String> {
-    let id =
-        uuid::Uuid::parse_str(request_id).map_err(|_| "workspace_owner_request_invalid".to_owned())?;
+    let id = uuid::Uuid::parse_str(request_id)
+        .map_err(|_| "workspace_owner_request_invalid".to_owned())?;
     let parsed = sequence
         .parse::<u64>()
         .map_err(|_| "workspace_owner_request_invalid".to_owned())?;
@@ -405,7 +405,11 @@ pub async fn open_workspace_owner(
                 .runtime
                 .lock()
                 .map_err(|_| "capsule_state_unavailable".to_owned())?;
-            ensure_owner_open(&guard, &request, vault.access_generation().load(Ordering::Acquire))?;
+            ensure_owner_open(
+                &guard,
+                &request,
+                vault.access_generation().load(Ordering::Acquire),
+            )?;
         }
         let permit = workspace_file::begin_workspace_access(&app_for_open, &vault)?;
         let authority = OwnerAuthority {
@@ -1247,7 +1251,10 @@ mod tests {
         install_owner_open(&mut guard, second, &replacement, 3, |_| Ok(())).unwrap();
 
         assert!(install_owner_open(&mut guard, first, &authority(), 3, |_| Ok(())).is_err());
-        assert_eq!(guard.owner.as_ref().unwrap().authority.owner_id, "new-owner");
+        assert_eq!(
+            guard.owner.as_ref().unwrap().authority.owner_id,
+            "new-owner"
+        );
     }
 
     #[test]

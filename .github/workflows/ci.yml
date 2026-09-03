@@ -180,4 +180,10 @@ jobs:
         run: cargo check -p linked-info-desktop
 
       - name: Test Windows desktop lifecycle
+        id: desktop-tests
         run: cargo test -p linked-info-desktop --lib
+
+      - name: Diagnose Windows test process startup failure
+        if: failure() && steps.desktop-tests.outcome == 'failure'
+        shell: pwsh
+        run: ./.github/scripts/diagnose-windows-test-loader.ps1

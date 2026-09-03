@@ -500,12 +500,16 @@ impl AdmittedLockSnapshot {
 impl Drop for AdmittedLockSnapshot {
     fn drop(&mut self) {
         if !self.settled {
-            self.barrier.store(LOCK_SAVE_RECOVERY_REQUIRED, Ordering::Release);
+            self.barrier
+                .store(LOCK_SAVE_RECOVERY_REQUIRED, Ordering::Release);
             if let Some(app) = &self.app {
                 let emitted = revoke_workspace_access(app, "workspace_lock_save_recovery_required");
                 crate::secret_clipboard::clear_active(app);
                 if !emitted {
-                    let _ = app.emit(WORKSPACE_LOCKED_EVENT, "workspace_lock_save_recovery_required");
+                    let _ = app.emit(
+                        WORKSPACE_LOCKED_EVENT,
+                        "workspace_lock_save_recovery_required",
+                    );
                 }
             }
         }
@@ -557,9 +561,9 @@ impl WorkspaceVaultState {
     ) -> Result<(), String> {
         let mut slot = self.lock_data_key_for_transition()?;
         self.ensure_no_lock_save()?;
-        if expected_generation.is_some_and(|expected| {
-            self.access_generation.load(Ordering::Acquire) != expected
-        }) {
+        if expected_generation
+            .is_some_and(|expected| self.access_generation.load(Ordering::Acquire) != expected)
+        {
             return Err("workspace_vault_session_expired".to_owned());
         }
         self.advance_access_generation()?;
@@ -603,7 +607,8 @@ impl WorkspaceVaultState {
         } else {
             None
         };
-        self.lock_save_state.store(LOCK_SAVE_PENDING, Ordering::Release);
+        self.lock_save_state
+            .store(LOCK_SAVE_PENDING, Ordering::Release);
         Ok(AdmittedLockSnapshot {
             data_key,
             encrypted,
@@ -2108,7 +2113,8 @@ fn persist_admitted_lock_snapshot(
         return Err("workspace_lock_save_boundary_changed".to_owned());
     }
     let normalized = Zeroizing::new(
-        normalize_storage_envelope(contents).map_err(|_| "workspace_lock_save_invalid".to_owned())?,
+        normalize_storage_envelope(contents)
+            .map_err(|_| "workspace_lock_save_invalid".to_owned())?,
     );
     let serialized = Zeroizing::new(serialize_workspace_for_slot(
         &normalized,
@@ -2116,8 +2122,11 @@ fn persist_admitted_lock_snapshot(
         admission.data_key.as_deref(),
     )?);
     fs::create_dir_all(&store.base_directory).map_err(|error| error.to_string())?;
-    write(&store.path(WorkspaceFileSlot::Primary), serialized.as_bytes())
-        .map_err(|_| "workspace_lock_save_failed".to_owned())
+    write(
+        &store.path(WorkspaceFileSlot::Primary),
+        serialized.as_bytes(),
+    )
+    .map_err(|_| "workspace_lock_save_failed".to_owned())
 }
 
 fn lock_snapshot_outcome(result: &Result<AtomicWriteStatus, String>) -> LockSnapshotOutcome {
@@ -2144,7 +2153,9 @@ pub async fn lock_workspace_with_snapshot(
         // Lock order is capsule-owner mutex -> data-key mutex, with only
         // bounded key copying and barrier installation in this closure.
         state.admit_lock_snapshot(
-            authority.permit, authority.generation, authority.permit.is_some(),
+            authority.permit,
+            authority.generation,
+            authority.permit.is_some(),
         )
     });
 
@@ -2160,7 +2171,10 @@ pub async fn lock_workspace_with_snapshot(
             lock_workspace_runtime_with_terminal_event(&app, "workspace_lock_save_started");
             if let Err(error) = state.ensure_no_lock_save() {
                 if error == "workspace_vault_lock_save_recovery_required" {
-                    let _ = app.emit(WORKSPACE_LOCKED_EVENT, "workspace_lock_save_recovery_required");
+                    let _ = app.emit(
+                        WORKSPACE_LOCKED_EVENT,
+                        "workspace_lock_save_recovery_required",
+                    );
                 }
                 return Err(error);
             }
@@ -2176,10 +2190,11 @@ pub async fn lock_workspace_with_snapshot(
     // Only this once-admitted immutable snapshot crosses that revocation.
     tauri::async_runtime::spawn_blocking(move || {
         let result = (|| {
-            let _operation = operation_lock.lock()
+            let _operation = operation_lock
+                .lock()
                 .map_err(|_| "workspace_lock_save_failed".to_owned())?;
-            let store = workspace_store(&app)
-                .map_err(|_| "workspace_lock_save_failed".to_owned())?;
+            let store =
+                workspace_store(&app).map_err(|_| "workspace_lock_save_failed".to_owned())?;
             let metadata = store.read_vault_metadata()?;
             let status = WorkspaceSecurityStatus {
                 encrypted: ticket.encrypted,
@@ -2189,7 +2204,10 @@ pub async fn lock_workspace_with_snapshot(
                 idle_timeout_minutes,
             };
             let written = persist_admitted_lock_snapshot(
-                &store, &ticket, &contents, write_atomically_commit_aware,
+                &store,
+                &ticket,
+                &contents,
+                write_atomically_commit_aware,
             )?;
             Ok::<_, String>((written, status))
         })();
@@ -6021,7 +6039,9 @@ mod tests {
         WorkspaceAccessPermit,
     ) {
         let store = WorkspaceFileStore::new(test_directory());
-        store.write_plaintext(WorkspaceFileSlot::Primary, &workspace("before-lock")).unwrap();
+        store
+            .write_plaintext(WorkspaceFileSlot::Primary, &workspace("before-lock"))
+            .unwrap();
         let key = migrate_plaintext_store(&store, "synthetic lock-save password").unwrap();
         let state = WorkspaceVaultState::default();
         state.replace_data_key(key).unwrap();
@@ -6033,25 +6053,42 @@ mod tests {
     fn manual_lock_admits_latest_snapshot_without_waiting_for_the_file_queue() {
         let (state, store, key, permit) = admitted_lock_fixture();
         let file_queue = state.operation_lock.lock().unwrap();
-        let mut ticket = state.admit_lock_snapshot(Some(permit), permit.generation, true).unwrap();
+        let mut ticket = state
+            .admit_lock_snapshot(Some(permit), permit.generation, true)
+            .unwrap();
         assert!(state.shutdown());
         assert!(!state.is_unlocked().unwrap());
-        assert_eq!(state.ensure_no_lock_save().unwrap_err(), "workspace_vault_lock_save_pending");
+        assert_eq!(
+            state.ensure_no_lock_save().unwrap_err(),
+            "workspace_vault_lock_save_pending"
+        );
         assert!(state.ensure_access_permit(permit).is_err());
         // Locking already completed while a different file operation still
         // owns the queue. The one accepted snapshot is persisted afterwards.
         drop(file_queue);
         let result = persist_admitted_lock_snapshot(
-            &store, &ticket, &workspace("latest-edit"), write_atomically_commit_aware,
+            &store,
+            &ticket,
+            &workspace("latest-edit"),
+            write_atomically_commit_aware,
         );
         assert_eq!(lock_snapshot_outcome(&result), LockSnapshotOutcome::Saved);
         ticket.finish(lock_snapshot_outcome(&result));
         assert!(ticket.data_key.is_none());
         assert!(!state.is_unlocked().unwrap());
         assert!(state.ensure_no_lock_save().is_ok());
-        let saved = store.read(WorkspaceFileSlot::Primary, Some(&key)).unwrap().unwrap();
-        assert_eq!(serde_json::from_str::<serde_json::Value>(&saved).unwrap()["nodes"][0]["name"], "latest-edit");
-        assert_eq!(state.ensure_access_permit(permit).unwrap_err(), "workspace_vault_session_expired");
+        let saved = store
+            .read(WorkspaceFileSlot::Primary, Some(&key))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&saved).unwrap()["nodes"][0]["name"],
+            "latest-edit"
+        );
+        assert_eq!(
+            state.ensure_access_permit(permit).unwrap_err(),
+            "workspace_vault_session_expired"
+        );
         fs::remove_dir_all(&store.base_directory).unwrap();
     }
 
@@ -6061,19 +6098,41 @@ mod tests {
         state.replace_data_key([17; DATA_KEY_BYTES]).unwrap();
         let permit = state.access_permit().unwrap();
         let old_unlock_generation = state.begin_unlock_generation().unwrap();
-        let mut ticket = state.admit_lock_snapshot(Some(permit), permit.generation, true).unwrap();
+        let mut ticket = state
+            .admit_lock_snapshot(Some(permit), permit.generation, true)
+            .unwrap();
         state.shutdown();
         let queued_transition = state.operation_lock.lock().unwrap();
-        assert_eq!(ensure_lock_save_idle(&state.lock_save_state).unwrap_err(), "workspace_vault_lock_save_pending");
-        assert_eq!(state.begin_unlock_generation().unwrap_err(), "workspace_vault_lock_save_pending");
-        assert_eq!(state.replace_data_key([18; DATA_KEY_BYTES]).unwrap_err(), "workspace_vault_lock_save_pending");
-        assert!(state.admit_lock_snapshot(Some(permit), permit.generation, true).is_err());
+        assert_eq!(
+            ensure_lock_save_idle(&state.lock_save_state).unwrap_err(),
+            "workspace_vault_lock_save_pending"
+        );
+        assert_eq!(
+            state.begin_unlock_generation().unwrap_err(),
+            "workspace_vault_lock_save_pending"
+        );
+        assert_eq!(
+            state.replace_data_key([18; DATA_KEY_BYTES]).unwrap_err(),
+            "workspace_vault_lock_save_pending"
+        );
+        assert!(
+            state
+                .admit_lock_snapshot(Some(permit), permit.generation, true)
+                .is_err()
+        );
         drop(queued_transition);
         ticket.finish(LockSnapshotOutcome::Saved);
-        assert_eq!(state.replace_data_key_at_generation([17; DATA_KEY_BYTES], Some(old_unlock_generation)).unwrap_err(), "workspace_vault_session_expired");
+        assert_eq!(
+            state
+                .replace_data_key_at_generation([17; DATA_KEY_BYTES], Some(old_unlock_generation))
+                .unwrap_err(),
+            "workspace_vault_session_expired"
+        );
         assert!(!state.is_unlocked().unwrap());
         let explicit_unlock_generation = state.begin_unlock_generation().unwrap();
-        state.replace_data_key_at_generation([17; DATA_KEY_BYTES], Some(explicit_unlock_generation)).unwrap();
+        state
+            .replace_data_key_at_generation([17; DATA_KEY_BYTES], Some(explicit_unlock_generation))
+            .unwrap();
         assert!(state.is_unlocked().unwrap());
     }
 
@@ -6082,7 +6141,10 @@ mod tests {
         let state = WorkspaceVaultState::default();
         let mut ticket = state.admit_lock_snapshot(None, 0, false).unwrap();
         state.shutdown();
-        assert_eq!(state.ensure_no_lock_save().unwrap_err(), "workspace_vault_lock_save_pending");
+        assert_eq!(
+            state.ensure_no_lock_save().unwrap_err(),
+            "workspace_vault_lock_save_pending"
+        );
         assert!(state.admit_lock_snapshot(None, 0, false).is_err());
         ticket.finish(LockSnapshotOutcome::Saved);
         assert!(state.ensure_no_lock_save().is_ok());
@@ -6092,39 +6154,73 @@ mod tests {
     #[test]
     fn lock_snapshot_precommit_failure_keeps_old_file_and_does_not_restore_authority() {
         let (state, store, key, permit) = admitted_lock_fixture();
-        let mut ticket = state.admit_lock_snapshot(Some(permit), permit.generation, true).unwrap();
+        let mut ticket = state
+            .admit_lock_snapshot(Some(permit), permit.generation, true)
+            .unwrap();
         state.shutdown();
-        let result = persist_admitted_lock_snapshot(&store, &ticket, &workspace("unsaved-edit"), |_, _| {
-            Err(io::Error::other("injected before replacement"))
-        });
+        let result =
+            persist_admitted_lock_snapshot(&store, &ticket, &workspace("unsaved-edit"), |_, _| {
+                Err(io::Error::other("injected before replacement"))
+            });
         assert_eq!(lock_snapshot_outcome(&result), LockSnapshotOutcome::Failed);
         ticket.finish(lock_snapshot_outcome(&result));
-        assert_eq!(LockSnapshotOutcome::Failed.reason(), "workspace_lock_save_failed");
+        assert_eq!(
+            LockSnapshotOutcome::Failed.reason(),
+            "workspace_lock_save_failed"
+        );
         assert!(!state.is_unlocked().unwrap());
         assert!(state.ensure_no_lock_save().is_ok());
-        let saved = store.read(WorkspaceFileSlot::Primary, Some(&key)).unwrap().unwrap();
-        assert_eq!(serde_json::from_str::<serde_json::Value>(&saved).unwrap()["nodes"][0]["name"], "before-lock");
+        let saved = store
+            .read(WorkspaceFileSlot::Primary, Some(&key))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&saved).unwrap()["nodes"][0]["name"],
+            "before-lock"
+        );
         fs::remove_dir_all(&store.base_directory).unwrap();
     }
 
     #[test]
     fn lock_snapshot_after_commit_uncertainty_retains_saved_file_and_a_process_barrier() {
         let (state, store, key, permit) = admitted_lock_fixture();
-        let mut ticket = state.admit_lock_snapshot(Some(permit), permit.generation, true).unwrap();
+        let mut ticket = state
+            .admit_lock_snapshot(Some(permit), permit.generation, true)
+            .unwrap();
         state.shutdown();
-        let result = persist_admitted_lock_snapshot(&store, &ticket, &workspace("committed-edit"), |path, bytes| {
-            write_atomically_commit_aware_with(path, bytes, replace_file, |_| {
-                Err(io::Error::other("injected after replacement"))
-            })
-        });
-        assert_eq!(lock_snapshot_outcome(&result), LockSnapshotOutcome::RecoveryRequired);
+        let result = persist_admitted_lock_snapshot(
+            &store,
+            &ticket,
+            &workspace("committed-edit"),
+            |path, bytes| {
+                write_atomically_commit_aware_with(path, bytes, replace_file, |_| {
+                    Err(io::Error::other("injected after replacement"))
+                })
+            },
+        );
+        assert_eq!(
+            lock_snapshot_outcome(&result),
+            LockSnapshotOutcome::RecoveryRequired
+        );
         ticket.finish(lock_snapshot_outcome(&result));
         assert!(!state.is_unlocked().unwrap());
-        assert_eq!(state.ensure_no_lock_save().unwrap_err(), "workspace_vault_lock_save_recovery_required");
-        assert_eq!(state.begin_unlock_generation().unwrap_err(), "workspace_vault_lock_save_recovery_required");
+        assert_eq!(
+            state.ensure_no_lock_save().unwrap_err(),
+            "workspace_vault_lock_save_recovery_required"
+        );
+        assert_eq!(
+            state.begin_unlock_generation().unwrap_err(),
+            "workspace_vault_lock_save_recovery_required"
+        );
         assert!(state.replace_data_key(key).is_err());
-        let saved = store.read(WorkspaceFileSlot::Primary, Some(&key)).unwrap().unwrap();
-        assert_eq!(serde_json::from_str::<serde_json::Value>(&saved).unwrap()["nodes"][0]["name"], "committed-edit");
+        let saved = store
+            .read(WorkspaceFileSlot::Primary, Some(&key))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&saved).unwrap()["nodes"][0]["name"],
+            "committed-edit"
+        );
         fs::remove_dir_all(&store.base_directory).unwrap();
     }
 
@@ -6133,11 +6229,16 @@ mod tests {
         let state = WorkspaceVaultState::default();
         state.replace_data_key([19; DATA_KEY_BYTES]).unwrap();
         let permit = state.access_permit().unwrap();
-        let ticket = state.admit_lock_snapshot(Some(permit), permit.generation, true).unwrap();
+        let ticket = state
+            .admit_lock_snapshot(Some(permit), permit.generation, true)
+            .unwrap();
         state.shutdown();
         drop(ticket);
         assert!(!state.is_unlocked().unwrap());
-        assert_eq!(state.ensure_no_lock_save().unwrap_err(), "workspace_vault_lock_save_recovery_required");
+        assert_eq!(
+            state.ensure_no_lock_save().unwrap_err(),
+            "workspace_vault_lock_save_recovery_required"
+        );
         assert!(state.replace_data_key([19; DATA_KEY_BYTES]).is_err());
     }
 

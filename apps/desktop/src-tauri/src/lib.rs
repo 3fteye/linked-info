@@ -221,7 +221,15 @@ pub fn run() {
 mod tests {
     #[test]
     fn the_final_lock_snapshot_command_is_main_window_only() {
-        assert!(super::capsule::command_allowed("main", "main", "lock_workspace_with_snapshot"));
-        assert!(!super::capsule::command_allowed("capsule", "capsule", "lock_workspace_with_snapshot"));
+        assert!(super::capsule::command_allowed(
+            "main",
+            "main",
+            "lock_workspace_with_snapshot"
+        ));
+        assert!(!super::capsule::command_allowed(
+            "capsule",
+            "capsule",
+            "lock_workspace_with_snapshot"
+        ));
     }
 }
