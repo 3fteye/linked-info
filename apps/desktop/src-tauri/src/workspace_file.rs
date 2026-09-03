@@ -4212,16 +4212,18 @@ fn validate_workspace_timeline(
     }
     let mut capture_node_ids = HashSet::with_capacity(captures.len());
     for capture in captures {
-        let capture = capture
-            .as_object()
-            .ok_or_else(|| invalid_workspace_data("workspace timeline capture must be an object"))?;
+        let capture = capture.as_object().ok_or_else(|| {
+            invalid_workspace_data("workspace timeline capture must be an object")
+        })?;
         if capture.len() != 4
             || !capture.contains_key("nodeId")
             || !capture.contains_key("capturedAtMs")
             || !capture.contains_key("utcOffsetMinutes")
             || !capture.contains_key("day")
         {
-            return Err(invalid_workspace_data("workspace timeline capture is invalid"));
+            return Err(invalid_workspace_data(
+                "workspace timeline capture is invalid",
+            ));
         }
         let node_id = canonical_workspace_node_id(
             capture
@@ -4242,9 +4244,7 @@ fn validate_workspace_timeline(
             0,
             MAXIMUM_TIMELINE_CAPTURE_MILLISECONDS,
         )
-        .ok_or_else(|| {
-            invalid_workspace_data("workspace timeline capture timestamp is invalid")
-        })?;
+        .ok_or_else(|| invalid_workspace_data("workspace timeline capture timestamp is invalid"))?;
         let utc_offset_minutes = bounded_workspace_integer(
             capture.get("utcOffsetMinutes"),
             -MAXIMUM_TIMELINE_UTC_OFFSET_MINUTES,
@@ -4719,7 +4719,12 @@ fn workspace_storage_from_export(contents: &str) -> io::Result<String> {
     if document.get("format").and_then(serde_json::Value::as_str) != Some(WORKSPACE_EXPORT_FORMAT)
         || !matches!(
             document.get("version").and_then(serde_json::Value::as_u64),
-            Some(1) | Some(2) | Some(3) | Some(4) | Some(5) | Some(CURRENT_WORKSPACE_STORAGE_VERSION)
+            Some(1)
+                | Some(2)
+                | Some(3)
+                | Some(4)
+                | Some(5)
+                | Some(CURRENT_WORKSPACE_STORAGE_VERSION)
         )
         || document
             .get("exportedAt")
@@ -5027,12 +5032,16 @@ mod tests {
     }
 
     fn timeline_workspace() -> serde_json::Value {
-        let mut value: serde_json::Value = serde_json::from_str(&workspace("timeline day")).unwrap();
-        value["nodes"].as_array_mut().unwrap().push(serde_json::json!({
-            "id": "22222222-2222-4222-8222-222222222222",
-            "name": null,
-            "content": "capture"
-        }));
+        let mut value: serde_json::Value =
+            serde_json::from_str(&workspace("timeline day")).unwrap();
+        value["nodes"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "id": "22222222-2222-4222-8222-222222222222",
+                "name": null,
+                "content": "capture"
+            }));
         value["view"]["canvases"][0]["layout"] = serde_json::json!([]);
         value["view"]["timeline"] = serde_json::json!({
             "canvasId": DEFAULT_CANVAS_ID,
@@ -5059,7 +5068,11 @@ mod tests {
             ("2000-02-29", 11_016),
             ("9999-12-31", 2_932_896),
         ] {
-            assert_eq!(workspace_timeline_day_number(date), Some(expected), "{date}");
+            assert_eq!(
+                workspace_timeline_day_number(date),
+                Some(expected),
+                "{date}"
+            );
         }
         for date in [
             "0000-01-01",
@@ -5095,11 +5108,15 @@ mod tests {
                 "utcOffsetMinutes": offset,
                 "day": day
             });
-            assert!(validate_storage_envelope(&value.to_string()).is_ok(), "{day}");
+            assert!(
+                validate_storage_envelope(&value.to_string()).is_ok(),
+                "{day}"
+            );
         }
 
         let mut floating_integers = timeline_workspace();
-        floating_integers["view"]["timeline"]["captures"][0]["capturedAtMs"] = serde_json::json!(1.0);
+        floating_integers["view"]["timeline"]["captures"][0]["capturedAtMs"] =
+            serde_json::json!(1.0);
         floating_integers["view"]["timeline"]["captures"][0]["utcOffsetMinutes"] =
             serde_json::json!(-0.0);
         assert!(validate_storage_envelope(&floating_integers.to_string()).is_ok());
@@ -5124,7 +5141,8 @@ mod tests {
         }
 
         let mut mismatched_day = timeline_workspace();
-        mismatched_day["view"]["timeline"]["captures"][0]["utcOffsetMinutes"] = serde_json::json!(-1);
+        mismatched_day["view"]["timeline"]["captures"][0]["utcOffsetMinutes"] =
+            serde_json::json!(-1);
         assert!(validate_storage_envelope(&mismatched_day.to_string()).is_err());
     }
 
@@ -5139,7 +5157,8 @@ mod tests {
         value["view"]["activeCanvasId"] = serde_json::json!(canvas_id);
         value["view"]["canvases"][0]["id"] = serde_json::json!(canvas_id);
         value["view"]["timeline"]["canvasId"] = serde_json::json!(canvas_id.to_uppercase());
-        value["view"]["timeline"]["days"][0]["nodeId"] = serde_json::json!(day_node_id.to_uppercase());
+        value["view"]["timeline"]["days"][0]["nodeId"] =
+            serde_json::json!(day_node_id.to_uppercase());
         value["view"]["timeline"]["captures"][0]["nodeId"] =
             serde_json::json!(capture_node_id.to_uppercase());
 
@@ -5164,7 +5183,10 @@ mod tests {
                 value["layout"] = value["view"]["canvases"][0]["layout"].clone();
                 value["viewport"] = serde_json::Value::Null;
                 value["view"].as_object_mut().unwrap().remove("canvases");
-                value["view"].as_object_mut().unwrap().remove("activeCanvasId");
+                value["view"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("activeCanvasId");
             }
             if version < 3 {
                 value["view"]
