@@ -629,6 +629,74 @@ async function run() {
       return { bothInputsArchived: true, inboxExposesOnlyOriginalInputAndMinimalReceipts: true,
         originalNodeUnchanged: true, collidingAndUniqueBodiesPreserved: true, newNodes: 2 };
     });
+    await step("legacy-unicode-name-archives-without-disclosure", async () => {
+      const seed = { name: "Synthetic legacy Unicode seed", content: "Synthetic legacy body must remain unchanged" };
+      const base = "Synthetic previously unused Unicode collision base";
+      const legacyName = "\u0085" + base;
+      const incoming = { name: base, content: "Synthetic Unicode collision body must remain verbatim" };
+      const seeded = await archiveFixturesWithoutNameDisclosure(capture, [seed]);
+      requireCondition(seeded.uniformArchivedResult && seeded.archivedCount === 1 && seeded.publicBoundaryPreserved &&
+        seeded.inputSnapshotsPreserved && seeded.absentFromInboxList, "native_capsule_unicode_seed_not_archived");
+      const before = await readyContext(main);
+      requireCondition(before.encrypted === true, "native_capsule_unicode_setup_requires_encryption");
+      // Do not create the legacy name through capture: its current naming
+      // policy would trim U+0085 before the fixture ever reached the workspace.
+      // This is the existing main-owner final-snapshot command, not a file edit.
+      const locked = await main.evaluate(async ({ ownerId, seedId, expectedSeed, base, legacyName }) => {
+        const nativeInvoke = window.__TAURI_INTERNALS__.invoke;
+        const document = JSON.parse(await nativeInvoke("read_workspace_file", { ownerId, slot: "primary" }));
+        const matches = document.nodes.filter((entry) => entry.id === seedId);
+        if (matches.length !== 1 || matches[0].name !== expectedSeed.name || matches[0].content !== expectedSeed.content ||
+          document.nodes.some((entry) => entry.name === base || entry.name === legacyName)) return false;
+        const node = matches[0];
+        node.name = legacyName;
+        const status = await nativeInvoke("lock_workspace_with_snapshot", { ownerId, contents: JSON.stringify(document) });
+        return status.locked === true;
+      }, { ownerId: before.ownerId, seedId: seeded.ids[0], expectedSeed: seed, base, legacyName });
+      requireCondition(locked, "native_capsule_unicode_legacy_setup_failed");
+      await main.locator("#workspace-unlock-password").waitFor({ state: "visible" });
+      const oldOwnerRejected = await main.evaluate(async ({ ownerId }) => {
+        try { await window.__TAURI_INTERNALS__.invoke("read_workspace_file", { ownerId, slot: "primary" }); return false; }
+        catch { return true; }
+      }, { ownerId: before.ownerId });
+      requireCondition(oldOwnerRejected, "native_capsule_unicode_setup_kept_old_authority");
+      const current = await unlock(main, syntheticPassword);
+      requireCondition(current.ownerId !== before.ownerId, "native_capsule_unicode_setup_reused_owner");
+      // Assert the actual persisted legacy spelling after the new owner has
+      // loaded its authoritative snapshot; otherwise this would miss the bug.
+      const legacyReloaded = await main.evaluate(async ({ ownerId, seedId, legacyName, originalContent, base }) => {
+        const contents = await window.__TAURI_INTERNALS__.invoke("read_workspace_file", { ownerId, slot: "primary" });
+        const document = JSON.parse(contents);
+        const original = document.nodes.filter((entry) => entry.id === seedId);
+        return original.length === 1 && original[0].name === legacyName && original[0].content === originalContent &&
+          !document.nodes.some((entry) => entry.name === base);
+      }, { ownerId: current.ownerId, seedId: seeded.ids[0], legacyName, originalContent: seed.content, base });
+      requireCondition(legacyReloaded, "native_capsule_unicode_legacy_name_not_reloaded");
+      const archived = await archiveFixturesWithoutNameDisclosure(capture, [incoming]);
+      requireCondition(archived.uniformArchivedResult && archived.archivedCount === 1 && archived.publicBoundaryPreserved &&
+        archived.inputSnapshotsPreserved && archived.absentFromInboxList, "native_capsule_unicode_collision_result_disclosed");
+      const verified = await main.evaluate(async ({ ownerId, seedId, incomingId, legacyName, expectedSeed, expectedIncoming, expectedCount }) => {
+        const contents = await window.__TAURI_INTERNALS__.invoke("read_workspace_file", { ownerId, slot: "primary" });
+        const document = JSON.parse(contents);
+        const original = document.nodes.filter((entry) => entry.id === seedId);
+        const added = document.nodes.filter((entry) => entry.id === incomingId);
+        const expectedName = `${expectedIncoming.name} (${incomingId.slice(0, 8)})`;
+        const captures = document.view.timeline?.captures ?? [];
+        return {
+          originalNodeUnchanged: original.length === 1 && original[0].name === legacyName && original[0].content === expectedSeed.content,
+          suffixNodeAdded: added.length === 1 && added[0].name === expectedName && added[0].content === expectedIncoming.content,
+          identitiesRemainDistinct: seedId !== incomingId,
+          ordinaryCapturesRetained: [seedId, incomingId].every((id) => captures.filter((entry) => entry.nodeId === id).length === 1),
+          expectedCaptureCount: captures.length === expectedCount,
+        };
+      }, { ownerId: current.ownerId, seedId: seeded.ids[0], incomingId: archived.ids[0], legacyName,
+        expectedSeed: seed, expectedIncoming: incoming, expectedCount: captureCount + 2 });
+      requireCondition(verified.originalNodeUnchanged && verified.suffixNodeAdded && verified.identitiesRemainDistinct &&
+        verified.ordinaryCapturesRetained && verified.expectedCaptureCount, "native_capsule_unicode_collision_workspace_invalid");
+      captureCount += 2;
+      return { legacyNameReloadedThroughNewOwner: true, oldOwnerRejected: true, originalNodeUnchanged: true,
+        collidingBodyPreserved: true, uniformArchivedResult: true, derivedNameDisclosedToInbox: false };
+    });
     await step("main-exit-keeps-capture-running-and-saving", async () => {
       await close("main"); assertAlive(targets.capsule);
       const standalone = { name: "Synthetic after main exit", content: "Synthetic durable standalone draft" };

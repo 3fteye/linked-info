@@ -1146,6 +1146,31 @@ impl Drop for CapsuleCommitGuard {
     }
 }
 
+// This capture-only table is shared with TypeScript: Unicode White_Space plus
+// FEFF. Rust str::trim and JavaScript trim disagree on 0085/FEFF; neither native
+// implementation alone is a safe key for cross-language automatic naming.
+fn capture_name_whitespace(character: char) -> bool {
+    matches!(
+        character,
+        '\u{0009}'..='\u{000d}'
+            | '\u{0020}'
+            | '\u{0085}'
+            | '\u{00a0}'
+            | '\u{1680}'
+            | '\u{2000}'..='\u{200a}'
+            | '\u{2028}'
+            | '\u{2029}'
+            | '\u{202f}'
+            | '\u{205f}'
+            | '\u{3000}'
+            | '\u{feff}'
+    )
+}
+
+fn trim_capture_name(name: &str) -> &str {
+    name.trim_matches(capture_name_whitespace)
+}
+
 /// Capture-only names are deterministic and bounded. Recomputing against all
 /// other nodes in the after-image also verifies a lock snapshot or a recovered
 /// commit without exposing the chosen name to the plaintext inbox.
@@ -1161,12 +1186,12 @@ fn capsule_archive_name<'a>(
     {
         return Err("capsule_invalid_commit".to_owned());
     }
-    let base = name.trim();
+    let base = trim_capture_name(name);
     if base.is_empty() {
         return Ok(None);
     }
     let occupied: HashSet<String> = other_names
-        .map(|name| name.trim().to_lowercase())
+        .map(|name| trim_capture_name(name).to_lowercase())
         .collect();
     if !occupied.contains(&base.to_lowercase()) {
         return Ok(Some(base.to_owned()));
@@ -1185,7 +1210,7 @@ fn capsule_archive_name<'a>(
             .ok_or_else(|| "capsule_invalid_commit".to_owned())?;
         let prefix: String = characters.iter().copied().take(prefix_length).collect();
         let candidate = format!("{prefix}{suffix}");
-        if !occupied.contains(&candidate.trim().to_lowercase()) {
+        if !occupied.contains(&trim_capture_name(&candidate).to_lowercase()) {
             return Ok(Some(candidate));
         }
     }
@@ -5848,6 +5873,7 @@ mod tests {
             );
             if let Some(name) = actual.as_ref() {
                 assert!(name.chars().count() <= linked_info_capture_inbox::MAX_NAME_CHARACTERS);
+                assert_eq!(trim_capture_name(name), name);
             }
 
             let input = crate::capsule::CapsuleNoteInput {
@@ -5866,24 +5892,106 @@ mod tests {
             after["nodes"][1]["name"] = fixture["expectedName"].clone();
             after["nodes"][1]["content"] = input.content.clone().into();
             after["view"]["timeline"]["captures"][0]["nodeId"] = node_id.into();
+            if let Some(name) = fixture.get("expectedCanvasName") {
+                after["view"]["canvases"][0]["name"] = name.clone();
+                assert_eq!(
+                    trim_capture_name(name.as_str().unwrap()),
+                    name.as_str().unwrap()
+                );
+            }
+            if let Some(canvases) = fixture
+                .get("otherCanvasNames")
+                .and_then(serde_json::Value::as_array)
+            {
+                for (index, name) in canvases.iter().enumerate() {
+                    after["view"]["canvases"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(serde_json::json!({
+                            "id": format!("44444444-4444-4444-8444-{index:012}"),
+                            "name": name,
+                            "layout": [],
+                            "viewport": null
+                        }));
+                }
+            }
             for (index, name) in other_names.iter().enumerate() {
-                after["nodes"].as_array_mut().unwrap().push(serde_json::json!({
-                    "id": format!("33333333-3333-4333-8333-{index:012}"),
-                    "name": name,
-                    "content": null
-                }));
+                after["nodes"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(serde_json::json!({
+                        "id": format!("33333333-3333-4333-8333-{index:012}"),
+                        "name": name,
+                        "content": null
+                    }));
             }
             let normalized = normalize_storage_envelope(&after.to_string()).unwrap();
             assert!(
                 validate_capsule_commit(&normalized, &input).is_ok(),
                 "after-image {case_id}"
             );
+            let parsed: serde_json::Value = serde_json::from_str(&normalized).unwrap();
+            for (index, name) in other_names.iter().enumerate() {
+                assert_eq!(
+                    parsed["nodes"][index + 2]["name"],
+                    *name,
+                    "existing name {case_id}"
+                );
+            }
+            if let Some(canvases) = fixture
+                .get("otherCanvasNames")
+                .and_then(serde_json::Value::as_array)
+            {
+                for (index, name) in canvases.iter().enumerate() {
+                    assert_eq!(
+                        parsed["view"]["canvases"][index + 1]["name"],
+                        *name,
+                        "existing canvas {case_id}"
+                    );
+                }
+            }
             after["nodes"][1]["content"] = "tampered body".into();
             assert!(
                 validate_capsule_commit(&after.to_string(), &input).is_err(),
                 "body {case_id}"
             );
         }
+    }
+
+    #[test]
+    fn capture_whitespace_matches_the_shared_table_without_stripping_format_characters() {
+        let contract: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../fixtures/capture-name-contract.json"
+        )))
+        .unwrap();
+        let code_points = contract["whitespaceCodePoints"].as_array().unwrap();
+        assert_eq!(code_points.len(), 26);
+        let node_id = "a1b2c3d4-0000-4000-8000-000000000010";
+        for value in code_points {
+            let point = u32::try_from(value.as_u64().unwrap()).unwrap();
+            let character = char::from_u32(point).unwrap();
+            assert!(capture_name_whitespace(character));
+            let original = format!("{character}Secret{character}");
+            assert_eq!(trim_capture_name(&original), "Secret");
+            assert_eq!(
+                capsule_archive_name(node_id, &original, std::iter::empty()).unwrap(),
+                Some("Secret".to_owned())
+            );
+            assert_eq!(
+                capsule_archive_name(node_id, "Secret", [original.as_str()].into_iter()).unwrap(),
+                Some("Secret (a1b2c3d4)".to_owned())
+            );
+        }
+        for character in ['\u{180e}', '\u{200b}', '\u{2060}'] {
+            assert!(!capture_name_whitespace(character));
+            let name = format!("{character}Secret{character}");
+            assert_eq!(trim_capture_name(&name), name);
+        }
+        assert_eq!(
+            trim_capture_name("Inner\u{0085}\u{feff}Name"),
+            "Inner\u{0085}\u{feff}Name"
+        );
     }
 
     #[test]
@@ -5985,7 +6093,8 @@ mod tests {
         let mut candidate = timeline_workspace();
         candidate["nodes"][1]["id"] = input.node_id.clone().into();
         let derived =
-            capsule_archive_name(&input.node_id, &input.name, ["timeline day"].into_iter()).unwrap();
+            capsule_archive_name(&input.node_id, &input.name, ["timeline day"].into_iter())
+                .unwrap();
         candidate["nodes"][1]["name"] = serde_json::to_value(derived).unwrap();
         candidate["view"]["timeline"]["captures"][0]["nodeId"] = input.node_id.clone().into();
         let candidate = normalize_storage_envelope(&candidate.to_string()).unwrap();

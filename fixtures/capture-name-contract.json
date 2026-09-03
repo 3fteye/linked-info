@@ -1,5 +1,6 @@
 {
   "version": 1,
+  "whitespaceCodePoints": [9,10,11,12,13,32,133,160,5760,8192,8193,8194,8195,8196,8197,8198,8199,8200,8201,8202,8232,8233,8239,8287,12288,65279],
   "cases": [
     {
       "id": "trim-without-collision",
@@ -96,6 +97,119 @@
       ],
       "expectedName": "2026-09-03",
       "expectedDayName": "2026-09-03 (3)"
+    },
+    {
+      "id": "nel-occupied-name",
+      "nodeId": "a1b2c3d4-0000-4000-8000-000000000010",
+      "name": "Secret",
+      "otherNames": [
+        "\u0085Secret"
+      ],
+      "expectedName": "Secret (a1b2c3d4)"
+    },
+    {
+      "id": "bom-occupied-name",
+      "nodeId": "a1b2c3d4-0000-4000-8000-000000000010",
+      "name": "Secret",
+      "otherNames": [
+        "\ufeffSecret"
+      ],
+      "expectedName": "Secret (a1b2c3d4)"
+    },
+    {
+      "id": "mixed-input-and-occupied-boundaries",
+      "nodeId": "a1b2c3d4-0000-4000-8000-000000000010",
+      "name": "\u0085\ufeff \tSecret\ufeff\u0085",
+      "otherNames": [
+        "\ufeff\u0085secret\u0085\ufeff"
+      ],
+      "expectedName": "Secret (a1b2c3d4)"
+    },
+    {
+      "id": "mixed-suffix-collision-boundaries",
+      "nodeId": "a1b2c3d4-0000-4000-8000-000000000010",
+      "name": "\ufeffSecret\u0085",
+      "otherNames": [
+        "\u0085Secret\ufeff",
+        "\ufeff\u0085Secret (A1B2C3D4)\u0085\ufeff"
+      ],
+      "expectedName": "Secret (a1b2c3d4-2)"
+    },
+    {
+      "id": "union-whitespace-only-name",
+      "nodeId": "a1b2c3d4-0000-4000-8000-000000000010",
+      "name": "\u0085\ufeff \n 　",
+      "otherNames": [],
+      "expectedName": null
+    },
+    {
+      "id": "nel-date-and-canvas-collisions",
+      "nodeId": "a1b2c3d4-0000-4000-8000-000000000010",
+      "name": "Fresh",
+      "otherNames": [
+        "\u00852026-09-03"
+      ],
+      "otherCanvasNames": [
+        "\u0085Timeline"
+      ],
+      "expectedName": "Fresh",
+      "expectedDayName": "2026-09-03 (2)",
+      "expectedCanvasName": "Timeline (2)"
+    },
+    {
+      "id": "bom-date-and-canvas-collisions",
+      "nodeId": "a1b2c3d4-0000-4000-8000-000000000010",
+      "name": "Fresh",
+      "otherNames": [
+        "\ufeff2026-09-03"
+      ],
+      "otherCanvasNames": [
+        "\ufeffTimeline"
+      ],
+      "expectedName": "Fresh",
+      "expectedDayName": "2026-09-03 (2)",
+      "expectedCanvasName": "Timeline (2)"
+    },
+    {
+      "id": "mixed-date-and-canvas-suffix-collisions",
+      "nodeId": "a1b2c3d4-0000-4000-8000-000000000010",
+      "name": "2026-09-03",
+      "otherNames": [
+        "\u0085\ufeff2026-09-03\ufeff\u0085",
+        "\ufeff2026-09-03 (2)\u0085"
+      ],
+      "otherCanvasNames": [
+        "\u0085\ufeffTimeline\u0085\ufeff",
+        "\ufeffTimeline (2)\u0085"
+      ],
+      "expectedName": "2026-09-03 (a1b2c3d4)",
+      "expectedDayName": "2026-09-03 (3)",
+      "expectedCanvasName": "Timeline (3)"
+    },
+    {
+      "id": "generated-label-union-boundaries",
+      "nodeId": "a1b2c3d4-0000-4000-8000-000000000010",
+      "name": "Fresh",
+      "otherNames": [
+        "2026-09-03"
+      ],
+      "otherCanvasNames": [
+        "Timeline"
+      ],
+      "canvasName": "\u0085Timeline\ufeff",
+      "dateName": "\ufeff2026-09-03\u0085",
+      "expectedName": "Fresh",
+      "expectedDayName": "2026-09-03 (2)",
+      "expectedCanvasName": "Timeline (2)"
+    },
+    {
+      "id": "interior-boundary-characters-remain-literal",
+      "nodeId": "a1b2c3d4-0000-4000-8000-000000000010",
+      "name": "Inner\u0085\ufeffName",
+      "otherNames": [
+        "InnerName"
+      ],
+      "expectedName": "Inner\u0085\ufeffName"
     }
   ]
 }

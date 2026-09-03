@@ -155,3 +155,24 @@ test("native name-collision regression checks uniform inbox receipts and preserv
   assert.match(driver, /unique\[0\]\.name === expectedIncoming\[1\]\.name && unique\[0\]\.content === expectedIncoming\[1\]\.content/);
   assert.match(driver, /incomingIds\[0\]\.slice\(0, 8\)/);
 });
+
+test("native Unicode collision fixture uses the normal owner-bound snapshot and verifies the legacy name after unlock", () => {
+  const start = driver.indexOf('step("legacy-unicode-name-archives-without-disclosure"');
+  const end = driver.indexOf('step("main-exit-keeps-capture-running-and-saving"');
+  assert.ok(start > driver.indexOf('step("name-collision-archives-without-inbox-disclosure"'));
+  assert.ok(end > start);
+  const unicodeCase = driver.slice(start, end);
+  assert.ok(unicodeCase.includes('const legacyName = "\\u0085" + base;'));
+  assert.match(unicodeCase, /node\.name = legacyName;/);
+  assert.match(unicodeCase, /nativeInvoke\("lock_workspace_with_snapshot", \{ ownerId, contents: JSON\.stringify\(document\) \}\)/);
+  assert.match(unicodeCase, /requireCondition\(oldOwnerRejected,/);
+  assert.match(unicodeCase, /const current = await unlock\(main, syntheticPassword\)/);
+  assert.match(unicodeCase, /current\.ownerId !== before\.ownerId/);
+  assert.ok(unicodeCase.indexOf("requireCondition(legacyReloaded,") <
+    unicodeCase.indexOf("archiveFixturesWithoutNameDisclosure(capture, [incoming])"));
+  assert.match(unicodeCase, /original\[0\]\.name === legacyName && original\[0\]\.content === originalContent/);
+  assert.match(unicodeCase, /original\[0\]\.name === legacyName && original\[0\]\.content === expectedSeed\.content/);
+  assert.match(unicodeCase, /added\[0\]\.name === expectedName && added\[0\]\.content === expectedIncoming\.content/);
+  assert.match(unicodeCase, /archived\.uniformArchivedResult && archived\.archivedCount === 1 && archived\.publicBoundaryPreserved/);
+  assert.doesNotMatch(unicodeCase, /capture_(?:create|save|submit)|write_workspace_file|fs\.(?:writeFile|readFile)/);
+});

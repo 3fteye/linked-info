@@ -1,6 +1,5 @@
 import {
   maximumWorkspaceCanvasCount,
-  normalizeNodeName,
   parseWorkspaceSnapshot,
   type NodeLayout,
   type NodeReference,
@@ -51,6 +50,21 @@ const dateWidth = 240;
 const dateHeight = 100;
 const gap = 60;
 const maximumCaptureNameCharacters = 512;
+// Fixed capture contract: Unicode White_Space plus FEFF, the union of the two
+// existing validators' boundary whitespace sets. Do not change global naming.
+const captureNameWhitespace = /[\u0009-\u000d\u0020\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]/u;
+
+export function trimCaptureName(name: string): string {
+  let start = 0;
+  let end = name.length;
+  while (start < end && captureNameWhitespace.test(name[start])) start += 1;
+  while (end > start && captureNameWhitespace.test(name[end - 1])) end -= 1;
+  return name.slice(start, end);
+}
+
+function captureNameKey(name: string): string {
+  return trimCaptureName(name).toLowerCase();
+}
 
 /** Capture-only naming; ordinary node editing keeps its existing uniqueness rule. */
 export function resolveTimelineNoteName(
@@ -62,10 +76,10 @@ export function resolveTimelineNoteName(
     Array.from(draftName).length > maximumCaptureNameCharacters) {
     throw new TimelineCaptureError("invalid-input");
   }
-  const base = draftName.trim();
+  const base = trimCaptureName(draftName);
   if (base.length === 0) return null;
-  const occupied = new Set(Array.from(otherNames, (name) => normalizeNodeName(name ?? "")));
-  if (!occupied.has(normalizeNodeName(base))) return base;
+  const occupied = new Set(Array.from(otherNames, (name) => captureNameKey(name ?? "")));
+  if (!occupied.has(captureNameKey(base))) return base;
   const characters = Array.from(base);
   const shortId = nodeId.slice(0, 8);
   // Every suffix is distinct, so at most occupied.size candidates can be taken.
@@ -74,7 +88,7 @@ export function resolveTimelineNoteName(
     const suffix = attempt === 1 ? ` (${shortId})` : ` (${shortId}-${attempt})`;
     const prefix = characters.slice(0, maximumCaptureNameCharacters - suffix.length).join("");
     const candidate = `${prefix}${suffix}`;
-    if (!occupied.has(normalizeNodeName(candidate))) return candidate;
+    if (!occupied.has(captureNameKey(candidate))) return candidate;
   }
   throw new TimelineCaptureError("invalid-result");
 }
@@ -98,17 +112,15 @@ export function timelineDayAt(capturedAtMs: number, utcOffsetMinutes: number): s
 }
 
 function uniqueGeneratedName(base: string, names: ReadonlySet<string>): string {
-  const name = base.trim();
+  const name = trimCaptureName(base);
   if (name.length === 0) {
     throw new TimelineCaptureError("invalid-input");
   }
-  let candidate = name;
-  let index = 2;
-  while (names.has(normalizeNodeName(candidate))) {
-    candidate = `${name} (${index})`;
-    index += 1;
+  for (let index = 1; index <= names.size + 1; index += 1) {
+    const candidate = index === 1 ? name : `${name} (${index})`;
+    if (!names.has(captureNameKey(candidate))) return candidate;
   }
-  return candidate;
+  throw new TimelineCaptureError("invalid-result");
 }
 
 /**
@@ -198,7 +210,7 @@ export function captureTimelineNote(
     ? {
         id: allocateId(),
         name: uniqueGeneratedName(labels.canvasName, new Set(
-          workspace.view.canvases.map((item) => normalizeNodeName(item.name)),
+          workspace.view.canvases.map((item) => captureNameKey(item.name)),
         )),
         layout: [] as NodeLayout[], viewport: null,
       }
@@ -222,7 +234,7 @@ export function captureTimelineNote(
   }
   if (previousDay === undefined) {
     const dateName = uniqueGeneratedName(labels.dateNodeName(day), new Set(
-      nodes.map((node) => normalizeNodeName(node.name ?? "")),
+      nodes.map((node) => captureNameKey(node.name ?? "")),
     ));
     nodes.push({ id: dayNodeId, name: dateName, content: null });
     days = [...days, { date: day, nodeId: dayNodeId }].sort((left, right) =>

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { captureTimelineNote, resolveTimelineNoteName, TimelineCaptureError, timelineDayAt, type TimelineNoteInput } from "./timelineWorkspace";
+import { captureTimelineNote, resolveTimelineNoteName, TimelineCaptureError, timelineDayAt, trimCaptureName, type TimelineNoteInput } from "./timelineWorkspace";
 import { emptyWorkspace, isNodeNameAvailable, removeNodesFromWorkspaceView, type WorkspaceSnapshot } from "./workspaceData";
 import { captureWorkspaceHistory, restoreWorkspaceHistory } from "./workspaceHistory";
 import { parseWorkspaceExport, serializeWorkspaceExport } from "./workspaceBackup";
@@ -136,36 +136,63 @@ describe("timeline note transactions", () => {
     expect(Array.from(fixture.expectedName ?? "").length).toBeLessThanOrEqual(512);
   });
 
+  it("uses the fixed cross-language whitespace union only at capture name boundaries", () => {
+    expect(captureNameContract.whitespaceCodePoints).toHaveLength(26);
+    for (const codePoint of captureNameContract.whitespaceCodePoints) {
+      const whitespace = String.fromCodePoint(codePoint);
+      expect(trimCaptureName(`${whitespace}Name${whitespace}`)).toBe("Name");
+      expect(trimCaptureName(`In${whitespace}side`)).toBe(`In${whitespace}side`);
+    }
+    for (const codePoint of [0x180e, 0x200b, 0x2060]) {
+      const literal = String.fromCodePoint(codePoint);
+      expect(trimCaptureName(`${literal}Name${literal}`)).toBe(`${literal}Name${literal}`);
+    }
+  });
+
   it.each(captureNameContract.cases)("archives, restores and recognizes retries with the shared name: $id", (fixture) => {
     const workspace = emptyWorkspace();
     workspace.nodes = fixture.otherNames.map((name, index) => ({
       id: id(200 + index), name, content: `Existing synthetic content ${index}`,
     }));
+    if (fixture.otherCanvasNames !== undefined) {
+      const template = workspace.view.canvases[0];
+      workspace.view.canvases = fixture.otherCanvasNames.map((name, index) => ({
+        ...template, id: index === 0 ? template.id : id(300 + index), name,
+      }));
+    }
+    const fixtureLabels = {
+      canvasName: fixture.canvasName ?? labels.canvasName,
+      dateNodeName: (day: string) => fixture.dateName ?? labels.dateNodeName(day),
+    };
     const before = JSON.stringify(workspace);
     const request = {
       ...input(10), nodeId: fixture.nodeId, name: fixture.name,
       content: "  Synthetic unchanged body\n[[li:secret]]synthetic-value[[/li]]\n",
     };
-    const result = captureTimelineNote(workspace, request, labels, ids());
+    const result = captureTimelineNote(workspace, request, fixtureLabels, ids());
     expect(JSON.stringify(workspace)).toBe(before);
     expect(result.workspace.nodes.slice(0, workspace.nodes.length)).toEqual(workspace.nodes);
+    expect(result.workspace.view.canvases.slice(0, workspace.view.canvases.length)).toEqual(workspace.view.canvases);
     expect(result.workspace.nodes.find((node) => node.id === request.nodeId)).toEqual({
       id: request.nodeId, name: fixture.expectedName, content: request.content,
     });
     if (fixture.expectedDayName !== undefined) {
       expect(result.workspace.nodes.find((node) => node.id === result.dayNodeId)?.name).toBe(fixture.expectedDayName);
     }
+    if (fixture.expectedCanvasName !== undefined) {
+      expect(result.workspace.view.canvases.find((canvas) => canvas.id === result.canvasId)?.name).toBe(fixture.expectedCanvasName);
+    }
     // Rust's verifier sees the full after-image, including the newly allocated
     // date node, and must still calculate the same first available capture name.
     const afterNames = result.workspace.nodes.filter((node) => node.id !== request.nodeId).map((node) => node.name);
     expect(resolveTimelineNoteName(request.nodeId, request.name, afterNames)).toBe(fixture.expectedName);
-    const retry = captureTimelineNote(result.workspace, request, labels, ids());
+    const retry = captureTimelineNote(result.workspace, request, fixtureLabels, ids());
     expect(retry.duplicate).toBe(true);
     expect(retry.workspace).toBe(result.workspace);
     const decoded = parseWorkspaceExport(serializeWorkspaceExport(result.workspace));
     if (!decoded.ok) throw new Error("synthetic capture export rejected");
-    expect(captureTimelineNote(decoded.workspace, request, labels, ids()).duplicate).toBe(true);
-    expect(() => captureTimelineNote(result.workspace, { ...request, content: "Different body" }, labels, ids()))
+    expect(captureTimelineNote(decoded.workspace, request, fixtureLabels, ids()).duplicate).toBe(true);
+    expect(() => captureTimelineNote(result.workspace, { ...request, content: "Different body" }, fixtureLabels, ids()))
       .toThrowError("timeline_capture_identity-conflict");
   });
 
