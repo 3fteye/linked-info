@@ -37,6 +37,8 @@ export default function WorkspaceSecurityGate({
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [lockSavePending, setLockSavePending] = useState(false);
+  const lockSavePendingRef = useRef(false);
   const [recoveryRequired, setRecoveryRequired] = useState(false);
   const [restartBusy, setRestartBusy] = useState(false);
   const [restartFailed, setRestartFailed] = useState(false);
@@ -61,6 +63,27 @@ export default function WorkspaceSecurityGate({
     },
     [],
   );
+  const applySecurityError = useCallback((reason: unknown) => {
+    const code = errorReason(reason);
+    if (
+      code === "workspace_vault_lock_save_pending" ||
+      code === "workspace_vault_lock_save_recovery_required"
+    ) {
+      lockLatchedRef.current = true;
+      lockSavePendingRef.current = code === "workspace_vault_lock_save_pending";
+      setLockSavePending(lockSavePendingRef.current);
+      setStatus((current) => current === null ? current : { ...current, locked: true });
+      setPassword("");
+      if (code === "workspace_vault_lock_save_recovery_required") {
+        setRecoveryRequired(true);
+        setError(code);
+      } else {
+        setError(null);
+      }
+      return;
+    }
+    setError(code);
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -81,13 +104,13 @@ export default function WorkspaceSecurityGate({
           active &&
           statusProbeGenerationRef.current === probeGeneration
         ) {
-          setError(errorReason(reason));
+          applySecurityError(reason);
         }
       });
     return () => {
       active = false;
     };
-  }, [retryGeneration, security, updateStatusFromWorkspace]);
+  }, [applySecurityError, retryGeneration, security, updateStatusFromWorkspace]);
 
   useEffect(() => {
     let active = true;
@@ -98,7 +121,16 @@ export default function WorkspaceSecurityGate({
           return;
         }
         lockLatchedRef.current = true;
-        const mayReopenPlaintext = currentStatusRef.current?.encrypted !== true;
+        const snapshotLockEvent = reason === "workspace_lock_save_started" ||
+          reason === "workspace_lock_save_completed" ||
+          reason === "workspace_lock_save_failed" ||
+          reason === "workspace_lock_save_recovery_required";
+        const mayReopenPlaintext = !snapshotLockEvent && !lockSavePendingRef.current &&
+          currentStatusRef.current?.encrypted !== true;
+        if (snapshotLockEvent) {
+          lockSavePendingRef.current = reason === "workspace_lock_save_started";
+          setLockSavePending(lockSavePendingRef.current);
+        }
         setChildSessionGeneration((generation) => generation + 1);
         const probeGeneration = statusProbeGenerationRef.current + 1;
         statusProbeGenerationRef.current = probeGeneration;
@@ -107,7 +139,8 @@ export default function WorkspaceSecurityGate({
           reason === "workspace_restore_recovery_required" ||
           reason === "workspace_recovery_swap_pending" ||
           reason === "capsule_recovery_required" ||
-          reason === "workspace_owner_recovery_required"
+          reason === "workspace_owner_recovery_required" ||
+          reason === "workspace_lock_save_recovery_required"
         ) {
           setRecoveryRequired(true);
         }
@@ -116,7 +149,9 @@ export default function WorkspaceSecurityGate({
         );
         setPassword("");
         setNotice(
-          reason === "workspace_data_key_rotated_cleanup_pending"
+          reason === "workspace_lock_save_completed"
+            ? t("security.lockSaveCompleted")
+            : reason === "workspace_data_key_rotated_cleanup_pending"
             ? t("security.rotateSuccessCleanupPending")
             : reason === "workspace_data_key_rotated_cleanup_skipped"
               ? t("security.rotateSuccessCleanupSkipped")
@@ -128,7 +163,9 @@ export default function WorkspaceSecurityGate({
         );
         setError(
           reason === "workspace_destroy_failed" ||
-            reason === "workspace_data_key_rotation_failed"
+            reason === "workspace_data_key_rotation_failed" ||
+            reason === "workspace_lock_save_failed" ||
+            reason === "workspace_lock_save_recovery_required"
             ? reason
             : null,
         );
@@ -152,7 +189,7 @@ export default function WorkspaceSecurityGate({
               active &&
               statusProbeGenerationRef.current === probeGeneration
             ) {
-              setError(errorReason(error));
+              applySecurityError(error);
             }
           });
       })
@@ -165,14 +202,14 @@ export default function WorkspaceSecurityGate({
       })
       .catch((reason) => {
         if (active) {
-          setError(errorReason(reason));
+          applySecurityError(reason);
         }
       });
     return () => {
       active = false;
       unsubscribe?.();
     };
-  }, [security, t, updateStatusFromWorkspace]);
+  }, [applySecurityError, security, t, updateStatusFromWorkspace]);
 
   useEffect(() => {
     if (status?.encrypted !== true || status.locked) {
@@ -218,10 +255,12 @@ export default function WorkspaceSecurityGate({
         setPassword("");
       }
       lockLatchedRef.current = next.locked;
+      lockSavePendingRef.current = false;
+      setLockSavePending(false);
       setStatus(next);
     } catch (reason) {
       if (statusProbeGenerationRef.current === attemptGeneration) {
-        setError(errorReason(reason));
+        applySecurityError(reason);
       }
     } finally {
       setBusy(false);
@@ -229,14 +268,14 @@ export default function WorkspaceSecurityGate({
   }
 
   async function unlock() {
-    if (busy || password.length === 0) {
+    if (busy || lockSavePendingRef.current || password.length === 0) {
       return;
     }
     await performUnlock(() => security.unlock(password), true);
   }
 
   async function unlockWithSystem() {
-    if (busy) {
+    if (busy || lockSavePendingRef.current) {
       return;
     }
     await performUnlock(
@@ -271,7 +310,12 @@ export default function WorkspaceSecurityGate({
       <main className="security-gate" data-testid="workspace-security-recovery-required">
         <AlertTriangle aria-hidden="true" size={34} />
         <h1>{t("storageProblem.recoveryRequiredTitle")}</h1>
-        <p>{t("storageProblem.recoveryRequiredDescription")}</p>
+        <p>{t(
+          error === "workspace_lock_save_recovery_required" ||
+          error === "workspace_vault_lock_save_recovery_required"
+            ? "security.lockSaveRecoveryRequired"
+            : "storageProblem.recoveryRequiredDescription",
+        )}</p>
         <button
           className="primary-button"
           disabled={restartBusy}
@@ -286,6 +330,16 @@ export default function WorkspaceSecurityGate({
             {t("storageProblem.restartFailed")}
           </p>
         )}
+      </main>
+    );
+  }
+
+  if (lockSavePending) {
+    return (
+      <main className="security-gate" data-testid="workspace-security-lock-save-pending">
+        <LockKeyhole aria-hidden="true" size={34} />
+        <h1>{t("security.lockSavePendingTitle")}</h1>
+        <p role="status">{t("security.lockSavePending")}</p>
       </main>
     );
   }
@@ -374,6 +428,8 @@ export default function WorkspaceSecurityGate({
           <p className="security-error" role="alert">
             {error === "workspace_destroy_failed"
               ? t("security.destroyFailedLocked")
+              : error === "workspace_lock_save_failed"
+                ? t("security.lockSaveFailed")
               : error === "workspace_data_key_rotation_failed"
                 ? t("security.rotateFailedLocked")
               : error === "workspace_vault_invalid_password"

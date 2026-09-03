@@ -74,6 +74,131 @@ describe("WorkspaceSecurityGate", () => {
     expect(container.querySelector(".security-gate")).not.toBeNull();
   });
 
+  it("keeps snapshot saving behind a locked processing screen instead of reporting an unlock error", async () => {
+    const listenerRef = { current: null as ((reason: string) => void) | null };
+    const workspaceSecurity = security(listenerRef);
+    vi.mocked(workspaceSecurity.inspect)
+      .mockResolvedValueOnce({ ...unlocked, systemUnlockAvailable: true, systemUnlockEnabled: true })
+      .mockRejectedValueOnce("workspace_vault_lock_save_pending")
+      .mockResolvedValue(locked);
+    await act(async () => {
+      root.render(
+        <WorkspaceSecurityGate security={workspaceSecurity}>
+          {() => <div data-testid="secret-content">synthetic private text</div>}
+        </WorkspaceSecurityGate>,
+      );
+    });
+
+    await act(async () => { listenerRef.current?.("workspace_lock_save_started"); });
+
+    expect(container.querySelector('[data-testid="secret-content"]')).toBeNull();
+    expect(container.querySelector('[data-testid="workspace-security-lock-save-pending"]')).not.toBeNull();
+    expect(container.querySelector('[role="status"]')?.textContent).toContain("Saving the latest edits");
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    expect(container.querySelector("#workspace-unlock-password")).toBeNull();
+    expect(container.querySelector(".security-system-unlock button")).toBeNull();
+    expect(workspaceSecurity.unlock).not.toHaveBeenCalled();
+    expect(workspaceSecurity.unlockWithSystem).not.toHaveBeenCalled();
+
+    await act(async () => { listenerRef.current?.("workspace_lock_save_completed"); });
+
+    expect(container.querySelector('[data-testid="workspace-security-lock-save-pending"]')).toBeNull();
+    expect(container.querySelector('[data-testid="secret-content"]')).toBeNull();
+    expect(container.querySelector("#workspace-unlock-password")).not.toBeNull();
+    expect(container.querySelector('[role="status"]')?.textContent).toContain("latest edits were saved");
+  });
+
+  it("recognizes an in-progress lock save on initial inspection before any status has loaded", async () => {
+    const listenerRef = { current: null as ((reason: string) => void) | null };
+    const workspaceSecurity = security(listenerRef);
+    vi.mocked(workspaceSecurity.inspect)
+      .mockRejectedValueOnce("workspace_vault_lock_save_pending")
+      .mockResolvedValue(locked);
+    await act(async () => {
+      root.render(
+        <WorkspaceSecurityGate security={workspaceSecurity}>
+          {() => <div data-testid="secret-content" />}
+        </WorkspaceSecurityGate>,
+      );
+    });
+    expect(container.querySelector('[data-testid="workspace-security-lock-save-pending"]')).not.toBeNull();
+    expect(container.textContent).not.toContain("workspace_vault_lock_save_pending");
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    await act(async () => { listenerRef.current?.("workspace_lock_save_completed"); });
+    expect(container.querySelector("#workspace-unlock-password")).not.toBeNull();
+    expect(container.querySelector('[data-testid="secret-content"]')).toBeNull();
+  });
+
+  it.each(["completed", "failed"] as const)(
+    "keeps a lock-save %s terminal message locked despite stale unlocked probes and callbacks",
+    async (terminal) => {
+      const listenerRef = { current: null as ((reason: string) => void) | null };
+      const workspaceSecurity = security(listenerRef);
+      let resolveStarted!: (status: WorkspaceSecurityStatus) => void;
+      const startedInspection = new Promise<WorkspaceSecurityStatus>((resolve) => { resolveStarted = resolve; });
+      vi.mocked(workspaceSecurity.inspect)
+        .mockResolvedValueOnce(unlocked)
+        .mockReturnValueOnce(startedInspection)
+        .mockResolvedValue(unlocked);
+      let staleUpdate: ((status: WorkspaceSecurityStatus) => void) | null = null;
+      await act(async () => {
+        root.render(
+          <WorkspaceSecurityGate security={workspaceSecurity}>
+            {(_status, update) => {
+              staleUpdate = update;
+              return <div data-testid="secret-content">synthetic private text</div>;
+            }}
+          </WorkspaceSecurityGate>,
+        );
+      });
+      act(() => { listenerRef.current?.("workspace_lock_save_started"); });
+      await act(async () => { listenerRef.current?.(`workspace_lock_save_${terminal}`); });
+      expect(container.querySelector('[data-testid="secret-content"]')).toBeNull();
+      expect(container.querySelector("#workspace-unlock-password")).not.toBeNull();
+      const message = terminal === "completed" ? '[role="status"]' : '[role="alert"]';
+      expect(container.querySelector(message)?.textContent).toContain(
+        terminal === "completed" ? "latest edits were saved" : "latest edits could not be saved",
+      );
+      await act(async () => { resolveStarted(unlocked); });
+      act(() => {
+        const update = staleUpdate as ((status: WorkspaceSecurityStatus) => void) | null;
+        update?.(unlocked);
+      });
+      expect(container.querySelector('[data-testid="secret-content"]')).toBeNull();
+      expect(container.querySelector(message)?.textContent).toContain(
+        terminal === "completed" ? "latest edits were saved" : "latest edits could not be saved",
+      );
+      expect(workspaceSecurity.unlock).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["initial-inspection", "terminal-event"] as const)(
+    "requires native recovery after a lock-save durability error from %s",
+    async (source) => {
+      const listenerRef = { current: null as ((reason: string) => void) | null };
+      const workspaceSecurity = security(listenerRef);
+      if (source === "initial-inspection") {
+        vi.mocked(workspaceSecurity.inspect).mockRejectedValue("workspace_vault_lock_save_recovery_required");
+      }
+      await act(async () => {
+        root.render(
+          <WorkspaceSecurityGate security={workspaceSecurity}>
+            {() => <div data-testid="secret-content" />}
+          </WorkspaceSecurityGate>,
+        );
+      });
+      if (source === "terminal-event") {
+        vi.mocked(workspaceSecurity.inspect).mockRejectedValue("workspace_vault_lock_save_recovery_required");
+        await act(async () => { listenerRef.current?.("workspace_lock_save_recovery_required"); });
+      }
+      expect(container.querySelector('[data-testid="workspace-security-recovery-required"]')).not.toBeNull();
+      expect(container.textContent).toContain("latest save needs recovery confirmation");
+      expect(container.querySelector("#workspace-unlock-password")).toBeNull();
+      expect(container.querySelector('[data-testid="secret-content"]')).toBeNull();
+      expect(workspaceSecurity.unlock).not.toHaveBeenCalled();
+    },
+  );
+
   it("keeps the recovery-required boundary above the unmounted App", async () => {
     const listenerRef = { current: null as ((reason: string) => void) | null };
     const workspaceSecurity = security(listenerRef);

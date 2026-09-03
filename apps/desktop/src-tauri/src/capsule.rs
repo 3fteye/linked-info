@@ -20,8 +20,16 @@ pub(crate) struct OwnerAuthority {
 
 struct WorkspaceOwner {
     authority: OwnerAuthority,
+    request: OwnerOpenRequest,
     context_id: String,
     ready: bool,
+}
+
+#[derive(Clone)]
+struct OwnerOpenRequest {
+    request_id: String,
+    sequence: u64,
+    access_generation: u64,
 }
 
 #[derive(Clone, Deserialize, Serialize, Zeroize, ZeroizeOnDrop)]
@@ -108,6 +116,9 @@ struct CapsuleRuntime {
     owner: Option<WorkspaceOwner>,
     submission: Option<Submission>,
     quarantined: bool,
+    latest_owner_request_sequence: u64,
+    latest_owner_request_id: Option<String>,
+    pending_owner_open: Option<OwnerOpenRequest>,
 }
 
 #[derive(Default)]
@@ -139,6 +150,20 @@ fn matches_owner(owner: Option<&WorkspaceOwner>, authority: &OwnerAuthority) -> 
 }
 
 pub(crate) fn owner_authority(app: &AppHandle, owner_id: &str) -> Result<OwnerAuthority, String> {
+    with_owner_authority(app, owner_id, |authority| {
+        ensure_authority(app, authority)?;
+        Ok(authority.clone())
+    })
+}
+
+/// Identity-only gate: the caller must validate the original generation and
+/// permit before accepting authority. Immediate lock admission must keep its
+/// closure memory-only, in capsule -> data-key lock order, with no file lock.
+pub(crate) fn with_owner_authority<T>(
+    app: &AppHandle,
+    owner_id: &str,
+    accept: impl FnOnce(&OwnerAuthority) -> Result<T, String>,
+) -> Result<T, String> {
     let state = runtime(app);
     let guard = state
         .runtime
@@ -149,8 +174,7 @@ pub(crate) fn owner_authority(app: &AppHandle, owner_id: &str) -> Result<OwnerAu
         .as_ref()
         .filter(|owner| owner.authority.owner_id == owner_id)
         .ok_or_else(|| "workspace_owner_expired".to_owned())?;
-    ensure_authority(app, &owner.authority)?;
-    Ok(owner.authority.clone())
+    accept(&owner.authority)
 }
 
 pub(crate) fn ensure_owner(app: &AppHandle, authority: &OwnerAuthority) -> Result<(), String> {
@@ -195,9 +219,10 @@ fn emit_state_changed(app: &AppHandle) {
 /// retain only their original authority and cannot acquire a replacement owner.
 pub(crate) fn revoke(app: &AppHandle) -> bool {
     let had_owner = if let Ok(mut guard) = runtime(app).runtime.lock() {
-        let had_owner = guard.owner.is_some();
+        let had_owner = guard.owner.is_some() || guard.pending_owner_open.is_some();
         guard.owner = None;
         guard.submission = None;
+        guard.pending_owner_open = None;
         had_owner
     } else {
         false
@@ -211,6 +236,7 @@ pub(crate) fn quarantine(app: &AppHandle) {
         guard.quarantined = true;
         guard.owner = None;
         guard.submission = None;
+        guard.pending_owner_open = None;
     }
     emit_state_changed(app);
 }
@@ -240,8 +266,132 @@ pub struct WorkspaceOwnerReceipt {
     owner_id: String,
 }
 
+fn parse_owner_request(request_id: &str, sequence: &str) -> Result<u64, String> {
+    let id =
+        uuid::Uuid::parse_str(request_id).map_err(|_| "workspace_owner_request_invalid".to_owned())?;
+    let parsed = sequence
+        .parse::<u64>()
+        .map_err(|_| "workspace_owner_request_invalid".to_owned())?;
+    if id.to_string() != request_id || parsed == 0 || parsed.to_string() != sequence {
+        return Err("workspace_owner_request_invalid".to_owned());
+    }
+    Ok(parsed)
+}
+
+fn admit_owner_open(
+    guard: &mut CapsuleRuntime,
+    request_id: String,
+    sequence: u64,
+    access_generation: u64,
+) -> Result<OwnerOpenRequest, String> {
+    if guard.quarantined {
+        return Err("workspace_owner_recovery_required".to_owned());
+    }
+    if sequence <= guard.latest_owner_request_sequence || access_generation == u64::MAX {
+        return Err("workspace_owner_request_expired".to_owned());
+    }
+    let request = OwnerOpenRequest {
+        request_id,
+        sequence,
+        access_generation,
+    };
+    guard.latest_owner_request_sequence = sequence;
+    guard.latest_owner_request_id = Some(request.request_id.clone());
+    guard.pending_owner_open = Some(request.clone());
+    guard.owner = None;
+    guard.submission = None;
+    Ok(request)
+}
+
+fn ensure_owner_open(
+    guard: &CapsuleRuntime,
+    request: &OwnerOpenRequest,
+    current_generation: u64,
+) -> Result<(), String> {
+    if guard.quarantined {
+        return Err("workspace_owner_recovery_required".to_owned());
+    }
+    if current_generation == u64::MAX
+        || current_generation != request.access_generation
+        || !guard.pending_owner_open.as_ref().is_some_and(|pending| {
+            pending.sequence == request.sequence && pending.request_id == request.request_id
+        })
+    {
+        return Err("workspace_owner_request_expired".to_owned());
+    }
+    Ok(())
+}
+
+fn cancel_owner_request(
+    guard: &mut CapsuleRuntime,
+    request_id: &str,
+    sequence: u64,
+    owner_id: Option<&str>,
+) -> Result<(), String> {
+    if sequence > guard.latest_owner_request_sequence {
+        // Disposal can arrive before the async open command is first polled.
+        guard.latest_owner_request_sequence = sequence;
+        guard.latest_owner_request_id = Some(request_id.to_owned());
+        guard.pending_owner_open = None;
+    } else if sequence == guard.latest_owner_request_sequence {
+        if guard.latest_owner_request_id.as_deref() != Some(request_id) {
+            return Err("workspace_owner_request_invalid".to_owned());
+        }
+        guard.pending_owner_open = None;
+    }
+    if guard.owner.as_ref().is_some_and(|owner| {
+        owner.request.sequence == sequence
+            && owner.request.request_id == request_id
+            && owner_id.is_none_or(|id| owner.authority.owner_id == id)
+    }) {
+        guard.owner = None;
+        guard.submission = None;
+    }
+    Ok(())
+}
+
+fn install_owner_open(
+    guard: &mut CapsuleRuntime,
+    request: OwnerOpenRequest,
+    authority: &OwnerAuthority,
+    current_generation: u64,
+    validate: impl FnOnce(&OwnerAuthority) -> Result<(), String>,
+) -> Result<(), String> {
+    ensure_owner_open(guard, &request, current_generation)?;
+    validate(authority)?;
+    guard.pending_owner_open = None;
+    guard.owner = Some(WorkspaceOwner {
+        authority: authority.clone(),
+        request,
+        context_id: uuid::Uuid::new_v4().to_string(),
+        ready: false,
+    });
+    guard.submission = None;
+    Ok(())
+}
+
 #[tauri::command]
-pub async fn open_workspace_owner(app: AppHandle) -> Result<WorkspaceOwnerReceipt, String> {
+pub async fn open_workspace_owner(
+    app: AppHandle,
+    request_id: String,
+    request_sequence: String,
+) -> Result<WorkspaceOwnerReceipt, String> {
+    let sequence = parse_owner_request(&request_id, &request_sequence)?;
+    // Admission is independent of the blocking file queue. Client order also
+    // rejects an older async invocation that is first polled after a newer one.
+    let request = {
+        let state = runtime(&app);
+        let mut guard = state
+            .runtime
+            .lock()
+            .map_err(|_| "capsule_state_unavailable".to_owned())?;
+        let generation = app
+            .state::<WorkspaceVaultState>()
+            .access_generation()
+            .load(Ordering::Acquire);
+        admit_owner_open(&mut guard, request_id, sequence, generation)?
+    };
+    emit_state_changed(&app);
     let operation_lock = app.state::<WorkspaceVaultState>().operation_lock();
     let app_for_open = app.clone();
     let authority = tauri::async_runtime::spawn_blocking(move || {
@@ -249,12 +399,18 @@ pub async fn open_workspace_owner(app: AppHandle) -> Result<WorkspaceOwnerReceip
             .lock()
             .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
         let vault = app_for_open.state::<WorkspaceVaultState>();
+        {
+            let state = runtime(&app_for_open);
+            let guard = state
+                .runtime
+                .lock()
+                .map_err(|_| "capsule_state_unavailable".to_owned())?;
+            ensure_owner_open(&guard, &request, vault.access_generation().load(Ordering::Acquire))?;
+        }
         let permit = workspace_file::begin_workspace_access(&app_for_open, &vault)?;
         let authority = OwnerAuthority {
             owner_id: uuid::Uuid::new_v4().to_string(),
-            generation: permit
-                .map(|permit| permit.generation())
-                .unwrap_or_else(|| vault.access_generation().load(Ordering::Acquire)),
+            generation: request.access_generation,
             permit,
             context_id: None,
         };
@@ -263,16 +419,15 @@ pub async fn open_workspace_owner(app: AppHandle) -> Result<WorkspaceOwnerReceip
             .runtime
             .lock()
             .map_err(|_| "capsule_state_unavailable".to_owned())?;
-        if guard.quarantined {
-            return Err("workspace_owner_recovery_required".to_owned());
-        }
-        ensure_authority(&app_for_open, &authority)?;
-        guard.owner = Some(WorkspaceOwner {
-            authority: authority.clone(),
-            context_id: uuid::Uuid::new_v4().to_string(),
-            ready: false,
-        });
-        guard.submission = None;
+        // This also observes the pending lock-save admission barrier, while
+        // holding the same short capsule mutex as snapshot admission.
+        install_owner_open(
+            &mut guard,
+            request,
+            &authority,
+            vault.access_generation().load(Ordering::Acquire),
+            |authority| ensure_authority(&app_for_open, authority),
+        )?;
         Ok::<_, String>(authority)
     })
     .await
@@ -285,20 +440,19 @@ pub async fn open_workspace_owner(app: AppHandle) -> Result<WorkspaceOwnerReceip
 }
 
 #[tauri::command]
-pub fn close_workspace_owner(app: AppHandle, owner_id: String) -> Result<(), String> {
+pub fn close_workspace_owner(
+    app: AppHandle,
+    request_id: String,
+    request_sequence: String,
+    owner_id: Option<String>,
+) -> Result<(), String> {
+    let sequence = parse_owner_request(&request_id, &request_sequence)?;
     let state = runtime(&app);
     let mut guard = state
         .runtime
         .lock()
         .map_err(|_| "capsule_state_unavailable".to_owned())?;
-    if guard
-        .owner
-        .as_ref()
-        .is_some_and(|owner| owner.authority.owner_id == owner_id)
-    {
-        guard.owner = None;
-        guard.submission = None;
-    }
+    cancel_owner_request(&mut guard, &request_id, sequence, owner_id.as_deref())?;
     drop(guard);
     emit_state_changed(&app);
     Ok(())
@@ -829,6 +983,14 @@ mod tests {
         }
     }
 
+    fn open_request(sequence: u64, access_generation: u64) -> OwnerOpenRequest {
+        OwnerOpenRequest {
+            request_id: format!("00000000-0000-4000-8000-{sequence:012}"),
+            sequence,
+            access_generation,
+        }
+    }
+
     fn input() -> CapsuleNoteInput {
         CapsuleNoteInput {
             node_id: "00000000-0000-4000-8000-000000000001".to_owned(),
@@ -933,6 +1095,7 @@ mod tests {
         replacement.owner_id = "replacement".to_owned();
         let owner = WorkspaceOwner {
             authority: replacement,
+            request: open_request(1, 3),
             context_id: "new-context".to_owned(),
             ready: true,
         };
@@ -945,6 +1108,7 @@ mod tests {
         let mut guard = CapsuleRuntime::default();
         guard.owner = Some(WorkspaceOwner {
             authority: authority(),
+            request: open_request(1, 3),
             context_id: "new-context".to_owned(),
             ready: true,
         });
@@ -1044,6 +1208,7 @@ mod tests {
         let mut guard = CapsuleRuntime::default();
         guard.owner = Some(WorkspaceOwner {
             authority: authority(),
+            request: open_request(1, 3),
             context_id: "context".to_owned(),
             ready: true,
         });
@@ -1068,5 +1233,102 @@ mod tests {
         assert!(owner_context_matches(guard.owner.as_ref(), &captured));
         guard.owner.as_mut().unwrap().context_id = "replacement".to_owned();
         assert!(!owner_context_matches(guard.owner.as_ref(), &captured));
+    }
+
+    #[test]
+    fn reverse_blocking_open_completion_cannot_replace_the_new_owner() {
+        let mut guard = CapsuleRuntime::default();
+        let first = open_request(1, 3);
+        let second = open_request(2, 3);
+        let first = admit_owner_open(&mut guard, first.request_id, first.sequence, 3).unwrap();
+        let second = admit_owner_open(&mut guard, second.request_id, second.sequence, 3).unwrap();
+        let mut replacement = authority();
+        replacement.owner_id = "new-owner".to_owned();
+        install_owner_open(&mut guard, second, &replacement, 3, |_| Ok(())).unwrap();
+
+        assert!(install_owner_open(&mut guard, first, &authority(), 3, |_| Ok(())).is_err());
+        assert_eq!(guard.owner.as_ref().unwrap().authority.owner_id, "new-owner");
+    }
+
+    #[test]
+    fn admitting_a_new_request_immediately_revokes_the_previous_owner_and_broker() {
+        let mut guard = CapsuleRuntime::default();
+        let first = open_request(1, 3);
+        let first = admit_owner_open(&mut guard, first.request_id, first.sequence, 3).unwrap();
+        install_owner_open(&mut guard, first, &authority(), 3, |_| Ok(())).unwrap();
+        enqueue_note(&mut guard, authority(), "context".to_owned(), input()).unwrap();
+        let second = open_request(2, 3);
+        let second = admit_owner_open(&mut guard, second.request_id, second.sequence, 3).unwrap();
+
+        assert!(guard.owner.is_none());
+        assert!(guard.submission.is_none());
+        assert!(ensure_owner_open(&guard, &second, 3).is_ok());
+        let stale = open_request(1, 3);
+        assert!(admit_owner_open(&mut guard, stale.request_id, stale.sequence, 3).is_err());
+        assert!(ensure_owner_open(&guard, &second, 3).is_ok());
+    }
+
+    #[test]
+    fn late_async_admission_and_cancel_before_admission_are_rejected() {
+        let mut guard = CapsuleRuntime::default();
+        let newer = open_request(2, 3);
+        admit_owner_open(&mut guard, newer.request_id.clone(), newer.sequence, 3).unwrap();
+        let older = open_request(1, 3);
+        assert!(admit_owner_open(&mut guard, older.request_id, older.sequence, 3).is_err());
+
+        let cancelled = open_request(3, 3);
+        cancel_owner_request(&mut guard, &cancelled.request_id, cancelled.sequence, None).unwrap();
+        assert!(admit_owner_open(&mut guard, cancelled.request_id, cancelled.sequence, 3).is_err());
+        assert!(ensure_owner_open(&guard, &newer, 3).is_err());
+        assert!(guard.owner.is_none());
+    }
+
+    #[test]
+    fn disposing_an_old_request_does_not_cancel_a_new_pending_or_active_owner() {
+        let mut guard = CapsuleRuntime::default();
+        let old = open_request(1, 3);
+        let new = open_request(2, 3);
+        admit_owner_open(&mut guard, old.request_id.clone(), old.sequence, 3).unwrap();
+        let new = admit_owner_open(&mut guard, new.request_id, new.sequence, 3).unwrap();
+        cancel_owner_request(&mut guard, &old.request_id, old.sequence, None).unwrap();
+        assert!(ensure_owner_open(&guard, &new, 3).is_ok());
+        install_owner_open(&mut guard, new, &authority(), 3, |_| Ok(())).unwrap();
+        cancel_owner_request(&mut guard, &old.request_id, old.sequence, Some("owner")).unwrap();
+        assert!(guard.owner.is_some());
+    }
+
+    #[test]
+    fn queued_open_cannot_acquire_a_post_lock_generation_or_ignore_pending_save() {
+        let mut guard = CapsuleRuntime::default();
+        let request = open_request(1, 3);
+        let request =
+            admit_owner_open(&mut guard, request.request_id, request.sequence, 3).unwrap();
+        let validated = std::cell::Cell::new(false);
+        assert!(
+            install_owner_open(&mut guard, request.clone(), &authority(), 5, |_| {
+                validated.set(true);
+                Ok(())
+            })
+            .is_err()
+        );
+        assert!(!validated.get());
+        assert!(guard.owner.is_none());
+        assert!(
+            install_owner_open(&mut guard, request, &authority(), 3, |_| {
+                Err("workspace_vault_lock_save_pending".to_owned())
+            })
+            .is_err()
+        );
+        assert!(guard.owner.is_none());
+    }
+
+    #[test]
+    fn owner_request_identity_and_ordering_are_strictly_validated() {
+        let request = open_request(1, 3);
+        assert_eq!(parse_owner_request(&request.request_id, "1").unwrap(), 1);
+        for sequence in ["0", "01", "-1", "18446744073709551616"] {
+            assert!(parse_owner_request(&request.request_id, sequence).is_err());
+        }
+        assert!(parse_owner_request("not-an-identity", "1").is_err());
     }
 }

@@ -13,7 +13,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering},
     },
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -110,6 +110,9 @@ const SYSTEM_UNLOCK_KEY_AAD_PREFIX: &[u8] = b"linked-info-system-unlock-v1\0";
 const EXPORT_PAYLOAD_AAD: &[u8] = b"linked-info-workspace-export-v1";
 static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 pub const WORKSPACE_LOCKED_EVENT: &str = "workspace-security-locked";
+const LOCK_SAVE_IDLE: u8 = 0;
+const LOCK_SAVE_PENDING: u8 = 1;
+const LOCK_SAVE_RECOVERY_REQUIRED: u8 = 2;
 
 fn default_idle_timeout_minutes() -> Option<u32> {
     Some(DEFAULT_IDLE_TIMEOUT_MINUTES)
@@ -384,6 +387,7 @@ pub struct WorkspaceVaultState {
     data_key: Arc<Mutex<Option<Zeroizing<[u8; DATA_KEY_BYTES]>>>>,
     operation_lock: Arc<Mutex<()>>,
     access_generation: Arc<AtomicU64>,
+    lock_save_state: Arc<AtomicU8>,
     idle_timeout_milliseconds: AtomicU64,
     last_activity_milliseconds: AtomicU64,
     sensitive_authorization: Mutex<Option<SensitiveAuthorization>>,
@@ -398,6 +402,7 @@ impl Default for WorkspaceVaultState {
             data_key: Arc::new(Mutex::new(None)),
             operation_lock: Arc::new(Mutex::new(())),
             access_generation: Arc::new(AtomicU64::new(0)),
+            lock_save_state: Arc::new(AtomicU8::new(LOCK_SAVE_IDLE)),
             idle_timeout_milliseconds: AtomicU64::new(minutes_to_milliseconds(
                 DEFAULT_IDLE_TIMEOUT_MINUTES,
             )),
@@ -438,6 +443,75 @@ struct SensitiveAuthorization {
     expires_at_milliseconds: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LockSnapshotOutcome {
+    Saved,
+    Failed,
+    RecoveryRequired,
+}
+
+impl LockSnapshotOutcome {
+    fn reason(self) -> &'static str {
+        match self {
+            Self::Saved => "workspace_lock_save_completed",
+            Self::Failed => "workspace_lock_save_failed",
+            Self::RecoveryRequired => "workspace_lock_save_recovery_required",
+        }
+    }
+}
+
+fn ensure_lock_save_idle(barrier: &AtomicU8) -> Result<(), String> {
+    match barrier.load(Ordering::Acquire) {
+        LOCK_SAVE_IDLE => Ok(()),
+        LOCK_SAVE_PENDING => Err("workspace_vault_lock_save_pending".to_owned()),
+        _ => Err("workspace_vault_lock_save_recovery_required".to_owned()),
+    }
+}
+
+/// Only this private, once-admitted ticket may write its snapshot after lock.
+/// Its data key is copied at admission, never obtained from a newer session.
+struct AdmittedLockSnapshot {
+    data_key: Option<Zeroizing<[u8; DATA_KEY_BYTES]>>,
+    encrypted: bool,
+    barrier: Arc<AtomicU8>,
+    app: Option<AppHandle>,
+    settled: bool,
+}
+
+impl AdmittedLockSnapshot {
+    fn finish(&mut self, outcome: LockSnapshotOutcome) {
+        self.data_key = None;
+        self.barrier.store(
+            if outcome == LockSnapshotOutcome::RecoveryRequired {
+                LOCK_SAVE_RECOVERY_REQUIRED
+            } else {
+                LOCK_SAVE_IDLE
+            },
+            Ordering::Release,
+        );
+        // A terminal-event probe must observe the new barrier state.
+        if let Some(app) = &self.app {
+            let _ = app.emit(WORKSPACE_LOCKED_EVENT, outcome.reason());
+        }
+        self.settled = true;
+    }
+}
+
+impl Drop for AdmittedLockSnapshot {
+    fn drop(&mut self) {
+        if !self.settled {
+            self.barrier.store(LOCK_SAVE_RECOVERY_REQUIRED, Ordering::Release);
+            if let Some(app) = &self.app {
+                let emitted = revoke_workspace_access(app, "workspace_lock_save_recovery_required");
+                crate::secret_clipboard::clear_active(app);
+                if !emitted {
+                    let _ = app.emit(WORKSPACE_LOCKED_EVENT, "workspace_lock_save_recovery_required");
+                }
+            }
+        }
+    }
+}
+
 impl WorkspaceVaultState {
     fn advance_access_generation(&self) -> Result<(), String> {
         self.access_generation
@@ -463,6 +537,7 @@ impl WorkspaceVaultState {
     }
 
     fn data_key(&self) -> Result<Zeroizing<[u8; DATA_KEY_BYTES]>, String> {
+        self.ensure_no_lock_save()?;
         self.data_key
             .lock()
             .map_err(|_| "workspace_vault_state_unavailable".to_owned())?
@@ -472,7 +547,21 @@ impl WorkspaceVaultState {
     }
 
     fn replace_data_key(&self, key: [u8; DATA_KEY_BYTES]) -> Result<(), String> {
+        self.replace_data_key_at_generation(key, None)
+    }
+
+    fn replace_data_key_at_generation(
+        &self,
+        key: [u8; DATA_KEY_BYTES],
+        expected_generation: Option<u64>,
+    ) -> Result<(), String> {
         let mut slot = self.lock_data_key_for_transition()?;
+        self.ensure_no_lock_save()?;
+        if expected_generation.is_some_and(|expected| {
+            self.access_generation.load(Ordering::Acquire) != expected
+        }) {
+            return Err("workspace_vault_session_expired".to_owned());
+        }
         self.advance_access_generation()?;
         *slot = Some(Zeroizing::new(key));
         drop(slot);
@@ -480,7 +569,52 @@ impl WorkspaceVaultState {
         Ok(())
     }
 
+    fn ensure_no_lock_save(&self) -> Result<(), String> {
+        ensure_lock_save_idle(&self.lock_save_state)
+    }
+
+    fn begin_unlock_generation(&self) -> Result<u64, String> {
+        let _slot = self.lock_data_key_for_transition()?;
+        self.ensure_no_lock_save()?;
+        let generation = self.access_generation.load(Ordering::Acquire);
+        if generation == u64::MAX {
+            return Err("workspace_vault_access_generation_exhausted".to_owned());
+        }
+        Ok(generation)
+    }
+
+    fn admit_lock_snapshot(
+        &self,
+        permit: Option<WorkspaceAccessPermit>,
+        generation: u64,
+        encrypted: bool,
+    ) -> Result<AdmittedLockSnapshot, String> {
+        let slot = self.lock_data_key_for_transition()?;
+        self.ensure_no_lock_save()?;
+        if generation == u64::MAX
+            || self.access_generation.load(Ordering::Acquire) != generation
+            || encrypted != permit.is_some()
+            || permit.is_some_and(|permit| permit.generation != generation || slot.is_none())
+        {
+            return Err("workspace_vault_session_expired".to_owned());
+        }
+        let data_key = if encrypted {
+            slot.as_ref().map(|key| Zeroizing::new(**key))
+        } else {
+            None
+        };
+        self.lock_save_state.store(LOCK_SAVE_PENDING, Ordering::Release);
+        Ok(AdmittedLockSnapshot {
+            data_key,
+            encrypted,
+            barrier: Arc::clone(&self.lock_save_state),
+            app: None,
+            settled: false,
+        })
+    }
+
     fn optional_data_key(&self) -> Result<Option<Zeroizing<[u8; DATA_KEY_BYTES]>>, String> {
+        self.ensure_no_lock_save()?;
         self.data_key
             .lock()
             .map_err(|_| "workspace_vault_state_unavailable".to_owned())
@@ -515,6 +649,7 @@ impl WorkspaceVaultState {
             .data_key
             .lock()
             .map_err(|_| "workspace_vault_state_unavailable".to_owned())?;
+        self.ensure_no_lock_save()?;
         let generation = self.access_generation.load(Ordering::Acquire);
         if generation == u64::MAX {
             return Err("workspace_vault_access_generation_exhausted".to_owned());
@@ -578,6 +713,7 @@ impl WorkspaceVaultState {
             .data_key
             .lock()
             .map_err(|_| "workspace_vault_state_unavailable".to_owned())?;
+        self.ensure_no_lock_save()?;
         if permit.generation == u64::MAX
             || self.access_generation.load(Ordering::Acquire) != permit.generation
             || slot.is_none()
@@ -1296,19 +1432,23 @@ pub async fn inspect_workspace_security(
     state: tauri::State<'_, WorkspaceVaultState>,
     system_unlock_state: tauri::State<'_, SystemUnlockState>,
 ) -> Result<WorkspaceSecurityStatus, String> {
+    state.ensure_no_lock_save()?;
     let store = workspace_store(&app).map_err(|error| error.to_string())?;
     let operation_lock = Arc::clone(&state.operation_lock);
+    let lock_save_state = Arc::clone(&state.lock_save_state);
     let provider = system_unlock_state.provider();
     let provider_for_recovery = Arc::clone(&provider);
     let metadata = tauri::async_runtime::spawn_blocking(move || {
         let _guard = operation_lock
             .lock()
             .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
+        ensure_lock_save_idle(&lock_save_state)?;
         recover_pending_workspace_transactions(&store, provider_for_recovery.as_ref())?;
         store.read_vault_metadata()
     })
     .await
     .map_err(|error| error.to_string())??;
+    state.ensure_no_lock_save()?;
     let encrypted = metadata.is_some();
     let idle_timeout_minutes = metadata
         .as_ref()
@@ -1331,9 +1471,11 @@ pub async fn unlock_workspace(
     system_unlock_state: tauri::State<'_, SystemUnlockState>,
     password: String,
 ) -> Result<WorkspaceSecurityStatus, String> {
+    let unlock_generation = state.begin_unlock_generation()?;
     state.check_password_attempt_allowed()?;
     let store = workspace_store(&app).map_err(|error| error.to_string())?;
     let operation_lock = Arc::clone(&state.operation_lock);
+    let lock_save_state = Arc::clone(&state.lock_save_state);
     let password = Zeroizing::new(password);
     let provider = system_unlock_state.provider();
     let provider_for_unlock = Arc::clone(&provider);
@@ -1341,6 +1483,7 @@ pub async fn unlock_workspace(
         let _guard = operation_lock
             .lock()
             .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
+        ensure_lock_save_idle(&lock_save_state)?;
         recover_pending_workspace_transactions(&store, provider_for_unlock.as_ref())?;
         let metadata = store
             .read_vault_metadata()?
@@ -1367,8 +1510,8 @@ pub async fn unlock_workspace(
         }
     };
     state.set_idle_timeout(idle_timeout_minutes);
+    state.replace_data_key_at_generation(data_key, Some(unlock_generation))?;
     crate::capsule::revoke(&app);
-    state.replace_data_key(data_key)?;
     state.reset_password_failures();
     Ok(WorkspaceSecurityStatus {
         encrypted: true,
@@ -1386,18 +1529,22 @@ pub async fn unlock_workspace_with_system(
     system_unlock_state: tauri::State<'_, SystemUnlockState>,
     message: String,
 ) -> Result<WorkspaceSecurityStatus, String> {
+    let unlock_generation = state.begin_unlock_generation()?;
     let store = workspace_store(&app).map_err(|error| error.to_string())?;
     let operation_lock = Arc::clone(&state.operation_lock);
+    let lock_save_state = Arc::clone(&state.lock_save_state);
     let provider = system_unlock_state.provider();
     if !provider.available() {
         return Err("system_unlock_unavailable".to_owned());
     }
     crate::system_unlock::verify_user_presence(&app, message).await?;
+    state.ensure_no_lock_save()?;
     let provider_for_unlock = Arc::clone(&provider);
     let (data_key, idle_timeout_minutes) = tauri::async_runtime::spawn_blocking(move || {
         let _guard = operation_lock
             .lock()
             .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
+        ensure_lock_save_idle(&lock_save_state)?;
         recover_pending_workspace_transactions(&store, provider_for_unlock.as_ref())?;
         let metadata = store
             .read_vault_metadata()?
@@ -1409,8 +1556,8 @@ pub async fn unlock_workspace_with_system(
     .await
     .map_err(|error| error.to_string())??;
     state.set_idle_timeout(idle_timeout_minutes);
+    state.replace_data_key_at_generation(data_key, Some(unlock_generation))?;
     crate::capsule::revoke(&app);
-    state.replace_data_key(data_key)?;
     state.reset_password_failures();
     Ok(WorkspaceSecurityStatus {
         encrypted: true,
@@ -1434,6 +1581,7 @@ pub async fn enable_workspace_encryption(
     password: String,
 ) -> Result<WorkspaceSecurityStatus, String> {
     validate_new_password(&password)?;
+    state.ensure_no_lock_save()?;
     // Encryption changes the confidentiality boundary. Revoke the current
     // session before any cleanup that can fail; only the committed migration
     // below may establish a fresh authorization.
@@ -1443,10 +1591,12 @@ pub async fn enable_workspace_encryption(
     let store = workspace_store(&app).map_err(|error| error.to_string())?;
     let operation_lock = Arc::clone(&state.operation_lock);
     let password = Zeroizing::new(password);
+    let lock_save_state = Arc::clone(&state.lock_save_state);
     let data_key = tauri::async_runtime::spawn_blocking(move || {
         let _guard = operation_lock
             .lock()
             .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
+        ensure_lock_save_idle(&lock_save_state)?;
         recover_pending_migration(&store)?;
         if store.encryption_configured() {
             return Err("workspace_vault_already_configured".to_owned());
@@ -1575,6 +1725,7 @@ pub async fn rotate_workspace_data_key(
     let previous_data_key = state.data_key()?;
     let store = workspace_store(&app).map_err(|error| error.to_string())?;
     let operation_lock = Arc::clone(&state.operation_lock);
+    let lock_save_state = Arc::clone(&state.lock_save_state);
     let provider = system_unlock_state.provider();
     let password = Zeroizing::new(password);
 
@@ -1605,6 +1756,7 @@ pub async fn rotate_workspace_data_key(
             let _guard = operation_lock
                 .lock()
                 .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
+            ensure_lock_save_idle(&lock_save_state)?;
             recover_pending_workspace_transactions(&store, provider.as_ref())?;
             rotate_encrypted_store(&store, &previous_data_key, &password, provider.as_ref())
         })
@@ -1904,10 +2056,12 @@ pub async fn destroy_workspace(
     let store = workspace_store(&app).map_err(|error| error.to_string())?;
     let operation_lock = Arc::clone(&state.operation_lock);
     let provider = system_unlock_state.provider();
+    let lock_save_state = Arc::clone(&state.lock_save_state);
     let destruction_result = tauri::async_runtime::spawn_blocking(move || {
         let _guard = operation_lock
             .lock()
             .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
+        ensure_lock_save_idle(&lock_save_state)?;
         recover_pending_migration(&store)?;
         let metadata = store.read_vault_metadata()?;
         if let Some(credential) = metadata.and_then(|metadata| metadata.system_unlock)
@@ -1942,6 +2096,120 @@ pub async fn lock_workspace(
 ) -> Result<WorkspaceSecurityStatus, String> {
     lock_workspace_runtime(&app, "manual");
     inspect_workspace_security(app, state, system_unlock_state).await
+}
+
+fn persist_admitted_lock_snapshot(
+    store: &WorkspaceFileStore,
+    admission: &AdmittedLockSnapshot,
+    contents: &str,
+    write: impl FnOnce(&Path, &[u8]) -> io::Result<AtomicWriteStatus>,
+) -> Result<AtomicWriteStatus, String> {
+    if store.encryption_configured() != admission.encrypted {
+        return Err("workspace_lock_save_boundary_changed".to_owned());
+    }
+    let normalized = Zeroizing::new(
+        normalize_storage_envelope(contents).map_err(|_| "workspace_lock_save_invalid".to_owned())?,
+    );
+    let serialized = Zeroizing::new(serialize_workspace_for_slot(
+        &normalized,
+        WorkspaceFileSlot::Primary,
+        admission.data_key.as_deref(),
+    )?);
+    fs::create_dir_all(&store.base_directory).map_err(|error| error.to_string())?;
+    write(&store.path(WorkspaceFileSlot::Primary), serialized.as_bytes())
+        .map_err(|_| "workspace_lock_save_failed".to_owned())
+}
+
+fn lock_snapshot_outcome(result: &Result<AtomicWriteStatus, String>) -> LockSnapshotOutcome {
+    match result {
+        Ok(AtomicWriteStatus::Committed) => LockSnapshotOutcome::Saved,
+        Ok(AtomicWriteStatus::RecoveryRequired) => LockSnapshotOutcome::RecoveryRequired,
+        Err(_) => LockSnapshotOutcome::Failed,
+    }
+}
+
+#[tauri::command]
+pub async fn lock_workspace_with_snapshot(
+    app: AppHandle,
+    state: tauri::State<'_, WorkspaceVaultState>,
+    system_unlock_state: tauri::State<'_, SystemUnlockState>,
+    owner_id: String,
+    contents: String,
+) -> Result<WorkspaceSecurityStatus, String> {
+    let contents = Zeroizing::new(contents);
+    // An encrypted owner's original permit proves the admitted key mode.
+    // Do not query the filesystem before revocation: a slow disk must not
+    // delay the lock. The worker rechecks the actual storage boundary later.
+    let admission = crate::capsule::with_owner_authority(&app, &owner_id, |authority| {
+        // Lock order is capsule-owner mutex -> data-key mutex, with only
+        // bounded key copying and barrier installation in this closure.
+        state.admit_lock_snapshot(
+            authority.permit, authority.generation, authority.permit.is_some(),
+        )
+    });
+
+    let mut ticket = match admission {
+        Ok(mut ticket) => {
+            ticket.app = Some(app.clone());
+            lock_workspace_runtime_with_terminal_event(&app, "workspace_lock_save_started");
+            ticket
+        }
+        Err(_) => {
+            // Even an expired owner or an invalid save admission must not
+            // make a user's lock request leave the vault authorized.
+            lock_workspace_runtime_with_terminal_event(&app, "workspace_lock_save_started");
+            if let Err(error) = state.ensure_no_lock_save() {
+                if error == "workspace_vault_lock_save_recovery_required" {
+                    let _ = app.emit(WORKSPACE_LOCKED_EVENT, "workspace_lock_save_recovery_required");
+                }
+                return Err(error);
+            }
+            let _ = app.emit(WORKSPACE_LOCKED_EVENT, "workspace_lock_save_failed");
+            return Err("workspace_lock_save_failed".to_owned());
+        }
+    };
+
+    let operation_lock = Arc::clone(&state.operation_lock);
+    let provider = system_unlock_state.provider();
+    let idle_timeout_minutes = state.idle_timeout_minutes();
+    // Revocation and the start event above happen before the first await.
+    // Only this once-admitted immutable snapshot crosses that revocation.
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = (|| {
+            let _operation = operation_lock.lock()
+                .map_err(|_| "workspace_lock_save_failed".to_owned())?;
+            let store = workspace_store(&app)
+                .map_err(|_| "workspace_lock_save_failed".to_owned())?;
+            let metadata = store.read_vault_metadata()?;
+            let status = WorkspaceSecurityStatus {
+                encrypted: ticket.encrypted,
+                locked: ticket.encrypted,
+                system_unlock_available: provider.available(),
+                system_unlock_enabled: system_unlock_enabled(metadata.as_ref(), provider.as_ref()),
+                idle_timeout_minutes,
+            };
+            let written = persist_admitted_lock_snapshot(
+                &store, &ticket, &contents, write_atomically_commit_aware,
+            )?;
+            Ok::<_, String>((written, status))
+        })();
+        let outcome = match &result {
+            Ok((written, _)) => lock_snapshot_outcome(&Ok(*written)),
+            Err(_) => LockSnapshotOutcome::Failed,
+        };
+        ticket.finish(outcome);
+        match result {
+            Ok((AtomicWriteStatus::Committed, status)) => Ok(status),
+            Ok((AtomicWriteStatus::RecoveryRequired, _)) => {
+                Err("workspace_lock_save_recovery_required".to_owned())
+            }
+            Err(_) => Err("workspace_lock_save_failed".to_owned()),
+        }
+    })
+    .await
+    // A worker panic may occur after replacement. Ticket Drop retains the
+    // process recovery barrier and emits the terminal event before this result.
+    .map_err(|_| "workspace_lock_save_recovery_required".to_owned())?
 }
 
 #[tauri::command]
@@ -2187,6 +2455,7 @@ pub async fn prepare_workspace_restore(
     contents: String,
     password: String,
 ) -> Result<PreparedWorkspaceRestorePreview, String> {
+    state.ensure_no_lock_save()?;
     if workspace_encryption_configured(&app) {
         return Err("workspace_restore_requires_unconfigured_vault".to_owned());
     }
@@ -2287,6 +2556,7 @@ pub async fn commit_workspace_restore(
     system_unlock_state: tauri::State<'_, SystemUnlockState>,
     restore_id: uuid::Uuid,
 ) -> Result<WorkspaceSecurityTransactionResult, String> {
+    state.ensure_no_lock_save()?;
     // Take the prepared payload before ordinary locking. `shutdown()` clears
     // the in-memory preparation as part of its normal lock semantics; keeping
     // this one verified payload in a local variable lets the explicit restore
@@ -2301,11 +2571,13 @@ pub async fn commit_workspace_restore(
     let store = workspace_store(&app).map_err(|error| error.to_string())?;
     let store_for_install = store.clone();
     let operation_lock = Arc::clone(&state.operation_lock);
+    let lock_save_state = Arc::clone(&state.lock_save_state);
     let prepared_data_key = *prepared.data_key;
     let install_task = tauri::async_runtime::spawn_blocking(move || {
         let _guard = operation_lock
             .lock()
             .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
+        ensure_lock_save_idle(&lock_save_state)?;
         if recover_before_prepared_restore(&store_for_install) {
             return Ok::<_, String>(None);
         }
@@ -2398,6 +2670,7 @@ pub fn begin_workspace_access(
     app: &AppHandle,
     state: &WorkspaceVaultState,
 ) -> Result<Option<WorkspaceAccessPermit>, String> {
+    state.ensure_no_lock_save()?;
     if workspace_encryption_configured(app) {
         state.access_permit().map(Some)
     } else {
@@ -2410,6 +2683,7 @@ pub fn ensure_workspace_access(
     state: &WorkspaceVaultState,
     permit: Option<WorkspaceAccessPermit>,
 ) -> Result<(), String> {
+    state.ensure_no_lock_save()?;
     match permit {
         Some(permit) => state.ensure_access_permit(permit),
         None if workspace_encryption_configured(app) => {
@@ -5738,6 +6012,133 @@ mod tests {
                 "cleanup_plaintext_runtimes"
             ]
         );
+    }
+
+    fn admitted_lock_fixture() -> (
+        WorkspaceVaultState,
+        WorkspaceFileStore,
+        [u8; DATA_KEY_BYTES],
+        WorkspaceAccessPermit,
+    ) {
+        let store = WorkspaceFileStore::new(test_directory());
+        store.write_plaintext(WorkspaceFileSlot::Primary, &workspace("before-lock")).unwrap();
+        let key = migrate_plaintext_store(&store, "synthetic lock-save password").unwrap();
+        let state = WorkspaceVaultState::default();
+        state.replace_data_key(key).unwrap();
+        let permit = state.access_permit().unwrap();
+        (state, store, key, permit)
+    }
+
+    #[test]
+    fn manual_lock_admits_latest_snapshot_without_waiting_for_the_file_queue() {
+        let (state, store, key, permit) = admitted_lock_fixture();
+        let file_queue = state.operation_lock.lock().unwrap();
+        let mut ticket = state.admit_lock_snapshot(Some(permit), permit.generation, true).unwrap();
+        assert!(state.shutdown());
+        assert!(!state.is_unlocked().unwrap());
+        assert_eq!(state.ensure_no_lock_save().unwrap_err(), "workspace_vault_lock_save_pending");
+        assert!(state.ensure_access_permit(permit).is_err());
+        // Locking already completed while a different file operation still
+        // owns the queue. The one accepted snapshot is persisted afterwards.
+        drop(file_queue);
+        let result = persist_admitted_lock_snapshot(
+            &store, &ticket, &workspace("latest-edit"), write_atomically_commit_aware,
+        );
+        assert_eq!(lock_snapshot_outcome(&result), LockSnapshotOutcome::Saved);
+        ticket.finish(lock_snapshot_outcome(&result));
+        assert!(ticket.data_key.is_none());
+        assert!(!state.is_unlocked().unwrap());
+        assert!(state.ensure_no_lock_save().is_ok());
+        let saved = store.read(WorkspaceFileSlot::Primary, Some(&key)).unwrap().unwrap();
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&saved).unwrap()["nodes"][0]["name"], "latest-edit");
+        assert_eq!(state.ensure_access_permit(permit).unwrap_err(), "workspace_vault_session_expired");
+        fs::remove_dir_all(&store.base_directory).unwrap();
+    }
+
+    #[test]
+    fn pending_final_snapshot_blocks_unlock_and_replacement_even_when_the_queue_is_free() {
+        let state = WorkspaceVaultState::default();
+        state.replace_data_key([17; DATA_KEY_BYTES]).unwrap();
+        let permit = state.access_permit().unwrap();
+        let old_unlock_generation = state.begin_unlock_generation().unwrap();
+        let mut ticket = state.admit_lock_snapshot(Some(permit), permit.generation, true).unwrap();
+        state.shutdown();
+        let queued_transition = state.operation_lock.lock().unwrap();
+        assert_eq!(ensure_lock_save_idle(&state.lock_save_state).unwrap_err(), "workspace_vault_lock_save_pending");
+        assert_eq!(state.begin_unlock_generation().unwrap_err(), "workspace_vault_lock_save_pending");
+        assert_eq!(state.replace_data_key([18; DATA_KEY_BYTES]).unwrap_err(), "workspace_vault_lock_save_pending");
+        assert!(state.admit_lock_snapshot(Some(permit), permit.generation, true).is_err());
+        drop(queued_transition);
+        ticket.finish(LockSnapshotOutcome::Saved);
+        assert_eq!(state.replace_data_key_at_generation([17; DATA_KEY_BYTES], Some(old_unlock_generation)).unwrap_err(), "workspace_vault_session_expired");
+        assert!(!state.is_unlocked().unwrap());
+        let explicit_unlock_generation = state.begin_unlock_generation().unwrap();
+        state.replace_data_key_at_generation([17; DATA_KEY_BYTES], Some(explicit_unlock_generation)).unwrap();
+        assert!(state.is_unlocked().unwrap());
+    }
+
+    #[test]
+    fn plaintext_owner_admission_also_installs_the_lock_save_barrier() {
+        let state = WorkspaceVaultState::default();
+        let mut ticket = state.admit_lock_snapshot(None, 0, false).unwrap();
+        state.shutdown();
+        assert_eq!(state.ensure_no_lock_save().unwrap_err(), "workspace_vault_lock_save_pending");
+        assert!(state.admit_lock_snapshot(None, 0, false).is_err());
+        ticket.finish(LockSnapshotOutcome::Saved);
+        assert!(state.ensure_no_lock_save().is_ok());
+        assert!(state.admit_lock_snapshot(None, 0, false).is_err());
+    }
+
+    #[test]
+    fn lock_snapshot_precommit_failure_keeps_old_file_and_does_not_restore_authority() {
+        let (state, store, key, permit) = admitted_lock_fixture();
+        let mut ticket = state.admit_lock_snapshot(Some(permit), permit.generation, true).unwrap();
+        state.shutdown();
+        let result = persist_admitted_lock_snapshot(&store, &ticket, &workspace("unsaved-edit"), |_, _| {
+            Err(io::Error::other("injected before replacement"))
+        });
+        assert_eq!(lock_snapshot_outcome(&result), LockSnapshotOutcome::Failed);
+        ticket.finish(lock_snapshot_outcome(&result));
+        assert_eq!(LockSnapshotOutcome::Failed.reason(), "workspace_lock_save_failed");
+        assert!(!state.is_unlocked().unwrap());
+        assert!(state.ensure_no_lock_save().is_ok());
+        let saved = store.read(WorkspaceFileSlot::Primary, Some(&key)).unwrap().unwrap();
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&saved).unwrap()["nodes"][0]["name"], "before-lock");
+        fs::remove_dir_all(&store.base_directory).unwrap();
+    }
+
+    #[test]
+    fn lock_snapshot_after_commit_uncertainty_retains_saved_file_and_a_process_barrier() {
+        let (state, store, key, permit) = admitted_lock_fixture();
+        let mut ticket = state.admit_lock_snapshot(Some(permit), permit.generation, true).unwrap();
+        state.shutdown();
+        let result = persist_admitted_lock_snapshot(&store, &ticket, &workspace("committed-edit"), |path, bytes| {
+            write_atomically_commit_aware_with(path, bytes, replace_file, |_| {
+                Err(io::Error::other("injected after replacement"))
+            })
+        });
+        assert_eq!(lock_snapshot_outcome(&result), LockSnapshotOutcome::RecoveryRequired);
+        ticket.finish(lock_snapshot_outcome(&result));
+        assert!(!state.is_unlocked().unwrap());
+        assert_eq!(state.ensure_no_lock_save().unwrap_err(), "workspace_vault_lock_save_recovery_required");
+        assert_eq!(state.begin_unlock_generation().unwrap_err(), "workspace_vault_lock_save_recovery_required");
+        assert!(state.replace_data_key(key).is_err());
+        let saved = store.read(WorkspaceFileSlot::Primary, Some(&key)).unwrap().unwrap();
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&saved).unwrap()["nodes"][0]["name"], "committed-edit");
+        fs::remove_dir_all(&store.base_directory).unwrap();
+    }
+
+    #[test]
+    fn an_unsettled_lock_snapshot_cannot_silently_release_its_barrier() {
+        let state = WorkspaceVaultState::default();
+        state.replace_data_key([19; DATA_KEY_BYTES]).unwrap();
+        let permit = state.access_permit().unwrap();
+        let ticket = state.admit_lock_snapshot(Some(permit), permit.generation, true).unwrap();
+        state.shutdown();
+        drop(ticket);
+        assert!(!state.is_unlocked().unwrap());
+        assert_eq!(state.ensure_no_lock_save().unwrap_err(), "workspace_vault_lock_save_recovery_required");
+        assert!(state.replace_data_key([19; DATA_KEY_BYTES]).is_err());
     }
 
     #[test]

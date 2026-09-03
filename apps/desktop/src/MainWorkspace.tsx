@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import App from "./App";
@@ -34,6 +34,7 @@ import {
 import { localLlmSettingsStore } from "./llmSettings";
 import {
   type WorkspaceSecurityStatus,
+  type WorkspaceSecurity,
   tauriWorkspaceSecurity,
   unavailableWorkspaceSecurity,
 } from "./workspaceSecurity";
@@ -113,11 +114,26 @@ function UnlockedWorkspace({
       : {
           persistence: localWorkspacePersistence,
           capsuleHost: unavailableCapsuleHost,
+          lockWithSnapshot() {
+            return workspaceSecurity.lock();
+          },
           dispose() {},
         };
     setSession(current);
     return () => current.dispose();
   }, []);
+  const ownerSecurity = useMemo<WorkspaceSecurity>(() => ({
+    ...workspaceSecurity,
+    lock(contents) {
+      if (contents === undefined) {
+        return workspaceSecurity.lock();
+      }
+      if (session === null) {
+        return Promise.reject(new Error("workspace_session_unavailable"));
+      }
+      return session.lockWithSnapshot(contents);
+    },
+  }), [session]);
   if (session === null) {
     return null;
   }
@@ -139,7 +155,7 @@ function UnlockedWorkspace({
       smartReferenceResultCache={smartReferenceResultCache}
       updateWorkspaceSecurityStatus={updateWorkspaceSecurityStatus}
       workspaceBackupHistory={workspaceBackupHistory}
-      workspaceSecurity={workspaceSecurity}
+      workspaceSecurity={ownerSecurity}
       workspaceSecurityStatus={workspaceSecurityStatus}
     />
   );

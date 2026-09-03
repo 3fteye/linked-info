@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { CapsuleCommitResult, CapsuleHost } from "./capsuleHost";
 import type { TimelineNoteInput } from "./timelineWorkspace";
+import type { WorkspaceSecurityStatus } from "./workspaceSecurity";
 import {
   loadLegacyBrowserWorkspace,
   removeLegacyBrowserWorkspace,
@@ -17,6 +18,7 @@ import {
 export interface DesktopWorkspaceSession {
   persistence: WorkspacePersistence;
   capsuleHost: CapsuleHost;
+  lockWithSnapshot(contents: string): Promise<WorkspaceSecurityStatus>;
   dispose(): void;
 }
 
@@ -27,7 +29,33 @@ export interface DesktopWorkspaceSessionBridge {
 
 interface OwnerLease {
   epoch: number;
+  requestId: string;
+  requestSequence: string;
+  ownerId: string | null;
   owner: Promise<string>;
+}
+
+const ownerRequestSequenceKey = "linked-info.owner-request-sequence.v1";
+
+function nextOwnerRequest() {
+  try {
+    const previous = sessionStorage.getItem(ownerRequestSequenceKey) ?? "0";
+    if (previous.length > 20 || !/^(0|[1-9][0-9]*)$/.test(previous)) {
+      throw new Error("invalid sequence");
+    }
+    const next = BigInt(previous) + 1n;
+    if (next > 18_446_744_073_709_551_615n) {
+      throw new Error("sequence exhausted");
+    }
+    const requestSequence = next.toString();
+    const requestId = crypto.randomUUID();
+    // This non-secret counter survives a main WebView reload. Owner tokens,
+    // request identities, workspace contents, and keys never enter storage.
+    sessionStorage.setItem(ownerRequestSequenceKey, requestSequence);
+    return { requestId, requestSequence };
+  } catch {
+    throw new Error("workspace_owner_request_state_unavailable");
+  }
 }
 
 function commitStatus(result: unknown): unknown {
@@ -93,25 +121,33 @@ export function createDesktopWorkspaceSession(
       throw new Error("workspace_session_reload_required");
     }
     if (ownerLease === null) {
-      ownerLease = {
+      const request = nextOwnerRequest();
+      const lease: OwnerLease = {
         epoch,
+        ...request,
+        ownerId: null,
         owner: bridge
-          .invoke<{ ownerId: string }>("open_workspace_owner")
+          .invoke<{ ownerId: string }>("open_workspace_owner", request)
           .then(({ ownerId }) => {
             if (typeof ownerId !== "string" || ownerId.length === 0) {
               throw new Error("workspace_owner_invalid");
             }
+            lease.ownerId = ownerId;
             return ownerId;
           }),
       };
+      ownerLease = lease;
     }
   }
 
   function closeOwner(lease: OwnerLease) {
-    // Rust only closes a matching token. This must also handle an open that
-    // finishes after its App has already unmounted or renewed ownership.
-    void lease.owner
-      .then((ownerId) => bridge.invoke<void>("close_workspace_owner", { ownerId }))
+    // Cancel admission immediately, including an open whose blocking worker
+    // or receipt has not completed. Never wait for that open to mint an owner.
+    void bridge.invoke<void>("close_workspace_owner", {
+      requestId: lease.requestId,
+      requestSequence: lease.requestSequence,
+      ...(lease.ownerId === null ? {} : { ownerId: lease.ownerId }),
+    })
       .catch(() => undefined);
   }
 
@@ -263,6 +299,18 @@ export function createDesktopWorkspaceSession(
   };
 
   return {
+    async lockWithSnapshot(contents) {
+      const lease = captureOwner();
+      const ownerId = lease.ownerId ?? await lease.owner;
+      assertCurrent(lease);
+      // A loaded owner reaches native admission synchronously, even when a
+      // persistence write is blocked. The returned status contains no plaintext
+      // and remains valid after the native lock disposes this session.
+      return bridge.invoke<WorkspaceSecurityStatus>("lock_workspace_with_snapshot", {
+        ownerId,
+        contents,
+      });
+    },
     persistence: {
       load: () => queuedPersistence.load(),
       loadRecovery: () => queuedPersistence.loadRecovery(),

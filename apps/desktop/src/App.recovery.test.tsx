@@ -10,6 +10,7 @@ import type { WorkspaceLifecycle } from "./workspaceLifecycle";
 
 const canvasHarness = vi.hoisted(() => ({
   editName: null as null | ((name: string) => void),
+  editContent: null as null | ((content: string) => void),
   removeNodes: null as null | ((nodeIds: string[]) => void),
   undo: null as null | (() => void),
   redo: null as null | (() => void),
@@ -26,6 +27,7 @@ vi.mock("./GraphCanvas", () => ({
     nodes: Array<{ id: string; name: string | null }>;
     onDeleteNodes: (nodeIds: string[]) => void;
     onNodeNameChange: (nodeId: string, name: string) => void;
+    onNodeContentChange: (nodeId: string, content: string) => void;
     onUndo: () => void;
     onRedo: () => void;
     canUndo: boolean;
@@ -35,6 +37,11 @@ vi.mock("./GraphCanvas", () => ({
     canvasHarness.editName = (name: string) => {
       if (first !== undefined) {
         props.onNodeNameChange(first.id, name);
+      }
+    };
+    canvasHarness.editContent = (content: string) => {
+      if (first !== undefined) {
+        props.onNodeContentChange(first.id, content);
       }
     };
     canvasHarness.removeNodes = props.onDeleteNodes;
@@ -451,6 +458,7 @@ describe("App recovery transaction boundary", () => {
     ).IS_REACT_ACT_ENVIRONMENT = true;
     localStorage.clear();
     canvasHarness.editName = null;
+    canvasHarness.editContent = null;
     canvasHarness.removeNodes = null;
     canvasHarness.undo = null;
     canvasHarness.redo = null;
@@ -712,11 +720,64 @@ describe("App recovery transaction boundary", () => {
     expect((await find("mock-canvas")).textContent).toBe("Editable after rejected encryption password");
   });
 
+  it("passes the latest ordinary edit to native lock without waiting for an earlier hung save or the 300 ms timer", async () => {
+    vi.useFakeTimers();
+    const pendingSave = deferred<void>();
+    try {
+      const runtime = capsuleRuntime(workspace(currentNodeId, "Older saved name"));
+      vi.mocked(runtime.persistence.save).mockReturnValue(pendingSave.promise);
+      const status = encryptedStatus();
+      const locked = { ...status, locked: true };
+      const lock = vi.fn<WorkspaceSecurity["lock"]>(async () => locked);
+      await renderApp({
+        capsuleHost: runtime.host,
+        persistence: runtime.persistence,
+        security: { ...encryptedSecurity(status), lock },
+        status,
+        updateStatus: () => {},
+      });
+      await act(async () => { await vi.advanceTimersByTimeAsync(300); });
+      expect(runtime.persistence.save).toHaveBeenCalledOnce();
+      await act(async () => {
+        canvasHarness.editName?.("Latest edit before auto-save");
+        canvasHarness.editContent?.("Latest synthetic body before auto-save");
+      });
+      await openDataSecuritySettings();
+      const lockButton = await findButton(/Lock now|立即锁定/);
+      await act(async () => {
+        lockButton.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        lockButton.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+
+      expect(lock).toHaveBeenCalledOnce();
+      const contents = lock.mock.calls[0][0];
+      expect(contents).toEqual(expect.any(String));
+      const snapshot = parseStoredWorkspaceText(contents!);
+      expect(snapshot).toMatchObject({
+        status: "ready",
+        workspace: {
+          nodes: [{
+            id: currentNodeId,
+            name: "Latest edit before auto-save",
+            content: "Latest synthetic body before auto-save",
+          }],
+        },
+      });
+      expect(runtime.persistence.save).toHaveBeenCalledOnce();
+    } finally {
+      await act(async () => {
+        root.render(<></>);
+        pendingSave.resolve(undefined);
+      });
+      vi.useRealTimers();
+    }
+  });
+
   it("still invokes the native lock when the last workspace save fails", async () => {
     const runtime = capsuleRuntime(workspace(currentNodeId, "Synthetic encrypted node"));
     const status = encryptedStatus();
     const locked = { ...status, locked: true };
-    const lock = vi.fn(async () => locked);
+    const lock = vi.fn<WorkspaceSecurity["lock"]>(async () => locked);
     const updateStatus = vi.fn();
     await renderApp({
       capsuleHost: runtime.host,
@@ -737,7 +798,70 @@ describe("App recovery transaction boundary", () => {
     expect(runtime.persistence.save).toHaveBeenCalled();
     expect(vi.mocked(runtime.persistence.save).mock.calls).toHaveLength(savesBeforeLock);
     expect(lock).toHaveBeenCalledOnce();
+    expect(parseStoredWorkspaceText(lock.mock.calls[0][0]!)).toMatchObject({
+      status: "ready", workspace: { nodes: [{ id: currentNodeId, name: "Synthetic encrypted node" }] },
+    });
     expect(updateStatus).toHaveBeenCalledWith(locked);
+  });
+
+  it("preserves an already prepared capsule snapshot when its ordinary-save drain is hung", async () => {
+    const runtime = capsuleRuntime(workspace(currentNodeId, "Synthetic encrypted node"));
+    const pendingSave = deferred<void>();
+    vi.mocked(runtime.persistence.save).mockReturnValue(pendingSave.promise);
+    const status = encryptedStatus();
+    const lock = vi.fn<WorkspaceSecurity["lock"]>(async () => ({ ...status, locked: true }));
+    await renderApp({
+      capsuleHost: runtime.host,
+      persistence: runtime.persistence,
+      security: { ...encryptedSecurity(status), lock },
+      status,
+      updateStatus: () => {},
+    });
+    await waitUntil(() => vi.mocked(runtime.host.take).mock.calls.length > 0);
+    const savesBeforeCapture = vi.mocked(runtime.persistence.save).mock.calls.length;
+    await act(async () => { runtime.enqueue(capsuleNote()); });
+    await waitUntil(() => vi.mocked(runtime.persistence.save).mock.calls.length === savesBeforeCapture + 1);
+    expect(runtime.host.commit).not.toHaveBeenCalled();
+    await openDataSecuritySettings();
+    await clickButton(/Lock now|立即锁定/);
+
+    expect(lock).toHaveBeenCalledOnce();
+    const snapshot = parseStoredWorkspaceText(lock.mock.calls[0][0]!);
+    if (snapshot.status !== "ready") throw new Error("missing synthetic locked capsule snapshot");
+    expect(snapshot.workspace.nodes.some((node) => node.id === capsuleNote().nodeId)).toBe(true);
+    expect(snapshot.workspace.view.timeline?.captures).toHaveLength(1);
+    expect(snapshot.workspace.view.timeline?.days).toHaveLength(1);
+    expect(runtime.host.commit).not.toHaveBeenCalled();
+    await act(async () => {
+      root.render(<></>);
+      pendingSave.resolve(undefined);
+    });
+    expect(runtime.host.commit).not.toHaveBeenCalled();
+    expect(vi.mocked(runtime.persistence.save).mock.calls).toHaveLength(savesBeforeCapture + 1);
+  });
+
+  it("does not restore editable UI or accept an old edit callback after a snapshot-lock failure", async () => {
+    const runtime = capsuleRuntime(workspace(currentNodeId, "Synthetic encrypted node"));
+    const status = encryptedStatus();
+    const lock = vi.fn<WorkspaceSecurity["lock"]>().mockRejectedValue("workspace_lock_save_failed");
+    const updateStatus = vi.fn();
+    await renderApp({
+      capsuleHost: runtime.host,
+      persistence: runtime.persistence,
+      security: { ...encryptedSecurity(status), lock },
+      status,
+      updateStatus,
+    });
+    const oldEdit = canvasHarness.editName;
+    await openDataSecuritySettings();
+    await clickButton(/Lock now|立即锁定/);
+    expect(document.querySelector("#storage-recovery-title")).not.toBeNull();
+    expect(document.querySelector('[data-testid="mock-canvas"]')).toBeNull();
+    const savesAfterFailure = vi.mocked(runtime.persistence.save).mock.calls.length;
+    await act(async () => { oldEdit?.("Must remain blocked after lock failure"); });
+    expect(vi.mocked(runtime.persistence.save).mock.calls).toHaveLength(savesAfterFailure);
+    expect(document.querySelector('[data-testid="mock-canvas"]')).toBeNull();
+    expect(updateStatus).not.toHaveBeenCalled();
   });
 
   it("locks immediately while a capsule commit is hung and discards its late result", async () => {
@@ -746,7 +870,7 @@ describe("App recovery transaction boundary", () => {
     vi.mocked(runtime.host.commit).mockReturnValue(receipt.promise);
     const status = encryptedStatus();
     const locked = { ...status, locked: true };
-    const lock = vi.fn(async () => locked);
+    const lock = vi.fn<WorkspaceSecurity["lock"]>(async () => locked);
     const updateStatus = vi.fn();
     await renderApp({
       capsuleHost: runtime.host,
@@ -764,6 +888,7 @@ describe("App recovery transaction boundary", () => {
     await clickButton(/Lock now|立即锁定/);
 
     expect(lock).toHaveBeenCalledOnce();
+    expect(lock.mock.calls[0][0]).toBe(vi.mocked(runtime.host.commit).mock.calls[0][1]);
     expect(updateStatus).toHaveBeenCalledWith(locked);
     expect(vi.mocked(runtime.persistence.save).mock.calls).toHaveLength(savesBeforeLock);
     await act(async () => {

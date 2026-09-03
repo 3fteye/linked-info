@@ -1595,10 +1595,12 @@ function App({
         canvasName: t("capsule.timelineName"),
         dateNodeName: (date) => date,
       }, () => crypto.randomUUID());
+      // A lock can preserve this validated submission even while an earlier
+      // ordinary save is still draining; it must not wait for that queue.
+      pendingWorkspaceCommitRef.current = prepared.workspace;
       // Drain existing saves before using the broker's commit-aware write.
       await persistence.save(before);
       if (!capsuleOwnerAliveRef.current) return;
-      pendingWorkspaceCommitRef.current = prepared.workspace;
       commitAttempted = true;
       const result = await capsuleHost.commit(nodeId, serializeStoredWorkspace(prepared.workspace));
       committed = true;
@@ -2611,8 +2613,18 @@ function App({
   }
 
   async function lockEncryptedWorkspace() {
-    if (securityBusy) {
+    if (securityBusy || !capsuleOwnerAliveRef.current) {
       return;
+    }
+    let contents: string | undefined;
+    let snapshotInvalid = false;
+    try {
+      contents = serializeStoredWorkspace(
+        pendingWorkspaceCommitRef.current ?? workspaceRef.current,
+      );
+    } catch {
+      // Even an invalid in-memory snapshot must not prevent native revocation.
+      snapshotInvalid = true;
     }
     setSecurityBusy(true);
     setSecurityMessage(null);
@@ -2625,11 +2637,16 @@ function App({
       workspaceSaveTimerRef.current = null;
     }
     try {
-      // Lock immediately: a hung save or capsule IPC cannot delay revocation.
-      const locking = workspaceSecurity.lock();
+      // The owner-bound native command accepts the latest snapshot, revokes
+      // plaintext access immediately, and only then finishes persistence.
+      const locking = workspaceSecurity.lock(contents);
       embeddingAnalyzer.clearCache();
       setRemoteEmbeddingToken("");
       updateWorkspaceSecurityStatus(await locking);
+      if (snapshotInvalid) {
+        setPersistenceRecoveryRequired(true);
+        setPersistenceReady(false);
+      }
     } catch (error) {
       setPersistenceRecoveryRequired(true);
       setPersistenceReady(false);

@@ -5,12 +5,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CapsuleHost } from "./capsuleHost";
 import type { DesktopWorkspaceSession } from "./desktopWorkspaceSession";
 import type { WorkspacePersistence } from "./workspaceStore";
-import type { WorkspaceSecurityStatus } from "./workspaceSecurity";
+import type { WorkspaceSecurity, WorkspaceSecurityStatus } from "./workspaceSecurity";
 
 interface SessionRecord {
   id: number;
   disposed: boolean;
   disposeCount: number;
+  lockSnapshots: string[];
   session: DesktopWorkspaceSession;
 }
 
@@ -21,6 +22,9 @@ const harness = vi.hoisted(() => ({
   invalidMounts: [] as number[],
   loadErrors: [] as string[],
   restartCalls: 0,
+  nativeLockCalls: 0,
+  snapshotLockGate: null as Promise<void> | null,
+  appSecurity: null as WorkspaceSecurity | null,
   loadGate: null as Promise<void> | null,
   lockListeners: new Set<(event: { payload: string }) => void>(),
   updateSecurity: null as ((status: WorkspaceSecurityStatus) => void) | null,
@@ -45,6 +49,10 @@ vi.mock("@tauri-apps/api/core", () => ({
     }
     if (command === "record_workspace_activity") {
       return undefined;
+    }
+    if (command === "lock_workspace") {
+      harness.nativeLockCalls += 1;
+      return { ...harness.status, locked: true };
     }
     if (command === "restart_application") {
       harness.restartCalls += 1;
@@ -82,10 +90,12 @@ vi.mock("./App", () => ({
     capsuleHost,
     persistence,
     updateWorkspaceSecurityStatus,
+    workspaceSecurity,
   }: {
     capsuleHost: CapsuleHost;
     persistence: WorkspacePersistence;
     updateWorkspaceSecurityStatus: (status: WorkspaceSecurityStatus) => void;
+    workspaceSecurity: WorkspaceSecurity;
   }) {
     const record = harness.sessions.find(
       (candidate) => candidate.session.persistence === persistence,
@@ -97,6 +107,7 @@ vi.mock("./App", () => ({
       harness.invalidMounts.push(record.id);
     }
     harness.updateSecurity = updateWorkspaceSecurityStatus;
+    harness.appSecurity = workspaceSecurity;
     useEffect(() => {
       harness.appMounts.push(record.id);
       if (record.disposed) {
@@ -112,6 +123,7 @@ vi.mock("./App", () => ({
 
 import MainWorkspace from "./MainWorkspace";
 import { unavailableCapsuleHost } from "./capsuleHost";
+import { tauriWorkspaceSecurity } from "./workspaceSecurity";
 
 function createSession(): DesktopWorkspaceSession {
   const loadGate = harness.loadGate;
@@ -119,8 +131,15 @@ function createSession(): DesktopWorkspaceSession {
     id: harness.sessions.length + 1,
     disposed: false,
     disposeCount: 0,
+    lockSnapshots: [],
     session: {
       capsuleHost: { ...unavailableCapsuleHost, available: true },
+      async lockWithSnapshot(contents) {
+        assertActive();
+        record.lockSnapshots.push(contents);
+        await harness.snapshotLockGate;
+        return { ...harness.status, locked: true };
+      },
       persistence: {
         async load() {
           assertActive();
@@ -175,6 +194,9 @@ describe("MainWorkspace session composition", () => {
     harness.invalidMounts = [];
     harness.loadErrors = [];
     harness.restartCalls = 0;
+    harness.nativeLockCalls = 0;
+    harness.snapshotLockGate = null;
+    harness.appSecurity = null;
     harness.loadGate = null;
     harness.lockListeners.clear();
     harness.updateSecurity = null;
@@ -230,15 +252,73 @@ describe("MainWorkspace session composition", () => {
   it("does not replace a live owner when its security status is updated", async () => {
     await render();
     const current = harness.sessions[1];
+    const ownerSecurity = harness.appSecurity;
     await act(async () => {
       harness.updateSecurity?.({ ...harness.status, idleTimeoutMinutes: 30 });
     });
 
     expect(harness.createSession).toHaveBeenCalledTimes(2);
     expect(current.disposeCount).toBe(0);
+    expect(harness.appSecurity).toBe(ownerSecurity);
     expect(harness.invalidMounts).toEqual([]);
     expect(container.querySelector('[data-testid="session-app"]')?.getAttribute("data-session-id"))
       .toBe(String(current.id));
+  });
+
+  it("routes lock snapshots only to the mounted session and rejects the previous owner's wrapper", async () => {
+    await render();
+    const originalSecurity = harness.appSecurity;
+    if (originalSecurity === null) throw new Error("missing synthetic owner security");
+    await originalSecurity.lock("synthetic snapshot for owner two");
+    expect(harness.sessions[0].lockSnapshots).toEqual([]);
+    expect(harness.sessions[1].lockSnapshots).toEqual(["synthetic snapshot for owner two"]);
+    expect(harness.nativeLockCalls).toBe(0);
+
+    await lock();
+    const unlock = container.querySelector<HTMLButtonElement>(".security-system-unlock button");
+    if (unlock === null) throw new Error("missing synthetic unlock button");
+    await act(async () => { unlock.click(); });
+    const currentSecurity = harness.appSecurity;
+    if (currentSecurity === null) throw new Error("missing replacement owner security");
+    await currentSecurity.lock("synthetic snapshot for owner four");
+    await expect(originalSecurity.lock("stale owner's snapshot")).rejects.toThrow("workspace_session_disposed");
+    expect(harness.sessions[1].lockSnapshots).toEqual(["synthetic snapshot for owner two"]);
+    expect(harness.sessions[3].lockSnapshots).toEqual(["synthetic snapshot for owner four"]);
+    expect(harness.nativeLockCalls).toBe(0);
+  });
+
+  it("keeps snapshot-free lock calls on the existing native security adapter", async () => {
+    await render();
+    await harness.appSecurity?.lock();
+    expect(harness.nativeLockCalls).toBe(1);
+    expect(harness.sessions.every((record) => record.lockSnapshots.length === 0)).toBe(true);
+  });
+
+  it("does not silently discard a snapshot passed to the unscoped native adapter", async () => {
+    await expect(tauriWorkspaceSecurity.lock("unowned synthetic snapshot"))
+      .rejects.toThrow("workspace_lock_snapshot_owner_required");
+    expect(harness.nativeLockCalls).toBe(0);
+  });
+
+  it("keeps the accepted snapshot result valid after the start event disposes its owner", async () => {
+    let releaseLock: () => void = () => {};
+    harness.snapshotLockGate = new Promise<void>((resolve) => { releaseLock = resolve; });
+    await render();
+    const ownerSecurity = harness.appSecurity;
+    if (ownerSecurity === null) throw new Error("missing synthetic owner security");
+    const locking = ownerSecurity.lock("accepted synthetic snapshot");
+    await act(async () => {
+      harness.status = { ...harness.status, locked: true };
+      for (const listener of harness.lockListeners) {
+        listener({ payload: "workspace_lock_save_started" });
+      }
+    });
+    expect(harness.sessions[1].disposed).toBe(true);
+    expect(container.querySelector('[data-testid="session-app"]')).toBeNull();
+    await act(async () => { releaseLock(); });
+    await expect(locking).resolves.toMatchObject({ locked: true });
+    expect(harness.sessions[1].lockSnapshots).toEqual(["accepted synthetic snapshot"]);
+    expect(container.querySelector('[data-testid="session-app"]')).toBeNull();
   });
 
   it("disposes the old owner on lock and creates different services only after explicit unlock", async () => {

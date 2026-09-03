@@ -199,6 +199,7 @@ pub fn run() {
                 workspace_file::inspect_workspace_security,
                 workspace_file::inspect_workspace_backup_history,
                 workspace_file::lock_workspace,
+                workspace_file::lock_workspace_with_snapshot,
                 workspace_file::prepare_workspace_restore,
                 workspace_file::read_workspace_backup,
                 workspace_file::read_workspace_file,
@@ -214,4 +215,13 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_final_lock_snapshot_command_is_main_window_only() {
+        assert!(super::capsule::command_allowed("main", "main", "lock_workspace_with_snapshot"));
+        assert!(!super::capsule::command_allowed("capsule", "capsule", "lock_workspace_with_snapshot"));
+    }
 }

@@ -352,7 +352,13 @@ async function run() {
         throw new SmokeFailure("native_capsule_playwright_dependency_unavailable");
       }
       try {
-        browser = await chromium.connectOverCDP(`http://127.0.0.1:${port}`, { timeout: 20_000 });
+        // The pinned Playwright 1.62 transport otherwise enables focus
+        // emulation on every attached page. Preserve real Win32/WebView focus
+        // instead of making document.hasFocus() true in both windows.
+        browser = await chromium.connectOverCDP(`http://127.0.0.1:${port}`, {
+          timeout: 20_000,
+          noDefaults: true,
+        });
       } catch {
         throw new SmokeFailure("native_capsule_cdp_connect_failed");
       }
@@ -565,6 +571,36 @@ async function run() {
       requireCondition((await snapshot(main, capsule)).captureCount === 1,
         "native_capsule_encryption_changed_workspace");
       return { encrypted: true, newOwnerReady: true, systemQuickUnlockEnabled: false };
+    });
+
+    await step("pending-snapshot-survives-native-lock", async () => {
+      const context = await readyContext(capsule);
+      const pendingContent = "Synthetic latest edit admitted before lock";
+      // Keep this edit only in the proposed snapshot, never in an ordinary
+      // write. Rust must preserve it while immediately revoking the owner.
+      await main.evaluate(async ({ ownerId, name, content }) => {
+        const nativeInvoke = window.__TAURI_INTERNALS__.invoke;
+        const document = JSON.parse(await nativeInvoke("read_workspace_file", { ownerId, slot: "primary" }));
+        const node = document.nodes.find((entry) => entry.name === name);
+        if (node === undefined) throw new Error("synthetic_node_missing");
+        node.content = content;
+        await nativeInvoke("lock_workspace_with_snapshot", { ownerId, contents: JSON.stringify(document) });
+      }, { ownerId: context.ownerId, name: notes[0].name, content: pendingContent });
+      await main.locator("#workspace-unlock-password").waitFor({ state: "visible" });
+      const lockedCapsule = await invoke(capsule, "inspect_capsule");
+      requireCondition(!lockedCapsule.ready && lockedCapsule.ownerId === null,
+        "native_capsule_final_snapshot_did_not_lock");
+      await focus(main, "main");
+      await main.locator("#workspace-unlock-password").fill(syntheticPassword);
+      await main.locator(".security-unlock-form button[type=submit]").click();
+      await main.locator("#workspace-unlock-password").waitFor({ state: "detached", timeout: 45_000 });
+      const nextOwner = await readyContext(capsule);
+      notes[0].content = pendingContent;
+      const loaded = await snapshot(main, capsule);
+      requireCondition(nextOwner.ownerId !== context.ownerId &&
+        loaded.captureCount === 1 && loaded.notes[0].contentMatches,
+      "native_capsule_pending_edit_lost_on_lock");
+      return { pendingSnapshotPersisted: true, oldOwnerRevoked: true, explicitPasswordUnlock: true };
     });
 
     for (const [action, name] of [

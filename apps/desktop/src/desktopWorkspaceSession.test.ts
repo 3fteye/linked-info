@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createDesktopWorkspaceSession,
   type DesktopWorkspaceSessionBridge,
@@ -50,6 +50,8 @@ class MemorySessionBridge implements DesktopWorkspaceSessionBridge {
   ]);
   readonly listeners = new Set<() => void>();
   activeOwner: string | null = null;
+  activeRequest: { requestId: string; requestSequence: string } | null = null;
+  latestRequestSequence = 0n;
   openCount = 0;
   handler: ((command: string, args?: Record<string, unknown>) => Promise<unknown>) | null = null;
 
@@ -63,13 +65,27 @@ class MemorySessionBridge implements DesktopWorkspaceSessionBridge {
 
   dispatch(command: string, args?: Record<string, unknown>): unknown {
     if (command === "open_workspace_owner") {
+      const sequence = BigInt(args?.requestSequence as string);
+      if (sequence <= this.latestRequestSequence) {
+        throw new Error("workspace_owner_request_expired");
+      }
+      this.latestRequestSequence = sequence;
       this.openCount += 1;
       this.activeOwner = `owner-${this.openCount}`;
+      this.activeRequest = {
+        requestId: args?.requestId as string,
+        requestSequence: args?.requestSequence as string,
+      };
       return { ownerId: this.activeOwner };
     }
     if (command === "close_workspace_owner") {
-      if (this.activeOwner === args?.ownerId) {
+      const sequence = BigInt(args?.requestSequence as string);
+      if (sequence > this.latestRequestSequence) this.latestRequestSequence = sequence;
+      if (this.activeRequest?.requestId === args?.requestId &&
+        this.activeRequest?.requestSequence === args?.requestSequence &&
+        (args?.ownerId === undefined || this.activeOwner === args.ownerId)) {
         this.activeOwner = null;
+        this.activeRequest = null;
       }
       return undefined;
     }
@@ -112,6 +128,18 @@ class MemorySessionBridge implements DesktopWorkspaceSessionBridge {
 }
 
 describe("createDesktopWorkspaceSession", () => {
+  let requestStorage: Map<string, string>;
+
+  beforeEach(() => {
+    requestStorage = new Map();
+    vi.stubGlobal("sessionStorage", {
+      getItem: (key: string) => requestStorage.get(key) ?? null,
+      setItem: (key: string, value: string) => { requestStorage.set(key, value); },
+    });
+  });
+
+  afterEach(() => vi.unstubAllGlobals());
+
   it("lazily shares one owner across primary/recovery reads and every owned command", async () => {
     const bridge = new MemorySessionBridge();
     const session = createDesktopWorkspaceSession(bridge, missingLegacy);
@@ -155,6 +183,9 @@ describe("createDesktopWorkspaceSession", () => {
     const oldRead = oldSession.persistence.load();
     const oldRejected = expect(oldRead).rejects.toThrow("workspace_session_disposed");
     oldSession.dispose();
+    expect(bridge.calls).toContainEqual({
+      command: "close_workspace_owner", args: bridge.calls[0].args,
+    });
     const currentSession = createDesktopWorkspaceSession(bridge, missingLegacy);
     await currentSession.persistence.load();
     expect(bridge.activeOwner).toBe("owner-2");
@@ -164,11 +195,65 @@ describe("createDesktopWorkspaceSession", () => {
     expect(bridge.activeOwner).toBe("owner-2");
     expect(bridge.calls.filter((call) => call.command === "read_workspace_file"))
       .toEqual([{ command: "read_workspace_file", args: { ownerId: "owner-2", slot: "primary" } }]);
-    expect(bridge.calls).toContainEqual({
-      command: "close_workspace_owner", args: { ownerId: "owner-1" },
-    });
     await expect(oldSession.persistence.load()).rejects.toThrow("workspace_session_disposed");
     expect(bridge.openCount).toBe(2);
+  });
+
+  it("cancels before a delayed native admission and never replaces the next owner", async () => {
+    const bridge = new MemorySessionBridge();
+    const releaseOldOpen = deferred<void>();
+    let first = true;
+    bridge.handler = async (command, args) => {
+      if (command === "open_workspace_owner" && first) {
+        first = false;
+        await releaseOldOpen.promise;
+      }
+      return bridge.dispatch(command, args);
+    };
+    const old = createDesktopWorkspaceSession(bridge, missingLegacy);
+    const oldRead = expect(old.persistence.load()).rejects.toThrow("workspace_owner_request_expired");
+    old.dispose();
+    const current = createDesktopWorkspaceSession(bridge, missingLegacy);
+    await current.persistence.load();
+    const currentOwner = bridge.activeOwner;
+    releaseOldOpen.resolve();
+    await oldRead;
+    expect(bridge.activeOwner).toBe(currentOwner);
+    await expect(current.persistence.save(workspace("Current"))).resolves.toBeUndefined();
+    expect(bridge.openCount).toBe(1);
+  });
+
+  it("keeps only a monotonic non-secret request sequence across a module reload", async () => {
+    const bridge = new MemorySessionBridge();
+    const first = createDesktopWorkspaceSession(bridge, missingLegacy);
+    await first.persistence.load();
+    first.dispose();
+    const firstRequest = bridge.calls.find((call) => call.command === "open_workspace_owner")!.args!;
+    vi.resetModules();
+    const reloadedModule = await import("./desktopWorkspaceSession");
+    const second = reloadedModule.createDesktopWorkspaceSession(bridge, missingLegacy);
+    await second.persistence.load();
+    const requests = bridge.calls.filter((call) => call.command === "open_workspace_owner");
+    const secondRequest = requests[1].args!;
+    expect(BigInt(secondRequest.requestSequence as string))
+      .toBeGreaterThan(BigInt(firstRequest.requestSequence as string));
+    expect(secondRequest.requestId).not.toBe(firstRequest.requestId);
+    expect([...requestStorage]).toEqual([["linked-info.owner-request-sequence.v1", "2"]]);
+  });
+
+  it("fails closed instead of resetting an unavailable or invalid request counter", async () => {
+    const bridge = new MemorySessionBridge();
+    for (const invalid of ["not-a-sequence", "00", "18446744073709551615"]) {
+      requestStorage.set("linked-info.owner-request-sequence.v1", invalid);
+      await expect(createDesktopWorkspaceSession(bridge, missingLegacy).persistence.load())
+        .rejects.toThrow("workspace_owner_request_state_unavailable");
+    }
+    vi.stubGlobal("sessionStorage", {
+      getItem() { throw new Error("synthetic storage failure"); },
+    });
+    await expect(createDesktopWorkspaceSession(bridge, missingLegacy).persistence.load())
+      .rejects.toThrow("workspace_owner_request_state_unavailable");
+    expect(bridge.openCount).toBe(0);
   });
 
   it("rejects plaintext returned after disposal from a read or capsule take", async () => {
@@ -436,5 +521,51 @@ describe("createDesktopWorkspaceSession", () => {
     subscription.resolve(unsubscribe);
     await rejected;
     expect(unsubscribe).toHaveBeenCalledTimes(1);
+  });
+
+  it("admits a lock snapshot immediately without waiting for an in-flight disk write", async () => {
+    const bridge = new MemorySessionBridge();
+    const session = createDesktopWorkspaceSession(bridge, missingLegacy);
+    await session.persistence.load();
+    const writeStarted = deferred<void>();
+    const releaseWrite = deferred<void>();
+    const lockResult = deferred<{
+      encrypted: boolean;
+      locked: boolean;
+      systemUnlockAvailable: boolean;
+      systemUnlockEnabled: boolean;
+      idleTimeoutMinutes: number;
+    }>();
+    bridge.handler = async (command, args) => {
+      if (command === "write_workspace_file") {
+        writeStarted.resolve();
+        return releaseWrite.promise;
+      }
+      if (command === "lock_workspace_with_snapshot") return lockResult.promise;
+      return bridge.dispatch(command, args);
+    };
+    const staleWrite = expect(session.persistence.save(workspace("Queued earlier")))
+      .rejects.toThrow("workspace_session_disposed");
+    await writeStarted.promise;
+    const contents = serializeStoredWorkspace(workspace("Latest lock snapshot"));
+    const locking = session.lockWithSnapshot(contents);
+    expect(bridge.calls[bridge.calls.length - 1]).toEqual({
+      command: "lock_workspace_with_snapshot", args: { ownerId: "owner-1", contents },
+    });
+    session.dispose();
+    const locked = {
+      encrypted: true,
+      locked: true,
+      systemUnlockAvailable: false,
+      systemUnlockEnabled: false,
+      idleTimeoutMinutes: 15,
+    };
+    lockResult.resolve(locked);
+    await expect(locking).resolves.toEqual(locked);
+    releaseWrite.resolve();
+    await staleWrite;
+    await expect(session.lockWithSnapshot(contents)).rejects.toThrow("workspace_session_disposed");
+    expect(bridge.calls.filter((call) => call.command === "lock_workspace_with_snapshot")).toHaveLength(1);
+    expect(bridge.openCount).toBe(1);
   });
 });

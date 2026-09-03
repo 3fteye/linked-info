@@ -14,6 +14,7 @@
 
 - `.github/workflows/desktop-packages.yml` 先构建正常 portable EXE，再执行 `apps/desktop/scripts/native-capsule-smoke.mjs`。不会向发布包加入专用测试 IPC、调试编译特性或放宽 CSP。
 - CDP 只在测试启动期间开放于 loopback。连接前验证监听进程属于本次 EXE 或其 WebView2 子进程；不连接已有浏览器或扫描其他页面。
+- 使用锁定版本 Playwright 1.62 的 `noDefaults` 连接选项关闭默认焦点模拟，由真实 Win32 焦点驱动 `focus/blur` 与 `document.hasFocus()`；不能把两个页面同时被模拟聚焦的结果当成原生失焦证据。
 - 高完整性级别的 WebView2 host 会忽略 `WEBVIEW2_*` 环境变量，因此 CI 使用精确 EXE 名的临时 `HKLM` 浏览器参数策略；仅创建原先不存在的值，并在结束时只移除与本次端口匹配的值，不能改通配策略、覆盖旧值或删除整个键。依据 [Microsoft 提权 host 说明](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/security#for-an-elevated-host-app-use-appropriate-override-flags) 与 [WebView2 调试参数说明](https://learn.microsoft.com/en-us/microsoft-edge/webview2/how-to/debug-visual-studio-code#using-a-registry-value)。此操作只在临时 runner 执行，不修改用户机器或发布产物。
 - 窗口 helper 先验证 PID 的真实可执行路径，再检查该 PID 的窗口尺寸、DPI、置顶与边框属性，或执行限定窗口的焦点、鼠标拖动及关闭操作。
 - 无标题栏按客户区顶部相对外框的实际偏移验证，允许 Windows 11 的一 DIP 阴影边。Tao 0.35 保留顶层窗口的 `WS_CAPTION` 位，通过 `WM_NCCALCSIZE` 移除标题栏，因此该标志只作诊断，不能单独当成显示原生标题栏的证据。客户区尺寸及置顶、可见性仍分别断言。
