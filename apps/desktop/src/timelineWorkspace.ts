@@ -1,9 +1,7 @@
 import {
-  isNodeNameAvailable,
   maximumWorkspaceCanvasCount,
   normalizeNodeName,
   parseWorkspaceSnapshot,
-  persistedNodeNameFromDraft,
   type NodeLayout,
   type NodeReference,
   type WorkspaceSnapshot,
@@ -52,6 +50,34 @@ const noteHeight = 220;
 const dateWidth = 240;
 const dateHeight = 100;
 const gap = 60;
+const maximumCaptureNameCharacters = 512;
+
+/** Capture-only naming; ordinary node editing keeps its existing uniqueness rule. */
+export function resolveTimelineNoteName(
+  nodeId: string,
+  draftName: string,
+  otherNames: Iterable<string | null>,
+): string | null {
+  if (!canonicalUuid.test(nodeId) || typeof draftName !== "string" ||
+    Array.from(draftName).length > maximumCaptureNameCharacters) {
+    throw new TimelineCaptureError("invalid-input");
+  }
+  const base = draftName.trim();
+  if (base.length === 0) return null;
+  const occupied = new Set(Array.from(otherNames, (name) => normalizeNodeName(name ?? "")));
+  if (!occupied.has(normalizeNodeName(base))) return base;
+  const characters = Array.from(base);
+  const shortId = nodeId.slice(0, 8);
+  // Every suffix is distinct, so at most occupied.size candidates can be taken.
+  // This bound and scalar-value truncation are shared with the Rust verifier.
+  for (let attempt = 1; attempt <= occupied.size + 1; attempt += 1) {
+    const suffix = attempt === 1 ? ` (${shortId})` : ` (${shortId}-${attempt})`;
+    const prefix = characters.slice(0, maximumCaptureNameCharacters - suffix.length).join("");
+    const candidate = `${prefix}${suffix}`;
+    if (!occupied.has(normalizeNodeName(candidate))) return candidate;
+  }
+  throw new TimelineCaptureError("invalid-result");
+}
 
 export function timelineDayAt(capturedAtMs: number, utcOffsetMinutes: number): string {
   if (
@@ -125,7 +151,11 @@ export function captureTimelineNote(
     throw new TimelineCaptureError("invalid-input");
   }
   const day = timelineDayAt(input.capturedAtMs, input.utcOffsetMinutes);
-  const name = persistedNodeNameFromDraft(input.name.trim());
+  const name = resolveTimelineNoteName(
+    input.nodeId,
+    input.name,
+    workspace.nodes.filter((node) => node.id !== input.nodeId).map((node) => node.name),
+  );
   const content = input.content.length === 0 ? null : input.content;
   if (name === null && input.content.trim().length === 0) {
     throw new TimelineCaptureError("empty-note");
@@ -147,9 +177,6 @@ export function captureTimelineNote(
       };
     }
     throw new TimelineCaptureError("identity-conflict");
-  }
-  if (!isNodeNameAvailable(workspace.nodes, input.nodeId, input.name)) {
-    throw new TimelineCaptureError("duplicate-name");
   }
   if (currentTimeline === null && workspace.view.canvases.length >= maximumWorkspaceCanvasCount) {
     throw new TimelineCaptureError("canvas-limit");

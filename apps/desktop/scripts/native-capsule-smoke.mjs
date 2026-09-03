@@ -255,6 +255,52 @@ async function run() {
     await capture.getByTestId("capture-content").fill(note.content);
     await localSaved(capture);
   }
+  async function archiveFixturesWithoutNameDisclosure(capture, fixtures) {
+    return capture.evaluate(async (expectedFixtures) => {
+      const nativeInvoke = window.__TAURI_INTERNALS__.invoke;
+      const recordKeys = ["capturedAtMs", "content", "failure", "id", "name", "revision", "state", "utcOffsetMinutes"];
+      const summaryKeys = recordKeys.filter((key) => key !== "content");
+      const sameKeys = (value, expected) => value !== null && typeof value === "object" &&
+        JSON.stringify(Object.keys(value).sort()) === JSON.stringify(expected);
+      const submitted = [];
+      let inputSnapshotsPreserved = true;
+      let publicBoundaryPreserved = true;
+      for (const fixture of expectedFixtures) {
+        const created = await nativeInvoke("capture_create");
+        const saved = await nativeInvoke("capture_save", { id: created.id, expectedRevision: created.revision,
+          name: fixture.name, content: fixture.content });
+        const pending = await nativeInvoke("capture_submit", { id: saved.id, expectedRevision: saved.revision,
+          capturedAtMs: Date.now(), utcOffsetMinutes: -new Date().getTimezoneOffset() });
+        publicBoundaryPreserved &&= [created, saved, pending].every((record) => sameKeys(record, recordKeys) && record.failure === null);
+        inputSnapshotsPreserved &&= [saved, pending].every((record) =>
+          record.id === created.id && record.name === fixture.name && record.content === fixture.content);
+        submitted.push({ id: pending.id, revision: pending.revision, fixture });
+      }
+      let replies = [];
+      const deadline = Date.now() + 60_000;
+      while (Date.now() < deadline) {
+        replies = await Promise.all(submitted.map(({ id }) => nativeInvoke("capture_get", { id })));
+        publicBoundaryPreserved &&= replies.every((record, index) => sameKeys(record, recordKeys) &&
+          record.id === submitted[index].id && record.revision === submitted[index].revision && record.failure === null &&
+          (record.state === "archived"
+            ? record.name === "" && record.content === "" && record.capturedAtMs === null && record.utcOffsetMinutes === null
+            : record.name === submitted[index].fixture.name && record.content === submitted[index].fixture.content));
+        const summaries = await nativeInvoke("capture_list");
+        const tracked = summaries.filter((summary) => submitted.some(({ id }) => id === summary.id));
+        publicBoundaryPreserved &&= tracked.every((summary) => sameKeys(summary, summaryKeys) && summary.failure === null &&
+          summary.name === submitted.find(({ id }) => id === summary.id).fixture.name);
+        if (!publicBoundaryPreserved || replies.some((record) => record?.state === "failed" || record?.state === "uncertain")) break;
+        if (replies.every((record) => record?.state === "archived")) {
+          return { ids: submitted.map(({ id }) => id), inputSnapshotsPreserved, publicBoundaryPreserved,
+            uniformArchivedResult: true, archivedCount: replies.length, absentFromInboxList: tracked.length === 0 };
+        }
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      return { ids: submitted.map(({ id }) => id), inputSnapshotsPreserved, publicBoundaryPreserved,
+        uniformArchivedResult: false, archivedCount: replies.filter((record) => record?.state === "archived").length,
+        absentFromInboxList: false };
+    }, fixtures);
+  }
   const notes = [
     { name: "Synthetic standalone first", content: "Synthetic first line\nSynthetic second line" },
     { name: "Synthetic standalone second", content: "Synthetic real-window blur record" },
@@ -533,6 +579,55 @@ async function run() {
       requireCondition((await snapshot(main)).captureCount === captureCount, "native_capsule_capture_exit_changed_main");
       capture = await launch("capsule"); await expand(capture); await localSaved(capture);
       return { captureExitedCleanly: true, mainRemainedRunning: true };
+    });
+    await step("name-collision-archives-without-inbox-disclosure", async () => {
+      // Seed via normal capture IPC so its stable identity is known without
+      // reading any node identity, name or body out of the main page.
+      const seed = { name: "Synthetic collision seed", content: "Synthetic original seed body must remain unchanged" };
+      const incoming = [
+        { name: seed.name, content: "Synthetic colliding capture body must remain verbatim" },
+        { name: "Synthetic previously unused capture name", content: "Synthetic unique capture body must remain verbatim" },
+      ];
+      const seeded = await archiveFixturesWithoutNameDisclosure(capture, [seed]);
+      requireCondition(seeded.uniformArchivedResult && seeded.archivedCount === 1 && seeded.publicBoundaryPreserved &&
+        seeded.inputSnapshotsPreserved && seeded.absentFromInboxList, "native_capsule_collision_seed_not_archived");
+      let context = await readyContext(main);
+      const seedPresent = await main.evaluate(async ({ ownerId, id, expected }) => {
+        const contents = await window.__TAURI_INTERNALS__.invoke("read_workspace_file", { ownerId, slot: "primary" });
+        const document = JSON.parse(contents);
+        const matches = document.nodes.filter((node) => node.id === id);
+        return matches.length === 1 && matches[0].name === expected.name && matches[0].content === expected.content;
+      }, { ownerId: context.ownerId, id: seeded.ids[0], expected: seed });
+      requireCondition(seedPresent, "native_capsule_collision_seed_missing");
+      const archived = await archiveFixturesWithoutNameDisclosure(capture, incoming);
+      requireCondition(archived.uniformArchivedResult && archived.archivedCount === 2 && archived.publicBoundaryPreserved &&
+        archived.inputSnapshotsPreserved && archived.absentFromInboxList, "native_capsule_name_collision_result_disclosed");
+      context = await readyContext(main);
+      const verified = await main.evaluate(async ({ ownerId, seedId, incomingIds, expectedSeed, expectedIncoming, expectedCount }) => {
+        const contents = await window.__TAURI_INTERNALS__.invoke("read_workspace_file", { ownerId, slot: "primary" });
+        const document = JSON.parse(contents);
+        const original = document.nodes.filter((node) => node.id === seedId);
+        const collision = document.nodes.filter((node) => node.id === incomingIds[0]);
+        const unique = document.nodes.filter((node) => node.id === incomingIds[1]);
+        const expectedCollisionName = `${expectedIncoming[0].name} (${incomingIds[0].slice(0, 8)})`;
+        const captures = document.view.timeline?.captures ?? [];
+        return {
+          originalNodeUnchanged: original.length === 1 && original[0].name === expectedSeed.name && original[0].content === expectedSeed.content,
+          collidingNodeAdded: collision.length === 1 && collision[0].name === expectedCollisionName && collision[0].content === expectedIncoming[0].content,
+          uniqueNodeAdded: unique.length === 1 && unique[0].name === expectedIncoming[1].name && unique[0].content === expectedIncoming[1].content,
+          identitiesRemainDistinct: new Set([seedId, ...incomingIds]).size === 3,
+          ordinaryCapturesRetained: [seedId, ...incomingIds].every((id) => captures.filter((entry) => entry.nodeId === id).length === 1),
+          expectedCaptureCount: captures.length === expectedCount,
+          newNodes: collision.length + unique.length,
+        };
+      }, { ownerId: context.ownerId, seedId: seeded.ids[0], incomingIds: archived.ids,
+        expectedSeed: seed, expectedIncoming: incoming, expectedCount: captureCount + 3 });
+      requireCondition(verified.originalNodeUnchanged && verified.collidingNodeAdded && verified.uniqueNodeAdded &&
+        verified.identitiesRemainDistinct && verified.ordinaryCapturesRetained && verified.expectedCaptureCount && verified.newNodes === 2,
+      "native_capsule_name_collision_workspace_invalid");
+      captureCount += 3;
+      return { bothInputsArchived: true, inboxExposesOnlyOriginalInputAndMinimalReceipts: true,
+        originalNodeUnchanged: true, collidingAndUniqueBodiesPreserved: true, newNodes: 2 };
     });
     await step("main-exit-keeps-capture-running-and-saving", async () => {
       await close("main"); assertAlive(targets.capsule);

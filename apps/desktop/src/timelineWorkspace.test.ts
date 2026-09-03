@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { captureTimelineNote, TimelineCaptureError, timelineDayAt, type TimelineNoteInput } from "./timelineWorkspace";
-import { emptyWorkspace, removeNodesFromWorkspaceView, type WorkspaceSnapshot } from "./workspaceData";
+import { captureTimelineNote, resolveTimelineNoteName, TimelineCaptureError, timelineDayAt, type TimelineNoteInput } from "./timelineWorkspace";
+import { emptyWorkspace, isNodeNameAvailable, removeNodesFromWorkspaceView, type WorkspaceSnapshot } from "./workspaceData";
 import { captureWorkspaceHistory, restoreWorkspaceHistory } from "./workspaceHistory";
 import { parseWorkspaceExport, serializeWorkspaceExport } from "./workspaceBackup";
+import captureNameContract from "../../../fixtures/capture-name-contract.json";
 
 const id = (value: number) => `00000000-0000-4000-8000-${value.toString(16).padStart(12, "0")}`;
 const labels = { canvasName: "Timeline", dateNodeName: (date: string) => date };
@@ -121,12 +122,77 @@ describe("timeline note transactions", () => {
     expect(result.workspace.nodes.find((node) => node.id === id(10))).toEqual({ id: id(10), name: null, content });
   });
 
-  it("rejects empty records and name collisions without partial changes", () => {
+  it("rejects empty records without partial changes", () => {
     const workspace = emptyWorkspace();
     workspace.nodes.push({ id: id(20), name: "Existing", content: null });
     const before = JSON.stringify(workspace);
     expect(() => captureTimelineNote(workspace, { ...input(10), content: " \n " }, labels, ids())).toThrowError("timeline_capture_empty-note");
-    expect(() => captureTimelineNote(workspace, { ...input(10), name: " existing " }, labels, ids())).toThrowError("timeline_capture_duplicate-name");
+    expect(JSON.stringify(workspace)).toBe(before);
+  });
+
+  it.each(captureNameContract.cases)("uses the shared capture-only naming contract: $id", (fixture) => {
+    expect(captureNameContract.version).toBe(1);
+    expect(resolveTimelineNoteName(fixture.nodeId, fixture.name, fixture.otherNames)).toBe(fixture.expectedName);
+    expect(Array.from(fixture.expectedName ?? "").length).toBeLessThanOrEqual(512);
+  });
+
+  it.each(captureNameContract.cases)("archives, restores and recognizes retries with the shared name: $id", (fixture) => {
+    const workspace = emptyWorkspace();
+    workspace.nodes = fixture.otherNames.map((name, index) => ({
+      id: id(200 + index), name, content: `Existing synthetic content ${index}`,
+    }));
+    const before = JSON.stringify(workspace);
+    const request = {
+      ...input(10), nodeId: fixture.nodeId, name: fixture.name,
+      content: "  Synthetic unchanged body\n[[li:secret]]synthetic-value[[/li]]\n",
+    };
+    const result = captureTimelineNote(workspace, request, labels, ids());
+    expect(JSON.stringify(workspace)).toBe(before);
+    expect(result.workspace.nodes.slice(0, workspace.nodes.length)).toEqual(workspace.nodes);
+    expect(result.workspace.nodes.find((node) => node.id === request.nodeId)).toEqual({
+      id: request.nodeId, name: fixture.expectedName, content: request.content,
+    });
+    if (fixture.expectedDayName !== undefined) {
+      expect(result.workspace.nodes.find((node) => node.id === result.dayNodeId)?.name).toBe(fixture.expectedDayName);
+    }
+    // Rust's verifier sees the full after-image, including the newly allocated
+    // date node, and must still calculate the same first available capture name.
+    const afterNames = result.workspace.nodes.filter((node) => node.id !== request.nodeId).map((node) => node.name);
+    expect(resolveTimelineNoteName(request.nodeId, request.name, afterNames)).toBe(fixture.expectedName);
+    const retry = captureTimelineNote(result.workspace, request, labels, ids());
+    expect(retry.duplicate).toBe(true);
+    expect(retry.workspace).toBe(result.workspace);
+    const decoded = parseWorkspaceExport(serializeWorkspaceExport(result.workspace));
+    if (!decoded.ok) throw new Error("synthetic capture export rejected");
+    expect(captureTimelineNote(decoded.workspace, request, labels, ids()).duplicate).toBe(true);
+    expect(() => captureTimelineNote(result.workspace, { ...request, content: "Different body" }, labels, ids()))
+      .toThrowError("timeline_capture_identity-conflict");
+  });
+
+  it("archives two same-named notes without changing the first node or either body", () => {
+    const newId = ids();
+    const firstRequest = { ...input(10), name: "Named note", content: "First unchanged body" };
+    const first = captureTimelineNote(emptyWorkspace(), firstRequest, labels, newId);
+    const secondRequest = { ...input(11), name: "Named note", content: "Second unchanged body" };
+    expect(isNodeNameAvailable(first.workspace.nodes, secondRequest.nodeId, secondRequest.name)).toBe(false);
+    const second = captureTimelineNote(first.workspace, secondRequest, labels, newId);
+    expect(second.workspace.nodes.find((node) => node.id === firstRequest.nodeId)).toEqual({
+      id: firstRequest.nodeId, name: "Named note", content: firstRequest.content,
+    });
+    expect(second.workspace.nodes.find((node) => node.id === secondRequest.nodeId)).toEqual({
+      id: secondRequest.nodeId, name: "Named note (00000000)", content: secondRequest.content,
+    });
+    expect(captureTimelineNote(second.workspace, firstRequest, labels, newId).duplicate).toBe(true);
+    expect(captureTimelineNote(second.workspace, secondRequest, labels, newId).duplicate).toBe(true);
+  });
+
+  it("rejects oversized original names and invalid identities before choosing a suffix", () => {
+    const workspace = emptyWorkspace();
+    const before = JSON.stringify(workspace);
+    expect(() => captureTimelineNote(workspace, { ...input(10), name: "😀".repeat(513) }, labels, ids()))
+      .toThrowError("timeline_capture_invalid-input");
+    expect(() => resolveTimelineNoteName("invalid-id", "Note", ["Note"]))
+      .toThrowError("timeline_capture_invalid-input");
     expect(JSON.stringify(workspace)).toBe(before);
   });
 

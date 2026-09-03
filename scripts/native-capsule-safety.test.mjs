@@ -138,3 +138,20 @@ test("native archive acknowledgement matches production translations and does no
   assert.match(driver, /main\.keyboard\.press\("Control\+z"\)/);
   assert.match(driver, /validNote\(undone\.notes\[0\]\) && undone\.notes\[1\]\.count === 0/);
 });
+
+test("native name-collision regression checks uniform inbox receipts and preserves original workspace data", () => {
+  const collisionCase = driver.indexOf('step("name-collision-archives-without-inbox-disclosure"');
+  assert.ok(collisionCase > driver.indexOf('step("single-undo-and-receipt-prevent-reimport"'));
+  assert.ok(collisionCase > driver.indexOf('step("capture-exit-does-not-exit-main"'));
+  assert.ok(collisionCase < driver.indexOf('step("main-exit-keeps-capture-running-and-saving"'));
+  assert.match(driver, /const recordKeys = \["capturedAtMs", "content", "failure", "id", "name", "revision", "state", "utcOffsetMinutes"\]/);
+  assert.match(driver, /Object\.keys\(value\)\.sort\(\)/);
+  assert.match(driver, /record\.name === "" && record\.content === "" && record\.capturedAtMs === null && record\.utcOffsetMinutes === null/);
+  assert.match(driver, /record\.failure === null/);
+  assert.match(driver, /summary\.name === submitted\.find\(\(\{ id \}\) => id === summary\.id\)\.fixture\.name/);
+  assert.match(driver, /archived\.uniformArchivedResult && archived\.archivedCount === 2 && archived\.publicBoundaryPreserved/);
+  assert.match(driver, /original\[0\]\.name === expectedSeed\.name && original\[0\]\.content === expectedSeed\.content/);
+  assert.match(driver, /collision\[0\]\.name === expectedCollisionName && collision\[0\]\.content === expectedIncoming\[0\]\.content/);
+  assert.match(driver, /unique\[0\]\.name === expectedIncoming\[1\]\.name && unique\[0\]\.content === expectedIncoming\[1\]\.content/);
+  assert.match(driver, /incomingIds\[0\]\.slice\(0, 8\)/);
+});

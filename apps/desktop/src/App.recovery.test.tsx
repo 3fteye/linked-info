@@ -541,6 +541,32 @@ describe("App recovery transaction boundary", () => {
     expect(runtime.host.commit).toHaveBeenCalledOnce();
   });
 
+  it("archives a colliding capture name with a stable suffix as one unchanged-body transaction", async () => {
+    const request = capsuleNote();
+    const initial = workspace(currentNodeId, request.name);
+    const runtime = capsuleRuntime(initial);
+    await renderApp({
+      capsuleHost: runtime.host,
+      persistence: runtime.persistence,
+      security: unavailableWorkspaceSecurity,
+      updateStatus: () => {},
+    });
+    await waitUntil(() => vi.mocked(runtime.host.take).mock.calls.length > 0);
+    await act(async () => { runtime.enqueue(request); });
+    await waitUntil(() => canvasHarness.canUndo);
+    expect(runtime.host.reject).not.toHaveBeenCalled();
+    expect(runtime.host.commit).toHaveBeenCalledOnce();
+    expect(runtime.disk.workspace.nodes.find((node) => node.id === currentNodeId)).toEqual(initial.nodes[0]);
+    expect(runtime.disk.workspace.nodes.find((node) => node.id === request.nodeId)).toEqual({
+      id: request.nodeId, name: `${request.name} (33333333)`, content: request.content,
+    });
+    expect(request.name).toBe("Synthetic capsule note");
+    expect(runtime.disk.workspace.view.timeline?.captures).toHaveLength(1);
+    await act(async () => { canvasHarness.undo?.(); });
+    expect(runtime.disk.workspace.nodes).toEqual(initial.nodes);
+    expect(runtime.disk.workspace.view.timeline ?? null).toBeNull();
+  });
+
   it("keeps the old workspace editable after a confirmed capsule_commit_not_saved failure", async () => {
     const initial = workspace(currentNodeId, "Current workspace");
     const runtime = capsuleRuntime(initial);

@@ -1146,28 +1146,83 @@ impl Drop for CapsuleCommitGuard {
     }
 }
 
+/// Capture-only names are deterministic and bounded. Recomputing against all
+/// other nodes in the after-image also verifies a lock snapshot or a recovered
+/// commit without exposing the chosen name to the plaintext inbox.
+fn capsule_archive_name<'a>(
+    node_id: &str,
+    name: &str,
+    other_names: impl Iterator<Item = &'a str>,
+) -> Result<Option<String>, String> {
+    let id_value = serde_json::Value::String(node_id.to_owned());
+    let maximum = linked_info_capture_inbox::MAX_NAME_CHARACTERS;
+    if canonical_workspace_node_id(&id_value).as_deref() != Some(node_id)
+        || name.chars().count() > maximum
+    {
+        return Err("capsule_invalid_commit".to_owned());
+    }
+    let base = name.trim();
+    if base.is_empty() {
+        return Ok(None);
+    }
+    let occupied: HashSet<String> = other_names
+        .map(|name| name.trim().to_lowercase())
+        .collect();
+    if !occupied.contains(&base.to_lowercase()) {
+        return Ok(Some(base.to_owned()));
+    }
+    let characters: Vec<char> = base.chars().collect();
+    let short_id = &node_id[..8];
+    // Distinct suffixes guarantee a free candidate within this finite bound.
+    for attempt in 1..=occupied.len().saturating_add(1) {
+        let suffix = if attempt == 1 {
+            format!(" ({short_id})")
+        } else {
+            format!(" ({short_id}-{attempt})")
+        };
+        let prefix_length = maximum
+            .checked_sub(suffix.len())
+            .ok_or_else(|| "capsule_invalid_commit".to_owned())?;
+        let prefix: String = characters.iter().copied().take(prefix_length).collect();
+        let candidate = format!("{prefix}{suffix}");
+        if !occupied.contains(&candidate.trim().to_lowercase()) {
+            return Ok(Some(candidate));
+        }
+    }
+    Err("capsule_invalid_commit".to_owned())
+}
+
 fn validate_capsule_commit(
     contents: &str,
     input: &crate::capsule::CapsuleNoteInput,
 ) -> Result<(), String> {
     let value: serde_json::Value =
         serde_json::from_str(contents).map_err(|_| "capsule_invalid_commit".to_owned())?;
-    let expected_name = if input.name.trim().is_empty() {
-        serde_json::Value::Null
-    } else {
-        serde_json::Value::String(input.name.trim().to_owned())
-    };
+    input
+        .fingerprint()
+        .map_err(|_| "capsule_invalid_commit".to_owned())?;
+    let nodes = value["nodes"]
+        .as_array()
+        .ok_or_else(|| "capsule_invalid_commit".to_owned())?;
+    let expected_name = capsule_archive_name(
+        &input.node_id,
+        &input.name,
+        nodes
+            .iter()
+            .filter(|node| node["id"].as_str() != Some(input.node_id.as_str()))
+            .map(|node| node["name"].as_str().unwrap_or_default()),
+    )?
+    .map(serde_json::Value::String)
+    .unwrap_or(serde_json::Value::Null);
     let expected_content = if input.content.is_empty() {
         serde_json::Value::Null
     } else {
         serde_json::Value::String(input.content.clone())
     };
-    let note_matches = value["nodes"].as_array().is_some_and(|nodes| {
-        nodes.iter().any(|node| {
-            node["id"].as_str() == Some(input.node_id.as_str())
-                && node["name"] == expected_name
-                && node["content"] == expected_content
-        })
+    let note_matches = nodes.iter().any(|node| {
+        node["id"].as_str() == Some(input.node_id.as_str())
+            && node["name"] == expected_name
+            && node["content"] == expected_content
     });
     let capture_matches = value["view"]["timeline"]["captures"]
         .as_array()
@@ -5768,6 +5823,112 @@ mod tests {
     }
 
     #[test]
+    fn capture_name_contract_matches_frontend_and_complete_after_images() {
+        let contract: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../fixtures/capture-name-contract.json"
+        )))
+        .unwrap();
+        assert_eq!(contract["version"], 1);
+        for fixture in contract["cases"].as_array().unwrap() {
+            let case_id = fixture["id"].as_str().unwrap();
+            let node_id = fixture["nodeId"].as_str().unwrap();
+            let name = fixture["name"].as_str().unwrap();
+            let other_names = fixture["otherNames"].as_array().unwrap();
+            let actual = capsule_archive_name(
+                node_id,
+                name,
+                other_names.iter().map(|name| name.as_str().unwrap()),
+            )
+            .unwrap();
+            assert_eq!(
+                serde_json::to_value(&actual).unwrap(),
+                fixture["expectedName"],
+                "fixture {case_id}"
+            );
+            if let Some(name) = actual.as_ref() {
+                assert!(name.chars().count() <= linked_info_capture_inbox::MAX_NAME_CHARACTERS);
+            }
+
+            let input = crate::capsule::CapsuleNoteInput {
+                node_id: node_id.to_owned(),
+                name: name.to_owned(),
+                content: "unchanged fixture body\n".to_owned(),
+                captured_at_ms: 0,
+                utc_offset_minutes: 0,
+            };
+            let mut after = timeline_workspace();
+            after["nodes"][0]["name"] = fixture
+                .get("expectedDayName")
+                .cloned()
+                .unwrap_or_else(|| serde_json::Value::String("fixture day".to_owned()));
+            after["nodes"][1]["id"] = node_id.into();
+            after["nodes"][1]["name"] = fixture["expectedName"].clone();
+            after["nodes"][1]["content"] = input.content.clone().into();
+            after["view"]["timeline"]["captures"][0]["nodeId"] = node_id.into();
+            for (index, name) in other_names.iter().enumerate() {
+                after["nodes"].as_array_mut().unwrap().push(serde_json::json!({
+                    "id": format!("33333333-3333-4333-8333-{index:012}"),
+                    "name": name,
+                    "content": null
+                }));
+            }
+            let normalized = normalize_storage_envelope(&after.to_string()).unwrap();
+            assert!(
+                validate_capsule_commit(&normalized, &input).is_ok(),
+                "after-image {case_id}"
+            );
+            after["nodes"][1]["content"] = "tampered body".into();
+            assert!(
+                validate_capsule_commit(&after.to_string(), &input).is_err(),
+                "body {case_id}"
+            );
+        }
+    }
+
+    #[test]
+    fn capsule_commit_accepts_only_the_first_available_derived_name() {
+        let input = crate::capsule::CapsuleNoteInput {
+            node_id: "22222222-2222-4222-8222-222222222222".to_owned(),
+            name: "timeline day".to_owned(),
+            content: "capture".to_owned(),
+            captured_at_ms: 0,
+            utc_offset_minutes: 0,
+        };
+        let mut after = timeline_workspace();
+        after["nodes"][1]["name"] = "timeline day (22222222)".into();
+        assert!(validate_capsule_commit(&after.to_string(), &input).is_ok());
+        for invalid in [
+            "unrelated name",
+            "timeline day",
+            "Timeline day (22222222)",
+            "timeline day (11111111)",
+            "timeline day (22222222-2)",
+        ] {
+            after["nodes"][1]["name"] = invalid.into();
+            assert!(validate_capsule_commit(&after.to_string(), &input).is_err());
+        }
+        after["nodes"][1]["name"] = "timeline day (22222222)".into();
+        after["nodes"][0]["name"] = "different date label".into();
+        assert!(validate_capsule_commit(&after.to_string(), &input).is_err());
+    }
+
+    #[test]
+    fn derived_capture_names_do_not_hide_invalid_original_inputs() {
+        let id = "22222222-2222-4222-8222-222222222222";
+        assert!(capsule_archive_name(id, &"界".repeat(513), ["existing"].into_iter()).is_err());
+        assert!(capsule_archive_name("not-a-uuid", "existing", ["existing"].into_iter()).is_err());
+        assert!(
+            capsule_archive_name(
+                "A1B2C3D4-0000-4000-8000-000000000010",
+                "existing",
+                ["existing"].into_iter(),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn capsule_commit_never_reports_a_completed_write_as_unsaved_after_lock() {
         assert_eq!(
             capsule_commit_status(AtomicWriteStatus::Committed, true),
@@ -5794,19 +5955,38 @@ mod tests {
         crate::capsule::CapsuleNoteInput,
         String,
     ) {
+        named_capture_archive_fixture("")
+    }
+
+    fn named_capture_archive_fixture(
+        name: &str,
+    ) -> (
+        WorkspaceFileStore,
+        linked_info_capture_inbox::Inbox,
+        crate::capture_archive::CaptureClaim,
+        crate::capsule::CapsuleNoteInput,
+        String,
+    ) {
         let directory = test_directory();
         fs::create_dir_all(&directory).unwrap();
         let store = WorkspaceFileStore::new(directory.clone());
-        fs::write(store.path(WorkspaceFileSlot::Primary), workspace("before")).unwrap();
+        fs::write(
+            store.path(WorkspaceFileSlot::Primary),
+            workspace("timeline day"),
+        )
+        .unwrap();
         let mut inbox = linked_info_capture_inbox::Inbox::open(directory.join("capture")).unwrap();
         let draft = inbox
-            .create_draft(String::new(), "capture".to_owned())
+            .create_draft(name.to_owned(), "capture".to_owned())
             .unwrap();
         inbox.submit(&draft.id, draft.revision, 0, 0).unwrap();
         let claimed = inbox.claim_next().unwrap().unwrap();
         let (claim, input) = crate::capture_archive::claimed_input(&claimed).unwrap();
         let mut candidate = timeline_workspace();
         candidate["nodes"][1]["id"] = input.node_id.clone().into();
+        let derived =
+            capsule_archive_name(&input.node_id, &input.name, ["timeline day"].into_iter()).unwrap();
+        candidate["nodes"][1]["name"] = serde_json::to_value(derived).unwrap();
         candidate["view"]["timeline"]["captures"][0]["nodeId"] = input.node_id.clone().into();
         let candidate = normalize_storage_envelope(&candidate.to_string()).unwrap();
         (store, inbox, claim, input, candidate)
@@ -5926,6 +6106,140 @@ mod tests {
         )
         .unwrap();
         drop(ticket);
+        drop(inbox);
+        fs::remove_dir_all(store.base_directory).unwrap();
+    }
+
+    #[test]
+    fn renamed_capture_commit_preserves_original_input_and_existing_node() {
+        let (store, mut inbox, claim, input, candidate) =
+            named_capture_archive_fixture("timeline day");
+        let before: serde_json::Value = serde_json::from_str(
+            &store
+                .read(WorkspaceFileSlot::Primary, None)
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        let fingerprint = input.fingerprint().unwrap();
+        validate_capsule_commit(&candidate, &input).unwrap();
+        assert_eq!(
+            write_capture_archive(
+                &store,
+                &mut inbox,
+                &claim,
+                &input,
+                candidate.as_bytes(),
+                write_atomically_commit_aware,
+            )
+            .unwrap(),
+            AtomicWriteStatus::Committed
+        );
+        let after: serde_json::Value = serde_json::from_str(
+            &store
+                .read(WorkspaceFileSlot::Primary, None)
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(after["nodes"][0], before["nodes"][0]);
+        assert_eq!(
+            after["nodes"][1]["name"],
+            format!("timeline day ({})", &input.node_id[..8])
+        );
+        assert_eq!(after["nodes"][1]["content"], input.content);
+        assert_eq!(input.name, "timeline day");
+        assert_eq!(input.fingerprint().unwrap(), fingerprint);
+        let receipt = inbox.get(&claim.id).unwrap().unwrap();
+        assert_eq!(
+            receipt.state,
+            linked_info_capture_inbox::CaptureState::Archived
+        );
+        assert_eq!(receipt.revision, claim.revision);
+        assert!(receipt.name.is_empty());
+        assert!(receipt.content.is_empty());
+        assert_eq!(receipt.failure, None);
+        drop(inbox);
+        fs::remove_dir_all(store.base_directory).unwrap();
+    }
+
+    #[test]
+    fn renamed_after_image_recovers_with_the_original_queue_identity() {
+        let (store, mut inbox, claim, input, candidate) =
+            named_capture_archive_fixture("timeline day");
+        validate_capsule_commit(&candidate, &input).unwrap();
+        assert_eq!(
+            write_capture_archive(
+                &store,
+                &mut inbox,
+                &claim,
+                &input,
+                candidate.as_bytes(),
+                |path, bytes| {
+                    write_atomically(path, bytes)?;
+                    Ok(AtomicWriteStatus::RecoveryRequired)
+                },
+            )
+            .unwrap(),
+            AtomicWriteStatus::RecoveryRequired
+        );
+        let pending = inbox.get(&claim.id).unwrap().unwrap();
+        assert_eq!(pending.name, "timeline day");
+        assert_eq!(pending.content, input.content);
+        assert_eq!(pending.revision, claim.revision);
+        drop(inbox);
+        let mut reopened =
+            linked_info_capture_inbox::Inbox::open(store.base_directory.join("capture")).unwrap();
+        reconcile_capture_archive(&store, &mut reopened, None).unwrap();
+        assert_eq!(
+            reopened.archived_revision(&claim.id).unwrap(),
+            Some(claim.revision)
+        );
+        validate_capsule_commit(
+            &store
+                .read(WorkspaceFileSlot::Primary, None)
+                .unwrap()
+                .unwrap(),
+            &input,
+        )
+        .unwrap();
+        drop(reopened);
+        fs::remove_dir_all(store.base_directory).unwrap();
+    }
+
+    #[test]
+    fn final_lock_snapshot_acknowledges_a_derived_name_without_changing_the_claim() {
+        let (store, mut inbox, claim, input, candidate) =
+            named_capture_archive_fixture("timeline day");
+        let state = WorkspaceVaultState::default();
+        let mut ticket = state
+            .admit_lock_snapshot(
+                None,
+                state.access_generation().load(Ordering::Acquire),
+                false,
+            )
+            .unwrap();
+        let written = persist_admitted_lock_snapshot(&store, &ticket, &candidate, |_, bytes| {
+            validate_capsule_commit(&candidate, &input).unwrap();
+            write_capture_archive(
+                &store,
+                &mut inbox,
+                &claim,
+                &input,
+                bytes,
+                write_atomically_commit_aware,
+            )
+            .map_err(io::Error::other)
+        })
+        .unwrap();
+        assert_eq!(written, AtomicWriteStatus::Committed);
+        ticket.finish(LockSnapshotOutcome::Saved);
+        assert_eq!(
+            inbox.archived_revision(&claim.id).unwrap(),
+            Some(claim.revision)
+        );
+        assert!(inbox.claim_next().unwrap().is_none());
+        assert_eq!(input.name, "timeline day");
         drop(inbox);
         fs::remove_dir_all(store.base_directory).unwrap();
     }
