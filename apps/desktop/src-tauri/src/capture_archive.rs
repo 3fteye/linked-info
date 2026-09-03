@@ -302,19 +302,22 @@ fn rejection_already_settled(
     claim: &CaptureClaim,
     failure: FailureCode,
 ) -> Result<bool, String> {
-    Ok(inbox.get(&claim.id).map_err(inbox_error)?.is_some_and(|record| {
-        let failed = record.revision == claim.revision
-            && record.state == linked_info_capture_inbox::CaptureState::Failed
-            && record.failure == Some(failure);
-        let edited = record.revision > claim.revision
-            && matches!(
-                record.state,
-                linked_info_capture_inbox::CaptureState::Draft
-                    | linked_info_capture_inbox::CaptureState::Pending
-                    | linked_info_capture_inbox::CaptureState::Failed
-            );
-        failed || edited
-    }))
+    Ok(inbox
+        .get(&claim.id)
+        .map_err(inbox_error)?
+        .is_some_and(|record| {
+            let failed = record.revision == claim.revision
+                && record.state == linked_info_capture_inbox::CaptureState::Failed
+                && record.failure == Some(failure);
+            let edited = record.revision > claim.revision
+                && matches!(
+                    record.state,
+                    linked_info_capture_inbox::CaptureState::Draft
+                        | linked_info_capture_inbox::CaptureState::Pending
+                        | linked_info_capture_inbox::CaptureState::Failed
+                );
+            failed || edited
+        }))
 }
 
 /// Only a trusted before-image proof may turn a prepared capture into Failed.
@@ -373,7 +376,12 @@ fn settle_failed_journal(
                 .map_err(inbox_error)?;
         } else {
             inbox
-                .fail_claim(&claim.id, claim.revision, &claim.claim_id, FailureCode::SaveFailed)
+                .fail_claim(
+                    &claim.id,
+                    claim.revision,
+                    &claim.claim_id,
+                    FailureCode::SaveFailed,
+                )
                 .map_err(inbox_error)?;
         }
     } else {
@@ -739,7 +747,8 @@ mod tests {
             &fixture.claim,
             &fixture.input,
             FailureCode::SaveFailed,
-        ).unwrap();
+        )
+        .unwrap();
         let record = fixture.inbox.get(&fixture.claim.id).unwrap().unwrap();
         assert_eq!(record.state, CaptureState::Failed);
         assert_eq!(record.failure, Some(FailureCode::SaveFailed));
@@ -753,7 +762,10 @@ mod tests {
     #[test]
     fn duplicate_name_rejection_is_persisted_only_as_generic_save_failure() {
         let mut fixture = Fixture::new();
-        assert_eq!(failure_code(RejectionReason::DuplicateName), FailureCode::SaveFailed);
+        assert_eq!(
+            failure_code(RejectionReason::DuplicateName),
+            FailureCode::SaveFailed
+        );
         reject(
             &fixture.directory,
             &fixture.primary,
@@ -761,7 +773,8 @@ mod tests {
             &fixture.claim,
             &fixture.input,
             failure_code(RejectionReason::DuplicateName),
-        ).unwrap();
+        )
+        .unwrap();
         fixture.reopen();
         let record = fixture.inbox.get(&fixture.claim.id).unwrap().unwrap();
         assert_eq!(record.state, CaptureState::Failed);
@@ -777,19 +790,30 @@ mod tests {
             let mut fixture = Fixture::new();
             fixture.prepare();
             fs::write(&fixture.primary, primary).unwrap();
-            assert!(reject(
-                &fixture.directory,
-                &fixture.primary,
-                &mut fixture.inbox,
-                &fixture.claim,
-                &fixture.input,
-                FailureCode::SaveFailed,
-            ).is_err());
+            assert!(
+                reject(
+                    &fixture.directory,
+                    &fixture.primary,
+                    &mut fixture.inbox,
+                    &fixture.claim,
+                    &fixture.input,
+                    FailureCode::SaveFailed,
+                )
+                .is_err()
+            );
             let record = fixture.inbox.get(&fixture.claim.id).unwrap().unwrap();
             assert_eq!(record.state, CaptureState::Claimed);
             assert_eq!(record.failure, None);
             assert_eq!(record.content, "synthetic note");
-            assert!(fixture.inbox.outstanding().unwrap().unwrap().intent.is_some());
+            assert!(
+                fixture
+                    .inbox
+                    .outstanding()
+                    .unwrap()
+                    .unwrap()
+                    .intent
+                    .is_some()
+            );
             fixture.cleanup();
         }
     }
@@ -803,7 +827,9 @@ mod tests {
         journal.phase = JournalPhase::Failed;
         persist_journal(&fixture.directory, &journal).unwrap();
         fixture.reopen();
-        fixture.recover(|_| panic!("the primary was never committed")).unwrap();
+        fixture
+            .recover(|_| panic!("the primary was never committed"))
+            .unwrap();
         let record = fixture.inbox.get(&fixture.claim.id).unwrap().unwrap();
         assert_eq!(record.state, CaptureState::Failed);
         assert_eq!(record.failure, Some(FailureCode::SaveFailed));
@@ -816,8 +842,12 @@ mod tests {
         let mut fixture = Fixture::new();
         fixture.prepare();
         let blocker = rusqlite::Connection::open(
-            fixture.directory.join("capture").join(linked_info_capture_inbox::DATABASE_FILE_NAME),
-        ).unwrap();
+            fixture
+                .directory
+                .join("capture")
+                .join(linked_info_capture_inbox::DATABASE_FILE_NAME),
+        )
+        .unwrap();
         blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
         let result = reject(
             &fixture.directory,
@@ -828,10 +858,21 @@ mod tests {
             FailureCode::SaveFailed,
         );
         assert_eq!(result, Err("capture_busy".to_owned()));
-        assert!(read_journal(&fixture.directory).unwrap().is_some_and(|journal| {
-            journal.phase == JournalPhase::Failed
-        }));
-        assert_eq!(fixture.inbox.outstanding().unwrap().unwrap().claimed.claim_id, fixture.claim.claim_id);
+        assert!(
+            read_journal(&fixture.directory)
+                .unwrap()
+                .is_some_and(|journal| { journal.phase == JournalPhase::Failed })
+        );
+        assert_eq!(
+            fixture
+                .inbox
+                .outstanding()
+                .unwrap()
+                .unwrap()
+                .claimed
+                .claim_id,
+            fixture.claim.claim_id
+        );
         blocker.execute_batch("ROLLBACK").unwrap();
         drop(blocker);
 
@@ -842,8 +883,12 @@ mod tests {
             &fixture.claim,
             &fixture.input,
             FailureCode::SaveFailed,
-        ).unwrap();
-        assert_eq!(fixture.inbox.get(&fixture.claim.id).unwrap().unwrap().state, CaptureState::Failed);
+        )
+        .unwrap();
+        assert_eq!(
+            fixture.inbox.get(&fixture.claim.id).unwrap().unwrap().state,
+            CaptureState::Failed
+        );
         assert!(fixture.inbox.claim_next().unwrap().is_none());
         fixture.cleanup();
     }
@@ -858,13 +903,17 @@ mod tests {
             &fixture.claim,
             &fixture.input,
             FailureCode::SaveFailed,
-        ).unwrap();
-        let edited = fixture.inbox.save_draft(
-            &fixture.claim.id,
-            fixture.claim.revision,
-            String::new(),
-            "new user draft".to_owned(),
-        ).unwrap();
+        )
+        .unwrap();
+        let edited = fixture
+            .inbox
+            .save_draft(
+                &fixture.claim.id,
+                fixture.claim.revision,
+                String::new(),
+                "new user draft".to_owned(),
+            )
+            .unwrap();
         reject(
             &fixture.directory,
             &fixture.primary,
@@ -872,7 +921,8 @@ mod tests {
             &fixture.claim,
             &fixture.input,
             FailureCode::SaveFailed,
-        ).unwrap();
+        )
+        .unwrap();
         let current = fixture.inbox.get(&fixture.claim.id).unwrap().unwrap();
         assert_eq!(current.revision, edited.revision);
         assert_eq!(current.state, CaptureState::Draft);

@@ -18,6 +18,9 @@ class SmokeFailure extends Error {
 function requireCondition(condition, code) {
   if (!condition) throw new SmokeFailure(code);
 }
+// Keep the production archive feedback distinct from a local-save receipt.
+// The safety regression compares these exact texts with capture.state.archived.
+const ARCHIVE_NOTICE_MESSAGES = ["Archived to the main workspace", "已归档到主工作区"];
 const report = {
   schemaVersion: 2, environment: "github-hosted-windows", status: "running", tests: [],
   summary: { passed: 0, failed: 0, pageErrorCount: 0, nativeSessionNotificationsOnly: true,
@@ -404,9 +407,9 @@ async function run() {
         saved.nodeCount === saved.captureCount + saved.dayCount && saved.referenceCount === saved.captureCount + saved.dayCount - 1,
       "native_capsule_blur_transaction_invalid");
       await localSaved(capture, "archived");
-      await poll(() => main.evaluate(() => ["Saved", "已保存"].includes(
-        document.querySelector(".app-status-toast > span")?.textContent ?? "")),
-      "native_capsule_main_history_not_applied");
+      await poll(() => main.evaluate((expectedMessages) => expectedMessages.includes(
+        document.querySelector(".app-status-toast > span")?.textContent ?? ""), ARCHIVE_NOTICE_MESSAGES),
+      "native_capsule_main_archive_notice_not_observed");
       return { captures: 2, dates: saved.dayCount, reusedDateNode: saved.dayCount === 1 };
     });
     await step("single-undo-and-receipt-prevent-reimport", async () => {

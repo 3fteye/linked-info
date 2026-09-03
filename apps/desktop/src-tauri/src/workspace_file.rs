@@ -5831,11 +5831,19 @@ mod tests {
         );
         assert_eq!(inbox.get(&claim.id).unwrap().unwrap().content, "capture");
         let failed = inbox.get(&claim.id).unwrap().unwrap();
-        assert_eq!(failed.state, linked_info_capture_inbox::CaptureState::Failed);
-        assert_eq!(failed.failure, Some(linked_info_capture_inbox::FailureCode::SaveFailed));
+        assert_eq!(
+            failed.state,
+            linked_info_capture_inbox::CaptureState::Failed
+        );
+        assert_eq!(
+            failed.failure,
+            Some(linked_info_capture_inbox::FailureCode::SaveFailed)
+        );
         assert!(inbox.archived_revision(&claim.id).unwrap().is_none());
         assert!(inbox.claim_next().unwrap().is_none());
-        let next = inbox.create_draft(String::new(), "next capture".to_owned()).unwrap();
+        let next = inbox
+            .create_draft(String::new(), "next capture".to_owned())
+            .unwrap();
         inbox.submit(&next.id, next.revision, 1, 0).unwrap();
         assert_eq!(inbox.claim_next().unwrap().unwrap().record.id, next.id);
         drop(inbox);

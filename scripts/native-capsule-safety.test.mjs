@@ -118,3 +118,23 @@ test("native driver replaces old coupled lifecycle assertions with independent o
   ]) assert.ok(driver.includes(name), `must retain ${name}`);
   assert.doesNotMatch(driver, /capsuleInputRemoved|notification-clears-draft|capsule-close-hides-and-main-close-exits/);
 });
+
+test("native archive acknowledgement matches production translations and does not claim history from a toast", () => {
+  const locales = readFileSync(path.join(desktop, "src/locales.ts"), "utf8");
+  const app = readFileSync(path.join(desktop, "src/App.tsx"), "utf8");
+  const productionMessages = [...locales.matchAll(/^\s+archived:\s*"([^"]+)"/gm)]
+    .map((match) => match[1]);
+  const driverMessages = driver.match(/const ARCHIVE_NOTICE_MESSAGES = (\[[^;]+\]);/);
+  assert.notEqual(driverMessages, null, "driver must declare the exact archive acknowledgement texts");
+  const acceptedMessages = JSON.parse(driverMessages[1]);
+  assert.equal(productionMessages.length, 2, "both archive feedback translations must be present");
+  assert.deepEqual(new Set(acceptedMessages), new Set(productionMessages));
+  assert.equal(acceptedMessages.includes("Saved"), false);
+  assert.equal(acceptedMessages.includes("已保存"), false);
+  assert.match(app, /showAppNotice\(t\("capture\.state\.archived"\)\)/);
+  assert.match(driver, /main\.evaluate\(\(expectedMessages\) => expectedMessages\.includes\([\s\S]*?ARCHIVE_NOTICE_MESSAGES\)/);
+  assert.match(driver, /native_capsule_main_archive_notice_not_observed/);
+  assert.doesNotMatch(driver, /native_capsule_main_history_not_applied/);
+  assert.match(driver, /main\.keyboard\.press\("Control\+z"\)/);
+  assert.match(driver, /validNote\(undone\.notes\[0\]\) && undone\.notes\[1\]\.count === 0/);
+});
