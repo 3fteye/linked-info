@@ -1219,6 +1219,56 @@ fn reconcile_capture_archive(
     )
 }
 
+/// The caller holds the file-operation lock and has reserved this exact broker
+/// revision. A rejected prepared intent must retain its durable failure decision.
+pub(crate) fn reject_capture_input(
+    app: &AppHandle,
+    claim: &crate::capture_archive::CaptureClaim,
+    input: &crate::capsule::CapsuleNoteInput,
+    reason: crate::capsule::RejectionReason,
+) -> Result<(), String> {
+    let store = workspace_store(app).map_err(|_| "capture_inbox_unavailable".to_owned())?;
+    crate::capture_archive::with_inbox(app, |inbox| {
+        if matches!(reason, crate::capsule::RejectionReason::Busy) {
+            inbox
+                .release_claim(&claim.id, claim.revision, &claim.claim_id)
+                .map_err(crate::capture_archive::inbox_error)
+        } else {
+            crate::capture_archive::reject(
+                &store.base_directory,
+                &store.path(WorkspaceFileSlot::Primary),
+                inbox,
+                claim,
+                input,
+                crate::capture_archive::failure_code(reason),
+            )
+        }
+    })
+}
+
+fn fail_capture_before_write(
+    store: &WorkspaceFileStore,
+    inbox: &mut linked_info_capture_inbox::Inbox,
+    claim: &crate::capture_archive::CaptureClaim,
+    input: &crate::capsule::CapsuleNoteInput,
+    error: String,
+) -> Result<AtomicWriteStatus, String> {
+    match crate::capture_archive::reject(
+        &store.base_directory,
+        &store.path(WorkspaceFileSlot::Primary),
+        inbox,
+        claim,
+        input,
+        linked_info_capture_inbox::FailureCode::SaveFailed,
+    ) {
+        Ok(()) => Err(error),
+        // The failure decision is retained in the broker/local journal. Normal
+        // contention must not change it back into a request to import again.
+        Err(rejection) if matches!(rejection.as_str(), "capture_busy" | "capture_io") => Err(error),
+        Err(_) => Ok(AtomicWriteStatus::RecoveryRequired),
+    }
+}
+
 /// The local recovery intent, primary replacement and inbox acknowledgement
 /// share one file-operation critical section. Errors after replacement cannot
 /// be downgraded to an ordinary failed save by a delayed owner response.
@@ -1228,7 +1278,6 @@ fn write_capture_archive(
     claim: &crate::capture_archive::CaptureClaim,
     input: &crate::capsule::CapsuleNoteInput,
     serialized: &[u8],
-    active_key: Option<&[u8; DATA_KEY_BYTES]>,
     write: impl FnOnce(&Path, &[u8]) -> io::Result<AtomicWriteStatus>,
 ) -> Result<AtomicWriteStatus, String> {
     let journal = match crate::capture_archive::prepare(
@@ -1241,13 +1290,7 @@ fn write_capture_archive(
     ) {
         Ok(journal) => journal,
         Err(error) => {
-            // prepare never writes the primary. Reconcile its interrupted
-            // journal before permitting any later ordinary workspace writes.
-            return if reconcile_capture_archive(store, inbox, active_key).is_ok() {
-                Err(error)
-            } else {
-                Ok(AtomicWriteStatus::RecoveryRequired)
-            };
+            return fail_capture_before_write(store, inbox, claim, input, error);
         }
     };
     match write(&store.path(WorkspaceFileSlot::Primary), serialized) {
@@ -1263,14 +1306,13 @@ fn write_capture_archive(
             crate::capture_archive::mark_uncertain(inbox, &journal);
             Ok(AtomicWriteStatus::RecoveryRequired)
         }
-        Err(_) => {
-            if reconcile_capture_archive(store, inbox, active_key).is_ok() {
-                Err("capsule_commit_not_saved".to_owned())
-            } else {
-                crate::capture_archive::mark_uncertain(inbox, &journal);
-                Ok(AtomicWriteStatus::RecoveryRequired)
-            }
-        }
+        Err(_) => fail_capture_before_write(
+            store,
+            inbox,
+            claim,
+            input,
+            "capsule_commit_not_saved".to_owned(),
+        ),
     }
 }
 
@@ -1288,7 +1330,6 @@ pub(crate) async fn commit_capsule_contents(
     let data_key = state.optional_data_key()?;
     let app_for_commit = app.clone();
     let authority_for_commit = authority.clone();
-    let node_id = input.node_id.clone();
     let contents = Zeroizing::new(contents);
     let write_result = tauri::async_runtime::spawn_blocking(move || {
         let _guard = operation_lock
@@ -1338,7 +1379,6 @@ pub(crate) async fn commit_capsule_contents(
                 &claim,
                 &input,
                 serialized.as_bytes(),
-                active_key,
                 write_atomically_commit_aware,
             )
         });
@@ -1352,11 +1392,10 @@ pub(crate) async fn commit_capsule_contents(
         if status == AtomicWriteStatus::RecoveryRequired {
             crate::capsule::quarantine(&app_for_commit);
         }
-        crate::capsule::finish_submission(
+        crate::capsule::finish_saved_submission(
             &app_for_commit,
             &authority_for_commit,
             &input.node_id,
-            true,
         );
         commit_guard.settled = true;
         Ok::<_, String>(status)
@@ -1368,7 +1407,6 @@ pub(crate) async fn commit_capsule_contents(
             crate::capsule::ensure_owner_context(app, authority).is_ok(),
         ),
         Ok(Err(error)) => {
-            crate::capsule::finish_submission(app, authority, &node_id, false);
             return Err(error);
         }
         Ok(Ok(AtomicWriteStatus::RecoveryRequired)) | Err(_) => {
@@ -2329,7 +2367,6 @@ pub async fn lock_workspace_with_snapshot(
                             claim,
                             input,
                             serialized,
-                            ticket.data_key.as_deref(),
                             write_atomically_commit_aware,
                         )
                     })
@@ -5785,7 +5822,6 @@ mod tests {
             &claim,
             &input,
             candidate.as_bytes(),
-            None,
             |_, _| Err(io::Error::other("synthetic before-replace failure")),
         );
         assert!(result.is_err());
@@ -5794,8 +5830,14 @@ mod tests {
             before
         );
         assert_eq!(inbox.get(&claim.id).unwrap().unwrap().content, "capture");
+        let failed = inbox.get(&claim.id).unwrap().unwrap();
+        assert_eq!(failed.state, linked_info_capture_inbox::CaptureState::Failed);
+        assert_eq!(failed.failure, Some(linked_info_capture_inbox::FailureCode::SaveFailed));
         assert!(inbox.archived_revision(&claim.id).unwrap().is_none());
-        assert!(inbox.claim_next().unwrap().is_some());
+        assert!(inbox.claim_next().unwrap().is_none());
+        let next = inbox.create_draft(String::new(), "next capture".to_owned()).unwrap();
+        inbox.submit(&next.id, next.revision, 1, 0).unwrap();
+        assert_eq!(inbox.claim_next().unwrap().unwrap().record.id, next.id);
         drop(inbox);
         fs::remove_dir_all(store.base_directory).unwrap();
     }
@@ -5809,7 +5851,6 @@ mod tests {
             &claim,
             &input,
             candidate.as_bytes(),
-            None,
             |path, bytes| {
                 write_atomically(path, bytes)?;
                 Ok(AtomicWriteStatus::RecoveryRequired)
@@ -5856,7 +5897,6 @@ mod tests {
                 &claim,
                 &input,
                 bytes,
-                None,
                 write_atomically_commit_aware,
             )
             .map_err(io::Error::other)

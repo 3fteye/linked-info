@@ -47,6 +47,8 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Check Rust formatting
+        id: rust_format
+        continue-on-error: true
         run: cargo fmt --all -- --check
 
       - name: Lint core crates
@@ -168,6 +170,13 @@ jobs:
       - name: Build independent capture frontend
         working-directory: apps/desktop
         run: pnpm build:capture
+
+      # Formatting still fails the job, but must not hide unrelated test
+      # results when all executable verification is performed in CI.
+      - name: Enforce Rust formatting result
+        if: ${{ always() && steps.rust_format.outcome == 'failure' }}
+        shell: pwsh
+        run: throw 'Rust formatting failed; see Check Rust formatting'
 
   desktop-windows:
     name: Windows desktop check

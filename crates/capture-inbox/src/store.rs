@@ -18,6 +18,7 @@ use crate::{
 pub struct Inbox {
     connection: Connection,
     recovery_required: bool,
+    validated_data_version: i64,
 }
 
 impl Inbox {
@@ -37,7 +38,7 @@ impl Inbox {
         if !new_file {
             // 先拒绝其他格式，不能为一份不认识的数据库修改 journal 设置。
             let transaction = connection.transaction()?;
-            schema::validate(&transaction)?;
+            schema::validate_protocol(&transaction)?;
             transaction.commit()?;
         }
         // DELETE + EXTRA 会在删除回滚日志后同步目录；不依赖异步 WAL checkpoint。
@@ -66,12 +67,14 @@ impl Inbox {
         }
         drop(rows);
         drop(statement);
+        let validated_data_version = data_version(&transaction)?;
         transaction
             .commit()
             .map_err(|_| InboxError::RecoveryRequired)?;
         Ok(Self {
             connection,
             recovery_required: false,
+            validated_data_version,
         })
     }
 
@@ -215,6 +218,23 @@ impl Inbox {
 
     /// 全局最多一个在途记录；已有领取永不因墙钟或连接重开而失效。
     pub fn claim_next(&mut self) -> Result<Option<ClaimedCapture>> {
+        if self.recovery_required {
+            return Err(InboxError::RecoveryRequired);
+        }
+        // 空轮询只读：不申请 RESERVED 写锁，也不读取待归档正文。
+        // 发现候选后仍在原 IMMEDIATE 事务内复验，探测本身不授予领取权。
+        let available = self.read(|transaction| {
+            Ok(transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM captures WHERE state = 'pending')
+                    AND NOT EXISTS(SELECT 1 FROM captures
+                        WHERE state IN ('claimed', 'uncertain'))",
+                [],
+                |row| row.get::<_, bool>(0),
+            )?)
+        })?;
+        if !available {
+            return Ok(None);
+        }
         self.write(|transaction| {
             if outstanding(transaction)?.is_some() {
                 return Ok(None);
@@ -346,6 +366,25 @@ impl Inbox {
         })
     }
 
+    /// 仅供可信主程序证明主文件仍为 before 后结束这次确定失败的提交。
+    /// 保留正文和修订；严格匹配完整 intent，不能清除较新编辑或领取。
+    pub fn fail_before_commit(
+        &mut self,
+        intent: &CommitIntent,
+        failure: FailureCode,
+    ) -> Result<()> {
+        intent.validate()?;
+        self.write(|transaction| {
+            matching_intent(transaction, intent)?;
+            transaction.execute(
+                "UPDATE captures SET state = 'failed', failure = ?2, claim_id = NULL,
+                    intent_before = NULL, intent_after = NULL WHERE id = ?1",
+                params![intent.id, failure.as_str()],
+            )?;
+            Ok(())
+        })
+    }
+
     /// 仅在正式持久化已确认（或可信主程序恢复已验证 after）后调用。
     /// 原子插入最小收据并删除正文；相同 ID/revision 的重复确认幂等。
     pub fn confirm_archived(&mut self, intent: &CommitIntent) -> Result<()> {
@@ -370,9 +409,10 @@ impl Inbox {
 
     fn read<T>(&mut self, operation: impl FnOnce(&Transaction<'_>) -> Result<T>) -> Result<T> {
         let transaction = self.connection.transaction()?;
-        schema::validate(&transaction)?;
+        let validated = validate_transaction(&transaction, self.validated_data_version)?;
         let result = operation(&transaction)?;
         transaction.commit()?;
+        self.validated_data_version = validated;
         Ok(result)
     }
 
@@ -383,13 +423,14 @@ impl Inbox {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        schema::validate(&transaction)?;
+        let validated = validate_transaction(&transaction, self.validated_data_version)?;
         let result = operation(&transaction)?;
         if transaction.commit().is_err() {
             // 不确定的 SQLite 提交不能被旧自动保存覆盖；重新打开后读取权威状态。
             self.recovery_required = true;
             return Err(InboxError::RecoveryRequired);
         }
+        self.validated_data_version = validated;
         Ok(result)
     }
 }
@@ -398,6 +439,22 @@ struct StoredCapture {
     record: CaptureRecord,
     claim_id: Option<String>,
     intent: Option<CommitIntent>,
+}
+
+fn data_version(connection: &Connection) -> Result<i64> {
+    Ok(connection.pragma_query_value(None, "data_version", |row| row.get(0))?)
+}
+
+fn validate_transaction(connection: &Connection, validated: i64) -> Result<i64> {
+    // 先读协议以固定本事务快照；schema/version 每次检查，不能被缓存跳过。
+    schema::validate_protocol(connection)?;
+    let current = data_version(connection)?;
+    if current != validated {
+        // data_version 只比较同一连接：外部进程提交使它变化；本连接写入
+        // 已由单条校验、容量检查与原子状态迁移维持不变量，不重复扫正文。
+        schema::validate_contents(connection)?;
+    }
+    Ok(current)
 }
 
 fn read_stored(connection: &Connection, id: &str) -> Result<Option<StoredCapture>> {

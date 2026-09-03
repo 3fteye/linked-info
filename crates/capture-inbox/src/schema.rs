@@ -5,6 +5,11 @@ use crate::{InboxError, MAX_RECORD_BYTES, MAX_TOTAL_BYTES, MAX_UNARCHIVED_RECORD
 const APPLICATION_ID: i64 = 0x4c_49_43_49;
 const SCHEMA_VERSION: i64 = 1;
 
+#[cfg(test)]
+std::thread_local! {
+    static CONTENT_VALIDATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 const CAPTURES_SQL: &str = "CREATE TABLE captures (
     id TEXT PRIMARY KEY NOT NULL CHECK(length(id) = 36
         AND id GLOB '????????-????-[1-8]???-[89ab]???-????????????'
@@ -60,6 +65,11 @@ pub(crate) fn initialize(transaction: &Transaction<'_>) -> Result<()> {
 }
 
 pub(crate) fn validate(connection: &Connection) -> Result<()> {
+    validate_protocol(connection)?;
+    validate_contents(connection)
+}
+
+pub(crate) fn validate_protocol(connection: &Connection) -> Result<()> {
     let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
     let application: i64 =
         connection.pragma_query_value(None, "application_id", |row| row.get(0))?;
@@ -85,6 +95,12 @@ pub(crate) fn validate(connection: &Connection) -> Result<()> {
             return Err(InboxError::Corrupt);
         }
     }
+    Ok(())
+}
+
+pub(crate) fn validate_contents(connection: &Connection) -> Result<()> {
+    #[cfg(test)]
+    CONTENT_VALIDATIONS.set(CONTENT_VALIDATIONS.get() + 1);
     let (records, bytes, largest): (i64, i64, i64) = connection.query_row(
         "SELECT count(*), coalesce(sum(length(CAST(name AS BLOB))
             + length(CAST(content AS BLOB))), 0),
@@ -108,6 +124,11 @@ pub(crate) fn validate(connection: &Connection) -> Result<()> {
         return Err(InboxError::Corrupt);
     }
     Ok(())
+}
+
+#[cfg(test)]
+pub(crate) fn content_validation_count() -> usize {
+    CONTENT_VALIDATIONS.get()
 }
 
 pub(crate) fn check_capacity(

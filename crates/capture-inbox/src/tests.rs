@@ -299,6 +299,55 @@ fn uncertain_outcome_keeps_text_and_only_matching_before_proof_can_retry() {
 }
 
 #[test]
+fn proven_before_commit_failure_requires_exact_intent_and_preserves_editable_text() {
+    let directory = SyntheticDirectory::new();
+    let mut inbox = directory.open();
+    let claimed = claim(&mut inbox);
+    let intent = prepare(&mut inbox, &claimed);
+    let mut mismatched = intent.clone();
+    mismatched.after_sha256 = "c".repeat(64);
+    assert_eq!(
+        inbox
+            .fail_before_commit(&mismatched, FailureCode::SaveFailed)
+            .err(),
+        Some(InboxError::Conflict)
+    );
+    assert_eq!(
+        inbox.outstanding().unwrap().unwrap().intent,
+        Some(intent.clone())
+    );
+    inbox
+        .fail_before_commit(&intent, FailureCode::SaveFailed)
+        .unwrap();
+    let failed = inbox.get(&intent.id).unwrap().unwrap();
+    assert_eq!(failed.state, CaptureState::Failed);
+    assert_eq!(failed.failure, Some(FailureCode::SaveFailed));
+    assert_eq!(failed.revision, intent.revision);
+    assert!(failed.content == claimed.record.content);
+    assert!(inbox.outstanding().unwrap().is_none());
+    assert!(inbox.claim_next().unwrap().is_none());
+    assert_eq!(
+        inbox.confirm_archived(&intent).err(),
+        Some(InboxError::Conflict)
+    );
+    let updated = inbox
+        .save_draft(
+            &failed.id,
+            failed.revision,
+            failed.name,
+            "修改后仍保留的合成正文".to_owned(),
+        )
+        .unwrap();
+    assert_eq!(
+        inbox
+            .fail_before_commit(&intent, FailureCode::SaveFailed)
+            .err(),
+        Some(InboxError::Conflict)
+    );
+    assert!(inbox.get(&updated.id).unwrap().unwrap() == updated);
+}
+
+#[test]
 fn confirmed_archive_is_atomic_minimal_idempotent_and_persistent() {
     let directory = SyntheticDirectory::new();
     let intent = {
@@ -459,6 +508,85 @@ fn original_capture_time_controls_queue_order_and_survives_restarts() {
 }
 
 #[test]
+fn unchanged_polling_skips_body_budget_scans_but_external_writes_revalidate() {
+    let directory = SyntheticDirectory::new();
+    let mut inbox = directory.open();
+    let record = inbox
+        .create_draft(String::new(), "合".repeat(MAX_CONTENT_CHARACTERS))
+        .unwrap();
+    let initial_checks = crate::schema::content_validation_count();
+    for _ in 0..3 {
+        assert_eq!(inbox.list().unwrap().len(), 1);
+        assert!(inbox.claim_next().unwrap().is_none());
+    }
+    assert_eq!(crate::schema::content_validation_count(), initial_checks);
+    let mut external = directory.open();
+    external
+        .save_draft(
+            &record.id,
+            record.revision,
+            "外部修改".to_owned(),
+            record.content,
+        )
+        .unwrap();
+    let before_external_read = crate::schema::content_validation_count();
+    assert_eq!(inbox.list().unwrap()[0].name, "外部修改");
+    assert_eq!(
+        crate::schema::content_validation_count(),
+        before_external_read + 1
+    );
+    assert!(inbox.claim_next().unwrap().is_none());
+    assert_eq!(
+        crate::schema::content_validation_count(),
+        before_external_read + 1
+    );
+}
+
+#[test]
+fn empty_claim_poll_does_not_compete_with_an_external_reserved_write_lock() {
+    let directory = SyntheticDirectory::new();
+    let mut inbox = directory.open();
+    draft(&mut inbox);
+    let raw = directory.raw();
+    raw.execute_batch("BEGIN IMMEDIATE").unwrap();
+    assert!(inbox.claim_next().unwrap().is_none());
+    raw.execute_batch("ROLLBACK").unwrap();
+}
+
+#[test]
+fn cached_validation_still_rejects_external_protocol_and_capacity_changes() {
+    let changed_version = SyntheticDirectory::new();
+    let mut inbox = changed_version.open();
+    changed_version
+        .raw()
+        .pragma_update(None, "user_version", 2)
+        .unwrap();
+    assert_eq!(inbox.list().err(), Some(InboxError::SchemaUnsupported));
+
+    let changed_schema = SyntheticDirectory::new();
+    let mut inbox = changed_schema.open();
+    changed_schema
+        .raw()
+        .execute("CREATE TABLE unexpected (value TEXT)", [])
+        .unwrap();
+    assert_eq!(inbox.list().err(), Some(InboxError::Corrupt));
+
+    let changed_capacity = SyntheticDirectory::new();
+    let mut inbox = changed_capacity.open();
+    let record = draft(&mut inbox);
+    let raw = changed_capacity.raw();
+    raw.pragma_update(None, "ignore_check_constraints", true)
+        .unwrap();
+    raw.execute(
+        "UPDATE captures SET content = ?1 WHERE id = ?2",
+        params!["x".repeat(crate::MAX_RECORD_BYTES + 1), record.id],
+    )
+    .unwrap();
+    assert_eq!(inbox.list().err(), Some(InboxError::Corrupt));
+    assert_eq!(inbox.claim_next().err(), Some(InboxError::Corrupt));
+}
+
+#[test]
 fn single_record_and_timestamp_boundaries_are_validated_before_writes() {
     let directory = SyntheticDirectory::new();
     let mut inbox = directory.open();
@@ -490,9 +618,7 @@ fn single_record_and_timestamp_boundaries_are_validated_before_writes() {
         );
     }
     assert_eq!(
-        inbox
-            .submit(&record.id, record.revision, u64::MAX, 0)
-            .err(),
+        inbox.submit(&record.id, record.revision, u64::MAX, 0).err(),
         Some(InboxError::InvalidInput)
     );
     assert!(inbox.get(&record.id).unwrap().unwrap() == record);
@@ -512,12 +638,7 @@ fn maximum_contract_integers_round_trip_through_sqlite_and_receipts() {
         )
         .unwrap();
     let updated = inbox
-        .save_draft(
-            &record.id,
-            initial_revision,
-            record.name,
-            record.content,
-        )
+        .save_draft(&record.id, initial_revision, record.name, record.content)
         .unwrap();
     let maximum_time = 253_402_300_799_999;
     let pending = inbox
@@ -550,8 +671,7 @@ fn negative_and_out_of_contract_sql_integers_fail_closed_without_rewriting() {
             let raw = directory.raw();
             raw.pragma_update(None, "ignore_check_constraints", true)
                 .unwrap();
-            raw.execute(statement, params![invalid, record.id])
-                .unwrap();
+            raw.execute(statement, params![invalid, record.id]).unwrap();
             assert_eq!(inbox.list().err(), Some(InboxError::Corrupt));
             assert_eq!(inbox.get(&record.id).err(), Some(InboxError::Corrupt));
             let (revision, time): (i64, i64) = raw

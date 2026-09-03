@@ -74,7 +74,7 @@ pub enum SubmissionStatus {
     Unknown,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum RejectionReason {
     Busy,
@@ -101,6 +101,7 @@ struct Submission {
     result: SubmissionResult,
     committing: bool,
     claim: Option<CaptureClaim>,
+    pending_rejection: Option<RejectionReason>,
 }
 
 #[derive(Default)]
@@ -603,6 +604,7 @@ fn enqueue_note(
         result: result.clone(),
         committing: false,
         claim: None,
+        pending_rejection: None,
     });
     Ok(result)
 }
@@ -634,6 +636,22 @@ pub async fn take_capsule_note(
             .lock()
             .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
         ensure_owner_context(&app_for_take, &authority_for_take)?;
+        let pending_rejection = {
+            let state = runtime(&app_for_take);
+            let guard = state
+                .runtime
+                .lock()
+                .map_err(|_| "capsule_state_unavailable".to_owned())?;
+            next_rejection(&guard)
+        };
+        if let Some((node_id, reason)) = pending_rejection {
+            let result = attempt_rejection(&app_for_take, &authority_for_take, &node_id, reason);
+            return match result {
+                Ok(()) => Ok(None),
+                Err(error) if matches!(error.as_str(), "capture_busy" | "capture_io") => Ok(None),
+                Err(error) => Err(error),
+            };
+        }
         {
             let state = runtime(&app_for_take);
             let guard = state
@@ -708,7 +726,10 @@ pub async fn take_capsule_note(
 }
 
 fn claim_processing_commit(submission: &mut Submission) -> Result<(), String> {
-    if submission.result.status != SubmissionStatus::Processing || submission.committing {
+    if submission.result.status != SubmissionStatus::Processing
+        || submission.committing
+        || submission.pending_rejection.is_some()
+    {
         return Err("capsule_commit_unknown".to_owned());
     }
     submission.committing = true;
@@ -767,13 +788,12 @@ pub(crate) fn ensure_submission(
     ensure_authority(app, authority)
 }
 
-fn transition_processing_submission(
-    guard: &mut CapsuleRuntime,
+fn processing_submission<'a>(
+    guard: &'a mut CapsuleRuntime,
     authority: &OwnerAuthority,
     node_id: &str,
-    result: SubmissionResult,
-) -> Result<(), String> {
-    let submission = guard
+) -> Result<&'a mut Submission, String> {
+    guard
         .submission
         .as_mut()
         .filter(|submission| {
@@ -786,18 +806,116 @@ fn transition_processing_submission(
                     .is_none_or(|context| context == &submission.context_id)
                 && submission.result.status == SubmissionStatus::Processing
         })
-        .ok_or_else(|| "capsule_submission_expired".to_owned())?;
+        .ok_or_else(|| "capsule_submission_expired".to_owned())
+}
+
+fn transition_processing_submission(
+    guard: &mut CapsuleRuntime,
+    authority: &OwnerAuthority,
+    node_id: &str,
+    result: SubmissionResult,
+) -> Result<(), String> {
+    let submission = processing_submission(guard, authority, node_id)?;
     submission.input = None;
     submission.result = result;
     submission.committing = false;
+    submission.pending_rejection = None;
     Ok(())
 }
 
-pub(crate) fn finish_submission(
+fn retain_failed_commit_for_rejection(
+    guard: &mut CapsuleRuntime,
+    authority: &OwnerAuthority,
+    node_id: &str,
+) -> Result<(), String> {
+    let submission = processing_submission(guard, authority, node_id)?;
+    submission.committing = false;
+    submission.pending_rejection = Some(RejectionReason::SaveFailed);
+    Ok(())
+}
+
+fn reserve_rejection(submission: &mut Submission, reason: RejectionReason) -> Result<(), String> {
+    if submission.committing
+        || submission.result.status != SubmissionStatus::Processing
+        || submission.pending_rejection.is_some_and(|pending| pending != reason)
+    {
+        return Err("capsule_commit_unknown".to_owned());
+    }
+    submission.pending_rejection = Some(reason);
+    submission.committing = true;
+    Ok(())
+}
+
+fn next_rejection(guard: &CapsuleRuntime) -> Option<(String, RejectionReason)> {
+    guard.submission.as_ref().and_then(|submission| {
+        submission
+            .pending_rejection
+            .map(|reason| (submission.node_id.clone(), reason))
+    })
+}
+
+fn settle_rejection_attempt(
+    guard: &mut CapsuleRuntime,
+    authority: &OwnerAuthority,
+    node_id: &str,
+    reason: RejectionReason,
+    result: &Result<(), String>,
+) -> Result<(), String> {
+    let submission = processing_submission(guard, authority, node_id)?;
+    submission.committing = false;
+    if result.is_ok() {
+        transition_processing_submission(
+            guard,
+            authority,
+            node_id,
+            SubmissionResult {
+                status: SubmissionStatus::Failed,
+                reason: Some(reason),
+            },
+        )?;
+    }
+    Ok(())
+}
+
+/// Caller holds the workspace file-operation lock. Reserving and releasing the
+/// broker takes only short mutex sections; SQLite I/O never delays revocation.
+fn attempt_rejection(
     app: &AppHandle,
     authority: &OwnerAuthority,
     node_id: &str,
-    saved: bool,
+    reason: RejectionReason,
+) -> Result<(), String> {
+    let (input, claim) = {
+        let state = runtime(app);
+        let mut guard = state
+            .runtime
+            .lock()
+            .map_err(|_| "capsule_state_unavailable".to_owned())?;
+        if !owner_context_matches(guard.owner.as_ref(), authority) {
+            return Err("capsule_submission_expired".to_owned());
+        }
+        ensure_authority(app, authority)?;
+        let submission = processing_submission(&mut guard, authority, node_id)?;
+        let input = submission.input.clone().ok_or_else(|| "capsule_submission_expired".to_owned())?;
+        let claim = submission.claim.clone().ok_or_else(|| "capsule_submission_expired".to_owned())?;
+        reserve_rejection(submission, reason)?;
+        (input, claim)
+    };
+    let result = workspace_file::reject_capture_input(app, &claim, &input, reason);
+    if let Ok(mut guard) = runtime(app).runtime.lock() {
+        let _ = settle_rejection_attempt(&mut guard, authority, node_id, reason, &result);
+    }
+    if result.as_ref().is_err_and(|error| !matches!(error.as_str(), "capture_busy" | "capture_io")) {
+        quarantine(app);
+        workspace_file::lock_workspace_runtime(app, "capsule_recovery_required");
+    }
+    result
+}
+
+pub(crate) fn finish_saved_submission(
+    app: &AppHandle,
+    authority: &OwnerAuthority,
+    node_id: &str,
 ) {
     if let Ok(mut guard) = runtime(app).runtime.lock() {
         let _ = transition_processing_submission(
@@ -805,12 +923,8 @@ pub(crate) fn finish_submission(
             authority,
             node_id,
             SubmissionResult {
-                status: if saved {
-                    SubmissionStatus::Saved
-                } else {
-                    SubmissionStatus::Failed
-                },
-                reason: (!saved).then_some(RejectionReason::SaveFailed),
+                status: SubmissionStatus::Saved,
+                reason: None,
             },
         );
     }
@@ -863,7 +977,17 @@ pub async fn commit_capsule_note(
     let result =
         workspace_file::commit_capsule_contents(&app, &authority, input, claim, contents).await;
     if result.is_err() {
-        finish_submission(&app, &authority, &node_id, false);
+        if let Ok(mut guard) = runtime(&app).runtime.lock() {
+            let _ = retain_failed_commit_for_rejection(&mut guard, &authority, &node_id);
+        }
+        // Do not publish a terminal in-memory failure before the fixed inbox
+        // revision has a durable failure. Polling retries Busy/IO rejection.
+        let _ = reject_capsule_note(
+            app.clone(),
+            owner_id,
+            node_id,
+            RejectionReason::SaveFailed,
+        ).await;
     }
     result.map_err(|_| "capsule_commit_not_saved".to_owned())
 }
@@ -875,49 +999,24 @@ pub async fn reject_capsule_note(
     node_id: String,
     reason: RejectionReason,
 ) -> Result<(), String> {
-    let (authority, _, claim) = submission_authority(&app, &owner_id, &node_id, false)?;
+    let (authority, _, _) = submission_authority(&app, &owner_id, &node_id, false)?;
     let operation_lock = app.state::<WorkspaceVaultState>().operation_lock();
     let app_for_reject = app.clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    let result = tauri::async_runtime::spawn_blocking(move || {
         let _operation = operation_lock
             .lock()
             .map_err(|_| "workspace_vault_operation_unavailable".to_owned())?;
-        // Reserve the broker slot before SQLite I/O without holding the owner
-        // mutex on disk. A racing commit can no longer admit this revision.
-        submission_authority(&app_for_reject, &authority.owner_id, &node_id, true)?;
-        capture_archive::with_inbox(&app_for_reject, |inbox| {
-            let result = if matches!(reason, RejectionReason::Busy) {
-                inbox.release_claim(&claim.id, claim.revision, &claim.claim_id)
-            } else {
-                inbox.fail_claim(
-                    &claim.id,
-                    claim.revision,
-                    &claim.claim_id,
-                    capture_archive::failure_code(reason),
-                )
-            };
-            result.map_err(capture_archive::inbox_error)
-        })?;
-        let state = runtime(&app_for_reject);
-        let mut guard = state
-            .runtime
-            .lock()
-            .map_err(|_| "capsule_state_unavailable".to_owned())?;
-        // Revocation may already have cleared the in-memory broker. The
-        // persisted result still belongs only to the captured claim/revision.
-        let _ = transition_processing_submission(
-            &mut guard,
-            &authority,
-            &node_id,
-            SubmissionResult {
-                status: SubmissionStatus::Failed,
-                reason: Some(reason),
-            },
-        );
-        Ok::<_, String>(())
+        attempt_rejection(&app_for_reject, &authority, &node_id, reason)
     })
-    .await
-    .map_err(|_| "capsule_state_unavailable".to_owned())??;
+    .await;
+    match result {
+        Ok(result) => result?,
+        Err(_) => {
+            quarantine(&app);
+            workspace_file::lock_workspace_runtime(&app, "capsule_recovery_required");
+            return Err("capture_recovery_required".to_owned());
+        }
+    }
     emit_state_changed(&app);
     Ok(())
 }
@@ -1190,6 +1289,79 @@ mod tests {
         assert!(claim_processing_commit(submission).is_err());
         assert!(submission.committing);
         assert!(submission.input.is_some());
+    }
+
+    #[test]
+    fn known_unsaved_commit_keeps_input_until_its_durable_rejection() {
+        let mut guard = CapsuleRuntime::default();
+        let note = input();
+        enqueue_note(&mut guard, authority(), "context".to_owned(), note.clone()).unwrap();
+        let submission = guard.submission.as_mut().unwrap();
+        submission.result.status = SubmissionStatus::Processing;
+        claim_processing_commit(submission).unwrap();
+
+        retain_failed_commit_for_rejection(&mut guard, &authority(), &note.node_id).unwrap();
+        let submission = guard.submission.as_mut().unwrap();
+        assert_eq!(submission.result.status, SubmissionStatus::Processing);
+        assert!(submission.input.is_some());
+        assert!(!submission.committing);
+        assert!(claim_processing_commit(submission).is_err());
+        assert_eq!(next_rejection(&guard), Some((note.node_id.clone(), RejectionReason::SaveFailed)));
+
+        reserve_rejection(guard.submission.as_mut().unwrap(), RejectionReason::SaveFailed).unwrap();
+        settle_rejection_attempt(&mut guard, &authority(), &note.node_id, RejectionReason::SaveFailed, &Ok(())).unwrap();
+        assert_eq!(guard.submission.as_ref().unwrap().result.status, SubmissionStatus::Failed);
+        assert!(guard.submission.as_ref().unwrap().input.is_none());
+        assert!(next_rejection(&guard).is_none());
+    }
+
+    #[test]
+    fn busy_rejection_unreserves_the_slot_and_polling_retries_the_same_reason() {
+        for reason in [RejectionReason::DuplicateName, RejectionReason::Busy] {
+            let mut guard = CapsuleRuntime::default();
+            let note = input();
+            enqueue_note(&mut guard, authority(), "context".to_owned(), note.clone()).unwrap();
+            guard.submission.as_mut().unwrap().result.status = SubmissionStatus::Processing;
+            reserve_rejection(guard.submission.as_mut().unwrap(), reason).unwrap();
+            settle_rejection_attempt(
+                &mut guard,
+                &authority(),
+                &note.node_id,
+                reason,
+                &Err("capture_busy".to_owned()),
+            ).unwrap();
+
+            let submission = guard.submission.as_mut().unwrap();
+            assert!(!submission.committing);
+            assert!(submission.input.is_some());
+            assert!(claim_processing_commit(submission).is_err());
+            assert_eq!(next_rejection(&guard), Some((note.node_id.clone(), reason)));
+
+            reserve_rejection(guard.submission.as_mut().unwrap(), reason).unwrap();
+            settle_rejection_attempt(&mut guard, &authority(), &note.node_id, reason, &Ok(())).unwrap();
+            assert!(next_rejection(&guard).is_none());
+            assert_eq!(guard.submission.as_ref().unwrap().result.status, SubmissionStatus::Failed);
+        }
+    }
+
+    #[test]
+    fn late_rejection_failure_cannot_unreserve_a_new_owner_context() {
+        let mut guard = CapsuleRuntime::default();
+        let note = input();
+        enqueue_note(&mut guard, authority(), "new-context".to_owned(), note.clone()).unwrap();
+        guard.submission.as_mut().unwrap().result.status = SubmissionStatus::Processing;
+        reserve_rejection(guard.submission.as_mut().unwrap(), RejectionReason::Empty).unwrap();
+        let mut old = authority();
+        old.context_id = Some("old-context".to_owned());
+        assert!(settle_rejection_attempt(
+            &mut guard,
+            &old,
+            &note.node_id,
+            RejectionReason::Empty,
+            &Err("capture_busy".to_owned()),
+        ).is_err());
+        assert!(guard.submission.as_ref().unwrap().committing);
+        assert_eq!(guard.submission.as_ref().unwrap().pending_rejection, Some(RejectionReason::Empty));
     }
 
     #[test]

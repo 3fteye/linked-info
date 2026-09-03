@@ -40,6 +40,7 @@ pub(crate) struct ArchiveJournal {
 enum JournalPhase {
     Prepared,
     NotCommitted,
+    Failed,
     Committed,
 }
 
@@ -143,7 +144,9 @@ pub(crate) fn claimed_input(
 pub(crate) fn failure_code(reason: RejectionReason) -> FailureCode {
     match reason {
         RejectionReason::Busy => FailureCode::Invalid,
-        RejectionReason::DuplicateName => FailureCode::DuplicateName,
+        // A private workspace name collision must not be disclosed as a
+        // specific membership result through the shared plaintext inbox.
+        RejectionReason::DuplicateName => FailureCode::SaveFailed,
         RejectionReason::Empty => FailureCode::Empty,
         RejectionReason::Invalid => FailureCode::Invalid,
         RejectionReason::SaveFailed => FailureCode::SaveFailed,
@@ -294,6 +297,108 @@ pub(crate) fn mark_uncertain(inbox: &mut Inbox, journal: &ArchiveJournal) {
     let _ = inbox.mark_uncertain(&journal.intent());
 }
 
+fn rejection_already_settled(
+    inbox: &mut Inbox,
+    claim: &CaptureClaim,
+    failure: FailureCode,
+) -> Result<bool, String> {
+    Ok(inbox.get(&claim.id).map_err(inbox_error)?.is_some_and(|record| {
+        let failed = record.revision == claim.revision
+            && record.state == linked_info_capture_inbox::CaptureState::Failed
+            && record.failure == Some(failure);
+        let edited = record.revision > claim.revision
+            && matches!(
+                record.state,
+                linked_info_capture_inbox::CaptureState::Draft
+                    | linked_info_capture_inbox::CaptureState::Pending
+                    | linked_info_capture_inbox::CaptureState::Failed
+            );
+        failed || edited
+    }))
+}
+
+/// Only a trusted before-image proof may turn a prepared capture into Failed.
+/// Record that decision before SQLite I/O so Busy and lost replies cannot
+/// silently requeue this capture when the owner is replaced or restarted.
+pub(crate) fn reject(
+    base_directory: &Path,
+    primary: &Path,
+    inbox: &mut Inbox,
+    claim: &CaptureClaim,
+    input: &CapsuleNoteInput,
+    failure: FailureCode,
+) -> Result<(), String> {
+    let journal = read_journal(base_directory)?;
+    if let Some(mut journal) = journal {
+        if journal.claim != *claim
+            || journal.input_sha256 != input_digest(input)?
+            || failure != FailureCode::SaveFailed
+        {
+            return Err(RECOVERY_REQUIRED.to_owned());
+        }
+        if journal.phase == JournalPhase::Prepared
+            && primary_digest(primary)? == journal.before_sha256
+        {
+            journal.phase = JournalPhase::Failed;
+            persist_journal(base_directory, &journal)?;
+        } else if journal.phase != JournalPhase::Failed {
+            return Err(RECOVERY_REQUIRED.to_owned());
+        }
+        settle_failed_journal(base_directory, inbox, &journal)
+    } else if rejection_already_settled(inbox, claim, failure)? {
+        Ok(())
+    } else {
+        inbox
+            .fail_claim(&claim.id, claim.revision, &claim.claim_id, failure)
+            .map_err(inbox_error)
+    }
+}
+
+fn settle_failed_journal(
+    base_directory: &Path,
+    inbox: &mut Inbox,
+    journal: &ArchiveJournal,
+) -> Result<(), String> {
+    if let Some(outstanding) = inbox.outstanding().map_err(inbox_error)? {
+        let (claim, input) = claimed_input(&outstanding.claimed)?;
+        if claim != journal.claim || input_digest(&input)? != journal.input_sha256 {
+            return Err(RECOVERY_REQUIRED.to_owned());
+        }
+        if let Some(intent) = outstanding.intent {
+            if !journal.matches_intent(&intent) {
+                return Err(RECOVERY_REQUIRED.to_owned());
+            }
+            inbox
+                .fail_before_commit(&intent, FailureCode::SaveFailed)
+                .map_err(inbox_error)?;
+        } else {
+            inbox
+                .fail_claim(&claim.id, claim.revision, &claim.claim_id, FailureCode::SaveFailed)
+                .map_err(inbox_error)?;
+        }
+    } else {
+        let record = inbox
+            .get(&journal.claim.id)
+            .map_err(inbox_error)?
+            .ok_or_else(|| RECOVERY_REQUIRED.to_owned())?;
+        let failed = record.revision == journal.claim.revision
+            && record.state == linked_info_capture_inbox::CaptureState::Failed
+            && record.failure == Some(FailureCode::SaveFailed);
+        let edited = record.revision > journal.claim.revision
+            && matches!(
+                record.state,
+                linked_info_capture_inbox::CaptureState::Draft
+                    | linked_info_capture_inbox::CaptureState::Pending
+            );
+        if !failed && !edited {
+            return Err(RECOVERY_REQUIRED.to_owned());
+        }
+    }
+    // A newer user edit after a successful Failed transition belongs to the
+    // user. Cleanup must not touch that newer revision.
+    clear_journal(base_directory)
+}
+
 /// Resolve an interrupted operation before exposing a primary snapshot. The
 /// supplied validator decrypts only inside the main process and checks the
 /// exact fixed node and original capture time. It returns no data to SQLite.
@@ -317,6 +422,9 @@ pub(crate) fn recover(
         }
         return Ok(());
     };
+    if journal.phase == JournalPhase::Failed {
+        return settle_failed_journal(base_directory, inbox, &journal);
+    }
     if journal.phase == JournalPhase::NotCommitted {
         if let Some(outstanding) = outstanding {
             let (claim, _) = claimed_input(&outstanding.claimed)?;
@@ -617,6 +725,158 @@ mod tests {
             fixture.inbox.get(&fixture.claim.id).unwrap().unwrap().state,
             CaptureState::Pending
         );
+        fixture.cleanup();
+    }
+
+    #[test]
+    fn definite_failure_persists_failed_instead_of_requeueing_the_fixed_revision() {
+        let mut fixture = Fixture::new();
+        fixture.prepare();
+        reject(
+            &fixture.directory,
+            &fixture.primary,
+            &mut fixture.inbox,
+            &fixture.claim,
+            &fixture.input,
+            FailureCode::SaveFailed,
+        ).unwrap();
+        let record = fixture.inbox.get(&fixture.claim.id).unwrap().unwrap();
+        assert_eq!(record.state, CaptureState::Failed);
+        assert_eq!(record.failure, Some(FailureCode::SaveFailed));
+        assert_eq!(record.revision, fixture.claim.revision);
+        assert_eq!(record.content, "synthetic note");
+        assert!(fixture.inbox.claim_next().unwrap().is_none());
+        assert!(read_journal(&fixture.directory).unwrap().is_none());
+        fixture.cleanup();
+    }
+
+    #[test]
+    fn duplicate_name_rejection_is_persisted_only_as_generic_save_failure() {
+        let mut fixture = Fixture::new();
+        assert_eq!(failure_code(RejectionReason::DuplicateName), FailureCode::SaveFailed);
+        reject(
+            &fixture.directory,
+            &fixture.primary,
+            &mut fixture.inbox,
+            &fixture.claim,
+            &fixture.input,
+            failure_code(RejectionReason::DuplicateName),
+        ).unwrap();
+        fixture.reopen();
+        let record = fixture.inbox.get(&fixture.claim.id).unwrap().unwrap();
+        assert_eq!(record.state, CaptureState::Failed);
+        assert_eq!(record.failure, Some(FailureCode::SaveFailed));
+        assert_ne!(record.failure, Some(FailureCode::DuplicateName));
+        assert_eq!(record.content, "synthetic note");
+        fixture.cleanup();
+    }
+
+    #[test]
+    fn rejection_refuses_an_after_image_or_an_unproved_replacement() {
+        for primary in [b"after".as_slice(), b"unrelated primary".as_slice()] {
+            let mut fixture = Fixture::new();
+            fixture.prepare();
+            fs::write(&fixture.primary, primary).unwrap();
+            assert!(reject(
+                &fixture.directory,
+                &fixture.primary,
+                &mut fixture.inbox,
+                &fixture.claim,
+                &fixture.input,
+                FailureCode::SaveFailed,
+            ).is_err());
+            let record = fixture.inbox.get(&fixture.claim.id).unwrap().unwrap();
+            assert_eq!(record.state, CaptureState::Claimed);
+            assert_eq!(record.failure, None);
+            assert_eq!(record.content, "synthetic note");
+            assert!(fixture.inbox.outstanding().unwrap().unwrap().intent.is_some());
+            fixture.cleanup();
+        }
+    }
+
+    #[test]
+    fn interrupted_failure_decision_is_retried_after_restart_without_importing() {
+        let mut fixture = Fixture::new();
+        let mut journal = fixture.prepare();
+        // Equivalent to a Busy response after persisting the trusted failure
+        // decision but before the shared failure transaction can commit.
+        journal.phase = JournalPhase::Failed;
+        persist_journal(&fixture.directory, &journal).unwrap();
+        fixture.reopen();
+        fixture.recover(|_| panic!("the primary was never committed")).unwrap();
+        let record = fixture.inbox.get(&fixture.claim.id).unwrap().unwrap();
+        assert_eq!(record.state, CaptureState::Failed);
+        assert_eq!(record.failure, Some(FailureCode::SaveFailed));
+        assert!(fixture.inbox.claim_next().unwrap().is_none());
+        fixture.cleanup();
+    }
+
+    #[test]
+    fn sqlite_busy_preserves_the_failure_decision_for_the_same_claim_retry() {
+        let mut fixture = Fixture::new();
+        fixture.prepare();
+        let blocker = rusqlite::Connection::open(
+            fixture.directory.join("capture").join(linked_info_capture_inbox::DATABASE_FILE_NAME),
+        ).unwrap();
+        blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let result = reject(
+            &fixture.directory,
+            &fixture.primary,
+            &mut fixture.inbox,
+            &fixture.claim,
+            &fixture.input,
+            FailureCode::SaveFailed,
+        );
+        assert_eq!(result, Err("capture_busy".to_owned()));
+        assert!(read_journal(&fixture.directory).unwrap().is_some_and(|journal| {
+            journal.phase == JournalPhase::Failed
+        }));
+        assert_eq!(fixture.inbox.outstanding().unwrap().unwrap().claimed.claim_id, fixture.claim.claim_id);
+        blocker.execute_batch("ROLLBACK").unwrap();
+        drop(blocker);
+
+        reject(
+            &fixture.directory,
+            &fixture.primary,
+            &mut fixture.inbox,
+            &fixture.claim,
+            &fixture.input,
+            FailureCode::SaveFailed,
+        ).unwrap();
+        assert_eq!(fixture.inbox.get(&fixture.claim.id).unwrap().unwrap().state, CaptureState::Failed);
+        assert!(fixture.inbox.claim_next().unwrap().is_none());
+        fixture.cleanup();
+    }
+
+    #[test]
+    fn lost_failure_receipt_does_not_overwrite_a_newer_user_edit() {
+        let mut fixture = Fixture::new();
+        reject(
+            &fixture.directory,
+            &fixture.primary,
+            &mut fixture.inbox,
+            &fixture.claim,
+            &fixture.input,
+            FailureCode::SaveFailed,
+        ).unwrap();
+        let edited = fixture.inbox.save_draft(
+            &fixture.claim.id,
+            fixture.claim.revision,
+            String::new(),
+            "new user draft".to_owned(),
+        ).unwrap();
+        reject(
+            &fixture.directory,
+            &fixture.primary,
+            &mut fixture.inbox,
+            &fixture.claim,
+            &fixture.input,
+            FailureCode::SaveFailed,
+        ).unwrap();
+        let current = fixture.inbox.get(&fixture.claim.id).unwrap().unwrap();
+        assert_eq!(current.revision, edited.revision);
+        assert_eq!(current.state, CaptureState::Draft);
+        assert_eq!(current.content, "new user draft");
         fixture.cleanup();
     }
 
