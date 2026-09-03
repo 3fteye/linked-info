@@ -13,15 +13,28 @@ if ($null -eq $testBinary) { throw 'windows_test_loader_binary_missing' }
 Write-Output "test-loader-binary=$($testBinary.Name)"
 
 $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
-$dumpbin = & $vswhere -latest -products '*' -find 'VC/Tools/MSVC/*/bin/Hostx64/x64/dumpbin.exe' |
-    Select-Object -First 1
-if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($dumpbin)) {
-    throw 'windows_test_loader_dumpbin_missing'
+$installations = & $vswhere -all -prerelease -products '*' -format json | ConvertFrom-Json
+$dumpbin = $null
+foreach ($installation in $installations) {
+    Write-Output "test-loader-vs=$($installation.installationVersion) prerelease=$($installation.isPrerelease)"
+    $candidates = Get-ChildItem -Path (Join-Path $installation.installationPath 'VC/Tools/MSVC/*/bin/Hostx64/x64/dumpbin.exe') -File -ErrorAction SilentlyContinue |
+        Sort-Object FullName -Descending
+    if ($null -ne $candidates) {
+        $dumpbin = ($candidates | Select-Object -First 1).FullName
+        break
+    }
 }
 
-# PE imports contain binary/symbol names, not workspace or application payloads.
-& $dumpbin /imports $testBinary.FullName
-if ($LASTEXITCODE -ne 0) { throw 'windows_test_loader_imports_failed' }
+# Missing diagnostic tools must not suppress Windows' own loader events.
+if ($null -ne $dumpbin) {
+    # PE imports contain binary/symbol names, not application payloads.
+    & $dumpbin /imports $testBinary.FullName
+    Write-Output "test-loader-imports-exit=$LASTEXITCODE"
+    & $dumpbin /headers $testBinary.FullName
+    Write-Output "test-loader-headers-exit=$LASTEXITCODE"
+} else {
+    Write-Output 'test-loader-dumpbin-unavailable'
+}
 
 # Windows can name the missing entry point in an application popup event.
 # Only emit matching test-process events from this disposable runner.
