@@ -37,6 +37,35 @@ function workspace(): WorkspaceSnapshot {
 }
 
 describe("workspace history", () => {
+  it("undoes and redoes timeline creation without retaining the current metadata", () => {
+    const first = workspace();
+    const second = structuredClone(first);
+    second.view.timeline = {
+      canvasId: defaultCanvasId,
+      days: [{ date: "1970-01-01", nodeId }],
+      captures: [],
+    };
+    const before = captureWorkspaceHistory(first);
+    const after = captureWorkspaceHistory(second);
+    const timeline = appendWorkspaceHistory(emptyWorkspaceHistoryTimeline(), before, after, 100);
+    const undone = stepWorkspaceHistoryBackward(timeline);
+
+    expect(before.view.timeline).toBeNull();
+    expect(restoreWorkspaceHistory(undone!.state, second.view).view.timeline).toBeNull();
+    const redone = stepWorkspaceHistoryForward(undone!.timeline);
+    expect(restoreWorkspaceHistory(redone!.state, first.view).view.timeline).toEqual(
+      second.view.timeline,
+    );
+  });
+
+  it("treats absent and null timeline metadata as equal history state", () => {
+    const before = captureWorkspaceHistory(workspace());
+    const after = structuredClone(before);
+    delete before.view.timeline;
+    after.view.timeline = null;
+    expect(workspaceHistoryStatesEqual(before, after)).toBe(true);
+  });
+
   it("excludes viewport changes from undoable state", () => {
     const first = workspace();
     const second = structuredClone(first);

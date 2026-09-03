@@ -4445,6 +4445,9 @@ function App({
           bookmarks: (workspace.view.bookmarks ?? []).filter(
             (bookmark) => bookmark.canvasId !== canvasId,
           ),
+          timeline: workspace.view.timeline?.canvasId === canvasId
+            ? null
+            : workspace.view.timeline ?? null,
         },
       }),
       { flushImmediately: true, recordHistory: true },

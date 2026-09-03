@@ -31,6 +31,7 @@ function validWorkspace(name = "OpenAI"): WorkspaceSnapshot {
       ],
       contentProcessorByNodeId: {},
       extensionMetadata: {},
+      timeline: null,
     },
   };
 }
@@ -82,7 +83,7 @@ describe("createTauriWorkspacePersistence", () => {
 
     expect(await persistence.load()).toEqual({ status: "ready", workspace });
     expect(JSON.parse(bridge.files.get("primary") ?? "null")).toEqual({
-      version: 5,
+      version: 6,
       ...workspace,
       view: { ...workspace.view, bookmarks: [] },
     });
@@ -94,7 +95,7 @@ describe("createTauriWorkspacePersistence", () => {
     const legacy = new MemoryLegacySource();
     const fileWorkspace = validWorkspace("File");
     const browserWorkspace = validWorkspace("Browser");
-    bridge.files.set("primary", JSON.stringify({ version: 4, ...fileWorkspace }));
+    bridge.files.set("primary", JSON.stringify({ version: 4, ...fileWorkspace, view: { ...fileWorkspace.view, timeline: undefined } }));
     legacy.values.set("primary", { status: "ready", workspace: browserWorkspace });
     const persistence = createTauriWorkspacePersistence(bridge, legacy);
 
@@ -421,7 +422,7 @@ describe("createTauriWorkspacePersistence", () => {
     await persistence.save(before);
 
     const result = await persistence.runExclusiveTransaction(async () => {
-      bridge.files.set("primary", JSON.stringify({ version: 4, ...restored }));
+      bridge.files.set("primary", JSON.stringify({ version: 4, ...restored, view: { ...restored.view, timeline: undefined } }));
       return { status: "committed" as const };
     });
 
@@ -477,7 +478,7 @@ describe("createTauriWorkspacePersistence", () => {
     const first = persistence.runExclusiveTransaction(async () => {
       signalFirstStarted();
       await firstBlocked;
-      bridge.files.set("primary", JSON.stringify({ version: 4, ...restored }));
+      bridge.files.set("primary", JSON.stringify({ version: 4, ...restored, view: { ...restored.view, timeline: undefined } }));
       return { status: "committed" as const };
     });
     await firstStarted;

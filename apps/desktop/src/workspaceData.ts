@@ -43,6 +43,24 @@ export interface CanvasBookmark {
   zoom: number;
 }
 
+export interface WorkspaceTimelineDay {
+  date: string;
+  nodeId: string;
+}
+
+export interface WorkspaceTimelineCapture {
+  nodeId: string;
+  capturedAtMs: number;
+  utcOffsetMinutes: number;
+  day: string;
+}
+
+export interface WorkspaceTimeline {
+  canvasId: string;
+  days: WorkspaceTimelineDay[];
+  captures: WorkspaceTimelineCapture[];
+}
+
 export const defaultCanvasId = "00000000-0000-4000-8000-000000000001";
 export const defaultCanvasName = "Main";
 
@@ -52,6 +70,7 @@ export interface WorkspaceViewMetadata {
   contentProcessorByNodeId: Record<string, string>;
   extensionMetadata: Record<string, WorkspaceExtensionMetadata>;
   bookmarks?: CanvasBookmark[];
+  timeline?: WorkspaceTimeline | null;
 }
 
 export type ExtensionMetadataJsonValue =
@@ -101,7 +120,7 @@ const maximumCanvasBookmarkNameCharacters = 128;
 const maximumTotalCanvasPlacements = 1_000_000;
 const extensionMetadataUtf8Encoder = new TextEncoder();
 const invalidExtensionMetadataValue = Symbol("invalidExtensionMetadataValue");
-type WorkspaceSnapshotVersion = 1 | 2 | 3 | 4 | 5;
+type WorkspaceSnapshotVersion = 1 | 2 | 3 | 4 | 5 | 6;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -290,6 +309,7 @@ export function emptyWorkspace(): WorkspaceSnapshot {
       ],
       contentProcessorByNodeId: {},
       extensionMetadata: {},
+      timeline: null,
     },
   };
 }
@@ -617,19 +637,119 @@ function parseCanvasBookmarks(
   return bookmarks;
 }
 
+function isValidTimelineDate(value: unknown): value is string {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return false;
+  }
+  const year = Number(value.slice(0, 4));
+  const month = Number(value.slice(5, 7));
+  const day = Number(value.slice(8, 10));
+  if (year < 1 || month < 1 || month > 12 || day < 1) {
+    return false;
+  }
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const daysInMonth = [
+    31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31,
+  ];
+  return day <= daysInMonth[month - 1];
+}
+
+function parseWorkspaceTimeline(
+  value: unknown,
+  canvasIds: ReadonlySet<string>,
+  nodeIds: ReadonlySet<string>,
+): WorkspaceTimeline | null | undefined {
+  if (value === null) {
+    return null;
+  }
+  if (
+    !isRecord(value) ||
+    Object.keys(value).length !== 3 ||
+    !Array.isArray(value.days) ||
+    !Array.isArray(value.captures) ||
+    value.days.length + value.captures.length > nodeIds.size
+  ) {
+    return undefined;
+  }
+  const canvasId = canonicalNodeId(value.canvasId);
+  if (canvasId === null || !canvasIds.has(canvasId)) {
+    return undefined;
+  }
+  const dates = new Set<string>();
+  const timelineNodeIds = new Set<string>();
+  const days: WorkspaceTimelineDay[] = [];
+  for (const candidate of value.days) {
+    if (
+      !isRecord(candidate) ||
+      Object.keys(candidate).length !== 2 ||
+      !isValidTimelineDate(candidate.date) ||
+      dates.has(candidate.date)
+    ) {
+      return undefined;
+    }
+    const nodeId = canonicalNodeId(candidate.nodeId);
+    if (nodeId === null || !nodeIds.has(nodeId) || timelineNodeIds.has(nodeId)) {
+      return undefined;
+    }
+    dates.add(candidate.date);
+    timelineNodeIds.add(nodeId);
+    days.push({ date: candidate.date, nodeId });
+  }
+  const captures: WorkspaceTimelineCapture[] = [];
+  for (const candidate of value.captures) {
+    if (
+      !isRecord(candidate) ||
+      Object.keys(candidate).length !== 4 ||
+      typeof candidate.day !== "string" ||
+      !dates.has(candidate.day) ||
+      !isFiniteNumber(candidate.capturedAtMs) ||
+      !Number.isInteger(candidate.capturedAtMs) ||
+      candidate.capturedAtMs < 0 ||
+      candidate.capturedAtMs > 253_402_300_799_999 ||
+      !isFiniteNumber(candidate.utcOffsetMinutes) ||
+      !Number.isInteger(candidate.utcOffsetMinutes) ||
+      candidate.utcOffsetMinutes < -840 ||
+      candidate.utcOffsetMinutes > 840
+    ) {
+      return undefined;
+    }
+    const nodeId = canonicalNodeId(candidate.nodeId);
+    if (
+      nodeId === null ||
+      !nodeIds.has(nodeId) ||
+      timelineNodeIds.has(nodeId) ||
+      new Date(candidate.capturedAtMs + candidate.utcOffsetMinutes * 60_000)
+        .toISOString()
+        .slice(0, 10) !== candidate.day
+    ) {
+      return undefined;
+    }
+    timelineNodeIds.add(nodeId);
+    captures.push({
+      nodeId,
+      capturedAtMs: candidate.capturedAtMs,
+      utcOffsetMinutes: candidate.utcOffsetMinutes,
+      day: candidate.day,
+    });
+  }
+  return { canvasId, days, captures };
+}
+
 function parseWorkspaceSnapshotValue(
   value: unknown,
   version: WorkspaceSnapshotVersion,
+  allowOptionalViewFields = false,
 ): WorkspaceSnapshot | null {
   if (
     !isRecord(value) ||
     !Array.isArray(value.nodes) ||
-    !Array.isArray(value.references)
+    !Array.isArray(value.references) ||
+    (value.version !== undefined && value.version !== version)
   ) {
     return null;
   }
   const allowedKeys = new Set(
-    version === 4 || version === 5
+    version >= 4
       ? ["nodes", "references", "view", "version"]
       : version === 1
         ? ["nodes", "layout", "references", "viewport", "version"]
@@ -698,18 +818,22 @@ function parseWorkspaceSnapshotValue(
   let canvases: WorkspaceCanvas[];
   let activeCanvasId: string;
   let bookmarks: CanvasBookmark[] | undefined;
-  if (version === 4 || version === 5) {
-    const hasExplicitVersion5 = value.version === 5;
+  let timeline: WorkspaceTimeline | null = null;
+  if (version >= 4) {
+    const allowedViewKeys = new Set([
+      "activeCanvasId",
+      "canvases",
+      "contentProcessorByNodeId",
+      "extensionMetadata",
+      ...(version >= 5 ? ["bookmarks"] : []),
+      ...(version >= 6 ? ["timeline"] : []),
+    ]);
     if (
       !isRecord(value.view) ||
       Array.isArray(value.view) ||
-      (version === 4 && Object.keys(value.view).length !== 4) ||
-      (version === 5 &&
-        ((hasExplicitVersion5 &&
-          (Object.keys(value.view).length !== 5 ||
-            !Object.prototype.hasOwnProperty.call(value.view, "bookmarks"))) ||
-          (!hasExplicitVersion5 &&
-            ![4, 5].includes(Object.keys(value.view).length)))) ||
+      Object.keys(value.view).some((key) => !allowedViewKeys.has(key)) ||
+      (!allowOptionalViewFields &&
+        Object.keys(value.view).length !== allowedViewKeys.size) ||
       !Array.isArray(value.view.canvases) ||
       value.view.canvases.length === 0 ||
       value.view.canvases.length > maximumWorkspaceCanvasCount
@@ -759,13 +883,26 @@ function parseWorkspaceSnapshotValue(
     canvases = parsedCanvases;
     activeCanvasId = parsedActiveCanvasId;
     if (
-      version === 5 &&
+      version >= 5 &&
       Object.prototype.hasOwnProperty.call(value.view, "bookmarks")
     ) {
       bookmarks = parseCanvasBookmarks(value.view.bookmarks, canvasIds) ?? undefined;
       if (bookmarks === undefined) {
         return null;
       }
+    }
+    if (version === 6) {
+      const parsedTimeline = parseWorkspaceTimeline(
+        value.view.timeline === undefined && allowOptionalViewFields
+          ? null
+          : value.view.timeline,
+        canvasIds,
+        nodeIds,
+      );
+      if (parsedTimeline === undefined) {
+        return null;
+      }
+      timeline = parsedTimeline;
     }
   } else {
     const layout = parseNodeLayout(value.layout, nodeIds, true);
@@ -790,16 +927,8 @@ function parseWorkspaceSnapshotValue(
       Array.isArray(value.view) ||
       !isRecord(value.view.contentProcessorByNodeId) ||
       Array.isArray(value.view.contentProcessorByNodeId) ||
-      Object.keys(value.view).length !==
-        (version === 5
-          ? Object.prototype.hasOwnProperty.call(value.view, "bookmarks")
-            ? 5
-            : 4
-          : version === 2
-            ? 1
-            : version === 3
-              ? 2
-              : 4) ||
+      (version === 2 && Object.keys(value.view).length !== 1) ||
+      (version === 3 && Object.keys(value.view).length !== 2) ||
       (version === 2 &&
         Object.prototype.hasOwnProperty.call(value.view, "extensionMetadata"))
     ) {
@@ -822,7 +951,7 @@ function parseWorkspaceSnapshotValue(
       }
       contentProcessorByNodeId[nodeId] = processorId;
     }
-    if (version === 3 || version === 4 || version === 5) {
+    if (version >= 3) {
       const parsedExtensionMetadata = parseWorkspaceExtensionMetadata(
         value.view.extensionMetadata,
         nodeIds,
@@ -845,11 +974,26 @@ function parseWorkspaceSnapshotValue(
       contentProcessorByNodeId,
       extensionMetadata,
       ...(bookmarks === undefined || bookmarks.length === 0 ? {} : { bookmarks }),
+      timeline,
     },
   };
 }
 
 export function parseWorkspaceSnapshot(value: unknown): WorkspaceSnapshot | null {
+  return parseWorkspaceSnapshotValue(
+    value,
+    6,
+    isRecord(value) && value.version === undefined,
+  );
+}
+
+export function parseWorkspaceSnapshotV6(value: unknown): WorkspaceSnapshot | null {
+  return parseWorkspaceSnapshotValue(value, 6);
+}
+
+export function migrateWorkspaceSnapshotV5(
+  value: unknown,
+): WorkspaceSnapshot | null {
   return parseWorkspaceSnapshotValue(value, 5);
 }
 
@@ -893,6 +1037,22 @@ export function removeNodesFromWorkspaceView(
   );
   let extensionMetadataChanged = false;
   let canvasesChanged = false;
+  let timelineChanged = false;
+  let timeline = view.timeline ?? null;
+  if (timeline !== null) {
+    const days = timeline.days.filter((day) => !deletedNodeIds.has(day.nodeId));
+    const retainedDates = new Set(days.map((day) => day.date));
+    const captures = timeline.captures.filter(
+      (capture) =>
+        !deletedNodeIds.has(capture.nodeId) && retainedDates.has(capture.day),
+    );
+    timelineChanged =
+      days.length !== timeline.days.length ||
+      captures.length !== timeline.captures.length;
+    if (timelineChanged) {
+      timeline = { ...timeline, days, captures };
+    }
+  }
   const canvases = view.canvases.map((canvas) => {
     const layout = canvas.layout.filter(
       (item) => !deletedNodeIds.has(item.nodeId),
@@ -920,7 +1080,8 @@ export function removeNodesFromWorkspaceView(
   if (
     entries.length === Object.keys(view.contentProcessorByNodeId).length &&
     !canvasesChanged &&
-    !extensionMetadataChanged
+    !extensionMetadataChanged &&
+    !timelineChanged
   ) {
     return view;
   }
@@ -929,6 +1090,7 @@ export function removeNodesFromWorkspaceView(
     canvases,
     contentProcessorByNodeId: Object.fromEntries(entries),
     extensionMetadata,
+    timeline,
   };
 }
 

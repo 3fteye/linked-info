@@ -34,6 +34,12 @@ interface SyntheticBookmark extends SyntheticViewport {
   name: string;
 }
 
+interface SyntheticTimeline {
+  canvasId: string;
+  days: Array<{ date: string; nodeId: string }>;
+  captures: Array<{ nodeId: string; capturedAtMs: number; utcOffsetMinutes: number; day: string }>;
+}
+
 const workspaceStorageKey = "linked-info.workspace.v1";
 const workspaceRecoveryStorageKey = "linked-info.workspace.recovery.v1";
 
@@ -120,6 +126,7 @@ async function openSyntheticMultiCanvasWorkspace(
   canvases: SyntheticCanvas[],
   activeCanvasId: string,
   bookmarks: SyntheticBookmark[] = [],
+  timeline: SyntheticTimeline | null = null,
 ) {
   await page.addInitScript(
     ({
@@ -128,6 +135,7 @@ async function openSyntheticMultiCanvasWorkspace(
       syntheticBookmarks,
       syntheticCanvases,
       syntheticNodes,
+      syntheticTimeline,
     }) => {
       const seedMarker = `${storageKey}.playwright-multi-canvas-seeded`;
       if (sessionStorage.getItem(seedMarker) === "true") {
@@ -138,7 +146,7 @@ async function openSyntheticMultiCanvasWorkspace(
       localStorage.setItem(
         storageKey,
         JSON.stringify({
-          version: 5,
+          version: syntheticTimeline === null ? 5 : 6,
           nodes: syntheticNodes.map((node) => ({
             id: node.id,
             name: node.name,
@@ -168,6 +176,7 @@ async function openSyntheticMultiCanvasWorkspace(
             bookmarks: syntheticBookmarks,
             contentProcessorByNodeId: {},
             extensionMetadata: {},
+            ...(syntheticTimeline === null ? {} : { timeline: syntheticTimeline }),
           },
         }),
       );
@@ -179,6 +188,7 @@ async function openSyntheticMultiCanvasWorkspace(
       syntheticBookmarks: bookmarks,
       syntheticCanvases: canvases,
       syntheticNodes: nodes,
+      syntheticTimeline: timeline,
     },
   );
   await page.goto("/");
@@ -1555,6 +1565,32 @@ test("multiple canvases share nodes while keeping placements independent", async
   await page.getByTestId("workspace-deletion-confirm").click();
   await expect(page.getByTestId("node-list-row")).toHaveCount(0);
   await expect.poll(async () => (await storedWorkspace(page))?.nodes).toEqual([]);
+});
+
+test("deleting a time canvas clears its index without deleting records and can be undone", async ({ page }) => {
+  const mainId = syntheticId(800);
+  const timeId = syntheticId(801);
+  const dateId = syntheticId(802);
+  const noteId = syntheticId(803);
+  const timeline: SyntheticTimeline = {
+    canvasId: timeId,
+    days: [{ date: "2026-09-03", nodeId: dateId }],
+    captures: [{ nodeId: noteId, day: "2026-09-03", capturedAtMs: Date.parse("2026-09-03T03:00:00Z"), utcOffsetMinutes: 480 }],
+  };
+  await openSyntheticMultiCanvasWorkspace(page, [
+    { id: dateId, name: "Synthetic day", x: 100, y: 100 },
+    { id: noteId, name: "Synthetic record", x: 450, y: 100 },
+  ], [
+    { id: mainId, name: "Main", nodeIds: [] },
+    { id: timeId, name: "Timeline", nodeIds: [dateId, noteId] },
+  ], timeId, [], timeline);
+  await page.getByTestId("canvas-delete").click();
+  await page.getByTestId("workspace-deletion-confirm").click();
+  await expect.poll(async () => (await storedWorkspace(page))?.view?.timeline).toBeNull();
+  await expect.poll(async () => (await storedWorkspace(page))?.nodes?.length).toBe(2);
+  await page.keyboard.press("Control+z");
+  await expect.poll(async () => (await storedWorkspace(page))?.view?.timeline).toEqual(timeline);
+  await expect(page.getByTestId("canvas-select").locator("option")).toHaveCount(2);
 });
 
 test("selected placements can be copied and moved between canvases", async ({

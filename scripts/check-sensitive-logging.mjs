@@ -36,6 +36,7 @@ export const sensitiveSourcePaths = [
   "apps/desktop/src/secretClipboard.ts",
   "apps/desktop/src/totp.ts",
   "apps/desktop/src/totpContent.tsx",
+  "apps/desktop/src/timelineWorkspace.ts",
   "apps/desktop/src/workspaceSecurity.ts",
 ];
 
