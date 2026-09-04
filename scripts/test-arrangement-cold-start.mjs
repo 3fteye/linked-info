@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync } from "node:fs";
-import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -11,6 +10,12 @@ const optimizerReload = "optimized dependencies changed. reloading";
 
 function allSpecs(suites) {
   return suites.flatMap((suite) => [...(suite.specs ?? []), ...allSpecs(suite.suites ?? [])]);
+}
+
+export function arrangementScratchPrefix(desktop) {
+  // Match Vite's normal dependency-cache location: React's source transform
+  // excludes node_modules, but would re-transform optimized files in OS temp.
+  return path.join(desktop, "node_modules", ".linked-info-arrangement-cold-start-");
 }
 
 export function validateColdStartResult(variant, status, report, log) {
@@ -56,7 +61,7 @@ function main() {
   }
   const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   const desktop = path.join(repository, "apps/desktop");
-  const scratch = mkdtempSync(path.join(tmpdir(), "linked-info-arrangement-cold-start-"));
+  const scratch = mkdtempSync(arrangementScratchPrefix(desktop));
   for (const variant of ["baseline", "fixed"]) {
     const reportPath = path.join(scratch, `${variant}.json`);
     const result = spawnSync(process.execPath, [

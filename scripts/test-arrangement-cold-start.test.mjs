@@ -1,9 +1,22 @@
 import assert from "node:assert/strict";
+import path from "node:path";
 import test from "node:test";
-import { validateColdStartResult } from "./test-arrangement-cold-start.mjs";
+import { arrangementScratchPrefix, validateColdStartResult } from "./test-arrangement-cold-start.mjs";
 
 const reloadLog = "new dependencies optimized: @dagrejs/dagre\noptimized dependencies changed. reloading";
 const navigationFailure = "A canvas action must not reload the document or discard its undo history";
+
+test("cold-start scratch directories remain under node_modules without touching the filesystem", () => {
+  const desktop = path.resolve("synthetic-checkout", "apps", "desktop");
+  const prefix = arrangementScratchPrefix(desktop);
+  assert.equal(path.dirname(prefix), path.join(desktop, "node_modules"));
+  assert.equal(path.basename(prefix), ".linked-info-arrangement-cold-start-");
+  for (const variant of ["baseline", "fixed"]) {
+    const cache = path.join(`${prefix}synthetic-unique-suffix`, `${variant}-vite-cache`);
+    assert.equal(path.relative(desktop, cache).split(path.sep)[0], "node_modules");
+    assert.notEqual(cache, path.join(desktop, "node_modules", ".vite"));
+  }
+});
 
 function report(passed, message = navigationFailure) {
   return {
