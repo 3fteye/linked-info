@@ -283,6 +283,8 @@ Windows Hello、会话锁定、Rust 文件原子写入和系统安全存储不�
 
 正式审计安排在独立测试、SBOM 和两项前端构建之后，以免网络故障隐藏其他证据；审计本身不设置 `continue-on-error`，失败诊断也不能改写审计结果，整个 CI 仍失败并阻止合并。SBOM 或构建完成不等于依赖审计通过。
 
+审计前由同一 runner、同一目录和同样的步骤环境核对实际 `pnpm --version`、`pnpm config get fetch-timeout` 与 `pnpm config get fetch-retries`，必须分别等于 `11.16.0`、`180000` 和 `0`，否则在发出审计请求前阻断。只读取这两个非秘密数值，不打印完整配置、npmrc 或环境。该断言把配置是否生效变成 CI 证据，不能只凭源码推断或本次快速审计成功代替。
+
 ### 原生桌面验收
 
 胶囊原生回归另由 Windows 打包工作流在独立 GitHub-hosted runner 执行：启动正式 EXE，通过 WebView2 CDP 与限定 PID 的 Win32 helper 检查实际窗口和保存/锁定链路，不在用户账号下复制启动应用、不截图或上传工作区。三重 CI 防误运行检查有独立自动测试。首次运行状态、临时调试策略和“通知注入不等于真实休眠”的边界见 [原生自动验收](docs/capsule-native-validation.md)。

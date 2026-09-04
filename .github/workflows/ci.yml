@@ -213,6 +213,22 @@ jobs:
 
       # Collect independent test evidence before this network-bound gate.
       # Audit failures still fail the job; transport probes cannot override them.
+      - name: Verify effective pnpm audit configuration
+        working-directory: apps/desktop
+        timeout-minutes: 1
+        env:
+          PNPM_CONFIG_FETCH_TIMEOUT: '180000'
+          PNPM_CONFIG_FETCH_RETRIES: '0'
+        shell: pwsh
+        run: |
+          $auditPnpmVersion = pnpm --version
+          if ($LASTEXITCODE -ne 0 -or "$auditPnpmVersion".Trim() -ne '11.16.0') { throw 'Unexpected audit pnpm version' }
+          $auditFetchTimeout = pnpm config get fetch-timeout
+          if ($LASTEXITCODE -ne 0 -or "$auditFetchTimeout".Trim() -ne '180000') { throw 'Audit fetch timeout is not effective' }
+          $auditFetchRetries = pnpm config get fetch-retries
+          if ($LASTEXITCODE -ne 0 -or "$auditFetchRetries".Trim() -ne '0') { throw 'Audit fetch retries are not effective' }
+          Write-Output 'Verified pnpm=11.16.0 fetch-timeout=180000 fetch-retries=0'
+
       - name: Audit production frontend dependencies
         id: frontend_audit
         timeout-minutes: 4
