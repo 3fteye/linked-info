@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { EventEmitter } from "node:events";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { CapsuleHelperFailure, executeNativeCapsuleHelper, HELPER_ERROR_CODES,
+  HELPER_PHASES, HELPER_TIMEOUT_MS } from "../apps/desktop/scripts/native-capsule-helper.mjs";
 
 const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const desktop = path.join(repository, "apps/desktop");
@@ -175,4 +178,161 @@ test("native Unicode collision fixture uses the normal owner-bound snapshot and 
   assert.match(unicodeCase, /added\[0\]\.name === expectedName && added\[0\]\.content === expectedIncoming\.content/);
   assert.match(unicodeCase, /archived\.uniformArchivedResult && archived\.archivedCount === 1 && archived\.publicBoundaryPreserved/);
   assert.doesNotMatch(unicodeCase, /capture_(?:create|save|submit)|write_workspace_file|fs\.(?:writeFile|readFile)/);
+});
+
+function helperScenario({ events = [], error = null, stdout = '{"windows":[]}', stderr = "", finishedAt = 100 } = {}) {
+  let now = 0;
+  const calls = [];
+  const completion = executeNativeCapsuleHelper({
+    script: "synthetic-helper.ps1", kind: "window", role: "capture", action: "Inspect", executable: "synthetic.exe",
+    clock: () => now,
+    execFile: (command, args, options, callback) => {
+      calls.push({ command, args, options });
+      const child = new EventEmitter();
+      child.stderr = new EventEmitter();
+      queueMicrotask(() => {
+        for (const event of events) {
+          now = event.at;
+          if (event.spawn) child.emit("spawn");
+          else child.stderr.emit("data", event.text);
+        }
+        now = finishedAt;
+        callback(error, stdout, stderr);
+      });
+      return child;
+    },
+  });
+  return { calls, completion };
+}
+const phaseLine = (phase, elapsedMs) => `${JSON.stringify({ phase, elapsedMs })}\n`;
+
+test("helper timing distinguishes process spawn, script entry, compile and native execution", async () => {
+  const { calls, completion } = helperScenario({ events: [
+    { at: 3, spawn: true },
+    { at: 200, text: '{"phase":"script_' },
+    { at: 201, text: 'entered","elapsedMs":0}\n' },
+    { at: 220, text: phaseLine("interop_compile_started", 20) },
+    { at: 800, text: phaseLine("interop_compile_completed", 600) },
+    { at: 802, text: phaseLine("window_inspect_started", 602) },
+    { at: 804, text: phaseLine("window_inspect_completed", 604) },
+    { at: 805, text: phaseLine("response_ready", 605) },
+  ], finishedAt: 900 });
+  const { response, diagnostic } = await completion;
+  assert.deepEqual(response, { windows: [] });
+  assert.equal(diagnostic.spawnElapsedMs, 3);
+  assert.deepEqual(diagnostic.phases[0], { phase: "script_entered", helperElapsedMs: 0, observedElapsedMs: 201 });
+  assert.equal(diagnostic.phases[2].helperElapsedMs - diagnostic.phases[1].helperElapsedMs, 580);
+  assert.equal(diagnostic.durationMs, 900);
+  assert.equal(diagnostic.budgetElapsed, false);
+  assert.equal(diagnostic.exitCode, 0);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].options.timeout, 20_000);
+  assert.equal(calls[0].options.windowsHide, true);
+  assert.equal(calls[0].options.maxBuffer, 64 * 1024);
+});
+
+test("a killed helper retains its last checkpoint and deadline observation without retrying", async () => {
+  const { calls, completion } = helperScenario({ events: [
+    { at: 4, spawn: true },
+    { at: 200, text: phaseLine("script_entered", 0) },
+    { at: 230, text: phaseLine("interop_compile_started", 30) },
+  ], error: { code: null, killed: true, signal: "SIGTERM", message: "synthetic private arguments" }, finishedAt: 20_033 });
+  await assert.rejects(completion, (error) => {
+    assert.ok(error instanceof CapsuleHelperFailure);
+    assert.equal(error.code, "native_capsule_helper_failed");
+    assert.equal(error.diagnostic.phases.at(-1).phase, "interop_compile_started");
+    assert.equal(error.diagnostic.durationMs, 20_033);
+    assert.equal(error.diagnostic.budgetElapsed, true);
+    assert.equal(error.diagnostic.killed, true);
+    assert.equal(error.diagnostic.signal, "SIGTERM");
+    assert.equal(error.diagnostic.exitCode, null);
+    assert.doesNotMatch(JSON.stringify(error.diagnostic), /private/);
+    return true;
+  });
+  assert.equal(calls.length, 1);
+  assert.equal(HELPER_TIMEOUT_MS, 20_000, "diagnostics must not relax the failing budget");
+});
+
+test("helper launch failure remains distinct from a spawned process with no script checkpoint", async () => {
+  for (const launched of [false, true]) {
+    const { completion } = helperScenario({
+      events: launched ? [{ at: 2, spawn: true }] : [],
+      error: launched ? { code: null, killed: true, signal: "SIGTERM" } : { code: "ENOENT" },
+      finishedAt: launched ? 20_001 : 2,
+    });
+    await assert.rejects(completion, (error) => {
+      assert.equal(error.diagnostic.spawnObserved, launched);
+      assert.deepEqual(error.diagnostic.phases, []);
+      assert.equal(error.diagnostic.processError, launched ? null : "ENOENT");
+      assert.equal(error.diagnostic.budgetElapsed, launched);
+      return true;
+    });
+  }
+});
+
+test("diagnostics reject arbitrary errors, stdout, stderr, phase fields and unbounded lines", async () => {
+  const privateText = "synthetic-private-title-and-command";
+  const malformed = [
+    { phase: privateText, elapsedMs: 1 },
+    { phase: "paths_resolved", elapsedMs: 1, title: privateText },
+    { phase: "paths_resolved", elapsedMs: -1 },
+    { phase: "paths_resolved", elapsedMs: "1" },
+    { phase: "paths_resolved", elapsedMs: Number.MAX_SAFE_INTEGER },
+    { phase: "paths_resolved", elapsedMs: 0.25 },
+  ];
+  const { completion } = helperScenario({ events: [
+    { at: 1, text: phaseLine("script_entered", 0) },
+    { at: 2, text: malformed.map((value) => `${JSON.stringify(value)}\n`).join("") },
+    { at: 3, text: privateText.repeat(80) },
+    { at: 4, text: `\n${phaseLine("interop_compile_started", 4)}` },
+    { at: 5, text: phaseLine("interop_compile_started", 5) + phaseLine("paths_resolved", 1) },
+  ], error: { code: privateText, signal: privateText, killed: false },
+  stdout: JSON.stringify({ error: `native_capsule_${privateText}` }),
+  stderr: `${privateText}\n${JSON.stringify({ error: "native_capsule_process_unavailable", title: privateText })}` });
+  await assert.rejects(completion, (error) => {
+    assert.deepEqual(error.diagnostic.phases.map((entry) => entry.phase), ["script_entered", "interop_compile_started"]);
+    assert.equal(error.diagnostic.processError, "other");
+    assert.equal(error.diagnostic.signal, "other");
+    assert.equal(error.diagnostic.helperError, null);
+    assert.doesNotMatch(JSON.stringify(error.diagnostic), /synthetic-private/);
+    return true;
+  });
+});
+
+test("only exact declared helper errors survive failure reporting", async () => {
+  const { completion } = helperScenario({ error: { code: 1 },
+    stderr: '{"error":"native_capsule_process_unavailable"}\n' });
+  await assert.rejects(completion, (error) => {
+    assert.equal(error.diagnostic.helperError, "native_capsule_process_unavailable");
+    assert.equal(error.diagnostic.exitCode, 1);
+    return true;
+  });
+});
+
+test("invalid successful helper response fails closed without retaining response text", async () => {
+  const { completion } = helperScenario({ stdout: "synthetic private response" });
+  await assert.rejects(completion, (error) => {
+    assert.equal(error.code, "native_capsule_helper_response_invalid");
+    assert.equal(error.diagnostic.exitCode, 0);
+    assert.doesNotMatch(JSON.stringify(error), /synthetic private/);
+    return true;
+  });
+});
+
+test("phase and error allowlists cover the helpers without broadening their report boundary", () => {
+  const windowHelper = readFileSync(path.join(repository, ".github/scripts/native-capsule-window.ps1"), "utf8");
+  const debugHelper = readFileSync(path.join(repository, ".github/scripts/native-capsule-debug.ps1"), "utf8");
+  const declaredErrors = new Set([...`${windowHelper}\n${debugHelper}`.matchAll(/native_capsule_[a-z_]+/g)]
+    .map((match) => match[0]));
+  assert.deepEqual(new Set(HELPER_ERROR_CODES), declaredErrors);
+  const emittedPhases = [...windowHelper.matchAll(/Write-CapsulePhase "([a-z_]+)"/g)].map((match) => match[1]);
+  assert.deepEqual(new Set(HELPER_PHASES), new Set(emittedPhases));
+  assert.ok(windowHelper.indexOf('Stop-CapsuleHelper "native_capsule_ci_required"') <
+    windowHelper.indexOf('$phaseClock = [Diagnostics.Stopwatch]::StartNew()'));
+  assert.match(windowHelper, /\[Console\]::Error\.Flush\(\)/);
+  assert.match(windowHelper, /Write-CapsulePhase "interop_compile_started"\s+Add-Type[\s\S]*?Write-CapsulePhase "interop_compile_completed"/);
+  assert.match(windowHelper, /Write-CapsulePhase "window_inspect_started"\s+\$windows = @\(\[LinkedInfo\.CiCapsule\.Native\]::Inspect/);
+  assert.match(driver, /report\.summary\.firstHelperFailure \?\?= error\.diagnostic/);
+  assert.match(driver, /report\.helperCalls\.length > 256/);
+  assert.match(driver, /"native_capsule_helper_failed", "native_capsule_helper_response_invalid"\]\.includes\(error\.code\)\) throw error/);
 });

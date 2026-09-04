@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Frame, type Page } from "@playwright/test";
 
 interface SyntheticNode {
   content?: string;
@@ -257,6 +257,29 @@ async function storedWorkspace(page: Page) {
         activeCanvas === undefined ? stored.viewport : activeCanvas.viewport,
     };
   }, workspaceStorageKey);
+}
+
+async function withoutUnexpectedNavigation(
+  page: Page,
+  action: (assertNavigationStable: () => void) => Promise<void>,
+) {
+  let mainFrameNavigations = 0;
+  const navigationFailure = "A canvas action must not reload the document or discard its undo history";
+  const onFrameNavigated = (frame: Frame) => {
+    if (frame === page.mainFrame()) {
+      mainFrameNavigations += 1;
+    }
+  };
+  page.on("framenavigated", onFrameNavigated);
+  try {
+    await action(() => expect(mainFrameNavigations, navigationFailure).toBe(0));
+  } finally {
+    page.off("framenavigated", onFrameNavigated);
+    // Do not retry a destroyed execution context: a development-server reload
+    // also discards the in-memory undo history that this test must verify.
+    // Record navigation separately without replacing an unrelated action error.
+    expect.soft(mainFrameNavigations, navigationFailure).toBe(0);
+  }
 }
 
 async function selectAllTextarea(page: Page) {
@@ -2373,62 +2396,80 @@ test("smart arrangement normalizes width and saves one undoable layout step", as
     { sourceNodeId: arrangedNodes[0].id, targetNodeId: arrangedNodes[1].id },
     { sourceNodeId: arrangedNodes[1].id, targetNodeId: arrangedNodes[2].id },
   ]);
-  await page.keyboard.press("Control+a");
-  await node(page, arrangedNodes[1].id).click({
-    button: "right",
-    position: { x: 24, y: 24 },
+  await withoutUnexpectedNavigation(page, async (assertNavigationStable) => {
+    await page.keyboard.press("Control+a");
+    await node(page, arrangedNodes[1].id).click({
+      button: "right",
+      position: { x: 24, y: 24 },
+    });
+    await page.getByTestId("arrange-nodes-context-action").click();
+    const dialog = page.getByTestId("smart-arrangement-dialog");
+    await expect(dialog).toBeVisible();
+    await expect(dialog.locator("select").nth(0)).toHaveValue("auto");
+    await expect(dialog.locator("select").nth(1)).toHaveValue("equal-width");
+    await dialog.getByRole("button", { name: "Apply arrangement" }).click();
+    await expect(dialog).toBeHidden();
+
+    await expect
+      .poll(async () => {
+        assertNavigationStable();
+        const stored = await storedWorkspace(page);
+        return stored?.layout?.length === arrangedNodes.length && stored.layout.every(
+          (item: { height?: number; width?: number }) =>
+            typeof item.width === "number" && item.height === undefined,
+        );
+      })
+      .toBe(true);
+    const arranged = await storedWorkspace(page);
+    const widths = new Set(
+      arranged.layout.map((item: { width: number }) => item.width),
+    );
+    expect(widths.size).toBe(1);
+    await expect(
+      node(page, arrangedNodes[2].id).locator(".graph-node-fit-button"),
+    ).toBeVisible();
+    const xByNodeId = new Map(
+      arranged.layout.map((item: { nodeId: string; x: number }) => [item.nodeId, item.x]),
+    );
+    expect(xByNodeId.get(arrangedNodes[0].id)).toBeLessThan(
+      xByNodeId.get(arrangedNodes[1].id),
+    );
+    expect(xByNodeId.get(arrangedNodes[1].id)).toBeLessThan(
+      xByNodeId.get(arrangedNodes[2].id),
+    );
+
+    await page.keyboard.press("Control+z");
+    await expect
+      .poll(async () => {
+        assertNavigationStable();
+        const stored = await storedWorkspace(page);
+        return originalLayout.every((original) => {
+          const restored = stored?.layout?.find(
+            (item: { nodeId: string }) => item.nodeId === original.nodeId,
+          );
+          return (
+            restored?.x === original.x &&
+            restored?.y === original.y &&
+            restored.width === undefined &&
+            restored.height === undefined
+          );
+        });
+      })
+      .toBe(true);
   });
-  await page.getByTestId("arrange-nodes-context-action").click();
-  const dialog = page.getByTestId("smart-arrangement-dialog");
-  await expect(dialog).toBeVisible();
-  await expect(dialog.locator("select").nth(0)).toHaveValue("auto");
-  await expect(dialog.locator("select").nth(1)).toHaveValue("equal-width");
-  await dialog.getByRole("button", { name: "Apply arrangement" }).click();
-
-  await expect
-    .poll(async () => {
-      const stored = await storedWorkspace(page);
-      return stored?.layout?.every(
-        (item: { height?: number; width?: number }) =>
-          typeof item.width === "number" && item.height === undefined,
-      );
-    })
-    .toBe(true);
-  const arranged = await storedWorkspace(page);
-  const widths = new Set(
-    arranged.layout.map((item: { width: number }) => item.width),
-  );
-  expect(widths.size).toBe(1);
-  await expect(
-    node(page, arrangedNodes[2].id).locator(".graph-node-fit-button"),
-  ).toBeVisible();
-  const xByNodeId = new Map(
-    arranged.layout.map((item: { nodeId: string; x: number }) => [item.nodeId, item.x]),
-  );
-  expect(xByNodeId.get(arrangedNodes[0].id)).toBeLessThan(
-    xByNodeId.get(arrangedNodes[1].id),
-  );
-  expect(xByNodeId.get(arrangedNodes[1].id)).toBeLessThan(
-    xByNodeId.get(arrangedNodes[2].id),
-  );
-
-  await page.keyboard.press("Control+z");
-  await expect
-    .poll(async () => {
-      const stored = await storedWorkspace(page);
-      return originalLayout.every((original) => {
-        const restored = stored?.layout?.find(
-          (item: { nodeId: string }) => item.nodeId === original.nodeId,
-        );
-        return (
-          restored?.x === original.x &&
-          restored?.y === original.y &&
-          restored.width === undefined &&
-          restored.height === undefined
-        );
-      });
-    })
-    .toBe(true);
+  const undone = await storedWorkspace(page);
+  await page.reload();
+  await expect(page.getByTestId("graph-canvas")).toHaveAttribute("data-flow-ready", "true");
+  for (const original of arrangedNodes) {
+    await expect(node(page, original.id)).toBeVisible();
+    await expect(page.locator(`.react-flow__node[data-id="${original.id}"]`)).toHaveCSS(
+      "transform",
+      `matrix(1, 0, 0, 1, ${original.x}, ${original.y})`,
+    );
+  }
+  const reloaded = await storedWorkspace(page);
+  expect(reloaded.layout).toEqual(undone.layout);
+  expect(reloaded.nodes).toEqual(arrangedNodes.map(({ id, name, content }) => ({ id, name, content })));
 });
 
 test("automatic overlap avoidance preference persists on this device", async ({

@@ -22,7 +22,7 @@ function requireCondition(condition, code) {
 // The safety regression compares these exact texts with capture.state.archived.
 const ARCHIVE_NOTICE_MESSAGES = ["Archived to the main workspace", "已归档到主工作区"];
 const report = {
-  schemaVersion: 2, environment: "github-hosted-windows", status: "running", tests: [],
+  schemaVersion: 3, environment: "github-hosted-windows", status: "running", tests: [], helperCalls: [],
   summary: { passed: 0, failed: 0, pageErrorCount: 0, nativeSessionNotificationsOnly: true,
     actualOperatingSystemLockOrSuspendTested: false },
 };
@@ -34,6 +34,7 @@ async function run() {
   const net = await import("node:net");
   const { fileURLToPath } = await import("node:url");
   const { spawn, execFile } = await import("node:child_process");
+  const { CapsuleHelperFailure, executeNativeCapsuleHelper } = await import("./native-capsule-helper.mjs");
   const { setTimeout: delay } = await import("node:timers/promises");
   const options = new Map();
   const permittedOptions = new Set(["--executable", "--capture-executable", "--report"]);
@@ -81,27 +82,26 @@ async function run() {
       target.child.exitCode === null, "native_capsule_spawned_process_exited");
   }
   async function executeHelper(helper, action, target = targets.main, extra = []) {
-    return new Promise((resolve, reject) => {
-      execFile("pwsh", ["-NoLogo", "-NoProfile", "-NonInteractive", "-File", helper,
-        "-Action", action, "-ExecutablePath", target.executable, ...extra], {
-        windowsHide: true, timeout: 20_000, maxBuffer: 64 * 1024, encoding: "utf8",
-      }, (error, stdout, stderr) => {
-        if (error !== null) {
-          report.summary.lastHelperAction = action;
-          report.summary.lastHelperExitCode = typeof error.code === "number" ? error.code : null;
-          for (const line of `${stdout}\n${stderr}`.split(/\r?\n/)) {
-            try {
-              const code = JSON.parse(line).error;
-              if (typeof code === "string" && /^native_capsule_[a-z_]{1,100}$/.test(code)) report.summary.lastHelperError = code;
-            } catch { /* Only recognized fixed helper codes may enter reports. */ }
-          }
-          reject(new SmokeFailure("native_capsule_helper_failed"));
-          return;
-        }
-        try { resolve(JSON.parse(stdout.replace(/^\uFEFF/, "").trim())); }
-        catch { reject(new SmokeFailure("native_capsule_helper_response_invalid")); }
-      });
-    });
+    function record(diagnostic) {
+      if (diagnostic === null) return;
+      report.helperCalls.push(diagnostic);
+      if (report.helperCalls.length > 256) report.helperCalls.shift();
+    }
+    try {
+      const result = await executeNativeCapsuleHelper({ execFile, script: helper,
+        kind: helper === nativeHelper ? "window" : "debug", role: target.label,
+        action, executable: target.executable, extra });
+      record(result.diagnostic);
+      return result.response;
+    } catch (error) {
+      if (error instanceof CapsuleHelperFailure) {
+        record(error.diagnostic);
+        // Cleanup failures must not replace the original failing call.
+        report.summary.firstHelperFailure ??= error.diagnostic;
+        throw new SmokeFailure(error.code);
+      }
+      throw new SmokeFailure("native_capsule_helper_failed");
+    }
   }
   async function native(action, role = "capsule", extra = []) {
     const target = targets[role];
@@ -115,7 +115,8 @@ async function run() {
       for (const target of Object.values(targets)) if (target.expectedAlive) assertAlive(target);
       try { const result = await check(); if (result) return result; }
       catch (error) {
-        if (error instanceof SmokeFailure && error.code === "native_capsule_spawned_process_exited") throw error;
+        if (error instanceof SmokeFailure && ["native_capsule_spawned_process_exited",
+          "native_capsule_helper_failed", "native_capsule_helper_response_invalid"].includes(error.code)) throw error;
       }
       await delay(100);
     }
