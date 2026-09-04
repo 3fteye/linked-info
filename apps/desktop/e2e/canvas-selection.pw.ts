@@ -259,8 +259,12 @@ async function storedWorkspace(page: Page) {
   }, workspaceStorageKey);
 }
 
-async function withoutUnexpectedNavigation(page: Page, action: () => Promise<void>) {
+async function withoutUnexpectedNavigation(
+  page: Page,
+  action: (assertNavigationStable: () => void) => Promise<void>,
+) {
   let mainFrameNavigations = 0;
+  const navigationFailure = "A canvas action must not reload the document or discard its undo history";
   const onFrameNavigated = (frame: Frame) => {
     if (frame === page.mainFrame()) {
       mainFrameNavigations += 1;
@@ -268,15 +272,13 @@ async function withoutUnexpectedNavigation(page: Page, action: () => Promise<voi
   };
   page.on("framenavigated", onFrameNavigated);
   try {
-    await action();
+    await action(() => expect(mainFrameNavigations, navigationFailure).toBe(0));
   } finally {
     page.off("framenavigated", onFrameNavigated);
     // Do not retry a destroyed execution context: a development-server reload
     // also discards the in-memory undo history that this test must verify.
-    expect(
-      mainFrameNavigations,
-      "A canvas action must not reload the document or discard its undo history",
-    ).toBe(0);
+    // Record navigation separately without replacing an unrelated action error.
+    expect.soft(mainFrameNavigations, navigationFailure).toBe(0);
   }
 }
 
@@ -2394,7 +2396,7 @@ test("smart arrangement normalizes width and saves one undoable layout step", as
     { sourceNodeId: arrangedNodes[0].id, targetNodeId: arrangedNodes[1].id },
     { sourceNodeId: arrangedNodes[1].id, targetNodeId: arrangedNodes[2].id },
   ]);
-  await withoutUnexpectedNavigation(page, async () => {
+  await withoutUnexpectedNavigation(page, async (assertNavigationStable) => {
     await page.keyboard.press("Control+a");
     await node(page, arrangedNodes[1].id).click({
       button: "right",
@@ -2410,6 +2412,7 @@ test("smart arrangement normalizes width and saves one undoable layout step", as
 
     await expect
       .poll(async () => {
+        assertNavigationStable();
         const stored = await storedWorkspace(page);
         return stored?.layout?.length === arrangedNodes.length && stored.layout.every(
           (item: { height?: number; width?: number }) =>
@@ -2438,6 +2441,7 @@ test("smart arrangement normalizes width and saves one undoable layout step", as
     await page.keyboard.press("Control+z");
     await expect
       .poll(async () => {
+        assertNavigationStable();
         const stored = await storedWorkspace(page);
         return originalLayout.every((original) => {
           const restored = stored?.layout?.find(
@@ -2453,6 +2457,19 @@ test("smart arrangement normalizes width and saves one undoable layout step", as
       })
       .toBe(true);
   });
+  const undone = await storedWorkspace(page);
+  await page.reload();
+  await expect(page.getByTestId("graph-canvas")).toHaveAttribute("data-flow-ready", "true");
+  for (const original of arrangedNodes) {
+    await expect(node(page, original.id)).toBeVisible();
+    await expect(page.locator(`.react-flow__node[data-id="${original.id}"]`)).toHaveCSS(
+      "transform",
+      `matrix(1, 0, 0, 1, ${original.x}, ${original.y})`,
+    );
+  }
+  const reloaded = await storedWorkspace(page);
+  expect(reloaded.layout).toEqual(undone.layout);
+  expect(reloaded.nodes).toEqual(arrangedNodes.map(({ id, name, content }) => ({ id, name, content })));
 });
 
 test("automatic overlap avoidance preference persists on this device", async ({

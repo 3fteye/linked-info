@@ -30,6 +30,19 @@ test("fixed requires a first-attempt pass with no optimizer reload", () => {
   assert.throws(() => validateColdStartResult("fixed", 0, report(true), reloadLog));
 });
 
+test("navigation diagnostics preserve context-destroyed evidence but reject unrelated action failures", () => {
+  const contextDestroyed = report(false);
+  contextDestroyed.suites[0].specs[0].tests[0].results[0].errors.push({
+    message: "Error: page.evaluate: Execution context was destroyed, most likely because of a navigation\n    at storedWorkspace",
+  });
+  assert.doesNotThrow(() => validateColdStartResult("baseline", 1, contextDestroyed, reloadLog));
+  for (const message of ["Equal-width assertion failed", "Timeout 5000ms waiting for predicate"]) {
+    const unrelated = report(false);
+    unrelated.suites[0].specs[0].tests[0].results[0].errors.push({ message });
+    assert.throws(() => validateColdStartResult("baseline", 1, unrelated, reloadLog));
+  }
+});
+
 test("unrelated setup errors, retries, missing coverage and flaky results fail closed", () => {
   const setupError = report(false);
   setupError.errors.push({ message: "Server failed to start" });

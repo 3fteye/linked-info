@@ -33,6 +33,12 @@ export function validateColdStartResult(variant, status, report, log) {
       results[0].errors.some((error) => error.message?.includes(navigationFailure)),
       "Only the explicit main-frame navigation failure proves the regression",
     );
+    assert.ok(
+      results[0].errors.every((error) =>
+        error.message?.includes(navigationFailure) ||
+        /^(?:Error: )?page\.evaluate: Execution context was destroyed, most likely because of a navigation(?:\r?\n|$)/.test(error.message ?? "")),
+      "Navigation must not conceal an unrelated action assertion or timeout",
+    );
     assert.ok(log.includes("@dagrejs/dagre"), "Vite must identify the newly discovered worker dependency");
     assert.ok(log.includes(optimizerReload), "Vite must report an optimizer-triggered reload");
   } else {
