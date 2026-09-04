@@ -1,0 +1,74 @@
+@import "./CapsuleNote.css";
+
+html[data-window="capture"],
+html[data-window="capture"] body,
+html[data-window="capture"] #root {
+  width: 100%;
+  min-width: 0;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+}
+
+.capture-app .capsule-body {
+  gap: 5px;
+}
+
+.capture-feedback {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.capture-feedback button {
+  flex: 0 0 auto;
+  padding: 2px 6px;
+  border: 1px solid #bac9bc;
+  border-radius: 5px;
+  color: inherit;
+  background: transparent;
+  font-size: 11px;
+}
+
+.capture-list {
+  display: flex;
+  flex: 0 1 64px;
+  flex-direction: column;
+  min-height: 28px;
+  overflow-y: auto;
+  border-top: 1px solid #bac9bc;
+}
+
+.capture-list button {
+  display: flex;
+  flex: 0 0 auto;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  padding: 4px;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  text-align: left;
+}
+
+.capture-list button[aria-current="true"] {
+  background: #e4eee6;
+}
+
+.capture-list span,
+.capture-list small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.capture-list small {
+  flex: 0 0 48%;
+  text-align: right;
+}
+
+html[data-theme="starry-dark"] .capture-list button[aria-current="true"] {
+  background: #344b3b;
+}

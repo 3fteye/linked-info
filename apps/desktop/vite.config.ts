@@ -5,8 +5,16 @@ import react from "@vitejs/plugin-react";
 const host = process.env.TAURI_DEV_HOST;
 
 // https://vite.dev/config/
-export default defineConfig(async () => ({
+export default defineConfig(({ mode }) => ({
   plugins: [react()],
+  build: {
+    outDir: mode === "capture" ? "dist-capture" : "dist",
+    rollupOptions: {
+      // The normal build validates both entries; the capture package embeds
+      // only its own entry and does not include the main workspace bundle.
+      input: mode === "capture" ? "capture.html" : { main: "index.html", capture: "capture.html" },
+    },
+  },
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //

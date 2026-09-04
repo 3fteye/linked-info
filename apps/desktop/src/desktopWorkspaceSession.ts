@@ -85,6 +85,8 @@ export function createDesktopWorkspaceSession(
   let epoch = 0;
   let ownerLease: OwnerLease | null = null;
   let renewalBlocked = false;
+  let captureReady = false;
+  let readinessSequence = 0;
   const subscriptions = new Set<() => void>();
 
   function assertActive() {
@@ -153,6 +155,8 @@ export function createDesktopWorkspaceSession(
 
   function retireOwner(lease: OwnerLease, allowRenewal: boolean) {
     assertCurrent(lease);
+    captureReady = false;
+    readinessSequence += 1;
     epoch += 1;
     ownerLease = null;
     renewalBlocked = !allowRenewal;
@@ -233,10 +237,13 @@ export function createDesktopWorkspaceSession(
     available: true,
     async setReady(ready) {
       const lease = captureOwner();
+      const sequence = ++readinessSequence;
+      if (!ready) captureReady = false;
       await invokeOwned<void>(lease, "set_workspace_owner_ready", {
         ready,
       });
       assertCurrent(lease);
+      if (sequence === readinessSequence) captureReady = ready;
     },
     async take() {
       const lease = captureOwner();
@@ -281,10 +288,16 @@ export function createDesktopWorkspaceSession(
         assertActive();
       }
       let subscribed = true;
+      // Process-local events do not observe writes by the independent capture
+      // executable. This bounded wake-up does not record user activity.
+      const timer = setInterval(() => {
+        if (subscribed && captureReady && ownerLease !== null && isCurrent(ownerLease)) listener();
+      }, 1_000);
       const remove = () => {
         if (subscribed) {
           subscribed = false;
           subscriptions.delete(remove);
+          clearInterval(timer);
           unsubscribe();
         }
       };
@@ -377,6 +390,7 @@ export function createDesktopWorkspaceSession(
         return;
       }
       disposed = true;
+      captureReady = false;
       queuedPersistence.dispose();
       for (const unsubscribe of subscriptions) {
         unsubscribe();

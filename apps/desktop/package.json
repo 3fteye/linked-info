@@ -6,6 +6,9 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "build:capture": "tsc && vite build --mode capture",
+    "capture:dev": "cd ../capture && tauri dev",
+    "capture:build": "cd ../capture && tauri build",
     "test": "vitest run",
     "test:all": "pnpm test && pnpm test:e2e && pnpm build",
     "test:e2e": "playwright test",

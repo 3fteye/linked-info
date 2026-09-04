@@ -19,6 +19,8 @@
 | --- | --- |
 | `apps/desktop` | React、TypeScript、React Flow 和 Tauri 2 桌面应用 |
 | `apps/desktop/src-tauri` | Rust 桌面壳、本地文件持久化和单实例生命周期 |
+| `apps/capture/src-tauri` | 独立明文便签 Tauri 程序，不链接主应用或模型；前端复用 desktop 工具链的独立入口 |
+| `crates/capture-inbox` | 版本化 SQLite 便签收件箱、容量约束、修订比较交换及持久领取/确认 |
 | `apps/cloudflare-worker` | 可选的 Cloudflare Worker HTTP 入口与 D1 绑定 |
 | `crates/domain` | 节点、引用和领域不变量 |
 | `crates/application` | 与存储实现无关的应用用例 |
@@ -74,6 +76,8 @@ flowchart LR
 节点引用是有方向的。两个节点之间的专属信息应放入第三个普通关系节点，由关系节点同时引用所有参与方。多引用筛选使用 AND 语义。
 
 ## 本地持久化
+
+便签正在按用户新决定拆分为独立明文应用。新程序只依赖版本化本地收件箱，不持有主工作区快照或密钥；主应用解锁后经同一 owner 和时间画布事务归档。最新契约、明文安全例外、提交点和分阶段验收以[独立明文便签](docs/standalone-capture.md)为准；下面旧版胶囊实现记录不代表独立应用已完成。
 
 桌面组件只依赖异步 `WorkspacePersistence`，不直接操作存储实现：
 

@@ -21,7 +21,7 @@ function Invoke-WindowsTestLoaderDiagnostics {
     $testDirectory = [IO.Path]::GetFullPath((Join-Path $repoRoot 'target/debug/deps'))
     $resolvedTestBinary = Get-Item -LiteralPath $BinaryPath
     if ($resolvedTestBinary.PSIsContainer -or $resolvedTestBinary.DirectoryName -ne $testDirectory -or
-        $resolvedTestBinary.Name -notmatch '^linked_info_desktop_lib-[0-9a-f]+\.exe$' -or
+        $resolvedTestBinary.Name -notmatch '^linked_info_(?:desktop|capture)_lib-[0-9a-f]+\.exe$' -or
         ($resolvedTestBinary.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
         throw 'windows_test_loader_binary_invalid'
     }

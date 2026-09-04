@@ -523,6 +523,33 @@ describe("createDesktopWorkspaceSession", () => {
     expect(unsubscribe).toHaveBeenCalledTimes(1);
   });
 
+  it("polls an external inbox only while the current owner is ready and stops on disposal", async () => {
+    vi.useFakeTimers();
+    const bridge = new MemorySessionBridge();
+    const session = createDesktopWorkspaceSession(bridge, missingLegacy);
+    const listener = vi.fn();
+    try {
+      await session.persistence.load();
+      await session.capsuleHost.subscribePending(listener);
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(listener).not.toHaveBeenCalled();
+      await session.capsuleHost.setReady(true);
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(listener).toHaveBeenCalledTimes(2);
+      await session.capsuleHost.setReady(false);
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(listener).toHaveBeenCalledTimes(2);
+      await session.capsuleHost.setReady(true);
+      session.dispose();
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(listener).toHaveBeenCalledTimes(2);
+      expect(bridge.calls.some((call) => call.command.includes("activity"))).toBe(false);
+    } finally {
+      session.dispose();
+      vi.useRealTimers();
+    }
+  });
+
   it("admits a lock snapshot immediately without waiting for an in-flight disk write", async () => {
     const bridge = new MemorySessionBridge();
     const session = createDesktopWorkspaceSession(bridge, missingLegacy);

@@ -91,6 +91,8 @@ try {
         @{
             appDataDirectory = [IO.Path]::Combine($appDataRoot, "com.linkedinfo.desktop")
             localDataDirectory = [IO.Path]::Combine($localDataRoot, "com.linkedinfo.desktop")
+            captureDataDirectory = [IO.Path]::Combine($appDataRoot, "com.linkedinfo.capture")
+            captureLocalDataDirectory = [IO.Path]::Combine($localDataRoot, "com.linkedinfo.capture")
         } | ConvertTo-Json -Compress
         exit 0
     }
@@ -109,10 +111,10 @@ try {
     $repositoryRoot = [IO.Path]::GetFullPath([IO.Path]::Combine($PSScriptRoot, "..", ".."))
     $releaseRoot = [IO.Path]::GetFullPath([IO.Path]::Combine($repositoryRoot, "target", "release"))
     $expectedExecutable = [IO.Path]::GetFullPath($ExecutablePath)
-    $releasePrefix = $releaseRoot.TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+    $allowedName = if ($Role -ceq 'main') { 'linked-info-desktop.exe' } else { 'linked-info-capture.exe' }
+    $allowedExecutable = [IO.Path]::Combine($releaseRoot, $allowedName)
     if (
-        -not $expectedExecutable.StartsWith($releasePrefix, [StringComparison]::OrdinalIgnoreCase) -or
-        -not [string]::Equals([IO.Path]::GetExtension($expectedExecutable), ".exe", [StringComparison]::OrdinalIgnoreCase)
+        -not [string]::Equals($expectedExecutable, $allowedExecutable, [StringComparison]::OrdinalIgnoreCase)
     ) {
         throw "native_capsule_executable_outside_release"
     }
@@ -320,7 +322,7 @@ namespace LinkedInfo.CiCapsule {
                     var title = new StringBuilder(128);
                     GetWindowText(window, title, title.Capacity);
                     string role = title.ToString() == "\u5173\u8054\u4fe1\u606f" ? "main"
-                        : title.ToString() == "Linked Info" ? "capsule" : null;
+                        : title.ToString() == "\u5173\u8054\u4fe1\u606f\u4fbf\u7b7e" ? "capsule" : null;
                     if (role != null) windows.Add(Snapshot(window, process, role));
                     return true;
                 } catch (Exception error) {

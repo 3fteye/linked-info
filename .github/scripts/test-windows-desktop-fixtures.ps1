@@ -144,11 +144,11 @@ Invoke-Fixture 'cargo-selects-one-absolute-runner-with-one-test-invocation' {
     Assert-Fixture ($LASTEXITCODE -eq 23) 'cargo_exit_lost'
     Assert-Fixture ($fixtureState.Calls.Count -eq 1) 'cargo_invoked_more_than_once'
     $call = $fixtureState.Calls[0]
-    Assert-Fixture ($call.Command -eq 'cargo' -and $call.Arguments.Count -eq 6) 'cargo_command_changed'
-    Assert-Fixture (($call.Arguments[0..4] -join '|') -eq 'test|-p|linked-info-desktop|--lib|--config') 'cargo_test_scope_changed'
+    Assert-Fixture ($call.Command -eq 'cargo' -and $call.Arguments.Count -eq 8) 'cargo_command_changed'
+    Assert-Fixture (($call.Arguments[0..6] -join '|') -eq 'test|-p|linked-info-desktop|-p|linked-info-capture|--lib|--config') 'cargo_test_scope_changed'
     $prefix = 'target.x86_64-pc-windows-msvc.runner='
-    Assert-Fixture ($call.Arguments[5].StartsWith($prefix)) 'runner_config_missing'
-    $runner = $call.Arguments[5].Substring($prefix.Length) | ConvertFrom-Json
+    Assert-Fixture ($call.Arguments[7].StartsWith($prefix)) 'runner_config_missing'
+    $runner = $call.Arguments[7].Substring($prefix.Length) | ConvertFrom-Json
     $expectedRunner = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot 'run-windows-desktop-test.ps1'))
     Assert-Fixture ($runner.Count -eq 6 -and $runner[5] -eq $expectedRunner) 'runner_path_not_absolute'
     Assert-Fixture (($runner[0..4] -join '|') -eq 'pwsh|-NoLogo|-NoProfile|-NonInteractive|-File') 'runner_arguments_split'
@@ -173,6 +173,16 @@ Invoke-Fixture 'manifest-is-embedded-and-validated-after-link-before-exact-test'
 Invoke-Fixture 'empty-artifact-is-rejected-before-file-or-tool-access' {
     Assert-FixtureThrows { Invoke-WindowsDesktopTestRunner -BinaryPath '' -InvokeTool $invokeFixtureTool } 'windows_desktop_test_artifact_invalid'
     Assert-Fixture ($fixtureState.Calls.Count -eq 0 -and $fixtureState.FileQueries.Count -eq 0) 'empty_path_used'
+}
+
+Invoke-Fixture 'independent-capture-test-binary-uses-same-guarded-runner' {
+    $directory = $fixtureState.BinaryMetadata.DirectoryName
+    $fixtureState.BinaryPath = Join-Path $directory 'linked_info_capture_lib-1234abcd.exe'
+    $fixtureState.BinaryMetadata.FullName = $fixtureState.BinaryPath
+    $fixtureState.BinaryMetadata.Name = 'linked_info_capture_lib-1234abcd.exe'
+    Invoke-WindowsDesktopTestRunner -BinaryPath $fixtureState.BinaryPath -InvokeTool $invokeFixtureTool | Out-Null
+    Assert-Fixture ($fixtureState.Calls.Count -eq 3) 'capture_test_not_executed'
+    Assert-Fixture ($fixtureState.Calls[2].Command -eq $fixtureState.BinaryPath) 'capture_wrong_binary'
 }
 
 foreach ($invalid in @('directory', 'filename', 'folder', 'reparse')) {

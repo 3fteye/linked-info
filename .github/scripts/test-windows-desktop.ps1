@@ -16,7 +16,7 @@ function Invoke-WindowsDesktopTests {
     # JSON string arrays are valid TOML arrays, including escaped Windows paths.
     # Cargo invokes this absolute runner only after linking, with its DLL PATH.
     $runnerConfig = 'target.x86_64-pc-windows-msvc.runner=' + (ConvertTo-Json -InputObject $runnerArguments -Compress)
-    $cargoArguments = @('test', '-p', 'linked-info-desktop', '--lib', '--config', $runnerConfig)
+    $cargoArguments = @('test', '-p', 'linked-info-desktop', '-p', 'linked-info-capture', '--lib', '--config', $runnerConfig)
     & $InvokeTool 'cargo' $cargoArguments
     $global:LASTEXITCODE = $LASTEXITCODE
 }

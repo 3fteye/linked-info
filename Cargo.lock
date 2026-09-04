@@ -3078,6 +3078,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "linked-info-capture"
+version = "0.1.0"
+dependencies = [
+ "linked-info-capture-inbox",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-single-instance",
+]
+
+[[package]]
+name = "linked-info-capture-inbox"
+version = "0.1.0"
+dependencies = [
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "uuid",
+]
+
+[[package]]
 name = "linked-info-contracts"
 version = "0.1.0"
 dependencies = [
@@ -3103,6 +3124,7 @@ dependencies = [
  "keyring",
  "libc",
  "linked-info-backup-port",
+ "linked-info-capture-inbox",
  "linked-info-extension-contracts",
  "linked-info-extension-host-protocol",
  "quick-xml",

@@ -5,7 +5,14 @@ import path from "node:path";
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 export const sensitiveSourcePaths = [
+  "apps/capture/src-tauri/src/lib.rs",
+  "apps/desktop/src/CaptureApp.tsx",
+  "apps/desktop/src/captureBridge.ts",
+  "apps/desktop/src/captureEditor.ts",
+  "crates/capture-inbox/src/model.rs",
+  "crates/capture-inbox/src/store.rs",
   "apps/desktop/src-tauri/src/capsule.rs",
+  "apps/desktop/src-tauri/src/capture_archive.rs",
   "apps/desktop/src/CapsuleNote.tsx",
   "apps/desktop/src/capsuleBridge.ts",
   "apps/desktop/src/capsuleHost.ts",

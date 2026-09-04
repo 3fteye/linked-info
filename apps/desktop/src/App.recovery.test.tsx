@@ -499,7 +499,7 @@ describe("App recovery transaction boundary", () => {
     expect((await find("canvas-select") as HTMLSelectElement).options).toHaveLength(1);
     expect(runtime.disk.workspace.nodes).toEqual(initial.nodes);
     expect(canvasHarness.canUndo).toBe(false);
-    expect(document.querySelector(".app-status-toast")?.textContent ?? "").not.toMatch(/Saved|已保存/);
+    expect(document.querySelector(".app-status-toast")?.textContent ?? "").not.toMatch(/Archived|已归档/);
     expect(runtime.host.reject).not.toHaveBeenCalled();
     await act(async () => { canvasHarness.editName?.("Blocked edit while committing"); });
     expect((await find("mock-canvas")).textContent).toBe("Current workspace");
@@ -518,7 +518,7 @@ describe("App recovery transaction boundary", () => {
     expect(runtime.disk.workspace.view.timeline?.captures).toHaveLength(1);
     expect(runtime.disk.workspace.view.timeline?.days).toHaveLength(1);
     expect(runtime.disk.workspace.references).toHaveLength(1);
-    expect(document.querySelector(".app-status-toast")?.textContent).toMatch(/Saved|已保存/);
+    expect(document.querySelector(".app-status-toast")?.textContent).toMatch(/Archived|已归档/);
     const committed = runtime.disk.workspace;
 
     await act(async () => { canvasHarness.undo?.(); });
@@ -539,6 +539,32 @@ describe("App recovery transaction boundary", () => {
     expect(runtime.disk.workspace.references).toEqual(committed.references);
     expect(runtime.disk.workspace.view.timeline).toEqual(committed.view.timeline);
     expect(runtime.host.commit).toHaveBeenCalledOnce();
+  });
+
+  it("archives a colliding capture name with a stable suffix as one unchanged-body transaction", async () => {
+    const request = capsuleNote();
+    const initial = workspace(currentNodeId, request.name);
+    const runtime = capsuleRuntime(initial);
+    await renderApp({
+      capsuleHost: runtime.host,
+      persistence: runtime.persistence,
+      security: unavailableWorkspaceSecurity,
+      updateStatus: () => {},
+    });
+    await waitUntil(() => vi.mocked(runtime.host.take).mock.calls.length > 0);
+    await act(async () => { runtime.enqueue(request); });
+    await waitUntil(() => canvasHarness.canUndo);
+    expect(runtime.host.reject).not.toHaveBeenCalled();
+    expect(runtime.host.commit).toHaveBeenCalledOnce();
+    expect(runtime.disk.workspace.nodes.find((node) => node.id === currentNodeId)).toEqual(initial.nodes[0]);
+    expect(runtime.disk.workspace.nodes.find((node) => node.id === request.nodeId)).toEqual({
+      id: request.nodeId, name: `${request.name} (33333333)`, content: request.content,
+    });
+    expect(request.name).toBe("Synthetic capsule note");
+    expect(runtime.disk.workspace.view.timeline?.captures).toHaveLength(1);
+    await act(async () => { canvasHarness.undo?.(); });
+    expect(runtime.disk.workspace.nodes).toEqual(initial.nodes);
+    expect(runtime.disk.workspace.view.timeline ?? null).toBeNull();
   });
 
   it("keeps the old workspace editable after a confirmed capsule_commit_not_saved failure", async () => {
