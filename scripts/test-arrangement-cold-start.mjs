@@ -55,14 +55,38 @@ export function validateColdStartResult(variant, status, report, log) {
   }
 }
 
+export function runColdStartValidation(args, runVariant) {
+  let variants;
+  if (args.length === 0) variants = ["fixed"];
+  else if (args.length === 1 && args[0] === "--experiment") variants = ["baseline", "fixed"];
+  else throw new Error("Cold-start validation accepts only --experiment or no arguments");
+
+  // A historical timing failure is experimental evidence, not a prerequisite
+  // for exercising the current configuration. Keep both outcomes independent.
+  const outcomes = variants.map((variant) => {
+    try {
+      runVariant(variant);
+      return { variant, status: "verified" };
+    } catch (error) {
+      return { variant, status: variant === "baseline" ? "not-proven" : "failed", error };
+    }
+  });
+  return {
+    exitCode: outcomes.every((outcome) => outcome.status === "verified") ? 0 : 1,
+    outcomes,
+  };
+}
+
 function main() {
   if (process.env.CI !== "true" || process.env.GITHUB_ACTIONS !== "true") {
     throw new Error("Arrangement cold-start validation runs only in GitHub Actions");
   }
   const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   const desktop = path.join(repository, "apps/desktop");
-  const scratch = mkdtempSync(arrangementScratchPrefix(desktop));
-  for (const variant of ["baseline", "fixed"]) {
+  let scratch;
+  const summary = runColdStartValidation(process.argv.slice(2), (variant) => {
+    // Allocate only after validating the CLI, never reuse a previous run's cache.
+    scratch ??= mkdtempSync(arrangementScratchPrefix(desktop));
     const reportPath = path.join(scratch, `${variant}.json`);
     const result = spawnSync(process.execPath, [
       path.join(desktop, "node_modules/@playwright/test/cli.js"),
@@ -105,7 +129,14 @@ function main() {
       ? "dependency=@dagrejs/dagre optimizer-reload=true navigation-failure=true"
       : "first-attempt=passed optimizer-reload=false navigation-count=0";
     process.stdout.write(`arrangement-cold-start ${variant}: ${evidence}\n`);
+  });
+  for (const outcome of summary.outcomes) {
+    if (outcome.status !== "verified") {
+      process.stderr.write(`arrangement-cold-start ${outcome.variant}: status=${outcome.status}\n`);
+      process.stderr.write(`${outcome.error.message}\n`);
+    }
   }
+  process.exitCode = summary.exitCode;
 }
 
 if (path.resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) {

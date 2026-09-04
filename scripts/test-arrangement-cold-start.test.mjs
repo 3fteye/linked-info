@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import path from "node:path";
 import test from "node:test";
-import { arrangementScratchPrefix, validateColdStartResult } from "./test-arrangement-cold-start.mjs";
+import {
+  arrangementScratchPrefix, runColdStartValidation, validateColdStartResult,
+} from "./test-arrangement-cold-start.mjs";
 
 const reloadLog = "new dependencies optimized: @dagrejs/dagre\noptimized dependencies changed. reloading";
 const navigationFailure = "A canvas action must not reload the document or discard its undo history";
@@ -28,6 +30,85 @@ function report(passed, message = navigationFailure) {
     }] }],
   };
 }
+
+test("the default gate runs only the fixed configuration", () => {
+  const calls = [];
+  const summary = runColdStartValidation([], (variant) => {
+    calls.push(variant);
+    validateColdStartResult(variant, 0, report(true), "Vite ready");
+  });
+  assert.deepEqual(calls, ["fixed"]);
+  assert.deepEqual(summary, { exitCode: 0, outcomes: [{ variant: "fixed", status: "verified" }] });
+});
+
+test("the default gate preserves fixed-configuration failures", () => {
+  const failure = new Error("Fixed arrangement assertion failed");
+  const summary = runColdStartValidation([], () => { throw failure; });
+  assert.equal(summary.exitCode, 1);
+  assert.deepEqual(summary.outcomes, [{ variant: "fixed", status: "failed", error: failure }]);
+});
+
+test("the explicit experiment verifies the baseline before independently running the fix", () => {
+  const calls = [];
+  const summary = runColdStartValidation(["--experiment"], (variant) => {
+    calls.push(variant);
+    validateColdStartResult(variant, variant === "baseline" ? 1 : 0,
+      report(variant === "fixed"), variant === "baseline" ? reloadLog : "Vite ready");
+  });
+  assert.deepEqual(calls, ["baseline", "fixed"]);
+  assert.equal(summary.exitCode, 0);
+  assert.deepEqual(summary.outcomes, [
+    { variant: "baseline", status: "verified" },
+    { variant: "fixed", status: "verified" },
+  ]);
+});
+
+for (const baseline of [
+  { name: "an unrelated timeout", status: 1, report: report(false, "Timeout 5000ms"), log: reloadLog },
+  { name: "a run that did not reproduce", status: 0, report: report(true), log: "Vite ready" },
+  { name: "missing optimizer evidence", status: 1, report: report(false), log: "Vite ready" },
+]) {
+  test(`an experiment with ${baseline.name} remains unproven but still runs the fix`, () => {
+    const calls = [];
+    const summary = runColdStartValidation(["--experiment"], (variant) => {
+      calls.push(variant);
+      if (variant === "baseline") {
+        validateColdStartResult(variant, baseline.status, baseline.report, baseline.log);
+      } else {
+        validateColdStartResult(variant, 0, report(true), "Vite ready");
+      }
+    });
+    assert.deepEqual(calls, ["baseline", "fixed"]);
+    assert.equal(summary.exitCode, 1);
+    assert.equal(summary.outcomes[0].status, "not-proven");
+    assert.ok(summary.outcomes[0].error instanceof Error);
+    assert.deepEqual(summary.outcomes[1], { variant: "fixed", status: "verified" });
+  });
+}
+
+test("experiment failures retain both outcomes rather than hiding the fixed failure", () => {
+  const calls = [];
+  const failures = { baseline: new Error("Baseline setup failed"), fixed: new Error("Fixed assertion failed") };
+  const summary = runColdStartValidation(["--experiment"], (variant) => {
+    calls.push(variant);
+    throw failures[variant];
+  });
+  assert.deepEqual(calls, ["baseline", "fixed"]);
+  assert.equal(summary.exitCode, 1);
+  assert.deepEqual(summary.outcomes, [
+    { variant: "baseline", status: "not-proven", error: failures.baseline },
+    { variant: "fixed", status: "failed", error: failures.fixed },
+  ]);
+});
+
+test("unknown or repeated CLI arguments fail before invoking any runner", () => {
+  for (const args of [["--baseline"], ["fixed"], ["--experiment=true"], ["--experiment", "extra"],
+    ["--experiment", "--experiment"]]) {
+    let called = false;
+    assert.throws(() => runColdStartValidation(args, () => { called = true; }), /accepts only --experiment/);
+    assert.equal(called, false);
+  }
+});
 
 test("baseline requires the exact navigation failure and optimizer dependency evidence", () => {
   assert.doesNotThrow(() => validateColdStartResult("baseline", 1, report(false), reloadLog));

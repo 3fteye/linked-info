@@ -8,6 +8,11 @@ on:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      cold_start_experiment:
+        description: Run the historical baseline and fixed cold-start experiment
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -41,11 +46,16 @@ jobs:
         working-directory: apps/desktop
         run: pnpm install --frozen-lockfile
 
-      - name: Test cold-start evidence classification
+      - name: Test cold-start evidence classification and orchestration
         run: node --test scripts/test-arrangement-cold-start.test.mjs
 
-      - name: Verify arrangement cold-start control and fix
+      - name: Verify arrangement cold-start fix
+        if: ${{ github.event_name != 'workflow_dispatch' || !inputs.cold_start_experiment }}
         run: node scripts/test-arrangement-cold-start.mjs
+
+      - name: Run optional arrangement cold-start experiment
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.cold_start_experiment }}
+        run: node scripts/test-arrangement-cold-start.mjs --experiment
 
   quality:
     name: Windows core, frontend and Worker
@@ -145,16 +155,6 @@ jobs:
       - name: Test audit transport diagnostics
         run: node --test scripts/audit-transport-diagnostics.test.mjs
 
-      - name: Audit production frontend dependencies
-        id: frontend_audit
-        working-directory: apps/desktop
-        run: pnpm audit --prod --audit-level high
-
-      - name: Diagnose npm audit transport after failure
-        if: ${{ failure() && !cancelled() && steps.frontend_audit.outcome == 'failure' }}
-        timeout-minutes: 2
-        run: node scripts/audit-transport-diagnostics.mjs
-
       - name: Test dependency license policy
         run: node --test scripts/check-dependency-licenses.test.mjs
 
@@ -210,6 +210,22 @@ jobs:
       - name: Build independent capture frontend
         working-directory: apps/desktop
         run: pnpm build:capture
+
+      # Collect independent test evidence before this network-bound gate.
+      # Audit failures still fail the job; transport probes cannot override them.
+      - name: Audit production frontend dependencies
+        id: frontend_audit
+        timeout-minutes: 4
+        working-directory: apps/desktop
+        env:
+          PNPM_CONFIG_FETCH_TIMEOUT: '180000'
+          PNPM_CONFIG_FETCH_RETRIES: '0'
+        run: pnpm audit --prod --audit-level high
+
+      - name: Diagnose npm audit transport after failure
+        if: ${{ failure() && !cancelled() && steps.frontend_audit.outcome == 'failure' }}
+        timeout-minutes: 2
+        run: node scripts/audit-transport-diagnostics.mjs
 
       # Formatting still fails the job, but must not hide unrelated test
       # results when all executable verification is performed in CI.
