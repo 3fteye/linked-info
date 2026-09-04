@@ -24,6 +24,24 @@ if (
     Stop-CapsuleHelper "native_capsule_ci_required"
 }
 
+$phaseClock = [Diagnostics.Stopwatch]::StartNew()
+function Write-CapsulePhase {
+    param(
+        [ValidateSet("script_entered", "arguments_validated", "paths_resolved", "target_validated",
+            "cdp_check_started", "interop_compile_started", "interop_compile_completed",
+            "dpi_setup_started", "target_recheck_started", "window_inspect_started",
+            "window_inspect_completed", "window_action_started", "window_action_completed",
+            "window_reinspect_started", "response_ready")]
+        [string]$Phase
+    )
+    # Fixed enum and monotonic duration only. Flush before potentially blocking
+    # work so the parent retains the last reached boundary if this process dies.
+    $elapsed = $phaseClock.ElapsedMilliseconds.ToString([Globalization.CultureInfo]::InvariantCulture)
+    [Console]::Error.WriteLine('{"phase":"' + $Phase + '","elapsedMs":' + $elapsed + '}')
+    [Console]::Error.Flush()
+}
+Write-CapsulePhase "script_entered"
+
 function Assert-CapsuleProcess($TargetProcess, [string]$ExpectedPath) {
     try {
         $TargetProcess.Refresh()
@@ -88,6 +106,8 @@ try {
         if ([string]::IsNullOrWhiteSpace($appDataRoot) -or [string]::IsNullOrWhiteSpace($localDataRoot)) {
             throw "native_capsule_known_folder_unavailable"
         }
+        Write-CapsulePhase "paths_resolved"
+        Write-CapsulePhase "response_ready"
         @{
             appDataDirectory = [IO.Path]::Combine($appDataRoot, "com.linkedinfo.desktop")
             localDataDirectory = [IO.Path]::Combine($localDataRoot, "com.linkedinfo.desktop")
@@ -108,6 +128,7 @@ try {
     if (-not [IO.Path]::IsPathFullyQualified($ExecutablePath)) {
         throw "native_capsule_executable_invalid"
     }
+    Write-CapsulePhase "arguments_validated"
     $repositoryRoot = [IO.Path]::GetFullPath([IO.Path]::Combine($PSScriptRoot, "..", ".."))
     $releaseRoot = [IO.Path]::GetFullPath([IO.Path]::Combine($repositoryRoot, "target", "release"))
     $expectedExecutable = [IO.Path]::GetFullPath($ExecutablePath)
@@ -134,14 +155,17 @@ try {
         }
         $checkedItem = Get-Item -LiteralPath $parentPath -Force -ErrorAction Stop
     }
+    Write-CapsulePhase "paths_resolved"
     $verifiedProcess = [Diagnostics.Process]::GetProcessById($ProcessId)
     # Keep the process handle alive throughout the command to pin its identity.
     $null = $verifiedProcess.SafeHandle
     Assert-CapsuleProcess $verifiedProcess $expectedExecutable
+    Write-CapsulePhase "target_validated"
 
     if ($Action -ceq "CdpOwner") {
         # Return false unless every listener at this port belongs to the exact
         # launched process or its WebView2 descendants, on either IP family.
+        Write-CapsulePhase "cdp_check_started"
         $listeners = @(Get-NetTCPConnection -State Listen -ErrorAction Stop |
             Where-Object { $_.LocalPort -eq $Port })
         $owned = $listeners.Count -gt 0
@@ -155,6 +179,7 @@ try {
             }
         }
         Assert-CapsuleProcess $verifiedProcess $expectedExecutable
+        Write-CapsulePhase "response_ready"
         @{ owned = $owned } | ConvertTo-Json -Compress
         exit 0
     }
@@ -471,11 +496,18 @@ namespace LinkedInfo.CiCapsule {
     }
 }
 '@
+    Write-CapsulePhase "interop_compile_started"
     Add-Type -TypeDefinition $nativeSource -ErrorAction Stop | Out-Null
+    Write-CapsulePhase "interop_compile_completed"
+    Write-CapsulePhase "dpi_setup_started"
     [LinkedInfo.CiCapsule.Native]::UsePhysicalCoordinates()
+    Write-CapsulePhase "target_recheck_started"
     Assert-CapsuleProcess $verifiedProcess $expectedExecutable
+    Write-CapsulePhase "window_inspect_started"
     $windows = @([LinkedInfo.CiCapsule.Native]::Inspect($ProcessId, $false))
+    Write-CapsulePhase "window_inspect_completed"
     if ($Action -cne "Inspect") {
+        Write-CapsulePhase "window_action_started"
         $selectedRole = if ($Action -cin @("SessionLock", "Suspend")) { "main" } else { $Role }
         $selectedWindow = [LinkedInfo.CiCapsule.Native]::Select($windows, $selectedRole)
         Assert-CapsuleProcess $verifiedProcess $expectedExecutable
@@ -486,8 +518,11 @@ namespace LinkedInfo.CiCapsule {
             "Suspend" { [LinkedInfo.CiCapsule.Native]::Notify($selectedWindow, $ProcessId, $true, $verifiedProcess.SessionId) }
             "Close" { [LinkedInfo.CiCapsule.Native]::Close($selectedWindow, $ProcessId) }
         }
+        Write-CapsulePhase "window_action_completed"
+        Write-CapsulePhase "window_reinspect_started"
         $windows = @([LinkedInfo.CiCapsule.Native]::Inspect($ProcessId, $Action -ceq "Close"))
     }
+    Write-CapsulePhase "response_ready"
     @{ windows = @($windows) } | ConvertTo-Json -Depth 4 -Compress
 } catch {
     $failureCode = "native_capsule_action_failed"

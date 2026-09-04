@@ -7,6 +7,11 @@ const host = process.env.TAURI_DEV_HOST;
 // https://vite.dev/config/
 export default defineConfig(({ mode }) => ({
   plugins: [react()],
+  // The arrangement worker is reached only after an explicit canvas action.
+  // Pre-bundle its dependency before that action can trigger a full-page reload.
+  optimizeDeps: {
+    include: ["@dagrejs/dagre"],
+  },
   build: {
     outDir: mode === "capture" ? "dist-capture" : "dist",
     rollupOptions: {
