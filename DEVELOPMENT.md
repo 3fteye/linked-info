@@ -269,6 +269,16 @@ pnpm build
 
 Windows Hello、会话锁定、Rust 文件原子写入和系统安全存储不属于浏览器适配器能力，继续由 Rust/Tauri 测试与 Windows 实机验收负责；浏览器回归通过不能替代这些平台边界验证。
 
+### CI npm 审计失败诊断
+
+`1825239` 的 CI 33863830004 连续三次在 `pnpm audit --prod --audit-level high` 的 bulk 请求阶段超时；每次约 251 秒，包含三次约 60 秒请求及 10/60 秒退避。没有收到 HTTP 响应或漏洞报告，不能认定依赖安全，也不能仅凭这些结果断言 npm 全局故障。停止原样重跑后，CI 在同一 Windows runner 的审计失败步骤之后执行有界连接诊断；原审计命令、退出结果和失败门禁保持不变，不使用 `--ignore-registry-errors` 或非官方镜像。
+
+`scripts/audit-transport-diagnostics.mjs` 只允许 GitHub-hosted Windows 执行，访问固定的官方 registry ping 和 bulk 端点。使用公开的小型合成依赖请求对照 Node HTTPS 与原生 fetch，以及 JSON/gzip 编码；最多六次顺序请求，每次 15 秒，请求上限 1 KiB、响应读取上限 64 KiB（溢出计数以 65537 为哨兵），整个步骤限时两分钟。诊断只输出固定名称、状态码、字节数、受限错误码和阶段时间，不输出地址、请求/响应正文、headers、凭据、任意异常或全量环境，也不读取真实工作区或实际生产依赖请求体。HTTPS 阶段值是自请求开始到阶段完成的累计毫秒，`responseHeadersMs` 表示响应头可用而非逐字节首包时间；fetch 未观测的阶段为 `null`。字节数是各客户端实际读取量，不是线缆字节数。
+
+这些小请求只能定位连接和协议层差异；即使都返回 200，也不能代替正式生产依赖审计。Node 原生 fetch 也不等于 pnpm 内置客户端；若小请求正常而真实审计仍超时，再单独设计同一实际请求体的对照，不能直接归因给 pnpm 或升级版本碰运气。诊断代码由 fake transport 回归覆盖，验证只在 CI 进行。
+
+### 原生桌面验收
+
 胶囊原生回归另由 Windows 打包工作流在独立 GitHub-hosted runner 执行：启动正式 EXE，通过 WebView2 CDP 与限定 PID 的 Win32 helper 检查实际窗口和保存/锁定链路，不在用户账号下复制启动应用、不截图或上传工作区。三重 CI 防误运行检查有独立自动测试。首次运行状态、临时调试策略和“通知注入不等于真实休眠”的边界见 [原生自动验收](docs/capsule-native-validation.md)。
 
 ### Rust 检查

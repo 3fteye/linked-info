@@ -142,9 +142,18 @@ jobs:
         working-directory: apps/desktop
         run: pnpm install --frozen-lockfile
 
+      - name: Test audit transport diagnostics
+        run: node --test scripts/audit-transport-diagnostics.test.mjs
+
       - name: Audit production frontend dependencies
+        id: frontend_audit
         working-directory: apps/desktop
         run: pnpm audit --prod --audit-level high
+
+      - name: Diagnose npm audit transport after failure
+        if: ${{ failure() && !cancelled() && steps.frontend_audit.outcome == 'failure' }}
+        timeout-minutes: 2
+        run: node scripts/audit-transport-diagnostics.mjs
 
       - name: Test dependency license policy
         run: node --test scripts/check-dependency-licenses.test.mjs
