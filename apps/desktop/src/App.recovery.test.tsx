@@ -9,6 +9,7 @@ import type { TimelineNoteInput } from "./timelineWorkspace";
 import type { WorkspaceLifecycle } from "./workspaceLifecycle";
 import { unavailableCapsuleHost } from "./capsuleHost";
 import * as recoveryOperation from "./workspaceRecoveryOperation";
+import * as replacementOperation from "./workspaceReplacementOperation";
 
 const canvasHarness = vi.hoisted(() => ({
   editName: null as null | ((name: string) => void),
@@ -1304,6 +1305,81 @@ describe("App recovery transaction boundary", () => {
     });
     expect((await find("mock-canvas")).textContent).toBe("Current workspace");
     expect(primary.nodes[0]?.name).toBe("Current workspace");
+  });
+
+  it("quarantines an ordinary replacement save error without flushing the old snapshot", async () => {
+    const previous = workspace(currentNodeId, "Synthetic previous");
+    const replacement = workspace(recoveryNodeId, "Synthetic replacement");
+    let primary = previous;
+    let recovery = replacement;
+    const save = vi.fn<WorkspacePersistence["save"]>(async (next) => {
+      primary = next;
+      if (next.nodes.some((node) => node.id === recoveryNodeId)) throw new Error("synthetic post-write failure");
+    });
+    const persistence: WorkspacePersistence = {
+      async load() { return { status: "ready", workspace: primary }; },
+      async loadRecovery() { return { status: "ready", workspace: recovery }; },
+      async preserveForRecovery(next) { recovery = next; },
+      runExclusiveTransaction(transaction) { return transaction(); },
+      save,
+      async swapWithRecovery() { throw new Error("not used"); },
+    };
+    await renderApp({ persistence, security: unavailableWorkspaceSecurity, updateStatus: vi.fn() });
+    await openDataSecuritySettings();
+    await click("restore-recovery-workspace");
+    await click("workspace-restore-confirm");
+    await find("storage-recovery-title");
+    expect(document.querySelector('[data-testid="mock-canvas"]')).toBeNull();
+    expect(primary.nodes).toEqual(replacement.nodes);
+    expect(recovery.nodes).toEqual(previous.nodes);
+    const saved = save.mock.calls.length;
+    await act(async () => { root.render(<></>); });
+    expect(save.mock.calls).toHaveLength(saved);
+  });
+
+  it("keeps the first replacement locked if owner revocation occurs at coordinator return", async () => {
+    const replacement = workspace(recoveryNodeId, "Synthetic restored");
+    let primary = workspace(currentNodeId, "Synthetic original");
+    const save = vi.fn<WorkspacePersistence["save"]>(async (next) => { primary = next; });
+    const persistence: WorkspacePersistence = {
+      async load() { return { status: "ready", workspace: primary }; },
+      async loadRecovery() { return { status: "ready", workspace: replacement }; },
+      async preserveForRecovery() {},
+      runExclusiveTransaction(transaction) { return transaction(); },
+      save,
+      async swapWithRecovery() { throw new Error("not used"); },
+    };
+    const status = encryptedStatus();
+    const lock = vi.fn<WorkspaceSecurity["lock"]>(async () => ({ ...status, locked: true }));
+    const setReady = vi.fn(async (_ready: boolean) => {});
+    await renderApp({ persistence, status, security: { ...encryptedSecurity(status), lock },
+      updateStatus: vi.fn(), capsuleHost: { ...unavailableCapsuleHost, setReady } });
+    await openDataSecuritySettings();
+    const lockButton = await findButton(/Lock now|立即锁定/);
+    const propsKey = Object.keys(lockButton).find((key) => key.startsWith("__reactProps$"));
+    if (propsKey === undefined) throw new Error("synthetic lock props missing");
+    const lockHandler = (Reflect.get(lockButton, propsKey) as { onClick?: () => void }).onClick;
+    if (typeof lockHandler !== "function") throw new Error("synthetic lock handler missing");
+    const actual = replacementOperation.replaceWorkspace;
+    const outcomes: string[] = [];
+    vi.spyOn(replacementOperation, "replaceWorkspace").mockImplementation((operation) =>
+      actual(operation).then((outcome) => {
+        outcomes.push(outcome);
+        queueMicrotask(lockHandler);
+        return outcome;
+      }),
+    );
+    await click("restore-recovery-workspace");
+    const readyBefore = setReady.mock.calls.filter(([ready]) => ready).length;
+    await click("workspace-restore-confirm");
+    expect(outcomes).toEqual(["committed"]);
+    expect(lock).toHaveBeenCalledExactlyOnceWith(undefined);
+    expect(document.querySelector('[data-testid="mock-canvas"]')).toBeNull();
+    expect(primary.nodes).toEqual(replacement.nodes);
+    expect(setReady.mock.calls.filter(([ready]) => ready)).toHaveLength(readyBefore);
+    const saved = save.mock.calls.length;
+    await act(async () => { root.render(<></>); });
+    expect(save.mock.calls).toHaveLength(saved);
   });
 
   it("reloads the authoritative Rust workspace after a committed bootstrap restore", async () => {
