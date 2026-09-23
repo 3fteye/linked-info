@@ -56,6 +56,7 @@ import ExtensionSettings from "./ExtensionSettings";
 import { unavailableCapsuleHost, type CapsuleHost } from "./capsuleHost";
 import { archiveWorkspaceNote } from "./workspaceArchiveOperation";
 import { swapWorkspaceRecovery } from "./workspaceRecoveryOperation";
+import { replaceWorkspace } from "./workspaceReplacementOperation";
 import {
   commitExtensionInstall,
   extensionManagerAvailable,
@@ -538,6 +539,8 @@ function App({
   const documentImportCancelledRef = useRef(false);
   const workspaceChangedInSessionRef = useRef(false);
   const [persistenceReady, setPersistenceReady] = useState(false);
+  const persistenceReadyRef = useRef(persistenceReady);
+  persistenceReadyRef.current = persistenceReady;
   const [persistenceRecoveryRequired, setPersistenceRecoveryRequired] =
     useState(false);
   const [primaryStorageProblem, setPrimaryStorageProblem] = useState<string | null>(null);
@@ -2028,16 +2031,12 @@ function App({
   ]);
 
   useEffect(() => {
-    if (!persistenceReady) {
-      return;
-    }
-
     let active = true;
     let unregister: (() => void) | null = null;
     const flushLocalWorkspace = async () => {
       await capsuleTaskRef.current;
       if (
-        !capsuleOwnerAliveRef.current || skipUnmountFlushRef.current ||
+        !persistenceReadyRef.current || !capsuleOwnerAliveRef.current || skipUnmountFlushRef.current ||
         workspaceMutationBlockedRef.current
       ) {
         throw new Error("workspace_flush_not_authorized");
@@ -2061,6 +2060,13 @@ function App({
       }
     };
     const flushBeforeExit = async () => {
+      // Readiness controls the loading UI, not the lifetime of the native
+      // close interceptor. A replacement must never expose default close.
+      if (workspaceReplacementApplyBusyRef.current || workspaceReplacementHistoryBusyRef.current) {
+        throw new Error("workspace_replacement_in_progress");
+      }
+      // An idle loading/error/recovery screen has no editable snapshot to flush.
+      if (!persistenceReadyRef.current) return;
       capsuleSuspendedRef.current = true;
       await capsuleTaskRef.current;
       await capsuleHost.setReady(false);
@@ -2096,7 +2102,7 @@ function App({
         void flushLocalWorkspace().catch(() => {});
       }
     };
-  }, [capsuleHost, lifecycle, persistence, persistenceReady, t, workspaceBackupHistory]);
+  }, [capsuleHost, lifecycle, persistence, t, workspaceBackupHistory]);
 
   function changeLanguage(language: SupportedLanguage) {
     void i18n.changeLanguage(language);
@@ -5652,117 +5658,82 @@ function App({
   }
 
   async function applyWorkspaceReplacement() {
-    if (
-      pendingWorkspaceReplacement === null ||
-      workspaceReplacementApplyBusyRef.current || workspaceMutationBlockedRef.current
-    ) {
-      return;
-    }
+    const pending = pendingWorkspaceReplacement;
+    if (pending === null || !capsuleOwnerAliveRef.current ||
+      workspaceReplacementApplyBusyRef.current || workspaceMutationBlockedRef.current) return;
 
     workspaceReplacementApplyBusyRef.current = true;
     workspaceMutationBlockedRef.current = true;
+    setBackupStatus(null);
     capsuleSuspendedRef.current = true;
+    skipUnmountFlushRef.current = true;
+    setPersistenceReady(false);
     if (workspaceSaveTimerRef.current !== null) {
       window.clearTimeout(workspaceSaveTimerRef.current);
       workspaceSaveTimerRef.current = null;
     }
-    let bootstrapStarted = false;
-    let bootstrapCommitted = false;
-    let resumeCapsule = true;
+    let resumeCapsule = false;
     try {
-      await capsuleHost.setReady(false);
-      let replacementWorkspace = pendingWorkspaceReplacement.workspace;
-      if (pendingWorkspaceReplacement.kind === "bootstrapRestore") {
-        const preparedRestoreId = pendingWorkspaceReplacement.preparedRestoreId;
-        if (preparedRestoreId === undefined) {
-          throw new Error("workspace_restore_not_prepared");
-        }
-        bootstrapStarted = true;
-        workspaceMutationBlockedRef.current = true;
-        skipUnmountFlushRef.current = true;
-        setPersistenceReady(false);
-        await persistence.save(workspaceRef.current);
-        const result = await persistence.runExclusiveTransaction(() =>
-          workspaceSecurity.commitRestore(preparedRestoreId),
-        );
-        bootstrapCommitted = true;
-        if (result.status === "recoveryRequired") {
-          resumeCapsule = false;
-          setPersistenceRecoveryRequired(true);
-          return;
-        }
-        updateWorkspaceSecurityStatus(result.securityStatus);
-        if (result.status === "committedLocked") {
-          resumeCapsule = false;
-          return;
-        }
-        const authoritative = await persistence.load();
-        if (authoritative.status !== "ready") {
-          resumeCapsule = false;
-          setPersistenceRecoveryRequired(true);
-          return;
-        }
-        replacementWorkspace = authoritative.workspace;
-        setOffsiteEndpoint("");
-        offsiteRecoveryConnectionRef.current = null;
-        setOffsiteRecoveryPage(null);
-      } else {
-        await persistence.preserveForRecovery(workspaceRef.current);
-        await persistence.save(pendingWorkspaceReplacement.workspace);
-      }
-      workspaceChangedInSessionRef.current = true;
-      automaticOffsiteRevisionRef.current += 1;
-      extensionWorkspaceRevisionRef.current += 1;
-      workspaceReplacementGenerationRef.current += 1;
-      workspaceRef.current = replacementWorkspace;
-      setWorkspace(replacementWorkspace);
-      clearHistory();
-      setWorkspaceReplacementHistoryBoundary("undo");
-      setEditingNodeId(null);
-      setSearchTerm("");
-      setUnnamedOnly(false);
-      setReferenceFilterNodeIds([]);
-      smartReferenceQueueGenerationRef.current += 1;
-      smartReferenceMemoryCacheRef.current.clear();
-      setSmartReferenceTasks([]);
-      setSmartReferenceResult(null);
-      setRecoveryAvailable(true);
-      setRecoveryStorageProblem(null);
-      setActiveView("canvas");
-      const successMessage =
-        pendingWorkspaceReplacement.kind === "recovery"
-          ? t("backup.recoverySuccess")
-          : pendingWorkspaceReplacement.kind === "history"
-            ? t("backup.historyRestoreSuccess")
-            : pendingWorkspaceReplacement.kind === "bootstrapRestore"
-              ? t("offsiteBackup.bootstrapSuccess")
-              : t("backup.importSuccess");
-      showAppNotice(successMessage, {
-        label: t("backup.undoReplacement"),
-        run: () => void swapWorkspaceWithRecovery("undo"),
+      const outcome = await replaceWorkspace({
+        request: pending.kind === "bootstrapRestore"
+          ? { kind: "bootstrap", restoreId: pending.preparedRestoreId ?? "" }
+          : { kind: "snapshot", workspace: pending.workspace },
+        before: workspaceRef.current,
+        persistence,
+        security: workspaceSecurity,
+        suspendCapture: () => capsuleHost.setReady(false),
+        isOwnerAlive: () => capsuleOwnerAliveRef.current,
+        updateSecurity: updateWorkspaceSecurityStatus,
+        publish(replacementWorkspace) {
+          if (pending.kind === "bootstrapRestore") {
+            setOffsiteEndpoint("");
+            offsiteRecoveryConnectionRef.current = null;
+            setOffsiteRecoveryPage(null);
+          }
+          workspaceChangedInSessionRef.current = true;
+          automaticOffsiteRevisionRef.current += 1;
+          extensionWorkspaceRevisionRef.current += 1;
+          workspaceReplacementGenerationRef.current += 1;
+          workspaceRef.current = replacementWorkspace;
+          setWorkspace(replacementWorkspace);
+          clearHistory();
+          setWorkspaceReplacementHistoryBoundary("undo");
+          setEditingNodeId(null);
+          setSearchTerm("");
+          setUnnamedOnly(false);
+          setReferenceFilterNodeIds([]);
+          smartReferenceQueueGenerationRef.current += 1;
+          smartReferenceMemoryCacheRef.current.clear();
+          setSmartReferenceTasks([]);
+          setSmartReferenceResult(null);
+          setRecoveryAvailable(true);
+          setRecoveryStorageProblem(null);
+          setActiveView("canvas");
+          const successMessage =
+            pending.kind === "recovery"
+              ? t("backup.recoverySuccess")
+              : pending.kind === "history"
+                ? t("backup.historyRestoreSuccess")
+                : pending.kind === "bootstrapRestore"
+                  ? t("offsiteBackup.bootstrapSuccess")
+                  : t("backup.importSuccess");
+          showAppNotice(successMessage, {
+            label: t("backup.undoReplacement"),
+            run: () => void swapWorkspaceWithRecovery("undo"),
+          });
+          setPendingWorkspaceReplacement(null);
+        },
       });
-      setPendingWorkspaceReplacement(null);
-      if (bootstrapStarted) {
-        workspaceMutationBlockedRef.current = false;
-        skipUnmountFlushRef.current = false;
-        setPersistenceReady(true);
-      }
-    } catch {
-      if (bootstrapCommitted) {
-        resumeCapsule = false;
-        // Rust has crossed its durable commit point. Keep stale React state
-        // unmounted and require recovery instead of reporting a false import
-        // failure that would allow the old snapshot to be saved again.
+      // Recheck after the coordinator Promise boundary as well as inside it.
+      if (!capsuleOwnerAliveRef.current || outcome === "ownerExpired" || outcome === "committedLocked") return;
+      if (outcome === "recoveryRequired") {
         setPersistenceRecoveryRequired(true);
-        setPersistenceReady(false);
-      } else {
-        if (bootstrapStarted) {
-          workspaceMutationBlockedRef.current = false;
-          skipUnmountFlushRef.current = false;
-          setPersistenceReady(true);
-        }
-        setBackupStatus(t("backup.importFailed"));
+        return;
       }
+      setBackupStatus(outcome === "notCommitted" ? t("backup.importFailed") : null);
+      skipUnmountFlushRef.current = false;
+      setPersistenceReady(true);
+      resumeCapsule = true;
     } finally {
       workspaceReplacementApplyBusyRef.current = false;
       if (resumeCapsule && capsuleOwnerAliveRef.current) {
@@ -5842,6 +5813,8 @@ function App({
       if (outcome === "notCommitted") {
         workspaceReplacementHistoryBoundaryRef.current = direction;
         setBackupStatus(t("backup.replacementUndoFailed"));
+      } else {
+        setBackupStatus(null);
       }
     } finally {
       workspaceReplacementHistoryBusyRef.current = false;
@@ -5972,6 +5945,7 @@ function App({
         ) : primaryStorageProblem === null ? (
           <section className="storage-problem-card" aria-live="polite">
             <p>{t("storageProblem.loading")}</p>
+            {backupStatus !== null && <p role="alert">{backupStatus}</p>}
           </section>
         ) : (
           <section className="storage-problem-card" aria-labelledby="storage-problem-title">
