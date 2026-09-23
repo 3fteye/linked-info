@@ -1308,7 +1308,7 @@ describe("App recovery transaction boundary", () => {
     expect(primary.nodes[0]?.name).toBe("Current workspace");
   });
 
-  it.each(["preserve", "save"] as const)(
+  it.each(["preserve", "save", "undo", "redo"] as const)(
     "keeps the real close interceptor active while replacement waits for %s",
     async (stage) => {
       const previous = workspace(currentNodeId, "Synthetic original");
@@ -1317,6 +1317,7 @@ describe("App recovery transaction boundary", () => {
       let recovery = replacement;
       const release = deferred<void>();
       let blocked = false;
+      let swaps = 0;
       const persistence: WorkspacePersistence = {
         async load() { return { status: "ready", workspace: primary }; },
         async loadRecovery() { return { status: "ready", workspace: recovery }; },
@@ -1332,7 +1333,15 @@ describe("App recovery transaction boundary", () => {
           }
           primary = next;
         },
-        async swapWithRecovery() { throw new Error("not used"); },
+        async swapWithRecovery() {
+          swaps += 1;
+          if (stage === "undo" || (stage === "redo" && swaps === 2)) {
+            blocked = true;
+            await release.promise;
+          }
+          [primary, recovery] = [recovery, primary];
+          return { status: "committed", workspace: primary };
+        },
       };
       let closeHandler: ((event: CloseRequestEvent) => void | Promise<void>) | null = null;
       const unregister = vi.fn(() => { closeHandler = null; });
@@ -1345,7 +1354,13 @@ describe("App recovery transaction boundary", () => {
       await openDataSecuritySettings();
       await click("restore-recovery-workspace");
       try {
-        await click("workspace-restore-confirm");
+        if (stage === "undo" || stage === "redo") {
+          await click("workspace-restore-confirm");
+          if (stage === "redo") await click("app-notice-action");
+          await click("app-notice-action");
+        } else {
+          await click("workspace-restore-confirm");
+        }
         await waitUntil(() => blocked);
         expect(unregister).not.toHaveBeenCalled();
         const handler = closeHandler as ((event: CloseRequestEvent) => void | Promise<void>) | null;
@@ -1355,16 +1370,17 @@ describe("App recovery transaction boundary", () => {
         expect(preventDefault).toHaveBeenCalledOnce();
         expect(exit).not.toHaveBeenCalled();
         expect(container.querySelector('[role="alert"]')?.textContent).toBe(i18n.t("storage.saveFailed"));
-        expect(primary.nodes).toEqual(previous.nodes);
-        expect(recovery.nodes).toEqual(previous.nodes);
+        expect(primary.nodes).toEqual((stage === "undo" ? replacement : previous).nodes);
+        expect(recovery.nodes).toEqual((stage === "redo" ? replacement : previous).nodes);
         await act(async () => { release.resolve(undefined); await release.promise; });
         await waitUntil(() => document.querySelector('[data-testid="mock-canvas"]') !== null);
-        expect(primary.nodes).toEqual(replacement.nodes);
+        const expected = stage === "undo" ? previous : replacement;
+        expect(primary.nodes).toEqual(expected.nodes);
         await openDataSecuritySettings();
         expect(container.textContent).not.toContain(i18n.t("storage.saveFailed"));
         await act(async () => { await handler?.({ preventDefault }); });
         expect(exit).toHaveBeenCalledOnce();
-        expect(primary.nodes).toEqual(replacement.nodes);
+        expect(primary.nodes).toEqual(expected.nodes);
       } finally {
         release.resolve(undefined);
       }

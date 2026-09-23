@@ -5813,6 +5813,8 @@ function App({
       if (outcome === "notCommitted") {
         workspaceReplacementHistoryBoundaryRef.current = direction;
         setBackupStatus(t("backup.replacementUndoFailed"));
+      } else {
+        setBackupStatus(null);
       }
     } finally {
       workspaceReplacementHistoryBusyRef.current = false;
