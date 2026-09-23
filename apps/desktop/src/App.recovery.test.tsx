@@ -1328,7 +1328,7 @@ describe("App recovery transaction boundary", () => {
     await openDataSecuritySettings();
     await click("restore-recovery-workspace");
     await click("workspace-restore-confirm");
-    await find("storage-recovery-title");
+    await waitUntil(() => document.querySelector("#storage-recovery-title") !== null);
     expect(document.querySelector('[data-testid="mock-canvas"]')).toBeNull();
     expect(primary.nodes).toEqual(replacement.nodes);
     expect(recovery.nodes).toEqual(previous.nodes);
