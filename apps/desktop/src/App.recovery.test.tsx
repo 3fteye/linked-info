@@ -71,7 +71,7 @@ vi.mock("./workspaceFileBridge", () => ({
 }));
 
 import App from "./App";
-import "./i18n";
+import i18n from "./i18n";
 import { parseStoredWorkspaceText } from "./workspaceStore";
 import { unavailableEmbeddingGateway, unavailableLocalEmbeddingRuntime } from "./embeddingBridge";
 import { unavailableEmbeddingVectorCache } from "./embeddingCache";
@@ -1354,7 +1354,7 @@ describe("App recovery transaction boundary", () => {
         await act(async () => { await handler?.({ preventDefault }); });
         expect(preventDefault).toHaveBeenCalledOnce();
         expect(exit).not.toHaveBeenCalled();
-        expect(container.querySelector('[role="alert"]')?.textContent).toMatch(/Save failed|保存失败/);
+        expect(container.querySelector('[role="alert"]')?.textContent).toBe(i18n.t("storage.saveFailed"));
         expect(primary.nodes).toEqual(previous.nodes);
         expect(recovery.nodes).toEqual(previous.nodes);
         await act(async () => { release.resolve(undefined); await release.promise; });
