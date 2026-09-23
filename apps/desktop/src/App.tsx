@@ -5825,7 +5825,9 @@ function App({
           );
         },
       });
-      if (outcome === "ownerExpired") return;
+      // The coordinator's Promise resolution is another scheduling boundary.
+      // A lock can revoke the owner before this continuation resumes.
+      if (!capsuleOwnerAliveRef.current || outcome === "ownerExpired") return;
       if (outcome === "recoveryRequired") {
         // The Rust transaction may already be committed. Do not let the
         // lifecycle cleanup flush the stale React snapshot over it.
