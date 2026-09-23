@@ -539,6 +539,8 @@ function App({
   const documentImportCancelledRef = useRef(false);
   const workspaceChangedInSessionRef = useRef(false);
   const [persistenceReady, setPersistenceReady] = useState(false);
+  const persistenceReadyRef = useRef(persistenceReady);
+  persistenceReadyRef.current = persistenceReady;
   const [persistenceRecoveryRequired, setPersistenceRecoveryRequired] =
     useState(false);
   const [primaryStorageProblem, setPrimaryStorageProblem] = useState<string | null>(null);
@@ -2029,16 +2031,12 @@ function App({
   ]);
 
   useEffect(() => {
-    if (!persistenceReady) {
-      return;
-    }
-
     let active = true;
     let unregister: (() => void) | null = null;
     const flushLocalWorkspace = async () => {
       await capsuleTaskRef.current;
       if (
-        !capsuleOwnerAliveRef.current || skipUnmountFlushRef.current ||
+        !persistenceReadyRef.current || !capsuleOwnerAliveRef.current || skipUnmountFlushRef.current ||
         workspaceMutationBlockedRef.current
       ) {
         throw new Error("workspace_flush_not_authorized");
@@ -2062,6 +2060,13 @@ function App({
       }
     };
     const flushBeforeExit = async () => {
+      // Readiness controls the loading UI, not the lifetime of the native
+      // close interceptor. A replacement must never expose default close.
+      if (workspaceReplacementApplyBusyRef.current || workspaceReplacementHistoryBusyRef.current) {
+        throw new Error("workspace_replacement_in_progress");
+      }
+      // An idle loading/error/recovery screen has no editable snapshot to flush.
+      if (!persistenceReadyRef.current) return;
       capsuleSuspendedRef.current = true;
       await capsuleTaskRef.current;
       await capsuleHost.setReady(false);
@@ -2097,7 +2102,7 @@ function App({
         void flushLocalWorkspace().catch(() => {});
       }
     };
-  }, [capsuleHost, lifecycle, persistence, persistenceReady, t, workspaceBackupHistory]);
+  }, [capsuleHost, lifecycle, persistence, t, workspaceBackupHistory]);
 
   function changeLanguage(language: SupportedLanguage) {
     void i18n.changeLanguage(language);
@@ -5659,6 +5664,7 @@ function App({
 
     workspaceReplacementApplyBusyRef.current = true;
     workspaceMutationBlockedRef.current = true;
+    setBackupStatus(null);
     capsuleSuspendedRef.current = true;
     skipUnmountFlushRef.current = true;
     setPersistenceReady(false);
@@ -5937,6 +5943,7 @@ function App({
         ) : primaryStorageProblem === null ? (
           <section className="storage-problem-card" aria-live="polite">
             <p>{t("storageProblem.loading")}</p>
+            {backupStatus !== null && <p role="alert">{backupStatus}</p>}
           </section>
         ) : (
           <section className="storage-problem-card" aria-labelledby="storage-problem-title">

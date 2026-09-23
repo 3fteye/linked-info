@@ -7,6 +7,7 @@ import type { WorkspacePersistence } from "./workspaceStore";
 import type { CapsuleHost, CapsuleCommitResult } from "./capsuleHost";
 import type { TimelineNoteInput } from "./timelineWorkspace";
 import type { WorkspaceLifecycle } from "./workspaceLifecycle";
+import { createTauriWorkspaceLifecycle, type CloseRequestEvent } from "./workspaceLifecycle";
 import { unavailableCapsuleHost } from "./capsuleHost";
 import * as recoveryOperation from "./workspaceRecoveryOperation";
 import * as replacementOperation from "./workspaceReplacementOperation";
@@ -1306,6 +1307,67 @@ describe("App recovery transaction boundary", () => {
     expect((await find("mock-canvas")).textContent).toBe("Current workspace");
     expect(primary.nodes[0]?.name).toBe("Current workspace");
   });
+
+  it.each(["preserve", "save"] as const)(
+    "keeps the real close interceptor active while replacement waits for %s",
+    async (stage) => {
+      const previous = workspace(currentNodeId, "Synthetic original");
+      const replacement = workspace(recoveryNodeId, "Synthetic replacement");
+      let primary = previous;
+      let recovery = replacement;
+      const release = deferred<void>();
+      let blocked = false;
+      const persistence: WorkspacePersistence = {
+        async load() { return { status: "ready", workspace: primary }; },
+        async loadRecovery() { return { status: "ready", workspace: recovery }; },
+        async preserveForRecovery(next) {
+          recovery = next;
+          if (stage === "preserve") { blocked = true; await release.promise; }
+        },
+        runExclusiveTransaction(transaction) { return transaction(); },
+        async save(next) {
+          if (stage === "save" && next.nodes.some((node) => node.id === recoveryNodeId)) {
+            blocked = true;
+            await release.promise;
+          }
+          primary = next;
+        },
+        async swapWithRecovery() { throw new Error("not used"); },
+      };
+      let closeHandler: ((event: CloseRequestEvent) => void | Promise<void>) | null = null;
+      const unregister = vi.fn(() => { closeHandler = null; });
+      const exit = vi.fn(async () => {});
+      const lifecycle = createTauriWorkspaceLifecycle({
+        exit,
+        async onCloseRequested(handler) { closeHandler = handler; return unregister; },
+      });
+      await renderApp({ persistence, lifecycle, security: unavailableWorkspaceSecurity, updateStatus: vi.fn() });
+      await openDataSecuritySettings();
+      await click("restore-recovery-workspace");
+      try {
+        await click("workspace-restore-confirm");
+        await waitUntil(() => blocked);
+        expect(unregister).not.toHaveBeenCalled();
+        const handler = closeHandler as ((event: CloseRequestEvent) => void | Promise<void>) | null;
+        expect(handler).not.toBeNull();
+        const preventDefault = vi.fn();
+        await act(async () => { await handler?.({ preventDefault }); });
+        expect(preventDefault).toHaveBeenCalledOnce();
+        expect(exit).not.toHaveBeenCalled();
+        expect(container.querySelector('[role="alert"]')?.textContent).toMatch(/Save failed|保存失败/);
+        expect(primary.nodes).toEqual(previous.nodes);
+        expect(recovery.nodes).toEqual(previous.nodes);
+        await act(async () => { release.resolve(undefined); await release.promise; });
+        await waitUntil(() => document.querySelector('[data-testid="mock-canvas"]') !== null);
+        expect(primary.nodes).toEqual(replacement.nodes);
+        await act(async () => { await handler?.({ preventDefault }); });
+        expect(exit).toHaveBeenCalledOnce();
+        expect(primary.nodes).toEqual(replacement.nodes);
+      } finally {
+        release.resolve(undefined);
+      }
+    },
+  );
 
   it("quarantines an ordinary replacement save error without flushing the old snapshot", async () => {
     const previous = workspace(currentNodeId, "Synthetic previous");
