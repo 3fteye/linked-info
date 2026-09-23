@@ -7,6 +7,8 @@ import type { WorkspacePersistence } from "./workspaceStore";
 import type { CapsuleHost, CapsuleCommitResult } from "./capsuleHost";
 import type { TimelineNoteInput } from "./timelineWorkspace";
 import type { WorkspaceLifecycle } from "./workspaceLifecycle";
+import { unavailableCapsuleHost } from "./capsuleHost";
+import * as recoveryOperation from "./workspaceRecoveryOperation";
 
 const canvasHarness = vi.hoisted(() => ({
   editName: null as null | ((name: string) => void),
@@ -1087,6 +1089,67 @@ describe("App recovery transaction boundary", () => {
     } finally {
       swapRelease.resolve(undefined);
     }
+  });
+
+  it("does not reopen writes when locking between coordinator completion and the App continuation", async () => {
+    const workspaceA = workspace(currentNodeId, "Synthetic workspace A");
+    const workspaceB = workspace(recoveryNodeId, "Synthetic workspace B");
+    let primary = workspaceB;
+    let recovery = workspaceA;
+    const save = vi.fn<WorkspacePersistence["save"]>(async (next) => { primary = next; });
+    const persistence: WorkspacePersistence = {
+      async load() { return { status: "ready", workspace: primary }; },
+      async loadRecovery() { return { status: "ready", workspace: recovery }; },
+      async preserveForRecovery(next) { recovery = next; },
+      runExclusiveTransaction(transaction) { return transaction(); },
+      save,
+      async swapWithRecovery() {
+        [primary, recovery] = [recovery, primary];
+        return { status: "committed", workspace: primary };
+      },
+    };
+    const status = encryptedStatus();
+    const lock = vi.fn<WorkspaceSecurity["lock"]>(async () => ({ ...status, locked: true }));
+    const setReady = vi.fn(async (_ready: boolean) => {});
+    await renderApp({
+      persistence, status, security: { ...encryptedSecurity(status), lock }, updateStatus: vi.fn(),
+      capsuleHost: { ...unavailableCapsuleHost, setReady },
+    });
+    await openDataSecuritySettings();
+    await click("restore-recovery-workspace");
+    await click("workspace-restore-confirm");
+    await openDataSecuritySettings();
+    const undo = await find("app-notice-action");
+    const lockButton = await findButton(/Lock now|立即锁定/);
+    const actualSwap = recoveryOperation.swapWorkspaceRecovery;
+    const outcomes: string[] = [];
+    vi.spyOn(recoveryOperation, "swapWorkspaceRecovery").mockImplementation((operation) =>
+      actualSwap(operation).then((outcome) => {
+        outcomes.push(outcome);
+        // The real coordinator has already selected "committed". Queue lock
+        // before the wrapper resolves into App's awaiting continuation.
+        queueMicrotask(() => {
+          lockButton.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        });
+        return outcome;
+      }),
+    );
+    const savesBeforeSwap = save.mock.calls.length;
+    const readyBeforeSwap = setReady.mock.calls.filter(([ready]) => ready).length;
+    await act(async () => {
+      undo.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await Promise.resolve();
+    });
+    expect(outcomes).toEqual(["committed"]);
+    expect(lock).toHaveBeenCalledExactlyOnceWith(undefined);
+    expect(primary.nodes).toEqual(workspaceB.nodes);
+    expect(recovery.nodes).toEqual(workspaceA.nodes);
+    // updateStatus is intentionally a no-op: this checks App's own gate rather
+    // than relying on the parent security gate to unmount a wrongly reopened UI.
+    expect(document.querySelector('[data-testid="mock-canvas"]')).toBeNull();
+    expect(setReady.mock.calls.filter(([ready]) => ready)).toHaveLength(readyBeforeSwap);
+    await act(async () => { root.render(<></>); });
+    expect(save.mock.calls).toHaveLength(savesBeforeSwap);
   });
 
   it("does not treat a prepared extension metadata commit as a capsule lock snapshot", async () => {
