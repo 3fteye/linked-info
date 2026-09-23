@@ -54,7 +54,7 @@ import {
 import DocumentImportDialog from "./DocumentImportDialog";
 import ExtensionSettings from "./ExtensionSettings";
 import { unavailableCapsuleHost, type CapsuleHost } from "./capsuleHost";
-import { captureTimelineNote, TimelineCaptureError } from "./timelineWorkspace";
+import { archiveWorkspaceNote } from "./workspaceArchiveOperation";
 import {
   commitExtensionInstall,
   extensionManagerAvailable,
@@ -1568,99 +1568,54 @@ function App({
   }, [capsuleHost, persistenceReady]);
 
   async function processCapsuleNote(): Promise<void> {
-    let nodeId: string | null = null;
-    let mutationOwned = false;
-    let committed = false;
-    let commitAttempted = false;
-    let recoveryRequired = false;
-    try {
-      // Do not claim a persistent inbox item while an ordinary editor or a
-      // security/recovery transaction already owns the workspace boundary.
-      if (
-        !persistenceReady || workspaceMutationBlockedRef.current ||
-        capsuleSuspendedRef.current || editingNodeIdRef.current !== null ||
-        securityBusy || pendingWorkspaceReplacement !== null ||
-        workspaceReplacementApplyBusyRef.current || workspaceReplacementHistoryBusyRef.current
-      ) return;
-      const request = await capsuleHost.take();
-      if (request === null || !capsuleOwnerAliveRef.current) return;
-      nodeId = request.nodeId;
-      if (
-        !persistenceReady || workspaceMutationBlockedRef.current ||
-        capsuleSuspendedRef.current || editingNodeIdRef.current !== null ||
-        securityBusy ||
-        pendingWorkspaceReplacement !== null || workspaceReplacementApplyBusyRef.current ||
-        workspaceReplacementHistoryBusyRef.current
-      ) {
-        await capsuleHost.reject(nodeId, "busy");
-        return;
-      }
-      workspaceMutationBlockedRef.current = true;
-      mutationOwned = true;
-      if (workspaceSaveTimerRef.current !== null) {
-        window.clearTimeout(workspaceSaveTimerRef.current);
-        workspaceSaveTimerRef.current = null;
-      }
-      const before = workspaceRef.current;
-      const prepared = captureTimelineNote(before, request, {
-        canvasName: t("capsule.timelineName"),
-        dateNodeName: (date) => date,
-      }, () => crypto.randomUUID());
-      // A lock can preserve this validated submission even while an earlier
-      // ordinary save is still draining; it must not wait for that queue.
-      pendingWorkspaceCommitRef.current = { kind: "capsule", workspace: prepared.workspace };
-      // Drain existing saves before using the broker's commit-aware write.
-      await persistence.save(before);
-      if (!capsuleOwnerAliveRef.current) return;
-      commitAttempted = true;
-      const result = await capsuleHost.commit(nodeId, serializeStoredWorkspace(prepared.workspace));
-      committed = true;
-      if (!capsuleOwnerAliveRef.current) return;
-      if (result.status !== "committed") {
-        recoveryRequired = true;
-        return;
-      }
-      const authoritative = await persistence.load();
-      if (!capsuleOwnerAliveRef.current) return;
-      if (authoritative.status !== "ready") {
-        recoveryRequired = true;
-        return;
-      }
-      const next = authoritative.workspace;
-      if (!prepared.duplicate) {
-        recordHistory(captureWorkspaceHistory(before), captureWorkspaceHistory(next));
-        workspaceChangedInSessionRef.current = true;
-        automaticOffsiteRevisionRef.current += 1;
-        extensionWorkspaceRevisionRef.current += 1;
-      }
-      workspaceRef.current = next;
-      setWorkspace(next);
-      showAppNotice(t("capture.state.archived"));
-    } catch (error) {
-      if (!capsuleOwnerAliveRef.current) return;
-      if (committed || (commitAttempted && error !== "capsule_commit_not_saved")) {
-        // Never flush the old React snapshot over a committed capsule record.
-        recoveryRequired = true;
-      } else if (nodeId !== null) {
-        const reason = error instanceof TimelineCaptureError
-          ? error.reason === "duplicate-name" ? "duplicateName"
-            : error.reason === "empty-note" ? "empty" : "invalid"
-          : "saveFailed";
-        await capsuleHost.reject(nodeId, reason).catch(() => {});
-        showAppNotice(t("capsule.saveFailed"));
-      }
-    } finally {
-      pendingWorkspaceCommitRef.current = null;
-      if (mutationOwned && capsuleOwnerAliveRef.current) {
-        if (recoveryRequired) {
-          skipUnmountFlushRef.current = true;
-          setPersistenceRecoveryRequired(true);
-          setPersistenceReady(false);
-        } else {
-          workspaceMutationBlockedRef.current = false;
+    await archiveWorkspaceNote({
+      host: capsuleHost,
+      persistence,
+      canStart: () => persistenceReady && !workspaceMutationBlockedRef.current &&
+        !capsuleSuspendedRef.current && editingNodeIdRef.current === null &&
+        !securityBusy && pendingWorkspaceReplacement === null &&
+        !workspaceReplacementApplyBusyRef.current && !workspaceReplacementHistoryBusyRef.current,
+      isOwnerAlive: () => capsuleOwnerAliveRef.current,
+      labels: { canvasName: t("capsule.timelineName"), dateNodeName: (date) => date },
+      newId: () => crypto.randomUUID(),
+      notifyFailure: () => showAppNotice(t("capsule.saveFailed")),
+      acquire() {
+        workspaceMutationBlockedRef.current = true;
+        if (workspaceSaveTimerRef.current !== null) {
+          window.clearTimeout(workspaceSaveTimerRef.current);
+          workspaceSaveTimerRef.current = null;
         }
-      }
-    }
+        const before = workspaceRef.current;
+        return {
+          before,
+          prepare(workspace) {
+            pendingWorkspaceCommitRef.current = { kind: "capsule", workspace };
+          },
+          publish(next, duplicate) {
+            if (!duplicate) {
+              recordHistory(captureWorkspaceHistory(before), captureWorkspaceHistory(next));
+              workspaceChangedInSessionRef.current = true;
+              automaticOffsiteRevisionRef.current += 1;
+              extensionWorkspaceRevisionRef.current += 1;
+            }
+            workspaceRef.current = next;
+            setWorkspace(next);
+            showAppNotice(t("capture.state.archived"));
+          },
+          finish(completion) {
+            pendingWorkspaceCommitRef.current = null;
+            if (completion === "ownerExpired") return;
+            if (completion === "recoveryRequired") {
+              skipUnmountFlushRef.current = true;
+              setPersistenceRecoveryRequired(true);
+              setPersistenceReady(false);
+            } else {
+              workspaceMutationBlockedRef.current = false;
+            }
+          },
+        };
+      },
+    });
   }
 
   useEffect(
