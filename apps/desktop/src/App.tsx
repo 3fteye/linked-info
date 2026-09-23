@@ -55,6 +55,7 @@ import DocumentImportDialog from "./DocumentImportDialog";
 import ExtensionSettings from "./ExtensionSettings";
 import { unavailableCapsuleHost, type CapsuleHost } from "./capsuleHost";
 import { archiveWorkspaceNote } from "./workspaceArchiveOperation";
+import { swapWorkspaceRecovery } from "./workspaceRecoveryOperation";
 import {
   commitExtensionInstall,
   extensionManagerAvailable,
@@ -5789,8 +5790,43 @@ function App({
     syncHistoryAvailability();
     setPersistenceReady(false);
     try {
-      const result = await persistence.swapWithRecovery();
-      if (result.status === "reloadRequired") {
+      const outcome = await swapWorkspaceRecovery({
+        persistence,
+        isOwnerAlive: () => capsuleOwnerAliveRef.current,
+        publish(next) {
+          workspaceChangedInSessionRef.current = true;
+          automaticOffsiteRevisionRef.current += 1;
+          extensionWorkspaceRevisionRef.current += 1;
+          workspaceReplacementGenerationRef.current += 1;
+          workspaceRef.current = next;
+          setWorkspace(next);
+          historyTimelineRef.current = emptyWorkspaceHistoryTimeline();
+          editBaselineRef.current = null;
+          setEditingNodeId(null);
+          setSearchTerm("");
+          setUnnamedOnly(false);
+          setReferenceFilterNodeIds([]);
+          smartReferenceQueueGenerationRef.current += 1;
+          smartReferenceMemoryCacheRef.current.clear();
+          setSmartReferenceTasks([]);
+          setSmartReferenceResult(null);
+          setRecoveryAvailable(true);
+          setRecoveryStorageProblem(null);
+          setActiveView("canvas");
+          setWorkspaceReplacementHistoryBoundary(direction === "undo" ? "redo" : "undo");
+          showAppNotice(
+            direction === "undo"
+              ? t("backup.replacementUndoSuccess")
+              : t("backup.replacementRedoSuccess"),
+            {
+              label: direction === "undo" ? t("backup.redoReplacement") : t("backup.undoReplacement"),
+              run: () => void swapWorkspaceWithRecovery(direction === "undo" ? "redo" : "undo"),
+            },
+          );
+        },
+      });
+      if (outcome === "ownerExpired") return;
+      if (outcome === "recoveryRequired") {
         // The Rust transaction may already be committed. Do not let the
         // lifecycle cleanup flush the stale React snapshot over it.
         skipUnmountFlushRef.current = true;
@@ -5798,56 +5834,20 @@ function App({
         setPersistenceReady(false);
         return;
       }
-      const next = result.workspace;
-      workspaceChangedInSessionRef.current = true;
-      automaticOffsiteRevisionRef.current += 1;
-      extensionWorkspaceRevisionRef.current += 1;
-      workspaceReplacementGenerationRef.current += 1;
-      workspaceRef.current = next;
-      setWorkspace(next);
-      historyTimelineRef.current = emptyWorkspaceHistoryTimeline();
-      editBaselineRef.current = null;
-      setEditingNodeId(null);
-      setSearchTerm("");
-      setUnnamedOnly(false);
-      setReferenceFilterNodeIds([]);
-      smartReferenceQueueGenerationRef.current += 1;
-      smartReferenceMemoryCacheRef.current.clear();
-      setSmartReferenceTasks([]);
-      setSmartReferenceResult(null);
-      setRecoveryAvailable(true);
-      setRecoveryStorageProblem(null);
-      setActiveView("canvas");
-      setWorkspaceReplacementHistoryBoundary(direction === "undo" ? "redo" : "undo");
       workspaceMutationBlockedRef.current = false;
       skipUnmountFlushRef.current = false;
       setPersistenceReady(true);
-      showAppNotice(
-        direction === "undo"
-          ? t("backup.replacementUndoSuccess")
-          : t("backup.replacementRedoSuccess"),
-        {
-          label:
-            direction === "undo"
-              ? t("backup.redoReplacement")
-              : t("backup.undoReplacement"),
-          run: () =>
-            void swapWorkspaceWithRecovery(direction === "undo" ? "redo" : "undo"),
-        },
-      );
-    } catch {
-      workspaceMutationBlockedRef.current = false;
-      skipUnmountFlushRef.current = false;
-      setPersistenceReady(true);
-      workspaceReplacementHistoryBoundaryRef.current = direction;
-      setBackupStatus(t("backup.replacementUndoFailed"));
+      if (outcome === "notCommitted") {
+        workspaceReplacementHistoryBoundaryRef.current = direction;
+        setBackupStatus(t("backup.replacementUndoFailed"));
+      }
     } finally {
       workspaceReplacementHistoryBusyRef.current = false;
       if (!workspaceMutationBlockedRef.current && capsuleOwnerAliveRef.current) {
         capsuleSuspendedRef.current = false;
         void capsuleHost.setReady(true).catch(() => {});
       }
-      syncHistoryAvailability();
+      if (capsuleOwnerAliveRef.current) syncHistoryAvailability();
     }
   }
 

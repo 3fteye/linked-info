@@ -17,6 +17,7 @@ export const sensitiveSourcePaths = [
   "apps/desktop/src/capsuleBridge.ts",
   "apps/desktop/src/capsuleHost.ts",
   "apps/desktop/src/workspaceArchiveOperation.ts",
+  "apps/desktop/src/workspaceRecoveryOperation.ts",
   "apps/desktop/src/desktopWorkspaceSession.ts",
   "apps/desktop/src/MainWorkspace.tsx",
   "apps/desktop/src-tauri/src/embedding.rs",
