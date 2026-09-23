@@ -1122,14 +1122,23 @@ describe("App recovery transaction boundary", () => {
     const undo = await find("app-notice-action");
     const lockButton = await findButton(/Lock now|立即锁定/);
     const actualSwap = recoveryOperation.swapWorkspaceRecovery;
+    // The loading screen removes this button before the target microtask.
+    // Capture its actual React handler while mounted, rather than dispatching
+    // to a detached DOM node (which cannot reach React's delegated listener).
+    const propsKey = Object.keys(lockButton).find((key) => key.startsWith("__reactProps$"));
+    if (propsKey === undefined) throw new Error("synthetic lock button has no React props");
+    const lockHandler = (Reflect.get(lockButton, propsKey) as { onClick?: () => void }).onClick;
+    if (typeof lockHandler !== "function") throw new Error("synthetic lock handler missing");
     const outcomes: string[] = [];
+    let buttonDetachedAtLock = false;
     vi.spyOn(recoveryOperation, "swapWorkspaceRecovery").mockImplementation((operation) =>
       actualSwap(operation).then((outcome) => {
         outcomes.push(outcome);
         // The real coordinator has already selected "committed". Queue lock
         // before the wrapper resolves into App's awaiting continuation.
         queueMicrotask(() => {
-          lockButton.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+          buttonDetachedAtLock = !lockButton.isConnected;
+          lockHandler();
         });
         return outcome;
       }),
@@ -1141,6 +1150,7 @@ describe("App recovery transaction boundary", () => {
       await Promise.resolve();
     });
     expect(outcomes).toEqual(["committed"]);
+    expect(buttonDetachedAtLock).toBe(true);
     expect(lock).toHaveBeenCalledExactlyOnceWith(undefined);
     expect(primary.nodes).toEqual(workspaceB.nodes);
     expect(recovery.nodes).toEqual(workspaceA.nodes);
