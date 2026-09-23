@@ -1360,6 +1360,8 @@ describe("App recovery transaction boundary", () => {
         await act(async () => { release.resolve(undefined); await release.promise; });
         await waitUntil(() => document.querySelector('[data-testid="mock-canvas"]') !== null);
         expect(primary.nodes).toEqual(replacement.nodes);
+        await openDataSecuritySettings();
+        expect(container.textContent).not.toContain(i18n.t("storage.saveFailed"));
         await act(async () => { await handler?.({ preventDefault }); });
         expect(exit).toHaveBeenCalledOnce();
         expect(primary.nodes).toEqual(replacement.nodes);

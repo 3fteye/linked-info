@@ -5730,7 +5730,7 @@ function App({
         setPersistenceRecoveryRequired(true);
         return;
       }
-      if (outcome === "notCommitted") setBackupStatus(t("backup.importFailed"));
+      setBackupStatus(outcome === "notCommitted" ? t("backup.importFailed") : null);
       skipUnmountFlushRef.current = false;
       setPersistenceReady(true);
       resumeCapsule = true;
