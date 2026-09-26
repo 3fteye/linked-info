@@ -3705,8 +3705,9 @@ export default function GraphCanvas({
         onPaneContextMenu={
           pointSelection === null ? handlePaneContextMenu : undefined
         }
-        panActivationKeyCode="Space"
-        panOnDrag={pointSelection === null ? [0, 1] : [1]}
+        // 空格由 spacePanActive 禁用节点操作；库的平移激活键还会强制滚轮平移。
+        panActivationKeyCode={null}
+        panOnDrag={spacePanActive || pointSelection === null ? [0, 1] : [1]}
         proOptions={{ hideAttribution: true }}
         multiSelectionKeyCode={["Control", "Shift"]}
         selectionKeyCode={null}
