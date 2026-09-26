@@ -3568,7 +3568,7 @@ function App({
       const next = instantiateNodeTemplate(workspaceRef.current, pending.id, nodeId, pending.name, position, pending.skipMissing);
       updateWorkspace(() => next, { flushImmediately: true, recordHistory: true });
       setTemplatePlacement(null);
-      clearNodeFilters();
+      clearNodeFilters(false);
       editBaselineRef.current = { nodeId, state: captureWorkspaceHistory(next) };
       setEditingNodeId(nodeId);
     } catch {
@@ -4780,30 +4780,35 @@ function App({
     setEditingNodeId(null);
   }
 
+  function changeReferenceFilters(next: string[]) {
+    if (next.length === referenceFilterNodeIds.length && next.every((id, index) => id === referenceFilterNodeIds[index])) return;
+    rememberNavigation();
+    setReferenceFilterNodeIds(next);
+  }
+
   function toggleReferenceFilter(nodeId: string) {
-    if (!workspace.nodes.some((node) => node.id === nodeId)) {
+    if (!workspaceRef.current.nodes.some((node) => node.id === nodeId)) {
       return;
     }
-
-    setReferenceFilterNodeIds((current) =>
-      current.includes(nodeId)
-        ? current.filter((currentNodeId) => currentNodeId !== nodeId)
-        : [...current, nodeId],
+    changeReferenceFilters(
+      referenceFilterNodeIds.includes(nodeId)
+        ? referenceFilterNodeIds.filter((currentNodeId) => currentNodeId !== nodeId)
+        : [...referenceFilterNodeIds, nodeId],
     );
   }
 
   function activateCanvasReferenceFilter(nodeId: string) {
-    rememberNavigation();
     if (!workspaceRef.current.nodes.some((node) => node.id === nodeId)) {
       return;
     }
 
-    setReferenceFilterNodeIds((current) =>
-      current.length === 1 && current[0] === nodeId ? [] : [nodeId],
+    changeReferenceFilters(
+      referenceFilterNodeIds.length === 1 && referenceFilterNodeIds[0] === nodeId ? [] : [nodeId],
     );
   }
 
-  function clearNodeFilters() {
+  function clearNodeFilters(recordNavigation = true) {
+    if (recordNavigation && (searchTerm.length > 0 || unnamedOnly || referenceFilterNodeIds.length > 0)) rememberNavigation();
     setSearchTerm("");
     setUnnamedOnly(false);
     setReferenceFilterNodeIds([]);
@@ -6825,7 +6830,7 @@ function App({
                     {selectedReferenceFilterNodes.length > 1 && (
                       <button
                         className="clear-reference-filters"
-                        onClick={() => setReferenceFilterNodeIds([])}
+                        onClick={() => changeReferenceFilters([])}
                         type="button"
                       >
                         {t("filters.clearReferences")}

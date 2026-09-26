@@ -1410,6 +1410,31 @@ test("double-clicking an inline reference filter leaves every node visible", asy
   }
 });
 
+test("toolbar reference filters share browsing history and invalidate forward navigation", async ({ page }) => {
+  const nodes = gridNodes(3, 1);
+  await openSyntheticWorkspace(page, nodes, [
+    { sourceNodeId: nodes[0].id, targetNodeId: nodes[1].id },
+    { sourceNodeId: nodes[0].id, targetNodeId: nodes[2].id },
+  ]);
+  const picker = page.locator(".reference-filter-picker select");
+  const chips = page.locator(".active-reference-filter");
+  await picker.selectOption(nodes[1].id);
+  await picker.selectOption(nodes[2].id);
+  await expect(chips).toHaveCount(2);
+  await page.locator(".clear-reference-filters").click();
+  await expect(chips).toHaveCount(0);
+  await page.getByTestId("canvas-nav-back").click();
+  await expect(chips).toHaveCount(2);
+  await expect(page.getByTestId("canvas-nav-forward")).toBeEnabled();
+  await chips.first().click();
+  await expect(chips).toHaveCount(1);
+  await expect(page.getByTestId("canvas-nav-forward")).toBeDisabled();
+  await page.getByTestId("canvas-nav-back").click();
+  await expect(chips).toHaveCount(2);
+  await page.getByTestId("canvas-nav-back").click();
+  await expect(chips).toHaveCount(1);
+});
+
 test("following inline references replaces the browsing filter instead of accumulating AND filters", async ({
   page,
 }) => {
