@@ -804,6 +804,67 @@ test("Space plus left drag pans from a node without moving it", async ({ page })
   );
 });
 
+test("holding Space keeps wheel zoom between successive canvas drags", async ({ page }) => {
+  const nodes = gridNodes(2, 1);
+  await openSyntheticWorkspace(page, nodes);
+  const canvas = page.getByTestId("graph-canvas");
+  const firstNode = node(page, nodes[0].id);
+  const beforeNode = await firstNode.boundingBox();
+  expect(beforeNode).not.toBeNull();
+
+  await page.keyboard.down("Space");
+  await expect(canvas).toHaveAttribute("data-space-pan", "true");
+  await page.mouse.move(beforeNode!.x + 90, beforeNode!.y + 28);
+  await page.mouse.down();
+  await page.mouse.move(beforeNode!.x + 190, beforeNode!.y + 88, { steps: 8 });
+  await page.mouse.up();
+  await expect
+    .poll(async () => (await storedWorkspace(page))?.viewport)
+    .not.toEqual({ x: 0, y: 0, zoom: 1 });
+  const beforeZoom = (await storedWorkspace(page))!.viewport!.zoom;
+
+  // 不松开空格，指针仍在节点上时滚轮必须缩放，而不是上下平移。
+  await page.mouse.wheel(0, -240);
+  await expect
+    .poll(async () => (await storedWorkspace(page))?.viewport?.zoom ?? 0)
+    .toBeGreaterThan(beforeZoom);
+  const zoomedViewport = (await storedWorkspace(page))!.viewport!;
+  await expect(canvas).toHaveAttribute("data-space-pan", "true");
+
+  const zoomedNode = await firstNode.boundingBox();
+  expect(zoomedNode).not.toBeNull();
+  await page.mouse.move(zoomedNode!.x + 70, zoomedNode!.y + 20);
+  await page.mouse.down();
+  await page.mouse.move(zoomedNode!.x + 150, zoomedNode!.y + 60, { steps: 8 });
+  await page.mouse.up();
+  await expect
+    .poll(async () => (await storedWorkspace(page))?.viewport)
+    .not.toEqual(zoomedViewport);
+  expect((await storedWorkspace(page))!.viewport!.zoom).toBeCloseTo(
+    zoomedViewport.zoom,
+    5,
+  );
+
+  // 同一次空格按住期间在空白处缩小，松开后普通滚轮仍能放大。
+  const bounds = await canvas.boundingBox();
+  expect(bounds).not.toBeNull();
+  await page.mouse.move(bounds!.x + 25, bounds!.y + 25);
+  await page.mouse.wheel(0, 240);
+  await expect
+    .poll(async () => (await storedWorkspace(page))?.viewport?.zoom ?? Infinity)
+    .toBeLessThan(zoomedViewport.zoom);
+  const reducedZoom = (await storedWorkspace(page))!.viewport!.zoom;
+  await page.keyboard.up("Space");
+  await expect(canvas).toHaveAttribute("data-space-pan", "false");
+  await page.mouse.wheel(0, -120);
+  await expect
+    .poll(async () => (await storedWorkspace(page))?.viewport?.zoom ?? 0)
+    .toBeGreaterThan(reducedZoom);
+  expect((await storedWorkspace(page))?.layout).toEqual(
+    nodes.map((item) => ({ nodeId: item.id, x: item.x, y: item.y })),
+  );
+});
+
 test("middle drag pans from a node without moving it", async ({ page }) => {
   const nodes = gridNodes(2, 1);
   await openSyntheticWorkspace(page, nodes);
