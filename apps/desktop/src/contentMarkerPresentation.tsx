@@ -108,6 +108,9 @@ export const contentMarkerPresentationRegistry = new ContentMarkerPresentationRe
   {
     id: "totp",
     renderCanvas(marker, context) {
+      if (marker.payload.trim().length === 0) {
+        return withMarkerNote(marker, <span>{context.labels.totp.masked}</span>);
+      }
       return withMarkerNote(
         marker,
         <TotpContentLine

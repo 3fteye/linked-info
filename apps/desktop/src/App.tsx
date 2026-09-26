@@ -40,6 +40,9 @@ import {
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import GraphCanvas from "./GraphCanvas";
+import NodeTemplatesDialog from "./NodeTemplatesDialog";
+import { emptyCanvasNavigation, rememberCanvasLocation, traverseCanvasLocations, type CanvasNavigationLocation } from "./canvasNavigation";
+import { instantiateNodeTemplate, readNodeTemplates, writeNodeTemplates, type NodeTemplate } from "./nodeTemplates";
 import CanvasOperationGuide from "./CanvasOperationGuide";
 import { canvasOperationIds } from "./canvasOperations";
 import {
@@ -526,6 +529,10 @@ function App({
   const [activeSettingsTab, setActiveSettingsTab] =
     useState<SettingsTabId>("general");
   const [workspace, setWorkspace] = useState(emptyWorkspace);
+  const [templatesOpen, setTemplatesOpen] = useState(false);
+  const [templatePlacement, setTemplatePlacement] = useState<{
+    id: string; name: string; skipMissing: boolean; canvasId: string; generation: number;
+  } | null>(null);
   const [managedExtensions, setManagedExtensions] = useState<InstalledExtension[]>([]);
   const workspaceRef = useRef(workspace);
   const extensionWorkspaceRevisionRef = useRef(0);
@@ -554,6 +561,8 @@ function App({
     state: WorkspaceHistoryState;
   } | null>(null);
   const historyTimelineRef = useRef(emptyWorkspaceHistoryTimeline());
+  const navigationHistoryRef = useRef(emptyCanvasNavigation());
+  const [navigationAvailability, setNavigationAvailability] = useState({ back: false, forward: false });
   const workspaceReplacementHistoryBoundaryRef =
     useRef<WorkspaceReplacementHistoryBoundary>(null);
   const workspaceReplacementHistoryBusyRef = useRef(false);
@@ -814,6 +823,19 @@ function App({
   >(null);
   const currentView = views.find((view) => view.id === activeView) ?? views[0];
   const activeLanguage = i18n.resolvedLanguage ?? i18n.language;
+  useEffect(() => {
+    const navigate = (event: KeyboardEvent) => {
+      if (!event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || event.repeat ||
+          (event.key !== "ArrowLeft" && event.key !== "ArrowRight") || activeView !== "canvas" ||
+          editingNodeId !== null || templatesOpen || document.querySelector('[role="dialog"]') !== null ||
+          (event.target instanceof Element && event.target.closest('input,textarea,select,button,[contenteditable="true"]'))) return;
+      event.preventDefault();
+      event.stopPropagation();
+      navigateCanvasHistory(event.key === "ArrowLeft" ? "back" : "forward");
+    };
+    window.addEventListener("keydown", navigate, true);
+    return () => window.removeEventListener("keydown", navigate, true);
+  });
   const deferredSearchTerm = useDeferredValue(searchTerm);
   const nodeSearchIndex = useMemo(() => new NodeSearchIndex(), []);
   const remoteEmbeddingScope = useMemo(
@@ -2612,6 +2634,10 @@ function App({
     skipUnmountFlushRef.current = true;
     workspaceMutationBlockedRef.current = true;
     capsuleOwnerAliveRef.current = false;
+    navigationHistoryRef.current = emptyCanvasNavigation();
+    setNavigationAvailability({ back: false, forward: false });
+    setTemplatesOpen(false);
+    setTemplatePlacement(null);
     if (workspaceSaveTimerRef.current !== null) {
       window.clearTimeout(workspaceSaveTimerRef.current);
       workspaceSaveTimerRef.current = null;
@@ -3432,6 +3458,11 @@ function App({
   }
 
   function clearHistory() {
+    navigationHistoryRef.current = emptyCanvasNavigation();
+    setNavigationAvailability({ back: false, forward: false });
+    setCanvasFocusRequest(null);
+    setTemplatesOpen(false);
+    setTemplatePlacement(null);
     historyTimelineRef.current = emptyWorkspaceHistoryTimeline();
     workspaceReplacementHistoryBoundaryRef.current = null;
     editBaselineRef.current = null;
@@ -3509,6 +3540,41 @@ function App({
     historyTimelineRef.current = step.timeline;
     applyHistoryState(step.state);
     syncHistoryAvailability();
+  }
+
+  function saveNodeTemplate(template: NodeTemplate): boolean {
+    if (workspaceMutationBlockedRef.current || !capsuleOwnerAliveRef.current) return false;
+    try {
+      const templates = readNodeTemplates(workspaceRef.current);
+      const next = writeNodeTemplates(workspaceRef.current, [
+        ...templates.filter((item) => item.id !== template.id), template,
+      ]);
+      updateWorkspace(() => next, { flushImmediately: true, recordHistory: true });
+      return true;
+    } catch { return false; }
+  }
+
+  function placeNodeTemplate(position: { x: number; y: number }) {
+    const pending = templatePlacement;
+    if (pending === null || workspaceMutationBlockedRef.current || !capsuleOwnerAliveRef.current ||
+        pending.generation !== workspaceReplacementGenerationRef.current ||
+        pending.canvasId !== workspaceRef.current.view.activeCanvasId) {
+      setTemplatePlacement(null);
+      return;
+    }
+    try {
+      const nodeId = crypto.randomUUID();
+      const next = instantiateNodeTemplate(workspaceRef.current, pending.id, nodeId, pending.name, position, pending.skipMissing);
+      updateWorkspace(() => next, { flushImmediately: true, recordHistory: true });
+      setTemplatePlacement(null);
+      clearNodeFilters();
+      editBaselineRef.current = { nodeId, state: captureWorkspaceHistory(next) };
+      setEditingNodeId(nodeId);
+    } catch {
+      setTemplatePlacement(null);
+      setTemplatesOpen(true);
+      showAppNotice(t("nodeTemplates.invalid"));
+    }
   }
 
   function createNode(
@@ -4168,13 +4234,53 @@ function App({
     );
   }
 
-  function switchCanvas(canvasId: string) {
+  function currentNavigationLocation(): CanvasNavigationLocation {
+    const canvas = activeWorkspaceCanvas(workspaceRef.current);
+    return { canvasId: canvas.id, viewport: canvas.viewport, nodeId: searchNavigationNodeId,
+      searchTerm, searchScope, searchLocationScope, unnamedOnly, referenceFilterNodeIds: [...referenceFilterNodeIds] };
+  }
+
+  function syncNavigationAvailability() {
+    setNavigationAvailability({ back: navigationHistoryRef.current.back.length > 0, forward: navigationHistoryRef.current.forward.length > 0 });
+  }
+
+  function rememberNavigation() {
+    if (workspaceMutationBlockedRef.current || !capsuleOwnerAliveRef.current || activeView !== "canvas") return;
+    navigationHistoryRef.current = rememberCanvasLocation(navigationHistoryRef.current, currentNavigationLocation());
+    syncNavigationAvailability();
+  }
+
+  function navigateCanvasHistory(direction: "back" | "forward") {
+    if (workspaceMutationBlockedRef.current || !capsuleOwnerAliveRef.current || !persistenceReady || editingNodeId !== null || templatePlacement !== null || documentImportPlacementSelecting) return;
+    const current = workspaceRef.current;
+    const step = traverseCanvasLocations(navigationHistoryRef.current, direction, currentNavigationLocation(), new Set(current.view.canvases.map((item) => item.id)));
+    navigationHistoryRef.current = step.history;
+    syncNavigationAvailability();
+    const location = step.location;
+    if (location === null) return;
+    const ids = new Set(current.nodes.map((node) => node.id));
+    setCanvasFocusRequest(null);
+    setSearchTerm(location.searchTerm);
+    setSearchScope(location.searchScope);
+    setSearchLocationScope(location.searchLocationScope);
+    setUnnamedOnly(location.unnamedOnly);
+    setReferenceFilterNodeIds(location.referenceFilterNodeIds.filter((id) => ids.has(id)));
+    setSearchNavigationNodeId(location.nodeId !== null && ids.has(location.nodeId) ? location.nodeId : null);
+    setActiveView("canvas");
+    updateWorkspace((workspace) => ({ ...workspace, view: updateWorkspaceCanvas(
+      { ...workspace.view, activeCanvasId: location.canvasId }, location.canvasId,
+      (canvas) => ({ ...canvas, viewport: location.viewport }),
+    ) }), { flushImmediately: true, affectsOffsiteBackup: false });
+  }
+
+  function switchCanvas(canvasId: string, recordNavigation = true) {
     if (
       canvasId === workspaceRef.current.view.activeCanvasId ||
       !workspaceRef.current.view.canvases.some((canvas) => canvas.id === canvasId)
     ) {
       return;
     }
+    if (recordNavigation) rememberNavigation();
     updateWorkspace(
       (current) => ({
         ...current,
@@ -4336,6 +4442,7 @@ function App({
       showAppNotice(t("canvases.bookmarkTargetMissing"));
       return;
     }
+    rememberNavigation();
     updateWorkspace(
       (workspace) => ({
         ...workspace,
@@ -4376,7 +4483,8 @@ function App({
     if (!memberships.some((item) => item.canvasId === canvasId)) {
       return;
     }
-    switchCanvas(canvasId);
+    rememberNavigation();
+    switchCanvas(canvasId, false);
     setSearchNavigationNodeId(nodeId);
     setActiveView("canvas");
     requestCanvasFocus([nodeId]);
@@ -4684,6 +4792,7 @@ function App({
   }
 
   function activateCanvasReferenceFilter(nodeId: string) {
+    rememberNavigation();
     if (!workspaceRef.current.nodes.some((node) => node.id === nodeId)) {
       return;
     }
@@ -5769,6 +5878,11 @@ function App({
           automaticOffsiteRevisionRef.current += 1;
           extensionWorkspaceRevisionRef.current += 1;
           workspaceReplacementGenerationRef.current += 1;
+          navigationHistoryRef.current = emptyCanvasNavigation();
+          setNavigationAvailability({ back: false, forward: false });
+          setCanvasFocusRequest(null);
+          setTemplatesOpen(false);
+          setTemplatePlacement(null);
           workspaceRef.current = next;
           setWorkspace(next);
           historyTimelineRef.current = emptyWorkspaceHistoryTimeline();
@@ -6116,6 +6230,21 @@ function App({
 
   return (
     <div className="app-shell" data-theme={appearanceTheme}>
+      {templatesOpen && pendingWorkspaceReplacement === null && !securityBusy && (
+        <NodeTemplatesDialog workspace={workspace} onClose={() => setTemplatesOpen(false)} onSave={saveNodeTemplate}
+          onDelete={(id) => {
+            if (workspaceMutationBlockedRef.current || !capsuleOwnerAliveRef.current) return;
+            try {
+              updateWorkspace((current) => writeNodeTemplates(current, readNodeTemplates(current).filter((item) => item.id !== id)), { flushImmediately: true, recordHistory: true });
+            } catch { showAppNotice(t("nodeTemplates.invalid")); }
+          }}
+          onPlace={(id, name, skipMissing) => {
+            if (workspaceMutationBlockedRef.current || !capsuleOwnerAliveRef.current) return;
+            setTemplatePlacement({ id, name, skipMissing, canvasId: workspaceRef.current.view.activeCanvasId, generation: workspaceReplacementGenerationRef.current });
+            setTemplatesOpen(false);
+            setActiveView("canvas");
+          }} />
+      )}
       <aside className="sidebar">
         <div className="brand">
           <span className="brand-mark" aria-hidden="true">
@@ -6752,6 +6881,15 @@ function App({
                 <Plus size={16} />
                 <span>{t("actions.newNode")}</span>
               </button>
+              <button className="secondary-button" data-testid="templates-open" type="button" onClick={() => {
+                if (editingNodeId !== null) commitNode(editingNodeId);
+                setTemplatePlacement(null);
+                setTemplatesOpen(true);
+              }}>{t("nodeTemplates.title")}</button>
+              {activeView === "canvas" && <>
+                <button className="secondary-button" data-testid="canvas-nav-back" type="button" disabled={!navigationAvailability.back || editingNodeId !== null} onClick={() => navigateCanvasHistory("back")}>{t("canvasNavigation.back")}</button>
+                <button className="secondary-button" data-testid="canvas-nav-forward" type="button" disabled={!navigationAvailability.forward || editingNodeId !== null} onClick={() => navigateCanvasHistory("forward")}>{t("canvasNavigation.forward")}</button>
+              </>}
             </div>
           )}
         </header>
@@ -8521,7 +8659,14 @@ function App({
               filteredNodeIds={canvasFilteredNodeIds}
               unmatchedNodeOpacity={unmatchedNodeOpacity}
               pointSelection={
-                documentImportPlacementSelecting
+                templatePlacement !== null
+                  ? {
+                      cancelLabel: t("actions.cancel"),
+                      instruction: t("nodeTemplates.placement"),
+                      onCancel: () => setTemplatePlacement(null),
+                      onSelect: placeNodeTemplate,
+                    }
+                  : documentImportPlacementSelecting
                   ? {
                       cancelLabel: t("actions.cancel"),
                       instruction: t("documentImport.placementInstruction"),

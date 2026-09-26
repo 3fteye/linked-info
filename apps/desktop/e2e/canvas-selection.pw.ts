@@ -865,6 +865,60 @@ test("holding Space keeps wheel zoom between successive canvas drags", async ({ 
   );
 });
 
+test("node templates clear marked values and create one undoable positioned node", async ({ page }) => {
+  const nodes = gridNodes(2, 1);
+  nodes[0].content = 'Login\n[[li:secret note="Service password"]]synthetic-password[[/li]]\n[[li:totp]]JBSWY3DPEHPK3PXP[[/li]]';
+  await openSyntheticWorkspace(page, nodes, [{ sourceNodeId: nodes[0].id, targetNodeId: nodes[1].id }]);
+  await page.getByTestId("templates-open").click();
+  await page.getByTestId("template-source").selectOption(nodes[0].id);
+  await expect(page.getByTestId("template-content")).not.toHaveValue(/synthetic-password|JBSWY3DPEHPK3PXP/);
+  await expect(page.getByTestId("template-content")).toHaveValue(/note="Service password"/);
+  await page.getByTestId("template-name").fill("Account structure");
+  await page.getByRole("button", { name: "Save template", exact: true }).click();
+  await expect(page.getByTestId("template-content")).toHaveCount(0);
+  await expect.poll(async () => (await storedWorkspace(page))?.view?.extensionMetadata?.["app.linked-info.node-templates"]?.workspace?.templates?.length).toBe(1);
+  await page.reload();
+  await page.getByTestId("templates-open").click();
+  await page.getByTestId("template-saved").selectOption({ label: "Account structure" });
+  await page.getByTestId("template-node-name").fill("New account");
+  await page.getByTestId("template-place").click();
+  await expect(page.getByTestId("graph-canvas")).toHaveAttribute("data-point-selection", "true");
+  await page.getByTestId("graph-canvas").click({ position: { x: 760, y: 520 } });
+  await expect.poll(async () => (await storedWorkspace(page))?.nodes.length).toBe(3);
+  const created = (await storedWorkspace(page))!.nodes.find((item: { name: string }) => item.name === "New account");
+  expect(created.content).not.toMatch(/synthetic-password|JBSWY3DPEHPK3PXP/);
+  expect((await storedWorkspace(page))!.references).toContainEqual({ sourceNodeId: created.id, targetNodeId: nodes[1].id });
+  expect((await storedWorkspace(page))!.layout).toContainEqual({ nodeId: created.id, x: 760, y: 520 });
+  await page.keyboard.press("Escape");
+  await page.getByTestId("graph-canvas").click({ position: { x: 30, y: 30 } });
+  await page.keyboard.press("Control+z");
+  await expect.poll(async () => (await storedWorkspace(page))?.nodes.length).toBe(2);
+});
+
+test("canvas browsing back and forward do not consume data undo history", async ({ page }) => {
+  await openSyntheticWorkspace(page, gridNodes(2, 1));
+  const canvasSelect = page.getByTestId("canvas-select");
+  const first = await canvasSelect.inputValue();
+  await page.getByTestId("canvas-create").click();
+  const second = await canvasSelect.inputValue();
+  await canvasSelect.selectOption(first);
+  await page.getByTestId("canvas-nav-back").click();
+  await expect(canvasSelect).toHaveValue(second);
+  await page.getByTestId("canvas-nav-forward").click();
+  await expect(canvasSelect).toHaveValue(first);
+  await page.getByTestId("graph-canvas").click({ position: { x: 30, y: 30 } });
+  await page.keyboard.press("Alt+ArrowLeft");
+  await expect(canvasSelect).toHaveValue(second);
+  await page.keyboard.press("Alt+ArrowRight");
+  await expect(canvasSelect).toHaveValue(first);
+  await page.keyboard.press("Control+z");
+  await expect(canvasSelect.locator("option")).toHaveCount(1);
+  await expect(canvasSelect).toHaveValue(first);
+  await page.reload();
+  await expect(page.getByTestId("canvas-nav-back")).toBeDisabled();
+  await expect(page.getByTestId("canvas-nav-forward")).toBeDisabled();
+});
+
 test("middle drag pans from a node without moving it", async ({ page }) => {
   const nodes = gridNodes(2, 1);
   await openSyntheticWorkspace(page, nodes);
