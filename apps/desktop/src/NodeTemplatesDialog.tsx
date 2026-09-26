@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { readNodeTemplates, templateFromNode, prepareTemplateContent, type NodeTemplate } from "./nodeTemplates";
 import type { WorkspaceSnapshot } from "./workspaceData";
@@ -18,6 +18,12 @@ export default function NodeTemplatesDialog({ workspace, onClose, onSave, onDele
   const [nodeName, setNodeName] = useState("");
   const [skipMissing, setSkipMissing] = useState(false);
   const [error, setError] = useState(false);
+  const dialogRef = useRef<HTMLElement>(null);
+  useEffect(() => {
+    const previous = document.activeElement;
+    dialogRef.current?.querySelector<HTMLSelectElement>("select")?.focus();
+    return () => { if (previous instanceof HTMLElement && previous.isConnected) previous.focus(); };
+  }, []);
   let templates: NodeTemplate[] = [];
   let invalidLibrary = false;
   try { templates = readNodeTemplates(workspace); } catch { invalidLibrary = true; }
@@ -25,7 +31,16 @@ export default function NodeTemplatesDialog({ workspace, onClose, onSave, onDele
   const nodeById = new Map(workspace.nodes.map((item) => [item.id, item]));
   const missing = selected?.targetNodeIds.filter((id) => !nodeById.has(id)) ?? [];
   return <div className="modal-backdrop">
-    <section aria-modal="true" aria-labelledby="node-template-title" role="dialog" className="node-template-dialog">
+    <section ref={dialogRef} aria-modal="true" aria-labelledby="node-template-title" role="dialog" className="confirmation-dialog node-template-dialog"
+      onKeyDown={(event) => {
+        if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); onClose(); return; }
+        if (event.key !== "Tab") return;
+        const controls = Array.from(dialogRef.current?.querySelectorAll<HTMLElement>('button:not(:disabled),input:not(:disabled),select:not(:disabled),textarea:not(:disabled)') ?? []);
+        const first = controls[0];
+        const last = controls[controls.length - 1];
+        if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+        else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+      }}>
       <h2 id="node-template-title">{t("nodeTemplates.title")}</h2>
       <p>{t("nodeTemplates.warning")}</p>
       {(error || invalidLibrary) && <p role="alert">{t("nodeTemplates.invalid")}</p>}

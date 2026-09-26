@@ -870,6 +870,9 @@ test("node templates clear marked values and create one undoable positioned node
   nodes[0].content = 'Login\n[[li:secret note="Service password"]]synthetic-password[[/li]]\n[[li:totp]]JBSWY3DPEHPK3PXP[[/li]]';
   await openSyntheticWorkspace(page, nodes, [{ sourceNodeId: nodes[0].id, targetNodeId: nodes[1].id }]);
   await page.getByTestId("templates-open").click();
+  await expect(page.getByTestId("template-source")).toBeFocused();
+  await page.keyboard.press("Control+f");
+  await expect(page.getByTestId("template-source")).toBeFocused();
   await page.getByTestId("template-source").selectOption(nodes[0].id);
   await expect(page.getByTestId("template-content")).not.toHaveValue(/synthetic-password|JBSWY3DPEHPK3PXP/);
   await expect(page.getByTestId("template-content")).toHaveValue(/note="Service password"/);
@@ -902,6 +905,11 @@ test("canvas browsing back and forward do not consume data undo history", async 
   await page.getByTestId("canvas-create").click();
   const second = await canvasSelect.inputValue();
   await canvasSelect.selectOption(first);
+  await node(page, syntheticId(1)).click({ button: "right" });
+  await expect(page.locator(".graph-context-menu")).toBeVisible();
+  await page.evaluate(() => window.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowLeft", altKey: true, bubbles: true, cancelable: true })));
+  await expect(canvasSelect).toHaveValue(first);
+  await page.keyboard.press("Escape");
   await page.getByTestId("canvas-nav-back").click();
   await expect(canvasSelect).toHaveValue(second);
   await page.getByTestId("canvas-nav-forward").click();

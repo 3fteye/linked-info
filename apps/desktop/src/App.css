@@ -6053,8 +6053,6 @@ h1 {
   width: min(720px, 90vw);
   max-height: 85vh;
   overflow: auto;
-  background: var(--surface, #fff);
-  color: var(--text, #20242b);
   padding: 24px;
   border-radius: 12px;
 }

@@ -827,7 +827,7 @@ function App({
     const navigate = (event: KeyboardEvent) => {
       if (!event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || event.repeat ||
           (event.key !== "ArrowLeft" && event.key !== "ArrowRight") || activeView !== "canvas" ||
-          editingNodeId !== null || templatesOpen || document.querySelector('[role="dialog"]') !== null ||
+          editingNodeId !== null || templatesOpen || document.querySelector('[role="dialog"],[role="listbox"],.graph-context-menu') !== null ||
           (event.target instanceof Element && event.target.closest('input,textarea,select,button,[contenteditable="true"]'))) return;
       event.preventDefault();
       event.stopPropagation();
@@ -877,6 +877,7 @@ function App({
   useEffect(() => {
     const focusNodeSearch = (event: KeyboardEvent) => {
       if (
+        document.querySelector('[role="dialog"]') !== null ||
         !(event.ctrlKey || event.metaKey) ||
         event.altKey ||
         event.key.toLowerCase() !== "f"
