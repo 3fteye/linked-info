@@ -1,6 +1,16 @@
 export const resources = {
   "zh-CN": {
     translation: {
+      canvasNavigation: { back: "返回位置（Alt+←）", forward: "前进位置（Alt+→）" },
+      nodeTemplates: {
+        title: "节点模板", source: "从节点准备模板", choose: "请选择", unnamed: "未命名节点",
+        warning: "已标记的秘密和 TOTP 值会清空；未标记的密码及注释中的秘密无法自动识别，请在保存前检查。每份模板正文最多 4096 字符、128 条引用，模板库总计不超过 64 KiB。",
+        invalid: "无法保存或创建：请检查名称冲突、容量、失效引用及标记格式。若刚填写了秘密值，已清空，请重新检查预览。",
+        preview: "检查并编辑模板", name: "模板名称", content: "模板正文", references: "复用的出站引用（取消勾选可排除）",
+        save: "保存模板", saved: "已保存的模板", edit: "编辑模板", remove: "删除模板（可撤销）",
+        nodeName: "新节点名称（可空）", skipMissing: "确认跳过 {{count}} 个已删除的引用目标",
+        place: "到画布选择创建位置", placement: "点击空白画布创建模板节点；空格拖动可平移，滚轮可缩放。",
+      },
       app: {
         name: "关联信息",
       },
@@ -1053,6 +1063,16 @@ export const resources = {
   },
   "en-US": {
     translation: {
+      canvasNavigation: { back: "Back (Alt+Left)", forward: "Forward (Alt+Right)" },
+      nodeTemplates: {
+        title: "Node templates", source: "Prepare from node", choose: "Choose", unnamed: "Unnamed node",
+        warning: "Marked secrets and TOTP values are cleared. Unmarked passwords and secrets in notes cannot be detected automatically; review before saving. Each template allows 4096 content characters and 128 references; the library is limited to 64 KiB.",
+        invalid: "Cannot save or create: check name conflicts, capacity, missing references and marker syntax. Newly entered secret values have been cleared; review the preview again.",
+        preview: "Review and edit template", name: "Template name", content: "Template content", references: "Outgoing references to reuse (uncheck to exclude)",
+        save: "Save template", saved: "Saved templates", edit: "Edit template", remove: "Delete template (undoable)",
+        nodeName: "New node name (optional)", skipMissing: "Confirm skipping {{count}} deleted reference targets",
+        place: "Choose creation position on canvas", placement: "Click empty canvas to create the template node; Space-drag pans and the wheel zooms.",
+      },
       app: {
         name: "Linked Info",
       },
