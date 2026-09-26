@@ -1868,6 +1868,44 @@ test("document import requires and records an explicit canvas position", async (
   ).toContainText(/760.*520/u);
 });
 
+test("import placement keeps Space drag and wheel zoom without selecting a point", async ({ page }) => {
+  const nodes = gridNodes(1, 1);
+  await openSyntheticWorkspace(page, nodes);
+  await page.getByTestId("document-import-open").click();
+  await page.getByTestId("document-import-choose-placement").click();
+  const canvas = page.getByTestId("graph-canvas");
+  await expect(canvas).toHaveAttribute("data-point-selection", "true");
+  const bounds = await canvas.boundingBox();
+  expect(bounds).not.toBeNull();
+
+  await page.keyboard.down("Space");
+  await expect(canvas).toHaveAttribute("data-space-pan", "true");
+  await page.mouse.move(bounds!.x + 500, bounds!.y + 350);
+  await page.mouse.down();
+  await page.mouse.move(bounds!.x + 600, bounds!.y + 400, { steps: 8 });
+  await page.mouse.up();
+  await expect
+    .poll(async () => (await storedWorkspace(page))?.viewport?.x ?? 0)
+    .toBeCloseTo(100, 0);
+  await expect(canvas).toHaveAttribute("data-point-selection", "true");
+
+  await page.mouse.wheel(0, -240);
+  await expect
+    .poll(async () => (await storedWorkspace(page))?.viewport?.zoom ?? 0)
+    .toBeGreaterThan(1);
+  await expect(canvas).toHaveAttribute("data-point-selection", "true");
+  expect((await storedWorkspace(page))?.layout).toEqual(
+    nodes.map((item) => ({ nodeId: item.id, x: item.x, y: item.y })),
+  );
+
+  await page.keyboard.up("Space");
+  await expect(canvas).toHaveAttribute("data-space-pan", "false");
+  await canvas.click({ position: { x: 760, y: 520 } });
+  await expect(
+    page.getByTestId("document-import-placement-status"),
+  ).toHaveAttribute("data-selected", "true");
+});
+
 test("canvas select all, remove, undo, redo and context menu share one keyboard model", async ({
   page,
 }) => {
