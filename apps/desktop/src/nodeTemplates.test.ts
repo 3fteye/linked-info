@@ -48,8 +48,8 @@ describe("node templates", () => {
     const source = fixture();
     const base = writeNodeTemplates(source, [templateFromNode(source, sourceId, templateId)]);
     const next = instantiateNodeTemplate(base, templateId, newId, "New account", { x: 700, y: 500 }, false);
-    expect(next.nodes.at(-1)?.content).not.toContain("synthetic-password");
-    expect(next.references.at(-1)).toEqual({ sourceNodeId: newId, targetNodeId: targetId });
+    expect(next.nodes[next.nodes.length - 1]?.content).not.toContain("synthetic-password");
+    expect(next.references[next.references.length - 1]).toEqual({ sourceNodeId: newId, targetNodeId: targetId });
     expect(next.view.canvases[0].layout).toEqual([{ nodeId: newId, x: 700, y: 500 }]);
     expect(next.nodes[0]).toBe(base.nodes[0]);
     expect(readNodeTemplates(next)).toEqual(readNodeTemplates(base));

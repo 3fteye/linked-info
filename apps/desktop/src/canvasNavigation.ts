@@ -17,7 +17,7 @@ export interface CanvasNavigationHistory {
 }
 export const emptyCanvasNavigation = (): CanvasNavigationHistory => ({ back: [], forward: [] });
 export function rememberCanvasLocation(history: CanvasNavigationHistory, location: CanvasNavigationLocation): CanvasNavigationHistory {
-  const last = history.back.at(-1);
+  const last = history.back[history.back.length - 1];
   return {
     back: (last !== undefined && JSON.stringify(last) === JSON.stringify(location)
       ? history.back : [...history.back, location]).slice(-100),
