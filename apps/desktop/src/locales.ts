@@ -1,6 +1,9 @@
+import { featureDemoLocales } from "./featureDemoLocales";
 export const resources = {
   "zh-CN": {
     translation: {
+      featureDemos: featureDemoLocales["zh-CN"],
+      featureDemoControls: { synthetic: "虚构示意场景，不读取或修改你的工作区；布局为教学简图。", previous: "上一步", next: "下一步", play: "播放", pause: "暂停", reduced: "已遵循减少动态效果设置，可手动逐步查看。", step: "第 {{current}} / {{total}} 步", node0: "记录 A", node1: "共享节点 B", node2: "记录 C", card0: "说明与用途", card1: "可被多个记录引用", card2: "独立记录", selectedText: "演示选区（非密钥）", code: "123 456（演示）", destination: "位置标记" },
       canvasNavigation: { back: "返回位置（Alt+←）", forward: "前进位置（Alt+→）" },
       nodeTemplates: {
         title: "节点模板", source: "从节点准备模板", choose: "请选择", unnamed: "未命名节点",
@@ -242,6 +245,14 @@ export const resources = {
       },
       canvasShortcuts: {
         items: {
+          templates: { action: "节点模板", keys: "顶部“节点模板”" },
+          browse: { action: "浏览返回 / 前进", keys: "Alt+← / Alt+→" },
+          bookmarks: { action: "位置书签", keys: "画布栏书签入口" },
+          references: { action: "建立 / 删除引用", keys: "连接端 / Delete" },
+          incoming: { action: "反向引用浏览", keys: "节点被引用数量" },
+          markers: { action: "秘密 / TOTP 与注释", keys: "编辑中选中文字" },
+          smartQueue: { action: "智能引用队列", keys: "选择节点后分析" },
+          filterContext: { action: "筛选与空间上下文", keys: "搜索 / 引用筛选 / 透明度" },
           cancel: { action: "取消操作、清除选择或筛选", keys: "Esc" },
           contextMenu: { action: "上下文菜单", keys: "右键" },
           edit: { action: "编辑唯一选中的节点", keys: "Enter / F2 / 双击" },
@@ -1063,6 +1074,8 @@ export const resources = {
   },
   "en-US": {
     translation: {
+      featureDemos: featureDemoLocales["en-US"],
+      featureDemoControls: { synthetic: "Fictional schematic only. Your workspace is never read or changed.", previous: "Previous", next: "Next", play: "Play", pause: "Pause", reduced: "Reduced motion is enabled. Use the steps manually.", step: "Step {{current}} / {{total}}", node0: "Record A", node1: "Shared node B", node2: "Record C", card0: "Description and purpose", card1: "Referenced by several records", card2: "Independent record", selectedText: "Example selection (not a key)", code: "123 456 (demo)", destination: "Position marker" },
       canvasNavigation: { back: "Back (Alt+Left)", forward: "Forward (Alt+Right)" },
       nodeTemplates: {
         title: "Node templates", source: "Prepare from node", choose: "Choose", unnamed: "Unnamed node",
@@ -1310,6 +1323,14 @@ export const resources = {
       canvasShortcuts: {
         items: {
           cancel: { action: "Cancel an action, selection, or filters", keys: "Esc" },
+          templates: { action: "Node templates", keys: "Toolbar: Node templates" },
+          browse: { action: "Browsing back / forward", keys: "Alt+Left / Alt+Right" },
+          bookmarks: { action: "Position bookmarks", keys: "Canvas bookmark control" },
+          references: { action: "Connect / remove references", keys: "Connector / Delete" },
+          incoming: { action: "Incoming references", keys: "Incoming-reference count" },
+          markers: { action: "Secret / TOTP and notes", keys: "Select text while editing" },
+          smartQueue: { action: "Smart-reference queue", keys: "Select nodes and analyze" },
+          filterContext: { action: "Filters and spatial context", keys: "Search / references / opacity" },
           contextMenu: { action: "Context menu", keys: "Right click" },
           edit: { action: "Edit the sole selected node", keys: "Enter / F2 / double click" },
           resize: { action: "Resize a node", keys: "Select, then drag an edge or corner" },

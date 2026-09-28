@@ -7135,6 +7135,7 @@ function App({
                     </div>
                   </div>
                   <CanvasOperationGuide
+                    active={activeView === "settings" && activeSettingsTab === "operations"}
                     items={canvasOperationItems}
                     pickerLabel={t("canvasShortcuts.pickerLabel")}
                     replayLabel={t("canvasShortcuts.replay")}

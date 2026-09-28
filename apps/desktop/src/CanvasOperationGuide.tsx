@@ -1,17 +1,21 @@
 import { Keyboard, MousePointer2, RotateCcw, Search } from "lucide-react";
 import { useState } from "react";
 import type { CanvasOperationItem, CanvasOperationId } from "./canvasOperations";
+import { featureOperationIds, type FeatureOperationId } from "./canvasOperations";
+import FeatureOperationDemo from "./FeatureOperationDemo";
 
 interface CanvasOperationGuideProps {
   items: readonly CanvasOperationItem[];
   pickerLabel: string;
   replayLabel: string;
+  active?: boolean;
 }
 
 export default function CanvasOperationGuide({
   items,
   pickerLabel,
   replayLabel,
+  active = true,
 }: CanvasOperationGuideProps) {
   const [selectedId, setSelectedId] = useState<CanvasOperationId>(
     items[0]?.id ?? "pan",
@@ -68,7 +72,10 @@ export default function CanvasOperationGuide({
             <span>{replayLabel}</span>
           </button>
         </header>
-        <div
+        {featureOperationIds.some((id) => id === selectedItem.id) ? (
+          active && <FeatureOperationDemo key={`${selectedItem.id}-${replayIteration}`}
+            id={selectedItem.id as FeatureOperationId} replayIteration={replayIteration} />
+        ) : <div
           aria-label={`${selectedItem.action} · ${selectedItem.keys}`}
           className="canvas-operation-stage"
           data-demo={selectedItem.id}
@@ -120,7 +127,7 @@ export default function CanvasOperationGuide({
             fill="currentColor"
             size={22}
           />
-        </div>
+        </div>}
       </section>
     </div>
   );
