@@ -40,7 +40,7 @@ export const featureDemoLocales: Record<"zh-CN" | "en-US", Record<FeatureOperati
     },
     smartQueue: {
       0: { title: "选中记录", body: "选择需要分析的一个或多个节点，加入智能引用分析队列。演示不会启动模型。", scene: "三条演示任务待处理" },
-      1: { title: "后台顺序处理", body: "本地模型按顺序处理队列。分析期间可以继续其他编辑，不必一直等在结果窗口。", scene: "第一条处理完成，继续下一条" },
+      1: { title: "后台顺序处理", body: "队列按顺序处理，使用设置里选定的本地或远端模型。选择远端时，相关文本会发送给服务商。分析期间可以继续其他编辑。", scene: "第一条处理完成，继续下一条" },
       2: { title: "检查建议", body: "以手动接受模式为例：查看每条记录的候选引用，确认是否符合语义。结果可以复用，但节点或模型变化后可能需要重新分析。", scene: "手动模式：候选尚未成为引用" },
       3: { title: "应用引用", body: "按当前接受方式应用候选，建立对已有节点的引用。自动引用阈值可在设置中配置；不要把匹配分数当作事实保证。", scene: "确认后才形成正式引用" },
     },
@@ -90,7 +90,7 @@ export const featureDemoLocales: Record<"zh-CN" | "en-US", Record<FeatureOperati
     },
     smartQueue: {
       0: { title: "Select records", body: "Add one or more selected nodes to the smart-reference analysis queue. This demo does not start a model.", scene: "Three fictional tasks are queued" },
-      1: { title: "Process in the background", body: "Local models process tasks sequentially. Continue other editing while analysis runs rather than waiting in the results window.", scene: "The first task finishes; the next starts" },
+      1: { title: "Process in the background", body: "The queue runs sequentially using the local or remote models selected in settings. Remote mode sends relevant text to the provider. You can continue editing while analysis runs.", scene: "The first task finishes; the next starts" },
       2: { title: "Review suggestions", body: "In manual acceptance mode, check each record's candidates. Results can be reused, but changed nodes or models may require fresh analysis.", scene: "Manual mode: suggestions are not references" },
       3: { title: "Apply references", body: "Apply candidates using the configured acceptance mode to reference existing nodes. Automatic thresholds are in settings; a similarity score is not a factual guarantee.", scene: "Accepted candidates become references" },
     },
