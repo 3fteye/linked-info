@@ -987,7 +987,7 @@ test("canvas shortcut help exposes the complete interaction baseline", async ({ 
   await toggle.click();
   await expect(toggle).toHaveAttribute("aria-expanded", "true");
   await expect(popover).toBeVisible();
-  await expect(popover.locator("dt")).toHaveCount(14);
+  await expect(popover.locator("dt")).toHaveCount(22);
   const canvasBounds = await page.getByTestId("graph-canvas").boundingBox();
   const popoverBounds = await popover.boundingBox();
   expect(canvasBounds).not.toBeNull();
@@ -2051,7 +2051,7 @@ test("settings operation guide demonstrates every shared canvas control", async 
   const stage = page.getByTestId("canvas-operation-stage");
   await expect(page.getByTestId("operation-guide-heading")).toBeVisible();
   await expect(guide).toBeVisible();
-  await expect(guide.locator(".canvas-operation-picker-item")).toHaveCount(14);
+  await expect(guide.locator(".canvas-operation-picker-item")).toHaveCount(22);
 
   const animatedTargets: Record<string, string> = {
     pan: ".canvas-operation-scene",
@@ -2102,7 +2102,84 @@ test("settings operation guide demonstrates every shared canvas control", async 
   await expect(page.getByTestId("operation-guide-heading")).toHaveText(
     "Operation guide",
   );
-  await expect(guide.locator(".canvas-operation-picker-item")).toHaveCount(14);
+  await expect(guide.locator(".canvas-operation-picker-item")).toHaveCount(22);
+});
+
+test("expanded canvas help remains scrollable in a small window", async ({ page }) => {
+  await page.setViewportSize({ width: 760, height: 560 });
+  await openSyntheticWorkspace(page, gridNodes(1, 1));
+  await page.getByTestId("canvas-shortcuts-toggle").click();
+  const help = page.getByTestId("canvas-shortcuts-popover");
+  await expect(help.locator("dt")).toHaveCount(22);
+  await expect.poll(async () => {
+    const canvas = await page.getByTestId("graph-canvas").boundingBox();
+    const bounds = await help.boundingBox();
+    return bounds!.y + bounds!.height <= canvas!.y + canvas!.height;
+  }).toBe(true);
+  expect(await help.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
+  const before = (await storedWorkspace(page))?.viewport;
+  await help.hover();
+  await page.mouse.wheel(0, 1800);
+  await expect.poll(() => help.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+  await help.locator("dt").last().scrollIntoViewIfNeeded();
+  const last = await help.locator("dt").last().boundingBox();
+  const bounds = await help.boundingBox();
+  expect(last!.y + last!.height).toBeLessThanOrEqual(bounds!.y + bounds!.height);
+  expect((await storedWorkspace(page))?.viewport).toEqual(before);
+});
+
+test("feature demos show all steps without mutating the workspace", async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await openSyntheticWorkspace(page, gridNodes(2, 1));
+  await page.getByTestId("settings-navigation").click();
+  await page.getByTestId("settings-tab-operations").click();
+  const before = await storedWorkspace(page);
+  const guide = page.getByTestId("canvas-operation-guide");
+  for (const language of ["zh-CN", "en-US"]) {
+    await page.getByTestId("settings-tab-general").click();
+    await page.locator(`[data-language="${language}"]`).click();
+    await page.getByTestId("settings-tab-operations").click();
+    for (const id of ["templates", "browse", "bookmarks", "references", "incoming", "markers", "smartQueue", "filterContext"]) {
+      await guide.locator(`[data-operation="${id}"]`).click();
+      const stage = page.getByTestId("canvas-operation-stage");
+      await expect(stage).toHaveAttribute("data-step", "0");
+      await expect(stage).toHaveAttribute("data-playing", "false");
+      await expect(stage.getByTestId("demo-play")).toBeDisabled();
+      for (let step = 0; step < 4; step++) {
+        await expect(stage).toHaveAttribute("data-step", String(step));
+        await expect(stage.locator(".feature-demo-explanation")).not.toContainText("featureDemos.");
+        await expect(stage.locator(".feature-demo-explanation strong")).toContainText(`${step + 1} / 4`);
+        if (step < 3) await stage.getByTestId("demo-next").click();
+      }
+      await expect(stage.getByTestId("demo-next")).toBeDisabled();
+      await stage.getByTestId("demo-previous").click();
+      await expect(stage).toHaveAttribute("data-step", "2");
+      await guide.getByTestId("canvas-operation-replay").click();
+      await expect(stage).toHaveAttribute("data-step", "0");
+    }
+  }
+  expect(await storedWorkspace(page)).toEqual(before);
+});
+
+test("feature demo playback stops outside the operations page", async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  await openSyntheticWorkspace(page, gridNodes(1, 1));
+  await page.getByTestId("settings-navigation").click();
+  await page.getByTestId("settings-tab-operations").click();
+  await page.locator('[data-operation="templates"]').click();
+  const stage = page.getByTestId("canvas-operation-stage");
+  await expect(stage).toHaveAttribute("data-playing", "true");
+  await expect(stage).toHaveAttribute("data-step", "1", { timeout: 6000 });
+  await stage.getByTestId("demo-play").click();
+  await expect(stage).toHaveAttribute("data-playing", "false");
+  await page.getByTestId("settings-tab-general").click();
+  await expect(page.locator(".feature-operation-demo")).toHaveCount(0);
+  await page.getByTestId("settings-tab-operations").click();
+  await expect(stage).toHaveAttribute("data-step", "0");
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await expect(stage).toHaveAttribute("data-playing", "false");
+  await expect(stage.getByTestId("demo-play")).toBeDisabled();
+  await expect(stage.locator(".feature-demo-card").first()).toHaveCSS("transition-duration", "0s");
 });
 
 test("settings operation guide honors reduced motion", async ({ page }) => {
