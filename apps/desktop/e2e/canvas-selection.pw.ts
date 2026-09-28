@@ -2105,6 +2105,29 @@ test("settings operation guide demonstrates every shared canvas control", async 
   await expect(guide.locator(".canvas-operation-picker-item")).toHaveCount(22);
 });
 
+test("expanded canvas help remains scrollable in a small window", async ({ page }) => {
+  await page.setViewportSize({ width: 760, height: 560 });
+  await openSyntheticWorkspace(page, gridNodes(1, 1));
+  await page.getByTestId("canvas-shortcuts-toggle").click();
+  const help = page.getByTestId("canvas-shortcuts-popover");
+  await expect(help.locator("dt")).toHaveCount(22);
+  await expect.poll(async () => {
+    const canvas = await page.getByTestId("graph-canvas").boundingBox();
+    const bounds = await help.boundingBox();
+    return bounds!.y + bounds!.height <= canvas!.y + canvas!.height;
+  }).toBe(true);
+  expect(await help.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
+  const before = (await storedWorkspace(page))?.viewport;
+  await help.hover();
+  await page.mouse.wheel(0, 1800);
+  await expect.poll(() => help.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+  await help.locator("dt").last().scrollIntoViewIfNeeded();
+  const last = await help.locator("dt").last().boundingBox();
+  const bounds = await help.boundingBox();
+  expect(last!.y + last!.height).toBeLessThanOrEqual(bounds!.y + bounds!.height);
+  expect((await storedWorkspace(page))?.viewport).toEqual(before);
+});
+
 test("feature demos show all steps without mutating the workspace", async ({ page }) => {
   await page.emulateMedia({ reducedMotion: "reduce" });
   await openSyntheticWorkspace(page, gridNodes(2, 1));

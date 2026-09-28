@@ -1438,6 +1438,22 @@ export default function GraphCanvas({
     useNodesState<InformationFlowNode>([]);
   const spacePanActive = useKeyPress("Space");
   const [shortcutHelpOpen, setShortcutHelpOpen] = useState(false);
+  const shortcutPopoverRef = useRef<HTMLElement>(null);
+  const [shortcutHelpMaxHeight, setShortcutHelpMaxHeight] = useState(240);
+  useEffect(() => {
+    if (!shortcutHelpOpen || containerRef.current === null) return;
+    const container = containerRef.current;
+    const update = () => {
+      const popover = shortcutPopoverRef.current;
+      if (popover === null) return;
+      setShortcutHelpMaxHeight(Math.max(0, container.getBoundingClientRect().bottom - popover.getBoundingClientRect().top - 8));
+    };
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(container);
+    window.addEventListener("resize", update);
+    return () => { observer.disconnect(); window.removeEventListener("resize", update); };
+  }, [shortcutHelpOpen]);
   const flowNodesRef = useRef(flowNodes);
   flowNodesRef.current = flowNodes;
   const layoutRef = useRef(layout);
@@ -3878,8 +3894,10 @@ export default function GraphCanvas({
           {shortcutHelpOpen && (
             <aside
               aria-label={labels.shortcuts.title}
-              className="canvas-shortcuts-popover"
+              className="canvas-shortcuts-popover nowheel nopan"
               data-testid="canvas-shortcuts-popover"
+              ref={shortcutPopoverRef}
+              style={{ maxHeight: shortcutHelpMaxHeight }}
             >
               <strong>{labels.shortcuts.title}</strong>
               <dl>

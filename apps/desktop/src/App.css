@@ -1968,6 +1968,8 @@ h1 {
 }
 
 .canvas-shortcuts-popover {
+  overflow-y: auto;
+  overscroll-behavior: contain;
   position: absolute;
   top: 42px;
   right: 0;
