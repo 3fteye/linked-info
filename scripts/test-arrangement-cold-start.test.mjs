@@ -4,11 +4,64 @@ import test from "node:test";
 import { EventEmitter } from "node:events";
 import { runInNewContext } from "node:vm";
 import { installStartupDiagnostics, observeStartupDom, resourceBucket, sanitizeDom,
-  validateStartupDiagnostic } from "../apps/desktop/e2e/fixtures/startup-diagnostics.mjs";
+  validateStartupDiagnostic, installArrangementDiagnostics, validateArrangementDiagnostic } from "../apps/desktop/e2e/fixtures/startup-diagnostics.mjs";
 import {
   arrangementScratchPrefix, runColdStartValidation, validateColdStartResult, startupDiagnosticsFromReport,
-  collectColdStartEvidence,
+  collectColdStartEvidence, arrangementDiagnosticsFromReport,
 } from "./test-arrangement-cold-start.mjs";
+
+test("arrangement observations preserve worker lifecycle without reading payloads", async () => {
+  let tick = 0;
+  const page = new EventEmitter();
+  page.evaluate = async () => ({ dialogPresent: false, applyDisabled: false, dialogErrorPresent: false,
+    secret: "not retained" });
+  const finish = await installArrangementDiagnostics(page, () => tick);
+  const worker = new EventEmitter();
+  worker.url = () => "http://127.0.0.1:1423/src/canvasAutoLayout.worker.ts?token=private";
+  worker.evaluate = async () => true;
+  tick = 10; page.emit("worker", worker);
+  await Promise.resolve();
+  tick = 15; worker.emit("close");
+  tick = 20;
+  const result = validateArrangementDiagnostic(await finish());
+  assert.equal(result.createdMs, 10);
+  assert.equal(result.handlerReadyMs, 10);
+  assert.equal(result.closedMs, 15);
+  assert.equal(result.workerCount, 1);
+  assert.equal(result.dialogPresent, false);
+  assert.equal(worker.listenerCount("close"), 0);
+  assert.equal(page.listenerCount("worker"), 0);
+  assert.ok(!JSON.stringify(result).includes("private"));
+  const source = report(true);
+  const attempt = source.suites[0].specs[0].tests[0].results[0];
+  assert.equal(arrangementDiagnosticsFromReport(source), null);
+  assert.throws(() => arrangementDiagnosticsFromReport(source, true));
+  attempt.attachments = [{ name: "arrangement-diagnostics", contentType: "application/json",
+    body: Buffer.from(JSON.stringify(result)).toString("base64") }];
+  assert.deepEqual(arrangementDiagnosticsFromReport(source, true), result);
+  assert.throws(() => validateArrangementDiagnostic({ ...result, message: "private" }));
+});
+
+test("arrangement probes are bounded, ignore foreign workers and discard late completion", async () => {
+  let resolveProbe;
+  const page = new EventEmitter();
+  page.evaluate = async () => { throw new Error("synthetic private error"); };
+  const finish = await installArrangementDiagnostics(page, () => 100);
+  const foreign = { url: () => "https://foreign.example/src/canvasAutoLayout.worker.ts" };
+  page.emit("worker", foreign);
+  const worker = new EventEmitter();
+  worker.url = () => "http://127.0.0.1:1423/src/canvasAutoLayout.worker.ts";
+  worker.evaluate = () => new Promise((resolve) => { resolveProbe = resolve; });
+  for (let i = 0; i < 5; i += 1) page.emit("worker", worker);
+  const result = validateArrangementDiagnostic(await finish());
+  const before = JSON.stringify(result);
+  resolveProbe(true);
+  await Promise.resolve();
+  assert.equal(JSON.stringify(result), before);
+  assert.equal(result.domAvailable, false);
+  assert.equal(result.workerCount, 4);
+  assert.equal(result.dropped, 1);
+});
 
 test("startup resource categorization never keeps paths, queries or foreign origins", () => {
   assert.equal(resourceBucket("http://127.0.0.1:1423/src/main.tsx?secret=private"), "entry");

@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { validateStartupDiagnostic } from "../apps/desktop/e2e/fixtures/startup-diagnostics.mjs";
+import { validateStartupDiagnostic, validateArrangementDiagnostic } from "../apps/desktop/e2e/fixtures/startup-diagnostics.mjs";
 
 const arrangementTitle = "smart arrangement normalizes width and saves one undoable layout step";
 const navigationFailure = "A canvas action must not reload the document or discard its undo history";
@@ -31,12 +31,29 @@ export function startupDiagnosticsFromReport(report) {
 export function collectColdStartEvidence(variant, status, report, log) {
   const failures = [];
   let startup = null;
+  let arrangement = null;
   // Test outcome is primary; missing diagnostics must not short-circuit it.
   try { validateColdStartResult(variant, status, report, log); }
   catch (error) { failures.push(error); }
   try { startup = startupDiagnosticsFromReport(report); }
   catch (error) { failures.push(error); }
-  return { startup, failures };
+  try { arrangement = arrangementDiagnosticsFromReport(report, startup !== null && status === 0); }
+  catch (error) { failures.push(error); }
+  return { startup, arrangement, failures };
+}
+
+export function arrangementDiagnosticsFromReport(report, required = false) {
+  const attempts = allSpecs(report?.suites ?? []).flatMap((spec) => spec.tests.flatMap((entry) => entry.results));
+  const attachments = attempts.flatMap((attempt) => (attempt.attachments ?? [])
+    .filter((entry) => entry.name === "arrangement-diagnostics"));
+  if (attachments.length === 0 && !required) return null;
+  assert.equal(attachments.length, 1, "Exactly one arrangement diagnostic is required");
+  assert.equal(attachments[0].contentType, "application/json");
+  assert.ok(typeof attachments[0].body === "string" && attachments[0].body.length < 16_384);
+  let value;
+  try { value = JSON.parse(Buffer.from(attachments[0].body, "base64").toString("utf8")); }
+  catch { throw new Error("Invalid arrangement diagnostic encoding"); }
+  return validateArrangementDiagnostic(value);
 }
 
 export function arrangementScratchPrefix(desktop) {
@@ -138,8 +155,9 @@ function main() {
     try {
       if (result.error) throw result.error;
       report = JSON.parse(readFileSync(reportPath, "utf8"));
-      const { startup, failures } = collectColdStartEvidence(variant, result.status, report, log);
+      const { startup, arrangement, failures } = collectColdStartEvidence(variant, result.status, report, log);
       if (startup !== null) process.stdout.write(`${JSON.stringify({ variant, sample, startup })}\n`);
+      if (arrangement !== null) process.stdout.write(`${JSON.stringify({ variant, sample, arrangement })}\n`);
       if (failures.length > 0) {
         throw new AggregateError(failures, failures.map((failure) => failure.message).join("\n"));
       }

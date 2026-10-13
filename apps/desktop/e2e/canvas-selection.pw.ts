@@ -1,5 +1,5 @@
 import { expect, test, type Frame, type Page } from "@playwright/test";
-import { installStartupDiagnostics } from "./fixtures/startup-diagnostics.mjs";
+import { installStartupDiagnostics, installArrangementDiagnostics } from "./fixtures/startup-diagnostics.mjs";
 
 interface SyntheticNode {
   content?: string;
@@ -2755,8 +2755,22 @@ test("smart arrangement normalizes width and saves one undoable layout step", as
     await expect(dialog).toBeVisible();
     await expect(dialog.locator("select").nth(0)).toHaveValue("auto");
     await expect(dialog.locator("select").nth(1)).toHaveValue("equal-width");
-    await dialog.getByRole("button", { name: "Apply arrangement" }).click();
-    await expect(dialog).toBeHidden();
+    const finishArrangement = process.env.LINKED_INFO_ARRANGEMENT_VARIANT
+      ? await installArrangementDiagnostics(page) : null;
+    try {
+      await dialog.getByRole("button", { name: "Apply arrangement" }).click();
+      await expect(dialog).toBeHidden();
+    } finally {
+      if (finishArrangement !== null) {
+        try {
+          await testInfo.attach("arrangement-diagnostics", {
+            body: JSON.stringify(await finishArrangement()), contentType: "application/json",
+          });
+        } catch {
+          // Keep the interaction failure; the runner validates evidence separately.
+        }
+      }
+    }
 
     await expect
       .poll(async () => {
