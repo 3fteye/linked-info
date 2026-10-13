@@ -22,6 +22,9 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::system_unlock::{SystemUnlockProvider, SystemUnlockState};
 
+#[cfg(all(test, windows))]
+use tests::recovery_crash::{Stage as RecoveryCrashStage, checkpoint as recovery_checkpoint};
+
 #[cfg(unix)]
 use std::fs::File;
 
@@ -3775,6 +3778,9 @@ fn install_prepared_workspace_restore(
     )
     .map_err(|error| error.to_string())?;
 
+    #[cfg(all(test, windows))]
+    recovery_checkpoint(store, RecoveryCrashStage::InstallPreparedPrimary);
+
     let mut migrated_slots = vec![WorkspaceFileSlot::Primary];
     if let Some(recovery) = recovery {
         let recovery = normalize_storage_envelope(&recovery).map_err(|error| error.to_string())?;
@@ -3788,6 +3794,9 @@ fn install_prepared_workspace_restore(
         migrated_slots.push(WorkspaceFileSlot::Recovery);
     }
 
+    #[cfg(all(test, windows))]
+    recovery_checkpoint(store, RecoveryCrashStage::InstallPreparedRecovery);
+
     let metadata = VaultMetadata {
         format: VAULT_FORMAT.to_owned(),
         version: CRYPTO_VERSION,
@@ -3800,6 +3809,8 @@ fn install_prepared_workspace_restore(
     let serialized = serde_json::to_vec(&metadata).map_err(|error| error.to_string())?;
     write_atomically(&store.pending_vault_path(), &serialized)
         .map_err(|error| error.to_string())?;
+    #[cfg(all(test, windows))]
+    recovery_checkpoint(store, RecoveryCrashStage::InstallPreparedVault);
     finish_pending_migration(store, &metadata)?;
     verify_encrypted_store(store, &metadata, &prepared.data_key)?;
     Ok(*prepared.data_key)
@@ -3827,12 +3838,22 @@ fn finish_pending_migration(
                 return Err("workspace_vault_pending_workspace_missing".to_owned());
             }
         }
+        #[cfg(all(test, windows))]
+        recovery_checkpoint(
+            store,
+            match slot {
+                WorkspaceFileSlot::Primary => RecoveryCrashStage::InstallPrimary,
+                WorkspaceFileSlot::Recovery => RecoveryCrashStage::InstallRecovery,
+            },
+        );
     }
     finish_pending_backup_migration(store)?;
     if store.pending_vault_path().is_file() {
         replace_file(&store.pending_vault_path(), &store.vault_path())
             .map_err(|error| error.to_string())?;
     }
+    #[cfg(all(test, windows))]
+    recovery_checkpoint(store, RecoveryCrashStage::InstallVault);
     sync_parent_directory(&store.base_directory).map_err(|error| error.to_string())
 }
 
@@ -3901,10 +3922,16 @@ fn finish_pending_workspace_recovery_swap(store: &WorkspaceFileStore) -> Result<
 
     write_atomically(&store.path(WorkspaceFileSlot::Primary), &primary)
         .map_err(|error| error.to_string())?;
+    #[cfg(all(test, windows))]
+    recovery_checkpoint(store, RecoveryCrashStage::SwapPrimary);
     write_atomically(&store.path(WorkspaceFileSlot::Recovery), &recovery)
         .map_err(|error| error.to_string())?;
+    #[cfg(all(test, windows))]
+    recovery_checkpoint(store, RecoveryCrashStage::SwapRecovery);
     sync_parent_directory(&store.base_directory).map_err(|error| error.to_string())?;
     remove_workspace_subdirectory(&store.base_directory, &store.recovery_swap_directory())?;
+    #[cfg(all(test, windows))]
+    recovery_checkpoint(store, RecoveryCrashStage::SwapCleaned);
     sync_parent_directory(&store.base_directory).map_err(|error| error.to_string())?;
     Ok(true)
 }
@@ -3947,14 +3974,20 @@ fn prepare_workspace_recovery_swap(
             next_primary.as_bytes(),
         )
         .map_err(|error| error.to_string())?;
+        #[cfg(all(test, windows))]
+        recovery_checkpoint(store, RecoveryCrashStage::SwapPreparedPrimary);
         write_atomically(
             &store.recovery_swap_slot_path(WorkspaceFileSlot::Recovery),
             next_recovery.as_bytes(),
         )
         .map_err(|error| error.to_string())?;
+        #[cfg(all(test, windows))]
+        recovery_checkpoint(store, RecoveryCrashStage::SwapPreparedRecovery);
         let serialized = serde_json::to_vec(&manifest).map_err(|error| error.to_string())?;
         write_atomically(&store.recovery_swap_manifest_path(), &serialized)
             .map_err(|error| error.to_string())?;
+        #[cfg(all(test, windows))]
+        recovery_checkpoint(store, RecoveryCrashStage::SwapManifest);
         sync_parent_directory(&directory).map_err(|error| error.to_string())?;
         sync_parent_directory(&store.base_directory).map_err(|error| error.to_string())
     })();
@@ -5627,6 +5660,8 @@ pub(crate) fn sync_parent_directory(_parent: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     mod backup_roundtrip;
+    #[cfg(windows)]
+    pub(super) mod recovery_crash;
 
     use super::*;
     use std::cell::{Cell, RefCell};
