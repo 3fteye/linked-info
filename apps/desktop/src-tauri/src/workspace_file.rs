@@ -7030,9 +7030,26 @@ mod tests {
         ));
         assert!(state.prepared_restore.lock().unwrap().is_some());
 
+        {
+            let mut pending = state.prepared_restore.lock().unwrap();
+            pending.as_mut().unwrap().expires_at_milliseconds = 0;
+        }
+        assert!(matches!(
+            take_prepared_workspace_restore(&state, restore_id),
+            Err(error) if error == "workspace_restore_not_prepared"
+        ));
+        {
+            let mut pending = state.prepared_restore.lock().unwrap();
+            assert_eq!(pending.as_ref().unwrap().id, restore_id);
+            pending.as_mut().unwrap().expires_at_milliseconds = u64::MAX;
+        }
         let taken = take_prepared_workspace_restore(&state, restore_id).unwrap();
         assert_eq!(taken.id, restore_id);
         assert!(state.prepared_restore.lock().unwrap().is_none());
+        assert!(matches!(
+            take_prepared_workspace_restore(&state, restore_id),
+            Err(error) if error == "workspace_restore_not_prepared"
+        ));
     }
 
     #[test]
@@ -7551,6 +7568,8 @@ mod tests {
 
         prepare_workspace_recovery_swap(&store, Some(&data_key)).unwrap();
         assert!(finish_pending_workspace_recovery_swap(&store).unwrap());
+        drop(store);
+        let store = WorkspaceFileStore::new(directory.clone());
 
         assert_eq!(
             store
@@ -7563,6 +7582,22 @@ mod tests {
                 .read(WorkspaceFileSlot::Recovery, Some(&data_key))
                 .unwrap(),
             Some(normalize_storage_envelope(&primary).unwrap())
+        );
+        prepare_workspace_recovery_swap(&store, Some(&data_key)).unwrap();
+        assert!(finish_pending_workspace_recovery_swap(&store).unwrap());
+        drop(store);
+        let reopened = WorkspaceFileStore::new(directory.clone());
+        assert_eq!(
+            reopened
+                .read(WorkspaceFileSlot::Primary, Some(&data_key))
+                .unwrap(),
+            Some(normalize_storage_envelope(&primary).unwrap())
+        );
+        assert_eq!(
+            reopened
+                .read(WorkspaceFileSlot::Recovery, Some(&data_key))
+                .unwrap(),
+            Some(normalize_storage_envelope(&recovery).unwrap())
         );
         fs::remove_dir_all(directory).unwrap();
     }

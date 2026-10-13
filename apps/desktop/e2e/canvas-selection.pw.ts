@@ -199,34 +199,56 @@ async function openSyntheticMultiCanvasWorkspace(
   );
 }
 
+function recoverySnapshot(nodes: SyntheticNode[]) {
+  return {
+    version: 6,
+    nodes: nodes.map((entry) => ({
+      id: entry.id, name: entry.name,
+      content: entry.content ?? `Generated test content for ${entry.name}`,
+    })),
+    references: nodes.slice(1).map((entry) => ({ sourceNodeId: nodes[0].id, targetNodeId: entry.id })),
+    view: {
+      activeCanvasId: "00000000-0000-4000-8000-000000000001",
+      canvases: [{
+        id: "00000000-0000-4000-8000-000000000001", name: "Main",
+        layout: nodes.map((entry) => ({ nodeId: entry.id, x: entry.x, y: entry.y, width: 320, height: 200 })),
+        viewport: { x: 0, y: 0, zoom: 1 },
+      }],
+      contentProcessorByNodeId: {},
+      extensionMetadata: {
+        "dev.example.restore-test": {
+          schemaVersion: 1, workspace: { source: nodes[0].name },
+          byNodeId: { [nodes[0].id]: { retained: true } },
+        },
+      },
+      bookmarks: [], timeline: null,
+    },
+  };
+}
+
+async function storedSnapshot(page: Page, key: string) {
+  return page.evaluate((storageKey) => JSON.parse(localStorage.getItem(storageKey) ?? "null"), key);
+}
+
 async function openSyntheticWorkspaceWithRecovery(
   page: Page,
   current: SyntheticNode[],
   recovery: SyntheticNode[],
 ) {
+  const snapshots = { primary: recoverySnapshot(current), recovery: recoverySnapshot(recovery) };
   await page.addInitScript(
-    ({ primaryKey, recoveryKey, currentNodes, recoveryNodes }) => {
-      const snapshot = (nodes: SyntheticNode[]) => ({
-        version: 2,
-        nodes: nodes.map((node) => ({
-          id: node.id,
-          name: node.name,
-          content: node.content ?? `Generated test content for ${node.name}`,
-        })),
-        layout: nodes.map((node) => ({ nodeId: node.id, x: node.x, y: node.y })),
-        references: [],
-        viewport: { x: 0, y: 0, zoom: 1 },
-        view: { contentProcessorByNodeId: {} },
-      });
+    ({ primaryKey, recoveryKey, snapshots }) => {
+      const seedMarker = `${primaryKey}.playwright-recovery-seeded`;
+      if (sessionStorage.getItem(seedMarker) === "true") return;
       localStorage.clear();
-      localStorage.setItem(primaryKey, JSON.stringify(snapshot(currentNodes)));
-      localStorage.setItem(recoveryKey, JSON.stringify(snapshot(recoveryNodes)));
+      localStorage.setItem(primaryKey, JSON.stringify(snapshots.primary));
+      localStorage.setItem(recoveryKey, JSON.stringify(snapshots.recovery));
+      sessionStorage.setItem(seedMarker, "true");
     },
     {
       primaryKey: workspaceStorageKey,
       recoveryKey: workspaceRecoveryStorageKey,
-      currentNodes: current,
-      recoveryNodes: recovery,
+      snapshots,
     },
   );
   await page.goto("/");
@@ -234,6 +256,7 @@ async function openSyntheticWorkspaceWithRecovery(
     "data-flow-ready",
     "true",
   );
+  return snapshots;
 }
 
 function node(page: Page, id: string) {
@@ -2282,7 +2305,8 @@ test("preserved extension metadata can be cleared separately and undone", async 
     });
 });
 
-test("confirmed workspace replacement can be undone and redone from disk", async ({
+for (const finalState of ["restored", "undone", "redone"] as const) {
+test(`workspace replacement persists the ${finalState} state across reload`, async ({
   page,
 }) => {
   const current = {
@@ -2297,7 +2321,10 @@ test("confirmed workspace replacement can be undone and redone from disk", async
     x: 520,
     y: 320,
   };
-  await openSyntheticWorkspaceWithRecovery(page, [current], [recovery]);
+  const snapshots = await openSyntheticWorkspaceWithRecovery(page,
+    [current, { id: syntheticId(905), name: "Current referenced node", x: 470, y: 120 }],
+    [recovery, { id: syntheticId(906), name: "Recovery referenced node", x: 160, y: 40 }],
+  );
 
   await page.getByTestId("settings-navigation").click();
   await page.getByTestId("settings-tab-dataSecurity").click();
@@ -2308,12 +2335,54 @@ test("confirmed workspace replacement can be undone and redone from disk", async
   await expect(node(page, recovery.id)).toBeVisible();
   await expect(node(page, current.id)).toHaveCount(0);
   await expect(page.getByTestId("app-notice-action")).toBeVisible();
-  await page.keyboard.press("Control+z");
+  if (finalState !== "restored") {
+    await page.keyboard.press("Control+z");
+    await expect(node(page, current.id)).toBeVisible();
+    await expect(node(page, recovery.id)).toHaveCount(0);
+  }
+  if (finalState === "redone") {
+    await page.keyboard.press("Control+y");
+    await expect(node(page, recovery.id)).toBeVisible();
+    await expect(node(page, current.id)).toHaveCount(0);
+  }
+  const expected = finalState === "undone" ? current : recovery;
+  const absent = finalState === "undone" ? recovery : current;
+  const expectedPrimary = finalState === "undone" ? snapshots.primary : snapshots.recovery;
+  const expectedRecovery = finalState === "undone" ? snapshots.recovery : snapshots.primary;
+  await expect.poll(() => storedSnapshot(page, workspaceStorageKey)).toEqual(expectedPrimary);
+  await expect.poll(() => storedSnapshot(page, workspaceRecoveryStorageKey)).toEqual(expectedRecovery);
+  await page.reload();
+  await expect(page.getByTestId("graph-canvas")).toHaveAttribute("data-flow-ready", "true");
+  await expect(node(page, expected.id)).toBeVisible();
+  await expect(node(page, absent.id)).toHaveCount(0);
+  expect(await storedSnapshot(page, workspaceStorageKey)).toEqual(expectedPrimary);
+  expect(await storedSnapshot(page, workspaceRecoveryStorageKey)).toEqual(expectedRecovery);
+});
+}
+
+test("cancelling workspace replacement preserves both stored snapshots after reload", async ({ page }) => {
+  const current = { id: syntheticId(903), name: "Cancel current", x: 120, y: 100 };
+  const recovery = { id: syntheticId(904), name: "Cancel candidate", x: 520, y: 320 };
+  const snapshots = await openSyntheticWorkspaceWithRecovery(page,
+    [current, { id: syntheticId(907), name: "Cancel current referenced", x: 470, y: 120 }],
+    [recovery, { id: syntheticId(908), name: "Cancel candidate referenced", x: 160, y: 40 }],
+  );
+  await page.getByTestId("settings-navigation").click();
+  await page.getByTestId("settings-tab-dataSecurity").click();
+  expect(await storedSnapshot(page, workspaceStorageKey)).toEqual(snapshots.primary);
+  expect(await storedSnapshot(page, workspaceRecoveryStorageKey)).toEqual(snapshots.recovery);
+  await page.getByTestId("restore-recovery-workspace").click();
+  const preview = page.getByTestId("workspace-restore-preview");
+  await expect(preview).toBeVisible();
+  await preview.locator(".restore-preview-actions").getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(preview).toHaveCount(0);
+  expect(await storedSnapshot(page, workspaceStorageKey)).toEqual(snapshots.primary);
+  expect(await storedSnapshot(page, workspaceRecoveryStorageKey)).toEqual(snapshots.recovery);
+  await page.reload();
   await expect(node(page, current.id)).toBeVisible();
   await expect(node(page, recovery.id)).toHaveCount(0);
-  await page.keyboard.press("Control+y");
-  await expect(node(page, recovery.id)).toBeVisible();
-  await expect(node(page, current.id)).toHaveCount(0);
+  expect(await storedSnapshot(page, workspaceStorageKey)).toEqual(snapshots.primary);
+  expect(await storedSnapshot(page, workspaceRecoveryStorageKey)).toEqual(snapshots.recovery);
 });
 
 test("workspace replacement preview can inspect every canvas", async ({ page }) => {
