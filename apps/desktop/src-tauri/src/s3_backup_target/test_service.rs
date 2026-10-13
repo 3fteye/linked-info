@@ -4,7 +4,10 @@ use std::{
     collections::BTreeMap,
     io::{Read, Write},
     net::{TcpListener, TcpStream},
-    sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     thread::{self, JoinHandle},
     time::Duration,
 };
@@ -43,13 +46,22 @@ impl Service {
                 }
             }
         });
-        Self { endpoint, state, stopped, thread: Some(thread) }
+        Self {
+            endpoint,
+            state,
+            stopped,
+            thread: Some(thread),
+        }
     }
 
     pub(crate) fn target(&self) -> S3BackupTarget {
         S3BackupTarget {
-            client: Client::builder().no_proxy().redirect(Policy::none())
-                .timeout(Duration::from_secs(3)).build().unwrap(),
+            client: Client::builder()
+                .no_proxy()
+                .redirect(Policy::none())
+                .timeout(Duration::from_secs(3))
+                .build()
+                .unwrap(),
             endpoint: self.endpoint.clone(),
             region: "us-east-1".into(),
             bucket: "synthetic-backups".into(),
@@ -75,13 +87,19 @@ impl Drop for Service {
     fn drop(&mut self) {
         self.stopped.store(true, Ordering::SeqCst);
         let result = self.thread.take().unwrap().join();
-        if !thread::panicking() { result.unwrap(); }
+        if !thread::panicking() {
+            result.unwrap();
+        }
     }
 }
 
 fn serve(mut stream: TcpStream, state: &Mutex<State>) {
-    stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
-    stream.set_write_timeout(Some(Duration::from_secs(3))).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    stream
+        .set_write_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
     let mut request = Vec::new();
     let header_end = loop {
         let mut chunk = [0; 4096];
@@ -100,8 +118,13 @@ fn serve(mut stream: TcpStream, state: &Mutex<State>) {
     let url = Url::parse(&format!("http://127.0.0.1{}", parts.next().unwrap())).unwrap();
     let headers = header.to_ascii_lowercase();
     assert!(headers.contains("authorization: aws4-hmac-sha256 "));
-    let length = headers.lines().find_map(|line| line.strip_prefix("content-length:")
-        .map(|value| value.trim().parse::<usize>().unwrap())).unwrap_or(0);
+    let length = headers
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("content-length:")
+                .map(|value| value.trim().parse::<usize>().unwrap())
+        })
+        .unwrap_or(0);
     assert!(length <= 1024 * 1024);
     while request.len() - header_end < length {
         let mut chunk = [0; 4096];
@@ -111,28 +134,46 @@ fn serve(mut stream: TcpStream, state: &Mutex<State>) {
     }
     let payload = &request[header_end..header_end + length];
     let query = url.query_pairs().collect::<BTreeMap<_, _>>();
-    let key = url.path().strip_prefix("/synthetic-backups").unwrap().trim_start_matches('/');
+    let key = url
+        .path()
+        .strip_prefix("/synthetic-backups")
+        .unwrap()
+        .trim_start_matches('/');
     let mut state = state.lock().unwrap();
     let (status, body) = match method {
         "PUT" => {
-            if std::mem::take(&mut state.interrupt_upload) { return; }
+            if std::mem::take(&mut state.interrupt_upload) {
+                return;
+            }
             assert!(!state.objects.contains_key(key));
             state.objects.insert(key.to_owned(), payload.to_vec());
             (200, Vec::new())
         }
         "GET" if query.contains_key("list-type") || query.contains_key("versions") => {
-            let prefix = query.get("prefix").map(|value| value.as_ref()).unwrap_or("");
+            let prefix = query
+                .get("prefix")
+                .map(|value| value.as_ref())
+                .unwrap_or("");
             let versions = query.contains_key("versions");
-            let root = if versions { "ListVersionsResult" } else { "ListBucketResult" };
+            let root = if versions {
+                "ListVersionsResult"
+            } else {
+                "ListBucketResult"
+            };
             let mut xml = format!("<{root}><IsTruncated>false</IsTruncated>");
             for (name, bytes) in &state.objects {
-                if !name.starts_with(prefix) { continue; }
+                if !name.starts_with(prefix) {
+                    continue;
+                }
                 // Production keys are restricted to ASCII UUID/hash/path segments.
                 assert!(!name.contains(['&', '<', '>']));
                 xml.push_str(&if versions {
                     format!("<Version><Key>{name}</Key><VersionId>null</VersionId></Version>")
                 } else {
-                    format!("<Contents><Key>{name}</Key><Size>{}</Size></Contents>", bytes.len())
+                    format!(
+                        "<Contents><Key>{name}</Key><Size>{}</Size></Contents>",
+                        bytes.len()
+                    )
                 });
             }
             xml.push_str(&format!("</{root}>"));
@@ -140,19 +181,29 @@ fn serve(mut stream: TcpStream, state: &Mutex<State>) {
         }
         "GET" => match state.objects.get(key).cloned() {
             Some(mut bytes) => {
-                if std::mem::take(&mut state.corrupt_download) { bytes[0] ^= 1; }
+                if std::mem::take(&mut state.corrupt_download) {
+                    bytes[0] ^= 1;
+                }
                 (200, bytes)
             }
             None => (404, Vec::new()),
         },
         "DELETE" => {
-            assert_eq!(query.get("versionId").map(|value| value.as_ref()), Some("null"));
+            assert_eq!(
+                query.get("versionId").map(|value| value.as_ref()),
+                Some("null")
+            );
             assert!(state.objects.remove(key).is_some());
             (204, Vec::new())
         }
         _ => panic!("unsupported synthetic S3 method"),
     };
     drop(state);
-    write!(stream, "HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
+    write!(
+        stream,
+        "HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    )
+    .unwrap();
     stream.write_all(&body).unwrap();
 }
