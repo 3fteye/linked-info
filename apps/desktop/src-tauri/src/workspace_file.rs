@@ -5626,6 +5626,8 @@ pub(crate) fn sync_parent_directory(_parent: &Path) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    mod backup_roundtrip;
+
     use super::*;
     use std::cell::{Cell, RefCell};
     use std::collections::HashMap;
