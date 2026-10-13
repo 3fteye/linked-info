@@ -206,6 +206,8 @@ async function openSyntheticWorkspaceWithRecovery(
 ) {
   await page.addInitScript(
     ({ primaryKey, recoveryKey, currentNodes, recoveryNodes }) => {
+      const seedMarker = `${primaryKey}.playwright-recovery-seeded`;
+      if (sessionStorage.getItem(seedMarker) === "true") return;
       const snapshot = (nodes: SyntheticNode[]) => ({
         version: 2,
         nodes: nodes.map((node) => ({
@@ -221,6 +223,7 @@ async function openSyntheticWorkspaceWithRecovery(
       localStorage.clear();
       localStorage.setItem(primaryKey, JSON.stringify(snapshot(currentNodes)));
       localStorage.setItem(recoveryKey, JSON.stringify(snapshot(recoveryNodes)));
+      sessionStorage.setItem(seedMarker, "true");
     },
     {
       primaryKey: workspaceStorageKey,
@@ -2282,7 +2285,8 @@ test("preserved extension metadata can be cleared separately and undone", async 
     });
 });
 
-test("confirmed workspace replacement can be undone and redone from disk", async ({
+for (const finalState of ["restored", "undone", "redone"] as const) {
+test(`workspace replacement persists the ${finalState} state across reload`, async ({
   page,
 }) => {
   const current = {
@@ -2308,12 +2312,52 @@ test("confirmed workspace replacement can be undone and redone from disk", async
   await expect(node(page, recovery.id)).toBeVisible();
   await expect(node(page, current.id)).toHaveCount(0);
   await expect(page.getByTestId("app-notice-action")).toBeVisible();
-  await page.keyboard.press("Control+z");
+  if (finalState !== "restored") {
+    await page.keyboard.press("Control+z");
+    await expect(node(page, current.id)).toBeVisible();
+    await expect(node(page, recovery.id)).toHaveCount(0);
+  }
+  if (finalState === "redone") {
+    await page.keyboard.press("Control+y");
+    await expect(node(page, recovery.id)).toBeVisible();
+    await expect(node(page, current.id)).toHaveCount(0);
+  }
+  const expected = finalState === "undone" ? current : recovery;
+  const absent = finalState === "undone" ? recovery : current;
+  await expect.poll(async () => (await storedWorkspace(page))?.nodes.map((entry: { id: string }) => entry.id))
+    .toEqual([expected.id]);
+  const persisted = await storedWorkspace(page);
+  await page.reload();
+  await expect(page.getByTestId("graph-canvas")).toHaveAttribute("data-flow-ready", "true");
+  await expect(node(page, expected.id)).toBeVisible();
+  await expect(node(page, absent.id)).toHaveCount(0);
+  const reloaded = await storedWorkspace(page);
+  expect(reloaded.nodes).toEqual(persisted.nodes);
+  expect(reloaded.references).toEqual(persisted.references);
+  expect(reloaded.layout).toEqual(persisted.layout);
+});
+}
+
+test("cancelling workspace replacement preserves both stored snapshots after reload", async ({ page }) => {
+  const current = { id: syntheticId(903), name: "Cancel current", x: 120, y: 100 };
+  const recovery = { id: syntheticId(904), name: "Cancel candidate", x: 520, y: 320 };
+  await openSyntheticWorkspaceWithRecovery(page, [current], [recovery]);
+  await page.getByTestId("settings-navigation").click();
+  await page.getByTestId("settings-tab-dataSecurity").click();
+  const before = await storedWorkspace(page);
+  const recoveryBefore = await page.evaluate((key) => localStorage.getItem(key), workspaceRecoveryStorageKey);
+  await page.getByTestId("restore-recovery-workspace").click();
+  const preview = page.getByTestId("workspace-restore-preview");
+  await expect(preview).toBeVisible();
+  await preview.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(preview).toHaveCount(0);
+  expect((await storedWorkspace(page)).nodes).toEqual(before.nodes);
+  expect(await page.evaluate((key) => localStorage.getItem(key), workspaceRecoveryStorageKey)).toBe(recoveryBefore);
+  await page.reload();
   await expect(node(page, current.id)).toBeVisible();
   await expect(node(page, recovery.id)).toHaveCount(0);
-  await page.keyboard.press("Control+y");
-  await expect(node(page, recovery.id)).toBeVisible();
-  await expect(node(page, current.id)).toHaveCount(0);
+  expect((await storedWorkspace(page)).layout).toEqual(before.layout);
+  expect(await page.evaluate((key) => localStorage.getItem(key), workspaceRecoveryStorageKey)).toBe(recoveryBefore);
 });
 
 test("workspace replacement preview can inspect every canvas", async ({ page }) => {

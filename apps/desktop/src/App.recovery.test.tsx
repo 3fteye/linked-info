@@ -58,10 +58,15 @@ vi.mock("./GraphCanvas", () => ({
 }));
 
 vi.mock("./WorkspaceRestorePreview", () => ({
-  default: (props: { onConfirm: () => void }) => (
-    <button data-testid="workspace-restore-confirm" onClick={props.onConfirm} type="button">
-      confirm
-    </button>
+  default: (props: { onConfirm: () => void; onCancel: () => void }) => (
+    <>
+      <button data-testid="workspace-restore-confirm" onClick={props.onConfirm} type="button">
+        confirm
+      </button>
+      <button data-testid="workspace-restore-cancel" onClick={props.onCancel} type="button">
+        cancel
+      </button>
+    </>
   ),
 }));
 
@@ -426,7 +431,7 @@ describe("App recovery transaction boundary", () => {
     });
   }
 
-  async function beginEncryptedBootstrapRestore(): Promise<void> {
+  async function beginEncryptedBootstrapRestore(expectPreview = true): Promise<void> {
     await click("settings-navigation");
     await click("settings-tab-dataSecurity");
     await click("import-workspace");
@@ -451,7 +456,7 @@ describe("App recovery transaction boundary", () => {
       );
       await Promise.resolve();
     });
-    await find("workspace-restore-confirm");
+    if (expectPreview) await find("workspace-restore-confirm");
   }
 
   beforeEach(() => {
@@ -1549,7 +1554,82 @@ describe("App recovery transaction boundary", () => {
     );
     expect(exclusiveTransactions).toBe(1);
     expect(updateStatus).toHaveBeenCalledWith(restoredStatus);
+    await act(async () => { root.unmount(); });
+    expect(primary.nodes).toEqual(authoritative.nodes);
+    root = createRoot(container);
+    await renderApp({ persistence, security, updateStatus, status: restoredStatus });
+    expect((await find("mock-canvas")).textContent).toBe("Authoritative Rust workspace");
+    expect(primary.nodes).toEqual(authoritative.nodes);
   });
+
+  it.each(["password", "cancel", "expired"] as const)(
+    "preserves the current workspace through a bootstrap restore %s outcome",
+    async (outcome) => {
+      const original = workspace(currentNodeId, "Synthetic unchanged workspace");
+      const preview = workspace(recoveryNodeId, "Synthetic restore candidate");
+      let primary = original;
+      const save = vi.fn<WorkspacePersistence["save"]>(async (next) => { primary = next; });
+      const preserve = vi.fn(async () => {});
+      const persistence: WorkspacePersistence = {
+        async load() { return { status: "ready", workspace: primary }; },
+        async loadRecovery() { return { status: "missing" }; },
+        preserveForRecovery: preserve,
+        runExclusiveTransaction(transaction) { return transaction(); },
+        save,
+        async swapWithRecovery() { throw new Error("unexpected recovery swap"); },
+      };
+      workspaceFileHarness.imported = {
+        name: "synthetic-encrypted-backup.json",
+        text: JSON.stringify({ format: "linked-info-encrypted-workspace-export", version: 1 }),
+      };
+      const cancelRestore = vi.fn(async () => {});
+      const commitRestore = vi.fn<WorkspaceSecurity["commitRestore"]>(async () => {
+        throw new Error("workspace_restore_not_prepared");
+      });
+      const prepareRestore = vi.fn<WorkspaceSecurity["prepareRestore"]>(async () => {
+        if (outcome === "password") throw new Error("workspace_vault_invalid_password");
+        return { id: "synthetic-prepared-restore", plaintext: workspaceExport(preview) };
+      });
+      const security = { ...unavailableWorkspaceSecurity, prepareRestore, cancelRestore, commitRestore };
+      const updateStatus = vi.fn();
+      await renderApp({ persistence, security, updateStatus });
+      await find("mock-canvas");
+      await beginEncryptedBootstrapRestore(outcome !== "password");
+      expect(prepareRestore).toHaveBeenCalledOnce();
+      if (outcome === "password") {
+        await waitUntil(() => document.querySelector(".security-error") !== null);
+        expect(document.querySelector(".security-error")?.textContent).toBe(i18n.t("security.invalidPassword"));
+        expect(document.querySelector('[data-testid="workspace-restore-confirm"]')).toBeNull();
+        const password = document.querySelector<HTMLInputElement>("#encrypted-import-password");
+        const cancel = Array.from(password?.form?.querySelectorAll<HTMLButtonElement>("button") ?? [])
+          .find((button) => button.type === "button");
+        expect(cancel).toBeDefined();
+        await act(async () => { cancel?.click(); });
+        expect(document.querySelector("#encrypted-import-password")).toBeNull();
+      } else if (outcome === "cancel") {
+        await click("workspace-restore-cancel");
+        expect(cancelRestore).toHaveBeenCalledExactlyOnceWith("synthetic-prepared-restore");
+      } else {
+        await click("workspace-restore-confirm");
+        await waitUntil(() => commitRestore.mock.calls.length === 1);
+        expect(commitRestore).toHaveBeenCalledWith("synthetic-prepared-restore");
+        expect(updateStatus).not.toHaveBeenCalled();
+        await click("workspace-restore-cancel");
+        await waitUntil(() => container.textContent?.includes(i18n.t("backup.importFailed")) === true);
+      }
+      if (outcome !== "expired") expect(commitRestore).not.toHaveBeenCalled();
+      expect(preserve).not.toHaveBeenCalled();
+      expect(primary.nodes).toEqual(original.nodes);
+      expect(save.mock.calls.every(([next]) => next.nodes[0]?.id === currentNodeId)).toBe(true);
+      await act(async () => { root.unmount(); });
+      expect(primary.nodes).toEqual(original.nodes);
+      root = createRoot(container);
+      await renderApp({ persistence, security, updateStatus });
+      expect((await find("mock-canvas")).textContent).toBe("Synthetic unchanged workspace");
+      expect(document.querySelector("#encrypted-import-password")).toBeNull();
+      expect(document.querySelector('[data-testid="workspace-restore-confirm"]')).toBeNull();
+    },
+  );
 
   it("unmounts stale workspace state when bootstrap restore committed but locked", async () => {
     const preview = workspace(recoveryNodeId, "Committed workspace");
