@@ -3650,6 +3650,30 @@ h1 {
   font-size: 11px;
 }
 
+.offsite-status-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr));
+  gap: 8px;
+  margin-block: 6px;
+}
+
+.offsite-status-grid section {
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid #e1e6e2;
+  border-radius: 6px;
+}
+
+.offsite-status-grid p {
+  margin: 5px 0;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.offsite-status-grid small {
+  display: block;
+}
+
 .offsite-automatic-settings {
   display: flex;
   align-items: center;

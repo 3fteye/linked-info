@@ -1,3 +1,4 @@
+import OffsiteBackupStatus from "./OffsiteBackupStatus";
 import {
   useDeferredValue,
   useEffect,
@@ -7997,6 +7998,10 @@ function App({
                           </label>
                           {selectedOffsiteTarget !== null && (
                             <div className="offsite-target-summary">
+                              <OffsiteBackupStatus
+                                target={selectedOffsiteTarget}
+                                formatDate={(time) => formatBackupDate(time, activeLanguage)}
+                              />
                               <strong>{selectedOffsiteTarget.endpoint}</strong>
                               <small>
                                 {t("offsiteBackup.s3TargetLocation", {
@@ -8006,31 +8011,6 @@ function App({
                                   region: selectedOffsiteTarget.region ?? "",
                                   bucket: selectedOffsiteTarget.bucket ?? "",
                                   prefix: selectedOffsiteTarget.prefix ?? "",
-                                })}
-                              </small>
-                              <small>
-                                {t("offsiteBackup.targetStatus", {
-                                  uploaded:
-                                    selectedOffsiteTarget.lastUploadAtMs === null
-                                      ? t("offsiteBackup.never")
-                                      : formatBackupDate(
-                                          selectedOffsiteTarget.lastUploadAtMs,
-                                          activeLanguage,
-                                        ),
-                                  verified:
-                                    selectedOffsiteTarget.lastVerifiedAtMs === null
-                                      ? t("offsiteBackup.never")
-                                      : formatBackupDate(
-                                          selectedOffsiteTarget.lastVerifiedAtMs,
-                                          activeLanguage,
-                                        ),
-                                  restored:
-                                    selectedOffsiteTarget.lastRestoreTestAtMs === null
-                                      ? t("offsiteBackup.never")
-                                      : formatBackupDate(
-                                          selectedOffsiteTarget.lastRestoreTestAtMs,
-                                          activeLanguage,
-                                        ),
                                 })}
                               </small>
                               {selectedOffsiteTarget.maximumUploadBytes !== null && (
