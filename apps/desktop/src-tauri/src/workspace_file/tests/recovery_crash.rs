@@ -297,7 +297,10 @@ fn interrupt(kind: &str, stage: Stage) -> (PathBuf, String) {
     let deadline = Instant::now() + Duration::from_secs(60);
     while !root.join("reached").is_file() {
         assert!(child.0.try_wait().unwrap().is_none(), "child exited early");
-        assert!(Instant::now() < deadline, "checkpoint not reached: {stage:?}");
+        assert!(
+            Instant::now() < deadline,
+            "checkpoint not reached: {stage:?}"
+        );
         std::thread::sleep(Duration::from_millis(20));
     }
     assert_eq!(fs::read(root.join("reached")).unwrap(), b"reached");
@@ -376,7 +379,10 @@ fn crash_child() {
     let token = std::env::var("LI_CRASH_TOKEN").unwrap();
     uuid::Uuid::parse_str(&token).unwrap();
     assert_eq!(root.parent(), Some(runner.as_path()));
-    assert_eq!(root, runner.join(format!("linked-info-recovery-crash-{token}")));
+    assert_eq!(
+        root,
+        runner.join(format!("linked-info-recovery-crash-{token}"))
+    );
     assert_eq!(fs::read(root.join("owner")).unwrap(), token.as_bytes());
     let stage_name = std::env::var("LI_CRASH_STAGE").unwrap();
     let stage = *STAGES
