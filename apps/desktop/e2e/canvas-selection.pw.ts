@@ -1,4 +1,5 @@
 import { expect, test, type Frame, type Page } from "@playwright/test";
+import { installStartupDiagnostics, installArrangementDiagnostics } from "./fixtures/startup-diagnostics.mjs";
 
 interface SyntheticNode {
   content?: string;
@@ -62,6 +63,7 @@ async function openSyntheticWorkspace(
   references: SyntheticReference[] = [],
   viewport: SyntheticViewport = { x: 0, y: 0, zoom: 1 },
   extensionMetadata: Record<string, unknown> | null = null,
+  onNavigated?: () => void,
 ) {
   await page.addInitScript(
     ({
@@ -113,6 +115,7 @@ async function openSyntheticWorkspace(
     },
   );
   await page.goto("/");
+  onNavigated?.();
   await expect(page.getByTestId("graph-canvas")).toBeVisible();
   await expect(page.getByTestId("graph-canvas")).toHaveAttribute(
     "data-flow-ready",
@@ -2718,16 +2721,31 @@ test("finishing an automatic size change pushes only overlapping neighbors", asy
 
 test("smart arrangement normalizes width and saves one undoable layout step", async ({
   page,
-}) => {
+}, testInfo) => {
   const arrangedNodes = gridNodes(3, 1).map((item, index) => ({
     ...item,
     content: `Synthetic arrangement content ${"x".repeat(index === 2 ? 2_000 : index * 30)}`,
   }));
   const originalLayout = arrangedNodes.map(({ id, x, y }) => ({ nodeId: id, x, y }));
-  await openSyntheticWorkspace(page, arrangedNodes, [
-    { sourceNodeId: arrangedNodes[0].id, targetNodeId: arrangedNodes[1].id },
-    { sourceNodeId: arrangedNodes[1].id, targetNodeId: arrangedNodes[2].id },
-  ]);
+  const finishStartup = process.env.LINKED_INFO_ARRANGEMENT_VARIANT
+    ? await installStartupDiagnostics(page) : null;
+  try {
+    await openSyntheticWorkspace(page, arrangedNodes, [
+      { sourceNodeId: arrangedNodes[0].id, targetNodeId: arrangedNodes[1].id },
+      { sourceNodeId: arrangedNodes[1].id, targetNodeId: arrangedNodes[2].id },
+    ], undefined, null, () => finishStartup?.markNavigationComplete());
+  } finally {
+    if (finishStartup !== null) {
+      try {
+        await testInfo.attach("startup-diagnostics", {
+          body: JSON.stringify(await finishStartup()), contentType: "application/json",
+        });
+      } catch {
+        // Preserve the original startup assertion. The cold-start runner separately
+        // rejects missing diagnostics, so collection failure cannot become a pass.
+      }
+    }
+  }
   await withoutUnexpectedNavigation(page, async (assertNavigationStable) => {
     await page.keyboard.press("Control+a");
     await node(page, arrangedNodes[1].id).click({
@@ -2739,8 +2757,22 @@ test("smart arrangement normalizes width and saves one undoable layout step", as
     await expect(dialog).toBeVisible();
     await expect(dialog.locator("select").nth(0)).toHaveValue("auto");
     await expect(dialog.locator("select").nth(1)).toHaveValue("equal-width");
-    await dialog.getByRole("button", { name: "Apply arrangement" }).click();
-    await expect(dialog).toBeHidden();
+    const finishArrangement = process.env.LINKED_INFO_ARRANGEMENT_VARIANT
+      ? await installArrangementDiagnostics(page) : null;
+    try {
+      await dialog.getByRole("button", { name: "Apply arrangement" }).click();
+      await expect(dialog).toBeHidden();
+    } finally {
+      if (finishArrangement !== null) {
+        try {
+          await testInfo.attach("arrangement-diagnostics", {
+            body: JSON.stringify(await finishArrangement()), contentType: "application/json",
+          });
+        } catch {
+          // Keep the interaction failure; the runner validates evidence separately.
+        }
+      }
+    }
 
     await expect
       .poll(async () => {
