@@ -3162,8 +3162,23 @@ fn target_error(error: BackupTargetError) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    pub(crate) fn roundtrip_retention_plan(
+        snapshots: Vec<BackupSnapshotMetadata>,
+        proof: Uuid,
+        now: u64,
+    ) -> Result<Vec<BackupSnapshotMetadata>, String> {
+        let mut target = s3_target("linked-info/v1");
+        target.retention_enabled = true;
+        target.retention_max_snapshots = 1;
+        target.retention_max_age_days = 30;
+        target.last_restore_test_at_ms = Some(now);
+        target.last_restore_test_snapshot_id = Some(proof);
+        ensure_retention_proof_present(&target, &snapshots)?;
+        Ok(retention_candidates(&target, snapshots, now))
+    }
 
     #[test]
     fn config_rejects_duplicate_targets() {

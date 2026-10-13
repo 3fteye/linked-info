@@ -1,5 +1,8 @@
 use std::time::SystemTime;
 
+#[cfg(test)]
+pub(crate) mod test_service;
+
 use aws_credential_types::Credentials;
 use aws_sigv4::{
     http_request::{
