@@ -2013,7 +2013,16 @@ describe("App recovery transaction boundary", () => {
     ).toEqual(["Authoritative target"]);
   });
 
-  it("keeps config recovery visible while allowing read-only refresh and restore after snapshot deletion", async () => {
+  it("keeps config recovery visible while allowing read-only refresh and restore after snapshot deletion", async ({ onTestFinished }) => {
+    const startedAt = performance.now();
+    const phases: Array<{ name: string; startMs: number; endMs?: number }> = [];
+    async function phase<T>(name: string, operation: () => Promise<T>): Promise<T> {
+      const entry = { name, startMs: Math.round(performance.now() - startedAt), endMs: undefined as number | undefined };
+      phases.push(entry);
+      const result = await operation();
+      entry.endMs = Math.round(performance.now() - startedAt);
+      return result;
+    }
     const status = encryptedStatus();
     const target = offsiteTarget(
       "44444444-4444-4444-8444-444444444444",
@@ -2040,6 +2049,16 @@ describe("App recovery transaction boundary", () => {
       metadata: remainingSnapshot,
       encryptedExport: "encrypted-restore-preview",
     }));
+    onTestFinished(() => {
+      // Synthetic test metadata only: no DOM text, passwords, target data or errors.
+      console.info("recovery-readonly-phases", JSON.stringify({ phases,
+        elapsedMs: Math.round(performance.now() - startedAt),
+        calls: { inspect: inspectTargets.mock.calls.length, list: list.mock.calls.length,
+          delete: deleteSnapshot.mock.calls.length, download: download.mock.calls.length },
+        entries: document.querySelectorAll(".offsite-entry-actions").length,
+        recoveryBanner: document.querySelector('[data-testid="offsite-config-recovery-message"]') !== null,
+      }));
+    });
     const offsiteBackup: OffsiteBackupService = {
       ...unavailableOffsiteBackupService,
       available: true,
@@ -2052,40 +2071,40 @@ describe("App recovery transaction boundary", () => {
       },
     };
 
-    await renderApp({
+    await phase("render", () => renderApp({
       persistence: memoryPersistence(workspace(currentNodeId, "Encrypted node")),
       security: encryptedSecurity(status),
       updateStatus: () => {},
       offsiteBackup,
       status,
-    });
-    await openDataSecuritySettings();
-    await waitUntil(
+    }));
+    await phase("settings", openDataSecuritySettings);
+    await phase("initial-list", () => waitUntil(
       () => document.querySelectorAll(".offsite-entry-actions").length === 2,
-    );
+    ));
 
-    await clickButton(/删除快照|Delete snapshot/);
-    await submitCurrentPassword();
-    const recoveryBanner = await find("offsite-config-recovery-message");
+    await phase("delete-request", () => clickButton(/删除快照|Delete snapshot/));
+    await phase("reauthenticate", submitCurrentPassword);
+    const recoveryBanner = await phase("recovery-banner", () => find("offsite-config-recovery-message"));
     const recoveryMessage = recoveryBanner.textContent;
     expect(recoveryBanner.textContent).toMatch(/deleted|删除/);
     expect(deleteSnapshot).toHaveBeenCalledOnce();
     expect(document.querySelectorAll(".offsite-entry-actions")).toHaveLength(0);
     expect(document.querySelector(".app-status-toast")).toBeNull();
 
-    const refresh = await findButton(/刷新|Refresh/);
+    const refresh = await phase("refresh-button", () => findButton(/刷新|Refresh/));
     expect(refresh.disabled).toBe(false);
-    await clickButton(/刷新|Refresh/);
-    await waitUntil(
+    await phase("refresh", () => clickButton(/刷新|Refresh/));
+    await phase("refreshed-list", () => waitUntil(
       () => document.querySelectorAll(".offsite-entry-actions").length === 2,
-    );
+    ));
     expect((await find("offsite-config-recovery-message")).textContent).toBe(
       recoveryMessage,
     );
 
-    const restore = await findButton(/恢复预览|Restore preview/);
+    const restore = await phase("restore-button", () => findButton(/恢复预览|Restore preview/));
     expect(restore.disabled).toBe(false);
-    await clickButton(/恢复预览|Restore preview/);
+    await phase("restore-preview", () => clickButton(/恢复预览|Restore preview/));
     expect(download).toHaveBeenCalledOnce();
     expect(document.querySelector("#encrypted-import-password")).not.toBeNull();
     expect((await find("offsite-config-recovery-message")).textContent).toBe(
