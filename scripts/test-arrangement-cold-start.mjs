@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { validateStartupDiagnostic } from "../apps/desktop/e2e/fixtures/startup-diagnostics.mjs";
 
 const arrangementTitle = "smart arrangement normalizes width and saves one undoable layout step";
 const navigationFailure = "A canvas action must not reload the document or discard its undo history";
@@ -10,6 +11,21 @@ const optimizerReload = "optimized dependencies changed. reloading";
 
 function allSpecs(suites) {
   return suites.flatMap((suite) => [...(suite.specs ?? []), ...allSpecs(suite.suites ?? [])]);
+}
+
+export function startupDiagnosticsFromReport(report) {
+  const attempts = allSpecs(report?.suites ?? []).flatMap((spec) =>
+    spec.tests.flatMap((entry) => entry.results));
+  assert.equal(attempts.length, 1, "Startup evidence requires one attempt");
+  const attachments = (attempts[0].attachments ?? []).filter((entry) => entry.name === "startup-diagnostics");
+  assert.equal(attachments.length, 1, "Exactly one startup diagnostic is required");
+  const attachment = attachments[0];
+  assert.equal(attachment.contentType, "application/json");
+  assert.ok(typeof attachment.body === "string" && attachment.body.length < 32_768);
+  let value;
+  try { value = JSON.parse(Buffer.from(attachment.body, "base64").toString("utf8")); }
+  catch { throw new Error("Invalid startup diagnostic encoding"); }
+  return validateStartupDiagnostic(value);
 }
 
 export function arrangementScratchPrefix(desktop) {
@@ -59,7 +75,8 @@ export function runColdStartValidation(args, runVariant) {
   let variants;
   if (args.length === 0) variants = ["fixed"];
   else if (args.length === 1 && args[0] === "--experiment") variants = ["baseline", "fixed"];
-  else throw new Error("Cold-start validation accepts only --experiment or no arguments");
+  else if (args.length === 1 && args[0] === "--startup-samples") variants = ["fixed", "fixed", "fixed"];
+  else throw new Error("Cold-start validation accepts only --experiment, --startup-samples or no arguments");
 
   // A historical timing failure is experimental evidence, not a prerequisite
   // for exercising the current configuration. Keep both outcomes independent.
@@ -83,10 +100,11 @@ function main() {
   }
   const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   const desktop = path.join(repository, "apps/desktop");
-  let scratch;
+  let sample = 0;
   const summary = runColdStartValidation(process.argv.slice(2), (variant) => {
     // Allocate only after validating the CLI, never reuse a previous run's cache.
-    scratch ??= mkdtempSync(arrangementScratchPrefix(desktop));
+    const scratch = mkdtempSync(arrangementScratchPrefix(desktop));
+    sample += 1;
     const reportPath = path.join(scratch, `${variant}.json`);
     const result = spawnSync(process.execPath, [
       path.join(desktop, "node_modules/@playwright/test/cli.js"),
@@ -109,6 +127,8 @@ function main() {
     try {
       if (result.error) throw result.error;
       report = JSON.parse(readFileSync(reportPath, "utf8"));
+      const startup = startupDiagnosticsFromReport(report);
+      process.stdout.write(`${JSON.stringify({ variant, sample, startup })}\n`);
       validateColdStartResult(variant, result.status, report, log);
     } catch (error) {
       // All browser inputs in this isolated run are the existing synthetic

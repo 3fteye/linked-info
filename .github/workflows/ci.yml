@@ -13,6 +13,10 @@ on:
         description: Run the historical baseline and fixed cold-start experiment
         type: boolean
         default: false
+      startup_samples:
+        description: Collect three independent cold-start samples without retries
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -51,7 +55,7 @@ jobs:
 
       - name: Verify arrangement cold-start fix
         if: ${{ github.event_name != 'workflow_dispatch' || !inputs.cold_start_experiment }}
-        run: node scripts/test-arrangement-cold-start.mjs
+        run: node scripts/test-arrangement-cold-start.mjs ${{ inputs.startup_samples && '--startup-samples' || '' }}
 
       - name: Run optional arrangement cold-start experiment
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.cold_start_experiment }}

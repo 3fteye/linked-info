@@ -1,4 +1,5 @@
 import { expect, test, type Frame, type Page } from "@playwright/test";
+import { installStartupDiagnostics } from "./fixtures/startup-diagnostics.mjs";
 
 interface SyntheticNode {
   content?: string;
@@ -2718,16 +2719,31 @@ test("finishing an automatic size change pushes only overlapping neighbors", asy
 
 test("smart arrangement normalizes width and saves one undoable layout step", async ({
   page,
-}) => {
+}, testInfo) => {
   const arrangedNodes = gridNodes(3, 1).map((item, index) => ({
     ...item,
     content: `Synthetic arrangement content ${"x".repeat(index === 2 ? 2_000 : index * 30)}`,
   }));
   const originalLayout = arrangedNodes.map(({ id, x, y }) => ({ nodeId: id, x, y }));
-  await openSyntheticWorkspace(page, arrangedNodes, [
-    { sourceNodeId: arrangedNodes[0].id, targetNodeId: arrangedNodes[1].id },
-    { sourceNodeId: arrangedNodes[1].id, targetNodeId: arrangedNodes[2].id },
-  ]);
+  const finishStartup = process.env.LINKED_INFO_ARRANGEMENT_VARIANT
+    ? await installStartupDiagnostics(page) : null;
+  try {
+    await openSyntheticWorkspace(page, arrangedNodes, [
+      { sourceNodeId: arrangedNodes[0].id, targetNodeId: arrangedNodes[1].id },
+      { sourceNodeId: arrangedNodes[1].id, targetNodeId: arrangedNodes[2].id },
+    ]);
+  } finally {
+    if (finishStartup !== null) {
+      try {
+        await testInfo.attach("startup-diagnostics", {
+          body: JSON.stringify(await finishStartup()), contentType: "application/json",
+        });
+      } catch {
+        // Preserve the original startup assertion. The cold-start runner separately
+        // rejects missing diagnostics, so collection failure cannot become a pass.
+      }
+    }
+  }
   await withoutUnexpectedNavigation(page, async (assertNavigationStable) => {
     await page.keyboard.press("Control+a");
     await node(page, arrangedNodes[1].id).click({

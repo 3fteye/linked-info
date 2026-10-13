@@ -1,9 +1,116 @@
 import assert from "node:assert/strict";
 import path from "node:path";
 import test from "node:test";
+import { EventEmitter } from "node:events";
+import { runInNewContext } from "node:vm";
+import { installStartupDiagnostics, observeStartupDom, resourceBucket, sanitizeDom,
+  validateStartupDiagnostic } from "../apps/desktop/e2e/fixtures/startup-diagnostics.mjs";
 import {
-  arrangementScratchPrefix, runColdStartValidation, validateColdStartResult,
+  arrangementScratchPrefix, runColdStartValidation, validateColdStartResult, startupDiagnosticsFromReport,
 } from "./test-arrangement-cold-start.mjs";
+
+test("startup resource categorization never keeps paths, queries or foreign origins", () => {
+  assert.equal(resourceBucket("http://127.0.0.1:1423/src/main.tsx?secret=private"), "entry");
+  assert.equal(resourceBucket("http://127.0.0.1:1423/src/GraphCanvas.tsx"), "canvas");
+  assert.equal(resourceBucket("http://127.0.0.1:1423/node_modules/private-name.js"), "dependency");
+  assert.equal(resourceBucket("https://private.example/src/main.tsx?token=secret"), "other");
+  assert.equal(resourceBucket("not a url"), "other");
+});
+
+test("DOM startup observations use only fixed selectors and stop once ready", () => {
+  let tick = 10;
+  let callback;
+  let disconnected = 0;
+  const present = new Map();
+  const scope = { window: {}, performance: { now: () => tick },
+    document: { querySelector: (selector) => present.get(selector) ?? null },
+    MutationObserver: class {
+      constructor(fn) { callback = fn; }
+      observe() {}
+      disconnect() { disconnected += 1; }
+    },
+  };
+  runInNewContext(`(${observeStartupDom.toString()})()`, scope);
+  tick = 20;
+  present.set("#root", { childElementCount: 1 });
+  present.set(".storage-problem-shell", {});
+  callback();
+  tick = 30;
+  present.set('[data-testid="graph-canvas"]', {});
+  present.set('[data-testid="graph-canvas"][data-flow-ready="true"]', {});
+  callback();
+  assert.ok(disconnected > 0);
+  const dom = sanitizeDom(scope.window.__liStartupDiagnostic());
+  assert.equal(dom.firstSeenMs.rootPopulated, 20);
+  assert.equal(dom.firstSeenMs.storageGate, 20);
+  assert.equal(dom.firstSeenMs.flowReady, 30);
+  assert.equal(dom.firstSeenMs.securityGate, null);
+  assert.equal(dom.rootHasChildren, true);
+});
+
+async function diagnosticFixture() {
+  let tick = 0;
+  const page = new EventEmitter();
+  page.addInitScript = async (fn) => { assert.equal(fn, observeStartupDom); };
+  page.evaluate = async () => ({ available: true, sampledAtMs: 12, rootHasChildren: true,
+    firstSeenMs: { flowReady: 10, private: "synthetic secret" }, content: "synthetic secret" });
+  const finish = await installStartupDiagnostics(page, () => tick);
+  const request = { url: () => "http://127.0.0.1:1423/src/main.tsx?token=synthetic-secret" };
+  page.emit("request", request);
+  tick = 42;
+  page.emit("response", { request: () => request, status: () => 503 });
+  page.emit("requestfailed", request);
+  page.emit("pageerror", new Error("synthetic secret"));
+  page.emit("console", { type: () => "error", text: () => { throw new Error("must not read"); } });
+  const pending = { url: () => "http://127.0.0.1:1423/src/MainWorkspace.tsx" };
+  page.emit("request", pending);
+  tick = 70;
+  const diagnostic = await finish();
+  assert.equal(page.eventNames().length, 0);
+  return diagnostic;
+}
+
+test("startup metadata preserves failed and pending requests without retaining secrets", async () => {
+  const diagnostic = await diagnosticFixture();
+  assert.equal(validateStartupDiagnostic(diagnostic), diagnostic);
+  assert.deepEqual(diagnostic.resources.entry, { started: 1, finished: 0, failed: 1,
+    httpErrors: 1, pending: 0, firstStartMs: 0, maxDurationMs: 42 });
+  assert.equal(diagnostic.resources.workspace.pending, 1);
+  assert.equal(diagnostic.resources.workspace.maxDurationMs, 28);
+  assert.equal(diagnostic.pageErrors, 1);
+  assert.equal(diagnostic.consoleErrors, 1);
+  assert.ok(!JSON.stringify(diagnostic).includes("secret"));
+});
+
+test("startup tracking is bounded and page loss does not replace the original failure", async () => {
+  const page = new EventEmitter();
+  page.addInitScript = async () => {};
+  page.evaluate = async () => { throw new Error("synthetic private error"); };
+  const finish = await installStartupDiagnostics(page, () => 10);
+  for (let i = 0; i < 5000; i += 1) page.emit("request", { url: () => "not a url" });
+  const diagnostic = validateStartupDiagnostic(await finish());
+  assert.equal(diagnostic.resources.other.pending, 4096);
+  assert.equal(diagnostic.dropped, 904);
+  assert.equal(diagnostic.dom.available, false);
+  assert.equal(page.eventNames().length, 0);
+});
+
+test("startup report rejects missing, duplicate or unbounded evidence before logging it", async () => {
+  const diagnostic = await diagnosticFixture();
+  const source = report(true);
+  const result = source.suites[0].specs[0].tests[0].results[0];
+  const attachment = (value) => ({ name: "startup-diagnostics", contentType: "application/json",
+    body: Buffer.from(JSON.stringify(value)).toString("base64") });
+  assert.throws(() => startupDiagnosticsFromReport(source));
+  result.attachments = [attachment(diagnostic)];
+  assert.deepEqual(startupDiagnosticsFromReport(source), diagnostic);
+  result.attachments.push(attachment(diagnostic));
+  assert.throws(() => startupDiagnosticsFromReport(source));
+  result.attachments = [attachment({ ...diagnostic, private: "synthetic secret" })];
+  assert.throws(() => startupDiagnosticsFromReport(source), /Invalid startup diagnostic schema/);
+  result.attachments = [attachment({ ...diagnostic, elapsedMs: 600_001 })];
+  assert.throws(() => startupDiagnosticsFromReport(source), /Invalid startup diagnostic schema/);
+});
 
 const reloadLog = "new dependencies optimized: @dagrejs/dagre\noptimized dependencies changed. reloading";
 const navigationFailure = "A canvas action must not reload the document or discard its undo history";
@@ -46,6 +153,18 @@ test("the default gate preserves fixed-configuration failures", () => {
   const summary = runColdStartValidation([], () => { throw failure; });
   assert.equal(summary.exitCode, 1);
   assert.deepEqual(summary.outcomes, [{ variant: "fixed", status: "failed", error: failure }]);
+});
+
+test("three explicit startup samples retain every first-attempt outcome without retrying failures", () => {
+  let calls = 0;
+  const result = runColdStartValidation(["--startup-samples"], (variant) => {
+    assert.equal(variant, "fixed");
+    calls += 1;
+    if (calls === 2) throw new Error("synthetic startup timeout");
+  });
+  assert.equal(calls, 3);
+  assert.equal(result.exitCode, 1);
+  assert.deepEqual(result.outcomes.map((entry) => entry.status), ["verified", "failed", "verified"]);
 });
 
 test("the explicit experiment verifies the baseline before independently running the fix", () => {
