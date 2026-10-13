@@ -28,8 +28,9 @@ export function validateStartupDiagnostic(value) {
   const nullable = (v) => v === null || numeric(v);
   const keys = (v, expected) => v !== null && typeof v === "object" &&
     JSON.stringify(Object.keys(v).sort()) === JSON.stringify([...expected].sort());
-  const valid = keys(value, ["schemaVersion", "elapsedMs", "pageErrors", "consoleErrors", "dropped", "resources", "dom"]) &&
-    value.schemaVersion === 1 && numeric(value.elapsedMs) &&
+  const valid = keys(value, ["schemaVersion", "elapsedMs", "navigationCompletedMs", "pageErrors", "consoleErrors", "dropped", "resources", "dom"]) &&
+    value.schemaVersion === 1 && numeric(value.elapsedMs) && nullable(value.navigationCompletedMs) &&
+    (value.navigationCompletedMs === null || value.navigationCompletedMs <= value.elapsedMs) &&
     [value.pageErrors, value.consoleErrors, value.dropped].every(numeric) &&
     keys(value.resources, buckets) && buckets.every((bucket) => {
       const row = value.resources[bucket];
@@ -78,6 +79,7 @@ export async function installStartupDiagnostics(page, now = () => performance.no
   let consoleErrors = 0;
   let dropped = 0;
   let accepted = 0;
+  let navigationCompletedMs = null;
   const onRequest = (request) => {
     if (accepted >= 4096) { dropped = Math.min(dropped + 1, 4096); return; }
     accepted += 1;
@@ -108,7 +110,7 @@ export async function installStartupDiagnostics(page, now = () => performance.no
   };
   for (const [name, handler] of Object.entries(handlers)) page.on(name, handler);
   await page.addInitScript(observeStartupDom);
-  return async () => {
+  const finish = async () => {
     // Detach before further arrangement actions so the result describes startup only.
     for (const [name, handler] of Object.entries(handlers)) page.off(name, handler);
     for (const { bucket, time } of active.values()) {
@@ -116,9 +118,11 @@ export async function installStartupDiagnostics(page, now = () => performance.no
     }
     active.clear();
     const dom = await page.evaluate(() => window.__liStartupDiagnostic?.()).catch(() => null);
-    return { schemaVersion: 1, elapsedMs: bounded(now() - started), pageErrors, consoleErrors,
+    return { schemaVersion: 1, elapsedMs: bounded(now() - started), navigationCompletedMs, pageErrors, consoleErrors,
       dropped, resources, dom: sanitizeDom(dom) };
   };
+  finish.markNavigationComplete = () => { navigationCompletedMs ??= bounded(now() - started); };
+  return finish;
 }
 
 export function validateArrangementDiagnostic(value) {

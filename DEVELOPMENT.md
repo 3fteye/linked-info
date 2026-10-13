@@ -293,6 +293,8 @@ pnpm build
 
 排版阶段另有 `arrangement-diagnostics` 附件：在点击 Apply 前订阅 Playwright Worker 事件，只观察精确本机排版 Worker 的创建、处理器安装可见和关闭时间，结束时检查弹窗存在、Apply 禁用及错误提示存在的布尔值。最多四个 Worker 探针，每个最多 15 秒；不读取或改写 postMessage 数据、不替换 Worker/terminate、不发送伪造回复。探针可能因 Worker 已终止而无法完成，因此 probeFailed 或缺少 handlerReadyMs 不能单独判定运行时错误，需结合 closedMs 与界面状态。采集完成后解绑监听并丢弃迟到探针结果，原有点击和 5 秒关闭断言不变。成功的完整排版场景必须包含有效附件；尚未走到排版的失败可以没有附件，但不能因此隐藏原失败。
 
+启动报告另记录 `navigationCompletedMs`（Node 侧相对采集起点）：`page.goto` 返回后立即登记，之后才开始原 5 秒 graph-canvas 可见性断言。它与 DOM 的 navigation-relative performance 时钟不同，不能直接相减；可用同一 Node 时钟的 elapsedMs 区分导航前后耗时。d39d02d 的三样本运行 38365846972 中首样本 document 请求约 9997 ms、flowReady 12289 ms，仍通过启动断言；三个排版 Worker 从观察到创建至关闭分别 31/20/21 ms，均正常关闭弹窗。证据说明总启动时间超过 5 秒不等于触发该断言，不能拿慢导航证明历史画布超时；探针因 Worker 很快结束而未得到 handlerReady 也不是排版失败。
+
 显式 `--startup-samples`（手动工作流勾选 startup_samples）运行三个独立固定配置冷样本，每个都创建新缓存、启动新服务器/浏览器且不重试；任一样本失败整体仍失败，不用后续成功覆盖。该选项不与历史 cold_start_experiment 同时使用；历史实验优先。原 5 秒可见性断言不变。诊断只描述观察到的阶段，不自动把慢请求、页面错误计数或根节点为空当成历史故障的根因证明。
 
 首批证据：3e27056 的三样本运行 38360394803 中，画布 flowReady 分别为导航后 3188/2423/1821 ms；请求失败、HTTP 错误、pageerror、截断均为 0，无存储错误标记，每个样本有一次未收集正文的 console error 计数，不能凭计数判定来源或无害。根节点首次填充为 2849/2215/1625 ms，说明这些成功样本的大部分启动时间在首屏挂载之前，但不能证明历史超时原因。新缓存不代表清空操作系统文件缓存或重启 runner。另一次纯文档提交 f941e22 的运行 38359778194 在 Apply arrangement 后等待弹窗隐藏超时，发生于启动成功之后，必须与 graph-canvas 不可见分开跟踪。两种历史故障均未因后续成功样本而宣布修复。

@@ -111,6 +111,8 @@ async function diagnosticFixture() {
   const finish = await installStartupDiagnostics(page, () => tick);
   const request = { url: () => "http://127.0.0.1:1423/src/main.tsx?token=synthetic-secret" };
   page.emit("request", request);
+  tick = 1;
+  finish.markNavigationComplete();
   tick = 42;
   page.emit("response", { request: () => request, status: () => 503 });
   page.emit("requestfailed", request);
@@ -133,6 +135,7 @@ test("startup metadata preserves failed and pending requests without retaining s
   assert.equal(diagnostic.resources.workspace.maxDurationMs, 28);
   assert.equal(diagnostic.pageErrors, 1);
   assert.equal(diagnostic.consoleErrors, 1);
+  assert.equal(diagnostic.navigationCompletedMs, 1);
   assert.ok(!JSON.stringify(diagnostic).includes("secret"));
 });
 

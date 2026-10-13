@@ -63,6 +63,7 @@ async function openSyntheticWorkspace(
   references: SyntheticReference[] = [],
   viewport: SyntheticViewport = { x: 0, y: 0, zoom: 1 },
   extensionMetadata: Record<string, unknown> | null = null,
+  onNavigated?: () => void,
 ) {
   await page.addInitScript(
     ({
@@ -114,6 +115,7 @@ async function openSyntheticWorkspace(
     },
   );
   await page.goto("/");
+  onNavigated?.();
   await expect(page.getByTestId("graph-canvas")).toBeVisible();
   await expect(page.getByTestId("graph-canvas")).toHaveAttribute(
     "data-flow-ready",
@@ -2731,7 +2733,7 @@ test("smart arrangement normalizes width and saves one undoable layout step", as
     await openSyntheticWorkspace(page, arrangedNodes, [
       { sourceNodeId: arrangedNodes[0].id, targetNodeId: arrangedNodes[1].id },
       { sourceNodeId: arrangedNodes[1].id, targetNodeId: arrangedNodes[2].id },
-    ]);
+    ], undefined, null, () => finishStartup?.markNavigationComplete());
   } finally {
     if (finishStartup !== null) {
       try {
