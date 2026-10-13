@@ -208,13 +208,16 @@ fn assert_interrupted_state(root: &Path, kind: &str, stage: Stage) {
         );
         if (2..5).contains(&phase) {
             // Inspect without the recovery reader, which can delete uncommitted evidence.
-            let manifest: RecoverySwapManifest = serde_json::from_slice(
-                &fs::read(store.recovery_swap_manifest_path()).unwrap(),
+            let manifest: RecoverySwapManifest =
+                serde_json::from_slice(&fs::read(store.recovery_swap_manifest_path()).unwrap())
+                    .unwrap();
+            validate_recovery_swap_manifest(&manifest).unwrap();
+            read_recovery_swap_payload(
+                &store,
+                WorkspaceFileSlot::Primary,
+                &manifest.primary_sha256,
             )
             .unwrap();
-            validate_recovery_swap_manifest(&manifest).unwrap();
-            read_recovery_swap_payload(&store, WorkspaceFileSlot::Primary, &manifest.primary_sha256)
-                .unwrap();
             read_recovery_swap_payload(
                 &store,
                 WorkspaceFileSlot::Recovery,
