@@ -2349,7 +2349,7 @@ test("cancelling workspace replacement preserves both stored snapshots after rel
   await page.getByTestId("restore-recovery-workspace").click();
   const preview = page.getByTestId("workspace-restore-preview");
   await expect(preview).toBeVisible();
-  await preview.getByRole("button", { name: "Cancel", exact: true }).click();
+  await preview.locator(".restore-preview-actions").getByRole("button", { name: "Cancel", exact: true }).click();
   await expect(preview).toHaveCount(0);
   expect((await storedWorkspace(page)).nodes).toEqual(before.nodes);
   expect(await page.evaluate((key) => localStorage.getItem(key), workspaceRecoveryStorageKey)).toBe(recoveryBefore);
