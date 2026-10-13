@@ -1,5 +1,6 @@
 //! CI-only process interruption of the real file transactions. No Tauri commands.
 use super::*;
+use std::collections::BTreeMap;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -89,6 +90,162 @@ fn fixture(name: &str) -> String {
     normalize_storage_envelope(&value.to_string()).unwrap()
 }
 
+fn assert_payload(
+    path: &Path,
+    slot: WorkspaceFileSlot,
+    expected: &str,
+    key: Option<&[u8; DATA_KEY_BYTES]>,
+) {
+    let contents = fs::read_to_string(path).unwrap();
+    let plaintext = match key {
+        Some(key) => decrypt_workspace_file(&contents, slot, key).unwrap(),
+        None => contents,
+    };
+    assert!(
+        serde_json::from_str::<serde_json::Value>(&plaintext).unwrap()
+            == serde_json::from_str::<serde_json::Value>(expected).unwrap()
+    );
+}
+
+fn assert_interrupted_state(root: &Path, kind: &str, stage: Stage) {
+    let store = WorkspaceFileStore::new(root.join("workspace"));
+    let original = fixture("original");
+    let incoming = fixture("incoming");
+    let position = STAGES
+        .iter()
+        .position(|candidate| *candidate == stage)
+        .unwrap();
+    let install = kind == "install";
+    let phase = if install {
+        position.checked_sub(6).unwrap()
+    } else {
+        position
+    };
+    assert!(phase < 6);
+    let primary_replaced = phase >= 3;
+    let recovery_replaced = phase >= 4;
+    let original_key = (kind == "encrypted").then_some(&KEY);
+    let next_key = (kind != "plain").then_some(&KEY);
+    assert_payload(
+        &store.path(WorkspaceFileSlot::Primary),
+        WorkspaceFileSlot::Primary,
+        if primary_replaced {
+            &incoming
+        } else {
+            &original
+        },
+        if primary_replaced {
+            next_key
+        } else {
+            original_key
+        },
+    );
+    assert_payload(
+        &store.path(WorkspaceFileSlot::Recovery),
+        WorkspaceFileSlot::Recovery,
+        if recovery_replaced {
+            &original
+        } else {
+            &incoming
+        },
+        if recovery_replaced {
+            next_key
+        } else {
+            original_key
+        },
+    );
+    for (slot, expected, present) in [
+        (
+            WorkspaceFileSlot::Primary,
+            &incoming,
+            if install { phase < 3 } else { phase < 5 },
+        ),
+        (
+            WorkspaceFileSlot::Recovery,
+            &original,
+            if install {
+                (1..4).contains(&phase)
+            } else {
+                (1..5).contains(&phase)
+            },
+        ),
+    ] {
+        let path = if install {
+            store.pending_path(slot)
+        } else {
+            store.recovery_swap_slot_path(slot)
+        };
+        assert_eq!(
+            path.exists(),
+            present,
+            "pending payload stage mismatch: {stage:?}"
+        );
+        if present {
+            assert_payload(&path, slot, expected, next_key);
+        }
+    }
+    if install {
+        assert_eq!(store.pending_vault_path().exists(), (2..5).contains(&phase));
+        assert_eq!(store.vault_path().exists(), phase == 5);
+        if phase >= 2 {
+            let path = if phase == 5 {
+                store.vault_path()
+            } else {
+                store.pending_vault_path()
+            };
+            let metadata = parse_vault_metadata(&fs::read_to_string(path).unwrap()).unwrap();
+            assert!(unwrap_data_key(&metadata, PASSWORD).unwrap() == KEY);
+            assert_eq!(
+                metadata.migrated_slots,
+                vec![WorkspaceFileSlot::Primary, WorkspaceFileSlot::Recovery]
+            );
+        }
+    } else {
+        assert_eq!(store.recovery_swap_directory().exists(), phase < 5);
+        assert_eq!(
+            store.recovery_swap_manifest_path().exists(),
+            (2..5).contains(&phase)
+        );
+        if (2..5).contains(&phase) {
+            // Inspect without the recovery reader, which can delete uncommitted evidence.
+            let manifest: RecoverySwapManifest = serde_json::from_slice(
+                &fs::read(store.recovery_swap_manifest_path()).unwrap(),
+            )
+            .unwrap();
+            validate_recovery_swap_manifest(&manifest).unwrap();
+            read_recovery_swap_payload(&store, WorkspaceFileSlot::Primary, &manifest.primary_sha256)
+                .unwrap();
+            read_recovery_swap_payload(
+                &store,
+                WorkspaceFileSlot::Recovery,
+                &manifest.recovery_sha256,
+            )
+            .unwrap();
+        }
+    }
+}
+
+fn directory_evidence(root: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
+    fn visit(root: &Path, directory: &Path, entries: &mut BTreeMap<PathBuf, Option<Vec<u8>>>) {
+        for entry in fs::read_dir(directory).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            let kind = entry.file_type().unwrap();
+            assert!(kind.is_file() || kind.is_dir());
+            let relative = path.strip_prefix(root).unwrap().to_path_buf();
+            if kind.is_dir() {
+                entries.insert(relative, None);
+                visit(root, &path, entries);
+            } else {
+                entries.insert(relative, Some(fs::read(path).unwrap()));
+            }
+        }
+    }
+    let mut entries = BTreeMap::new();
+    visit(root, root, &mut entries);
+    entries
+}
+
 struct OwnedChild(Child);
 
 impl OwnedChild {
@@ -147,10 +304,13 @@ fn interrupt(kind: &str, stage: Stage) -> (PathBuf, String) {
     assert!(child.0.try_wait().unwrap().is_none());
     child.0.kill().unwrap();
     assert!(!child.wait().success(), "termination must be abnormal");
+    assert_interrupted_state(&root, kind, stage);
     (root, token)
 }
 
 fn verify_twice(root: &Path, token: &str, kind: &str, stage: Stage, mode: &str) {
+    let directory = WorkspaceFileStore::new(root.join("workspace")).recovery_swap_directory();
+    let evidence = (mode == "reject").then(|| directory_evidence(&directory));
     for pass in 0..2 {
         assert!(!root.join("verified").exists());
         assert!(
@@ -159,6 +319,12 @@ fn verify_twice(root: &Path, token: &str, kind: &str, stage: Stage, mode: &str) 
         );
         assert_eq!(fs::read(root.join("verified")).unwrap(), mode.as_bytes());
         fs::remove_file(root.join("verified")).unwrap();
+        if let Some(expected) = &evidence {
+            assert!(
+                directory_evidence(&directory) == *expected,
+                "transaction evidence changed"
+            );
+        }
     }
 }
 
