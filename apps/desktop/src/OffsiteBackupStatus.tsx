@@ -5,6 +5,7 @@ export type BackupStatusRecord = Pick<
   OffsiteBackupTarget,
   | "lastUploadAtMs"
   | "automaticPending"
+  | "automaticEnabled"
   | "lastVerifiedAtMs"
   | "lastRestoreTestAtMs"
   | "retentionEnabled"
@@ -24,7 +25,9 @@ export default function OffsiteBackupStatus({
     value === null ? t("offsiteBackup.never") : formatDate(value);
   const upload = target.lastUploadAtMs === null
     ? "notUploaded"
-    : target.automaticPending ? "pending" : "recorded";
+    : target.automaticPending
+      ? "pending"
+      : !target.automaticEnabled ? "untracked" : "recorded";
   const cleanup = !target.retentionEnabled
     ? "disabled"
     : target.lastRetentionError !== null

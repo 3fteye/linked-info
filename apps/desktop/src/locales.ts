@@ -901,6 +901,7 @@ export const resources = {
           "cleanupTitle": "旧快照清理",
           "upload": {
             "notUploaded": "尚无成功上传记录",
+            "untracked": "自动备份已关闭，后续变更未持续跟踪；请按需手动上传",
             "pending": "有本地变更尚未上传",
             "recorded": "按本机记录，没有待上传变更"
           },
@@ -2001,6 +2002,7 @@ export const resources = {
           "cleanupTitle": "Old snapshot cleanup",
           "upload": {
             "notUploaded": "No successful upload recorded",
+            "untracked": "Automatic backup is off; later changes are not continuously tracked. Upload manually when needed.",
             "pending": "Local changes are waiting for upload",
             "recorded": "No pending changes according to local records"
           },

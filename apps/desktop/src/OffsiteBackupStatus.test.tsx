@@ -7,6 +7,7 @@ import OffsiteBackupStatus, { type BackupStatusRecord } from "./OffsiteBackupSta
 const empty: BackupStatusRecord = {
   lastUploadAtMs: null,
   automaticPending: false,
+  automaticEnabled: true,
   lastVerifiedAtMs: null,
   lastRestoreTestAtMs: null,
   retentionEnabled: false,
@@ -38,6 +39,18 @@ describe("OffsiteBackupStatus", () => {
   it("qualifies current status as a local record, not a new remote verification", () => {
     expect(render({ lastUploadAtMs: 10 }).textContent)
       .toContain("No pending changes according to local records");
+  });
+
+  it("does not report a manually uploaded target as current while tracking is disabled", () => {
+    const text = render({ lastUploadAtMs: 10, automaticEnabled: false }).textContent;
+    expect(text).toContain("Automatic backup is off; later changes are not continuously tracked");
+    expect(text).not.toContain("No pending changes");
+    expect(text).toContain("Last successful upload: time-10");
+  });
+
+  it("retains known pending changes even after automatic backup is disabled", () => {
+    expect(render({ lastUploadAtMs: 10, automaticEnabled: false, automaticPending: true }).textContent)
+      .toContain("Local changes are waiting for upload");
   });
 
   it("does not mistake hash verification for a recovery drill", () => {
