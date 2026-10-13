@@ -7,6 +7,7 @@ import { installStartupDiagnostics, observeStartupDom, resourceBucket, sanitizeD
   validateStartupDiagnostic } from "../apps/desktop/e2e/fixtures/startup-diagnostics.mjs";
 import {
   arrangementScratchPrefix, runColdStartValidation, validateColdStartResult, startupDiagnosticsFromReport,
+  collectColdStartEvidence,
 } from "./test-arrangement-cold-start.mjs";
 
 test("startup resource categorization never keeps paths, queries or foreign origins", () => {
@@ -110,6 +111,25 @@ test("startup report rejects missing, duplicate or unbounded evidence before log
   assert.throws(() => startupDiagnosticsFromReport(source), /Invalid startup diagnostic schema/);
   result.attachments = [attachment({ ...diagnostic, elapsedMs: 600_001 })];
   assert.throws(() => startupDiagnosticsFromReport(source), /Invalid startup diagnostic schema/);
+});
+
+test("missing diagnostics never short-circuit the original startup failure", async () => {
+  const failedReport = report(false, "synthetic startup assertion failed");
+  const bothFailed = collectColdStartEvidence("fixed", 1, failedReport, "Vite ready");
+  assert.equal(bothFailed.startup, null);
+  assert.equal(bothFailed.failures.length, 2);
+  assert.match(bothFailed.failures[0].message, /fixed configuration must pass/);
+  assert.match(bothFailed.failures[1].message, /Exactly one startup diagnostic/);
+  assert.equal(failedReport.suites[0].specs[0].tests[0].results[0].errors[0].message,
+    "synthetic startup assertion failed");
+  const missingOnly = collectColdStartEvidence("fixed", 0, report(true), "Vite ready");
+  assert.equal(missingOnly.failures.length, 1);
+  const diagnostic = await diagnosticFixture();
+  failedReport.suites[0].specs[0].tests[0].results[0].attachments = [{ name: "startup-diagnostics",
+    contentType: "application/json", body: Buffer.from(JSON.stringify(diagnostic)).toString("base64") }];
+  const startupFailed = collectColdStartEvidence("fixed", 1, failedReport, "Vite ready");
+  assert.equal(startupFailed.failures.length, 1);
+  assert.deepEqual(startupFailed.startup, diagnostic);
 });
 
 const reloadLog = "new dependencies optimized: @dagrejs/dagre\noptimized dependencies changed. reloading";

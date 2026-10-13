@@ -28,6 +28,17 @@ export function startupDiagnosticsFromReport(report) {
   return validateStartupDiagnostic(value);
 }
 
+export function collectColdStartEvidence(variant, status, report, log) {
+  const failures = [];
+  let startup = null;
+  // Test outcome is primary; missing diagnostics must not short-circuit it.
+  try { validateColdStartResult(variant, status, report, log); }
+  catch (error) { failures.push(error); }
+  try { startup = startupDiagnosticsFromReport(report); }
+  catch (error) { failures.push(error); }
+  return { startup, failures };
+}
+
 export function arrangementScratchPrefix(desktop) {
   // Match Vite's normal dependency-cache location: React's source transform
   // excludes node_modules, but would re-transform optimized files in OS temp.
@@ -127,9 +138,11 @@ function main() {
     try {
       if (result.error) throw result.error;
       report = JSON.parse(readFileSync(reportPath, "utf8"));
-      const startup = startupDiagnosticsFromReport(report);
-      process.stdout.write(`${JSON.stringify({ variant, sample, startup })}\n`);
-      validateColdStartResult(variant, result.status, report, log);
+      const { startup, failures } = collectColdStartEvidence(variant, result.status, report, log);
+      if (startup !== null) process.stdout.write(`${JSON.stringify({ variant, sample, startup })}\n`);
+      if (failures.length > 0) {
+        throw new AggregateError(failures, failures.map((failure) => failure.message).join("\n"));
+      }
     } catch (error) {
       // All browser inputs in this isolated run are the existing synthetic
       // workspace. No app-data files, screenshots, recordings or traces exist.
