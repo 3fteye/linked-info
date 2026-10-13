@@ -5,6 +5,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { restoreFixture, inspectRestoredSlots } from "../apps/desktop/scripts/native-restore-fixture.mjs";
 import { CapsuleHelperFailure, executeNativeCapsuleHelper, HELPER_ERROR_CODES,
   HELPER_PHASES, HELPER_TIMEOUT_MS } from "../apps/desktop/scripts/native-capsule-helper.mjs";
 
@@ -78,6 +79,75 @@ for (const tool of tools) {
 }
 
 const driver = readFileSync(path.join(desktop, "scripts/native-capsule-smoke.mjs"), "utf8");
+
+test("native restore scenarios require real process replacement and authenticated rereads", () => {
+  const start = driver.indexOf('for (const terminal of ["restored", "undone", "redone"])');
+  assert.ok(start > driver.indexOf('step("main-exit-keeps-capture-running-and-saving"'));
+  const scenario = driver.slice(start, driver.indexOf("  } finally {", start));
+  assert.match(scenario, /getByTestId\("workspace-restore-confirm"\)\.click\(\)/);
+  assert.match(scenario, /await close\("main"\);\s+main = await launch\("main"\)/);
+  assert.match(scenario, /previousProcess\.exitCode === 0/);
+  assert.match(scenario, /targets\.main\.child !== previousProcess/);
+  assert.match(scenario, /locked\.encrypted && locked\.locked && !locked\.systemUnlockEnabled/);
+  assert.match(scenario, /reopenedOwner\.ownerId !== previousOwner\.ownerId/);
+  assert.match(scenario, /oldOwnerRejected && reopened\.primaryMatches && reopened\.recoveryMatches/);
+  const undoStored = scenario.indexOf('"native_restore_undo_not_persisted"');
+  const undoVisible = scenario.indexOf('await main.locator(`[data-node-id="${primary.nodes[0].id}"]`).waitFor');
+  const redo = scenario.indexOf('main.keyboard.press("Control+y")');
+  assert.ok(undoStored >= 0 && undoVisible > undoStored && redo > undoVisible);
+  assert.doesNotMatch(scenario, /\.reload\(|fs\.|\.screenshot\(|\.tracing\.|report\.[^;]*(?:syntheticPassword|expectedPrimary|expectedRecovery)/);
+});
+
+async function compareSyntheticSlots(primary, recovery) {
+  const previousWindow = globalThis.window;
+  const calls = [];
+  globalThis.window = { __TAURI_INTERNALS__: { async invoke(command, args) {
+    assert.equal(command, "read_workspace_file");
+    assert.equal(args.ownerId, "synthetic-owner");
+    assert.ok(args.slot === "primary" || args.slot === "recovery");
+    calls.push(args.slot);
+    return JSON.stringify(args.slot === "primary" ? primary : recovery);
+  } } };
+  try {
+    const result = await inspectRestoredSlots({ ownerId: "synthetic-owner",
+      expectedPrimary: restoreFixture(false), expectedRecovery: restoreFixture(true) });
+    assert.deepEqual(calls, ["primary", "recovery"]);
+    assert.deepEqual(Object.keys(result).sort(), ["primaryMatches", "recoveryMatches"]);
+    return result;
+  } finally {
+    if (previousWindow === undefined) delete globalThis.window;
+    else globalThis.window = previousWindow;
+  }
+}
+
+test("native restoration comparison accepts full synthetic fixtures without returning content", async () => {
+  assert.deepEqual(await compareSyntheticSlots(restoreFixture(false), restoreFixture(true)),
+    { primaryMatches: true, recoveryMatches: true });
+});
+
+for (const [field, corrupt] of [
+  ["node", (value) => { value.nodes[0].content = "synthetic corruption"; }],
+  ["references", (value) => { value.references = []; }],
+  ["layout", (value) => { value.view.canvases[0].layout[0].x += 50; }],
+  ["viewport", (value) => { value.view.canvases[0].viewport.zoom = 2; }],
+  ["metadata", (value) => { value.view.extensionMetadata = {}; }],
+  ["timeline", (value) => { delete value.view.timeline; }],
+]) {
+  for (const slot of ["primary", "recovery"]) {
+    test(`native restore comparison detects ${slot} ${field} changes`, async () => {
+      const primary = restoreFixture(false);
+      const recovery = restoreFixture(true);
+      corrupt(slot === "primary" ? primary : recovery);
+      assert.deepEqual(await compareSyntheticSlots(primary, recovery),
+        { primaryMatches: slot !== "primary", recoveryMatches: slot !== "recovery" });
+    });
+  }
+}
+
+test("native restore fixture module neither reads files nor emits documents", () => {
+  const source = readFileSync(path.join(desktop, "scripts/native-restore-fixture.mjs"), "utf8");
+  assert.doesNotMatch(source, /node:fs|console\.|stdout|stderr|\.screenshot\(|\.tracing\./);
+});
 
 test("native driver checks both executable paths and all four fresh storage roots", () => {
   assert.match(driver, /options\.has\("--executable"\) && options\.has\("--capture-executable"\)/);

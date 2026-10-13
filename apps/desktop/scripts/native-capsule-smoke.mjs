@@ -35,6 +35,7 @@ async function run() {
   const { fileURLToPath } = await import("node:url");
   const { spawn, execFile } = await import("node:child_process");
   const { CapsuleHelperFailure, executeNativeCapsuleHelper } = await import("./native-capsule-helper.mjs");
+  const { restoreFixture, inspectRestoredSlots } = await import("./native-restore-fixture.mjs");
   const { setTimeout: delay } = await import("node:timers/promises");
   const options = new Map();
   const permittedOptions = new Set(["--executable", "--capture-executable", "--report"]);
@@ -710,6 +711,88 @@ async function run() {
       requireCondition(report.summary.pageErrorCount === 0, "native_capsule_page_errors_detected");
       return { mainExitedCleanly: true, captureRemainedRunning: true, draftRestoredWithoutMain: true };
     });
+    // Capture is now closed. No pending capture input can race fixture setup.
+    // Each scenario ends in a real process exit/relaunch, never page.reload().
+    for (const terminal of ["restored", "undone", "redone"]) {
+      await step(`native-restore-${terminal}-survives-process-restart`, async () => {
+        if (terminal === "restored") {
+          main = await launch("main");
+          await unlock(main, syntheticPassword);
+        }
+        const primary = restoreFixture(false);
+        const recovery = restoreFixture(true);
+        const setupOwner = await readyContext(main);
+        requireCondition(setupOwner.encrypted === true, "native_restore_encryption_required");
+        const seeded = await main.evaluate(async ({ ownerId, primary, recovery }) => {
+          const call = window.__TAURI_INTERNALS__.invoke;
+          await call("write_workspace_file", { ownerId, slot: "recovery", contents: JSON.stringify(recovery) });
+          const status = await call("lock_workspace_with_snapshot", { ownerId, contents: JSON.stringify(primary) });
+          return status.locked === true;
+        }, { ownerId: setupOwner.ownerId, primary, recovery });
+        requireCondition(seeded, "native_restore_fixture_not_saved");
+        await main.locator("#workspace-unlock-password").waitFor({ state: "visible" });
+        await unlock(main, syntheticPassword);
+        async function checkSlots(expectedPrimary, expectedRecovery) {
+          const context = await readyContext(main);
+          return main.evaluate(inspectRestoredSlots, { ownerId: context.ownerId, expectedPrimary, expectedRecovery });
+        }
+        const initial = await checkSlots(primary, recovery);
+        requireCondition(initial.primaryMatches && initial.recoveryMatches, "native_restore_initial_slots_mismatch");
+        await main.getByTestId("settings-navigation").click();
+        await main.getByTestId("settings-tab-dataSecurity").click();
+        await main.getByTestId("restore-recovery-workspace").click();
+        await main.getByTestId("workspace-restore-preview").waitFor({ state: "visible" });
+        await main.getByTestId("workspace-restore-confirm").click();
+        await poll(async () => {
+          const slots = await checkSlots(recovery, primary);
+          return slots.primaryMatches && slots.recoveryMatches;
+        }, "native_restore_confirmation_not_persisted");
+        await main.getByTestId("app-notice-action").waitFor({ state: "visible" });
+        if (terminal !== "restored") {
+          await focus(main, "main");
+          await main.keyboard.press("Control+z");
+          await poll(async () => {
+            const slots = await checkSlots(primary, recovery);
+            return slots.primaryMatches && slots.recoveryMatches;
+          }, "native_restore_undo_not_persisted");
+          await main.locator(`[data-node-id="${primary.nodes[0].id}"]`).waitFor({ state: "visible" });
+        }
+        if (terminal === "redone") {
+          await main.keyboard.press("Control+y");
+          await poll(async () => {
+            const slots = await checkSlots(recovery, primary);
+            return slots.primaryMatches && slots.recoveryMatches;
+          }, "native_restore_redo_not_persisted");
+        }
+        const expectedPrimary = terminal === "undone" ? primary : recovery;
+        const expectedRecovery = terminal === "undone" ? recovery : primary;
+        await main.locator(`[data-node-id="${expectedPrimary.nodes[0].id}"]`).waitFor({ state: "visible" });
+        const previousOwner = await readyContext(main);
+        const previousProcess = targets.main.child;
+        await close("main");
+        main = await launch("main");
+        requireCondition(targets.main.child !== previousProcess && previousProcess.exitCode === 0,
+          "native_restore_process_not_replaced");
+        await main.locator("#workspace-unlock-password").waitFor({ state: "visible" });
+        const locked = await invoke(main, "inspect_workspace_security");
+        requireCondition(locked.encrypted && locked.locked && !locked.systemUnlockEnabled,
+          "native_restore_restart_not_locked");
+        const reopenedOwner = await unlock(main, syntheticPassword);
+        requireCondition(reopenedOwner.ownerId !== previousOwner.ownerId, "native_restore_owner_reused");
+        const oldOwnerRejected = await main.evaluate(async (ownerId) => {
+          try { await window.__TAURI_INTERNALS__.invoke("read_workspace_file", { ownerId, slot: "primary" }); return false; }
+          catch { return true; }
+        }, previousOwner.ownerId);
+        const reopened = await checkSlots(expectedPrimary, expectedRecovery);
+        requireCondition(oldOwnerRejected && reopened.primaryMatches && reopened.recoveryMatches,
+          "native_restore_restarted_slots_mismatch");
+        await main.locator(`[data-node-id="${expectedPrimary.nodes[0].id}"]`).waitFor({ state: "visible" });
+        requireCondition(report.summary.pageErrorCount === 0, "native_restore_page_errors_detected");
+        if (terminal === "redone") await close("main");
+        return { processExitedCleanly: true, newProcessLaunched: true, lockedBeforeUnlock: true,
+          oldOwnerRejected: true, primaryMatches: true, recoveryMatches: true, uiNodeVisible: true };
+      });
+    }
   } finally {
     // Cleanup uses only original ChildProcess handles and exact policy values.
     // App-data roots and temporary WebView profiles are never deleted.

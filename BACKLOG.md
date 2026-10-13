@@ -1,5 +1,9 @@
 # Backlog
 
+## 原生恢复后重启验收（实施中）
+
+PR #28 已合并。用现有 CI-only 原生驱动补恢复、撤销、重做后真正退出并重新启动 EXE 的验证，沿用合成数据与摘要输出边界，不以浏览器刷新代替。只由 GitHub-hosted Windows 打包工作流执行，详见 [原生验收](docs/capsule-native-validation.md#主程序恢复后的真实进程重启实施中)。
+
 ## 恢复流程交互验证（实施中）
 
 PR #27 的密文 S3 组合测试已合并。继续补 App 的错误密码/取消/过期拒绝与重新挂载、Edge 的恢复/撤销/重做及取消后 reload、Rust 的过期与单次消费和加密文件重开验证。边界及已有覆盖见 [验收说明](docs/backup-recovery-validation.md)，不以浏览器刷新冒充桌面进程重启。
