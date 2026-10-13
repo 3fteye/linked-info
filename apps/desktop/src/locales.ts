@@ -895,7 +895,29 @@ export const resources = {
         restoreOnThisDevice: "在此设备恢复",
         bootstrapSuccess: "异机快照已恢复为新的本地加密工作区；原本地工作区已尽可能保留为加密恢复副本。系统快速解锁需要在此设备重新开启。",
         target: "备份目标",
-        targetStatus: "最近上传：{{uploaded}} · 最近完整校验：{{verified}} · 最近恢复演练：{{restored}}",
+        health: {
+          "uploadTitle": "上传状态",
+          "restoreTitle": "恢复验证",
+          "cleanupTitle": "旧快照清理",
+          "upload": {
+            "notUploaded": "尚无成功上传记录",
+            "pending": "有本地变更尚未上传",
+            "recorded": "按本机记录，没有待上传变更"
+          },
+          "uploadTime": "最近上传成功：{{time}}",
+          "verifyTime": "最近完整校验：{{time}}",
+          "restoreTime": "最近恢复演练：{{time}}",
+          "restoreMissing": "尚无恢复演练成功记录",
+          "restoreRecorded": "已有快照通过恢复演练",
+          "restoreScope": "校验和演练只证明当次所选快照；不代表最新快照或当前全部修改已验证。仅完整校验不等于可以解密恢复。",
+          "cleanup": {
+            "disabled": "自动清理已关闭",
+            "failed": "上次清理失败；不等于上传失败",
+            "notRun": "已启用，尚无清理成功记录",
+            "recorded": "已有清理成功记录"
+          },
+          "cleanupTime": "最近清理成功：{{time}}"
+        },
         never: "从未",
         providerLimit: "当前提供者单个快照上限：{{size}}。",
         automatic: "自动异机备份",
@@ -1973,7 +1995,29 @@ export const resources = {
         restoreOnThisDevice: "Restore on this device",
         bootstrapSuccess: "The offsite snapshot is now a local encrypted workspace. The previous local workspace was preserved as an encrypted recovery copy when possible. System quick unlock must be enabled again on this device.",
         target: "Backup target",
-        targetStatus: "Last upload: {{uploaded}} · last full verification: {{verified}} · last recovery drill: {{restored}}",
+        health: {
+          "uploadTitle": "Upload status",
+          "restoreTitle": "Recovery verification",
+          "cleanupTitle": "Old snapshot cleanup",
+          "upload": {
+            "notUploaded": "No successful upload recorded",
+            "pending": "Local changes are waiting for upload",
+            "recorded": "No pending changes according to local records"
+          },
+          "uploadTime": "Last successful upload: {{time}}",
+          "verifyTime": "Last full verification: {{time}}",
+          "restoreTime": "Last recovery drill: {{time}}",
+          "restoreMissing": "No successful recovery drill recorded",
+          "restoreRecorded": "A snapshot has passed a recovery drill",
+          "restoreScope": "Verification and drills cover only the selected snapshot, not necessarily the latest snapshot or all current edits. Full verification alone does not prove decryption and recovery.",
+          "cleanup": {
+            "disabled": "Automatic cleanup is disabled",
+            "failed": "Last cleanup failed; this is not an upload failure",
+            "notRun": "Enabled, with no successful cleanup recorded",
+            "recorded": "A successful cleanup is recorded"
+          },
+          "cleanupTime": "Last successful cleanup: {{time}}"
+        },
         never: "Never",
         providerLimit: "Maximum snapshot size for this provider: {{size}}.",
         automatic: "Automatic offsite backup",
