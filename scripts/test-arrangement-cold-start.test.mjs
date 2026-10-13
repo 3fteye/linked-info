@@ -16,6 +16,9 @@ test("arrangement observations preserve worker lifecycle without reading payload
   page.evaluate = async () => ({ dialogPresent: false, applyDisabled: false, dialogErrorPresent: false,
     secret: "not retained" });
   const finish = await installArrangementDiagnostics(page, () => tick);
+  const request = { url: () => "http://127.0.0.1:1423/src/canvasAutoLayout.worker.ts?private=secret" };
+  tick = 2; page.emit("request", request);
+  tick = 8; page.emit("requestfinished", request);
   const worker = new EventEmitter();
   worker.url = () => "http://127.0.0.1:1423/src/canvasAutoLayout.worker.ts?token=private";
   worker.evaluate = async () => true;
@@ -28,6 +31,9 @@ test("arrangement observations preserve worker lifecycle without reading payload
   assert.equal(result.handlerReadyMs, 10);
   assert.equal(result.closedMs, 15);
   assert.equal(result.workerCount, 1);
+  assert.equal(result.workerRequestMs, 2);
+  assert.equal(result.workerFinishedMs, 8);
+  assert.equal(result.resourceFailures, 0);
   assert.equal(result.dialogPresent, false);
   assert.equal(worker.listenerCount("close"), 0);
   assert.equal(page.listenerCount("worker"), 0);
@@ -61,6 +67,23 @@ test("arrangement probes are bounded, ignore foreign workers and discard late co
   assert.equal(result.domAvailable, false);
   assert.equal(result.workerCount, 4);
   assert.equal(result.dropped, 1);
+});
+
+test("a requested Worker can be pending before Playwright observes a Worker context", async () => {
+  const page = new EventEmitter();
+  page.evaluate = async () => ({ dialogPresent: true, applyDisabled: true, dialogErrorPresent: false });
+  const finish = await installArrangementDiagnostics(page, () => 50);
+  const request = { url: () => "http://127.0.0.1:1423/src/canvasAutoLayout.worker.ts" };
+  page.emit("request", request);
+  const diagnostic = validateArrangementDiagnostic(await finish());
+  assert.equal(diagnostic.workerCount, 0);
+  assert.equal(diagnostic.workerRequestMs, 0);
+  assert.equal(diagnostic.workerFinishedMs, null);
+  assert.equal(diagnostic.applyDisabled, true);
+  const before = JSON.stringify(diagnostic);
+  page.emit("requestfinished", request);
+  assert.equal(JSON.stringify(diagnostic), before);
+  assert.equal(page.eventNames().length, 0);
 });
 
 test("startup resource categorization never keeps paths, queries or foreign origins", () => {
@@ -241,6 +264,104 @@ test("three explicit startup samples retain every first-attempt outcome without 
   assert.equal(calls, 3);
   assert.equal(result.exitCode, 1);
   assert.deepEqual(result.outcomes.map((entry) => entry.status), ["verified", "failed", "verified"]);
+});
+
+test("phase experiment always executes both interventions and the undelayed control", () => {
+  const calls = [];
+  const summary = runColdStartValidation(["--phase-experiment"], (variant) => {
+    calls.push(variant);
+    if (variant === "startup-delay") throw new Error("synthetic wrong failure");
+  });
+  assert.deepEqual(calls, ["startup-delay", "worker-delay", "fixed"]);
+  assert.equal(summary.exitCode, 1);
+  assert.deepEqual(summary.outcomes.map((entry) => entry.status), ["failed", "verified", "verified"]);
+});
+
+async function phaseReport(phase) {
+  const startup = await diagnosticFixture();
+  startup.pageErrors = 0;
+  startup.resources.entry.failed = 0;
+  startup.resources.entry.finished = 1;
+  startup.resources.entry.httpErrors = 0;
+  const startupPhase = phase === "startup-delay";
+  startup.dom.rootHasChildren = !startupPhase;
+  startup.dom.firstSeenMs.canvas = startupPhase ? null : 9;
+  startup.dom.firstSeenMs.flowReady = startupPhase ? null : 10;
+  const locator = startupPhase ? "graph-canvas" : "smart-arrangement-dialog";
+  const assertion = startupPhase ? "toBeVisible" : "toBeHidden";
+  const value = report(false, `Error: expect(locator).${assertion} failed\nLocator: getByTestId('${locator}')\nTimeout: 5000ms`);
+  const attachments = [{ name: "startup-diagnostics", contentType: "application/json",
+    body: Buffer.from(JSON.stringify(startup)).toString("base64") }];
+  if (!startupPhase) attachments.push({ name: "arrangement-diagnostics", contentType: "application/json",
+    body: Buffer.from(JSON.stringify({ schemaVersion: 1, elapsedMs: 5100, workerCount: 1, dropped: 0,
+      createdMs: 50, handlerReadyMs: null, closedMs: null, probeFailed: false,
+      domAvailable: true, dialogPresent: true, applyDisabled: true, dialogErrorPresent: false,
+      clientRequestMs: 10, clientFinishedMs: 20, workerRequestMs: 40, workerFinishedMs: null,
+      resourceFailures: 0, workerRequests: 1, pageErrors: 0, httpErrors: 0, requestFailures: 0 })).toString("base64") });
+  value.suites[0].specs[0].tests[0].results[0].attachments = attachments;
+  return value;
+}
+
+for (const phase of ["startup-delay", "worker-delay"]) {
+  test(`${phase} requires the exact assertion and observed intervention, never any generic timeout`, async () => {
+    const value = await phaseReport(phase);
+    const log = `phase-hold=${phase}`;
+    assert.doesNotThrow(() => validateColdStartResult(phase, 1, value, log));
+    assert.equal(collectColdStartEvidence(phase, 1, value, log).failures.length, 0);
+    for (const badLog of ["", `${log}\n${log}`, `${log}\noptimized dependencies changed. reloading`]) {
+      assert.throws(() => validateColdStartResult(phase, 1, value, badLog));
+    }
+    assert.throws(() => validateColdStartResult(phase, 0, value, log));
+    const attempt = value.suites[0].specs[0].tests[0].results[0];
+    attempt.errors.push({ message: "synthetic unrelated failure" });
+    assert.throws(() => validateColdStartResult(phase, 1, value, log));
+    attempt.errors = [{ message: "Test timeout of 30000ms exceeded" }];
+    assert.throws(() => validateColdStartResult(phase, 1, value, log));
+  });
+}
+
+test("phase controls reject contradictory state and missing diagnostic attachments", async () => {
+  for (const phase of ["startup-delay", "worker-delay"]) {
+    const value = await phaseReport(phase);
+    const attempt = value.suites[0].specs[0].tests[0].results[0];
+    const attachment = attempt.attachments.at(-1);
+    const diagnostic = JSON.parse(Buffer.from(attachment.body, "base64").toString("utf8"));
+    if (phase === "startup-delay") diagnostic.dom.rootHasChildren = true;
+    else diagnostic.applyDisabled = false;
+    attachment.body = Buffer.from(JSON.stringify(diagnostic)).toString("base64");
+    assert.throws(() => validateColdStartResult(phase, 1, value, `phase-hold=${phase}`));
+    attempt.attachments = [];
+    assert.throws(() => validateColdStartResult(phase, 1, value, `phase-hold=${phase}`));
+  }
+});
+
+test("worker delay requires an outstanding module request, not just a visible busy dialog", async () => {
+  for (const [key, changed] of [["workerRequestMs", null], ["workerFinishedMs", 100], ["resourceFailures", 1],
+    ["workerRequests", 2], ["workerCount", 2], ["handlerReadyMs", 80], ["createdMs", null],
+    ["probeFailed", true], ["pageErrors", 1], ["httpErrors", 1], ["requestFailures", 1]]) {
+    const value = await phaseReport("worker-delay");
+    const attachment = value.suites[0].specs[0].tests[0].results[0].attachments.at(-1);
+    const diagnostic = JSON.parse(Buffer.from(attachment.body, "base64").toString("utf8"));
+    diagnostic[key] = changed;
+    attachment.body = Buffer.from(JSON.stringify(diagnostic)).toString("base64");
+    assert.throws(() => validateColdStartResult("worker-delay", 1, value, "phase-hold=worker-delay"));
+  }
+});
+
+test("arrangement records unrelated wait-phase failures only as bounded counts", async () => {
+  const page = new EventEmitter();
+  page.evaluate = async () => ({ dialogPresent: true, applyDisabled: true, dialogErrorPresent: false });
+  const finish = await installArrangementDiagnostics(page, () => 100);
+  page.emit("pageerror", new Error("synthetic-private-text"));
+  page.emit("response", { status: () => 503 });
+  page.emit("requestfailed", { url: () => { throw new Error("must not read"); } });
+  const result = validateArrangementDiagnostic(await finish());
+  assert.equal(result.pageErrors, 1);
+  assert.equal(result.httpErrors, 1);
+  assert.equal(result.requestFailures, 1);
+  assert.equal(result.resourceFailures, 0);
+  assert.ok(!JSON.stringify(result).includes("private"));
+  assert.equal(page.eventNames().length, 0);
 });
 
 test("the explicit experiment verifies the baseline before independently running the fix", () => {

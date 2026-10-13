@@ -127,13 +127,20 @@ export async function installStartupDiagnostics(page, now = () => performance.no
 
 export function validateArrangementDiagnostic(value) {
   const expected = ["schemaVersion", "elapsedMs", "workerCount", "dropped", "createdMs", "handlerReadyMs",
-    "closedMs", "probeFailed", "domAvailable", "dialogPresent", "applyDisabled", "dialogErrorPresent"];
+    "closedMs", "probeFailed", "domAvailable", "dialogPresent", "applyDisabled", "dialogErrorPresent",
+    "clientRequestMs", "clientFinishedMs", "workerRequestMs", "workerFinishedMs", "resourceFailures",
+    "workerRequests", "pageErrors", "httpErrors", "requestFailures"];
   const numeric = (v) => Number.isInteger(v) && v >= 0 && v <= 600_000;
   if (!value || JSON.stringify(Object.keys(value).sort()) !== JSON.stringify(expected.sort()) ||
     value.schemaVersion !== 1 || !numeric(value.elapsedMs) ||
     !Number.isInteger(value.workerCount) || value.workerCount < 0 || value.workerCount > 4 ||
     !Number.isInteger(value.dropped) || value.dropped < 0 || value.dropped > 4096 ||
-    ![value.createdMs, value.handlerReadyMs, value.closedMs].every((v) => v === null || numeric(v)) ||
+    ![value.createdMs, value.handlerReadyMs, value.closedMs, value.clientRequestMs, value.clientFinishedMs,
+      value.workerRequestMs, value.workerFinishedMs].every((v) => v === null || numeric(v)) ||
+    !Number.isInteger(value.resourceFailures) || value.resourceFailures < 0 || value.resourceFailures > 16 ||
+    !Number.isInteger(value.workerRequests) || value.workerRequests < 0 || value.workerRequests > 16 ||
+    ![value.pageErrors, value.httpErrors, value.requestFailures].every((v) =>
+      Number.isInteger(v) && v >= 0 && v <= 4096) ||
     ![value.probeFailed, value.domAvailable, value.dialogPresent, value.applyDisabled,
       value.dialogErrorPresent].every((v) => typeof v === "boolean")) {
     throw new Error("Invalid arrangement diagnostic schema");
@@ -145,9 +152,42 @@ export async function installArrangementDiagnostics(page, now = () => performanc
   const start = now();
   let stopped = false;
   const listeners = [];
+  const requests = new Map();
+  let acceptedRequests = 0;
   const result = { schemaVersion: 1, elapsedMs: 0, workerCount: 0, dropped: 0,
     createdMs: null, handlerReadyMs: null, closedMs: null, probeFailed: false,
-    domAvailable: false, dialogPresent: false, applyDisabled: false, dialogErrorPresent: false };
+    domAvailable: false, dialogPresent: false, applyDisabled: false, dialogErrorPresent: false,
+    clientRequestMs: null, clientFinishedMs: null, workerRequestMs: null, workerFinishedMs: null,
+    resourceFailures: 0, workerRequests: 0, pageErrors: 0, httpErrors: 0, requestFailures: 0 };
+  const onRequest = (request) => {
+    let url;
+    try { url = new URL(request.url()); } catch { return; }
+    if (url.origin !== "http://127.0.0.1:1423") return;
+    const kind = url.pathname === "/src/canvasAutoLayout.worker.ts" ? "worker" :
+      url.pathname === "/src/canvasAutoLayoutClient.ts" ? "client" : null;
+    if (kind === null) return;
+    if (acceptedRequests >= 16) { result.dropped = Math.min(result.dropped + 1, 4096); return; }
+    acceptedRequests += 1;
+    requests.set(request, kind);
+    if (kind === "worker") result.workerRequests += 1;
+    result[`${kind}RequestMs`] ??= bounded(now() - start);
+  };
+  const settle = (request, failed) => {
+    const kind = requests.get(request);
+    if (kind === undefined) return;
+    requests.delete(request);
+    if (failed) result.resourceFailures += 1;
+    else result[`${kind}FinishedMs`] ??= bounded(now() - start);
+  };
+  const onFinished = (request) => settle(request, false);
+  const onFailed = (request) => {
+    result.requestFailures = Math.min(result.requestFailures + 1, 4096);
+    settle(request, true);
+  };
+  const onResponse = (response) => {
+    if (response.status() >= 400) result.httpErrors = Math.min(result.httpErrors + 1, 4096);
+  };
+  const onPageError = () => { result.pageErrors = Math.min(result.pageErrors + 1, 4096); };
   const onWorker = (worker) => {
     let url;
     try { url = new URL(worker.url()); } catch { return; }
@@ -175,9 +215,20 @@ export async function installArrangementDiagnostics(page, now = () => performanc
     }).catch(() => { if (!stopped) result.probeFailed = true; });
   };
   page.on("worker", onWorker);
+  page.on("request", onRequest);
+  page.on("requestfinished", onFinished);
+  page.on("requestfailed", onFailed);
+  page.on("response", onResponse);
+  page.on("pageerror", onPageError);
   return async () => {
     stopped = true;
     page.off("worker", onWorker);
+    page.off("request", onRequest);
+    page.off("requestfinished", onFinished);
+    page.off("requestfailed", onFailed);
+    page.off("response", onResponse);
+    page.off("pageerror", onPageError);
+    requests.clear();
     for (const [worker, onClose] of listeners) worker.off("close", onClose);
     const dom = await page.evaluate(() => {
       const dialog = document.querySelector('[data-testid="smart-arrangement-dialog"]');

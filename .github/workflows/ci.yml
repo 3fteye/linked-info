@@ -17,6 +17,14 @@ on:
         description: Collect three independent cold-start samples without retries
         type: boolean
         default: false
+      startup_phase_experiment:
+        description: Validate two injected phase delays and an undelayed control
+        type: boolean
+        default: false
+      recovery_ui_samples:
+        description: Compare three fixed recovery-file and full-suite pairs, retaining every failure
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -25,6 +33,81 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  recovery-ui-samples:
+    name: Recovery UI paired samples
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.recovery_ui_samples }}
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@f520eceda224fe1a4aed5a2a27a194379a409996 # v6
+        with:
+          version: 11.16.0
+          run_install: false
+
+      - name: Install Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: apps/desktop/pnpm-lock.yaml
+
+      - name: Install frontend dependencies
+        working-directory: apps/desktop
+        run: pnpm install --frozen-lockfile
+
+      - name: Collect six independent samples without retries
+        working-directory: apps/desktop
+        shell: pwsh
+        env:
+          NO_COLOR: '1'
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          $sampleDirectory = Join-Path $env:RUNNER_TEMP 'recovery-ui-samples'
+          New-Item -ItemType Directory -Path $sampleDirectory -Force | Out-Null
+          $sampleResults = @()
+          foreach ($pair in 1..3) {
+            # Alternate order to avoid assigning every first/warm run to one scope.
+            $scopes = if ($pair % 2 -eq 1) { @('file', 'suite') } else { @('suite', 'file') }
+            foreach ($scope in $scopes) {
+              $sampleName = "$pair-$scope"
+              $sampleLog = Join-Path $sampleDirectory "$sampleName.log"
+              $reportPath = Join-Path $sampleDirectory "$sampleName.json"
+              $testArguments = @('exec', 'vitest', 'run', '--retry=0', '--reporter=default', '--reporter=json', "--outputFile.json=$reportPath")
+              if ($scope -eq 'file') { $testArguments += 'src/App.recovery.test.tsx' }
+              & pnpm @testArguments *> $sampleLog
+              $sampleExit = $LASTEXITCODE
+              $phaseLines = @(Select-String -Path $sampleLog -Pattern 'recovery-readonly-phases')
+              $reportExists = Test-Path -LiteralPath $reportPath
+              $sampleResults += [pscustomobject]@{
+                sample = $sampleName
+                exitCode = $sampleExit
+                phaseReports = $phaseLines.Count
+                reportExists = $reportExists
+              }
+              Write-Output "Sample $sampleName exit=$sampleExit phaseReports=$($phaseLines.Count) report=$reportExists"
+              $phaseLines | ForEach-Object { Write-Output $_.Line }
+              # Write incrementally so an interrupted later sample cannot erase evidence.
+              $sampleResults | ConvertTo-Json -Depth 4 | Set-Content (Join-Path $sampleDirectory 'summary.json')
+            }
+          }
+          $failedSamples = @($sampleResults | Where-Object { $_.exitCode -ne 0 -or $_.phaseReports -ne 1 -or -not $_.reportExists })
+          if ($sampleResults.Count -ne 6 -or $failedSamples.Count -gt 0) {
+            throw 'Recovery reproduction contains failed or incomplete samples; all results are retained.'
+          }
+
+      - name: Preserve every synthetic sample
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: recovery-ui-samples-${{ github.sha }}
+          path: ${{ runner.temp }}/recovery-ui-samples
+          if-no-files-found: error
+          retention-days: 14
+
   arrangement-cold-start:
     name: Cold-start canvas arrangement
     runs-on: windows-latest
@@ -54,12 +137,16 @@ jobs:
         run: node --test scripts/test-arrangement-cold-start.test.mjs
 
       - name: Verify arrangement cold-start fix
-        if: ${{ github.event_name != 'workflow_dispatch' || !inputs.cold_start_experiment }}
+        if: ${{ github.event_name != 'workflow_dispatch' || (!inputs.cold_start_experiment && !inputs.startup_phase_experiment) }}
         run: node scripts/test-arrangement-cold-start.mjs ${{ inputs.startup_samples && '--startup-samples' || '' }}
 
       - name: Run optional arrangement cold-start experiment
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.cold_start_experiment }}
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.cold_start_experiment && !inputs.startup_phase_experiment }}
         run: node scripts/test-arrangement-cold-start.mjs --experiment
+
+      - name: Run controlled startup phase experiment
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.startup_phase_experiment }}
+        run: node scripts/test-arrangement-cold-start.mjs --phase-experiment
 
   quality:
     name: Windows core, frontend and Worker
