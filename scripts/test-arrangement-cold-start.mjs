@@ -109,6 +109,17 @@ export function validateColdStartResult(variant, status, report, log) {
       assert.equal(arrangement.applyDisabled, true);
       assert.equal(arrangement.dialogErrorPresent, false);
       assert.equal(arrangement.closedMs, null);
+      assert.notEqual(arrangement.workerRequestMs, null);
+      assert.equal(arrangement.workerFinishedMs, null);
+      assert.equal(arrangement.resourceFailures, 0);
+      assert.equal(arrangement.pageErrors, 0);
+      assert.equal(arrangement.httpErrors, 0);
+      assert.equal(arrangement.requestFailures, 0);
+      assert.equal(arrangement.workerRequests, 1);
+      assert.ok(arrangement.workerCount <= 1);
+      assert.equal(arrangement.createdMs === null, arrangement.workerCount === 0);
+      assert.equal(arrangement.handlerReadyMs, null);
+      assert.equal(arrangement.probeFailed, false);
       assert.equal(arrangement.dropped, 0);
       assert.ok(arrangement.elapsedMs >= 5000);
     }

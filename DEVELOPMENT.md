@@ -299,6 +299,8 @@ pnpm build
 
 `--phase-experiment`（startup_phase_experiment，优先于其他实验输入）执行两个定向负对照及一个未延迟组。仅测试 Vite 配置在全新 GitHub-hosted Windows 中，将一次 MainWorkspace 或排版 Worker 模块 HTTP 请求延迟 8 秒；默认和正式 Vite 配置没有延迟。实验必须观察到唯一的固定阶段标记、准确的 5000ms 原断言失败、无页面异常/优化器刷新及对应诊断状态：首屏组的工作区请求仍未完成且画布尚未出现；排版组必须已完成首屏、Apply 仍禁用、弹窗仍在且无错误提示/Worker 关闭。任何其他超时、未命中延迟、缺少证据或未延迟组失败都使实验失败，不由后续成功覆盖。每组独立冷缓存且零重试；服务器不记录 URL、请求正文或头。负对照只验证机制及诊断辨识力，不代表历史故障已归因或修复。
 
+89fd2ee 的实验 38371043211 已观察到一个重要限制：阻塞 Worker 模块时，HTTP 请求已发出，但 Playwright 的 worker 事件仍未出现，workerCount=0。因此 createdMs 表示测试工具观察到 Worker 上下文的时间，不是 new Worker 调用时间。排版诊断另以最多 16 条精确本机模块请求记录 clientRequestMs/clientFinishedMs、workerRequestMs/workerFinishedMs 及失败计数，不读取 URL 参数或载荷；失败组必须有未完成的 Worker 模块请求，不能仅凭弹窗忙碌判断阶段。完成采集时移除请求监听并清空引用。此观测补全仍不是历史根因证明。
+
 首批证据：3e27056 的三样本运行 38360394803 中，画布 flowReady 分别为导航后 3188/2423/1821 ms；请求失败、HTTP 错误、pageerror、截断均为 0，无存储错误标记，每个样本有一次未收集正文的 console error 计数，不能凭计数判定来源或无害。根节点首次填充为 2849/2215/1625 ms，说明这些成功样本的大部分启动时间在首屏挂载之前，但不能证明历史超时原因。新缓存不代表清空操作系统文件缓存或重启 runner。另一次纯文档提交 f941e22 的运行 38359778194 在 Apply arrangement 后等待弹窗隐藏超时，发生于启动成功之后，必须与 graph-canvas 不可见分开跟踪。两种历史故障均未因后续成功样本而宣布修复。
 
 历史负对照单独保留为 `node scripts/test-arrangement-cold-start.mjs --experiment`；通过 CI 的 `workflow_dispatch` 勾选 `cold_start_experiment` 执行，不在用户机器启动。只有同时取得依赖优化器发现 `@dagrejs/dagre`、优化器请求整页刷新及测试导航断言失败的证据才算复现；其他错误不能充当根因证明。负对照未证明时仍执行修复组，分别报告结果，但实验整体保持失败，不能把“未证明”算成通过。未知参数在执行前拒绝；判定和协调有独立 Node 回归。本轮结果以新的 CI 为准，不能把编写了回归等同于验证通过。
