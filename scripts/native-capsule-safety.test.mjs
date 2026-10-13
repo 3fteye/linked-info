@@ -81,11 +81,14 @@ for (const tool of tools) {
 const driver = readFileSync(path.join(desktop, "scripts/native-capsule-smoke.mjs"), "utf8");
 
 test("native restore scenarios require real process replacement and authenticated rereads", () => {
-  const start = driver.indexOf('for (const terminal of ["restored", "undone", "redone"])');
+  const start = driver.indexOf('for (const [terminal, exitMode] of ["graceful", "forced"].flatMap');
   assert.ok(start > driver.indexOf('step("main-exit-keeps-capture-running-and-saving"'));
   const scenario = driver.slice(start, driver.indexOf("  } finally {", start));
   assert.match(scenario, /getByTestId\("workspace-restore-confirm"\)\.click\(\)/);
-  assert.match(scenario, /await close\("main"\);\s+main = await launch\("main"\)/);
+  assert.match(scenario, /\["restored", "undone", "redone"\]\.map/);
+  assert.match(scenario, /if \(exitMode === "forced"\) await forceMainExit\(\);\s+else await close\("main"\)/);
+  assert.ok(scenario.indexOf('main = await launch("main");', scenario.indexOf('await forceMainExit()')) >
+    scenario.indexOf('"native_restore_previous_process_not_exited"'));
   assert.match(scenario, /previousProcess\.exitCode === 0/);
   assert.match(scenario, /targets\.main\.child !== previousProcess/);
   assert.match(scenario, /locked\.encrypted && locked\.locked && !locked\.systemUnlockEnabled/);
@@ -96,6 +99,21 @@ test("native restore scenarios require real process replacement and authenticate
   const redo = scenario.indexOf('main.keyboard.press("Control+y")');
   assert.ok(undoStored >= 0 && undoVisible > undoStored && redo > undoVisible);
   assert.doesNotMatch(scenario, /\.reload\(|fs\.|\.screenshot\(|\.tracing\.|report\.[^;]*(?:syntheticPassword|expectedPrimary|expectedRecovery)/);
+});
+
+test("forced restore exit uses only its live owned child and requires abnormal termination", () => {
+  const start = driver.indexOf("  async function forceMainExit() {");
+  const source = driver.slice(start, driver.indexOf("  async function expand(", start));
+  assert.ok(start >= 0);
+  assert.match(source, /const target = targets\.main/);
+  assert.match(source, /await windowInfo\("main"\);\s+assertAlive\(target\);\s+requireCondition\(target\.child\.kill\("SIGKILL"\)/);
+  assert.match(source, /requireCondition\(await waitForExit\(target, 30_000\)/);
+  assert.match(source, /target\.child\.killed && \(target\.child\.signalCode === "SIGKILL"/);
+  assert.match(source, /typeof target\.child\.exitCode === "number" && target\.child\.exitCode !== 0/);
+  assert.ok(source.indexOf('"native_restore_force_exit_not_abnormal"') < source.indexOf("target.browser.close()"));
+  assert.match(source, /executeHelper\(debugHelper, "Disable", target, \["-Port", String\(target\.port\)\]\)/);
+  assert.match(source, /requireCondition\(disabled\.disabled === true[^;]+;\s+target\.debugPolicyEnabled = false/s);
+  assert.doesNotMatch(source, /native\("Close"|await close\(|invoke\(|lock_workspace|process\.kill\(|taskkill|Stop-Process/);
 });
 
 async function compareSyntheticSlots(primary, recovery) {

@@ -240,6 +240,24 @@ async function run() {
     if (target.browser !== null) await target.browser.close().catch(() => {});
     target.browser = null;
   }
+  async function forceMainExit() {
+    const target = targets.main;
+    // Revalidate the owned PID/path immediately before using our ChildProcess.
+    await windowInfo("main");
+    assertAlive(target);
+    requireCondition(target.child.kill("SIGKILL"), "native_restore_force_exit_not_sent");
+    requireCondition(await waitForExit(target, 30_000), "native_restore_force_exit_not_observed");
+    requireCondition(target.child.killed && (target.child.signalCode === "SIGKILL" ||
+      (typeof target.child.exitCode === "number" && target.child.exitCode !== 0)),
+    "native_restore_force_exit_not_abnormal");
+    if (target.browser !== null) await target.browser.close().catch(() => {});
+    target.browser = null;
+    // A killed host may leave a WebView shutting down on the previous port.
+    // Never reconnect to it: release only our policy value and use a new port.
+    const disabled = await executeHelper(debugHelper, "Disable", target, ["-Port", String(target.port)]);
+    requireCondition(disabled.disabled === true, "native_capsule_debug_cleanup_failed");
+    target.debugPolicyEnabled = false;
+  }
   async function expand(capture) {
     if (await capture.getByTestId("capture-content").count() === 0) await capture.getByTestId("capture-toggle").click();
     await capture.getByTestId("capture-content").waitFor({ state: "visible" });
@@ -713,8 +731,10 @@ async function run() {
     });
     // Capture is now closed. No pending capture input can race fixture setup.
     // Each scenario ends in a real process exit/relaunch, never page.reload().
-    for (const terminal of ["restored", "undone", "redone"]) {
-      await step(`native-restore-${terminal}-survives-process-restart`, async () => {
+    for (const [terminal, exitMode] of ["graceful", "forced"].flatMap((mode) =>
+      ["restored", "undone", "redone"].map((state) => [state, mode]))) {
+      const suffix = exitMode === "forced" ? "forced-process-restart" : "process-restart";
+      await step(`native-restore-${terminal}-survives-${suffix}`, async () => {
         if (terminal === "restored") {
           main = await launch("main");
           await unlock(main, syntheticPassword);
@@ -769,9 +789,12 @@ async function run() {
         await main.locator(`[data-node-id="${expectedPrimary.nodes[0].id}"]`).waitFor({ state: "visible" });
         const previousOwner = await readyContext(main);
         const previousProcess = targets.main.child;
-        await close("main");
+        if (exitMode === "forced") await forceMainExit();
+        else await close("main");
+        requireCondition(targets.main.exited && (exitMode === "forced" || previousProcess.exitCode === 0),
+          "native_restore_previous_process_not_exited");
         main = await launch("main");
-        requireCondition(targets.main.child !== previousProcess && previousProcess.exitCode === 0,
+        requireCondition(targets.main.child !== previousProcess,
           "native_restore_process_not_replaced");
         await main.locator("#workspace-unlock-password").waitFor({ state: "visible" });
         const locked = await invoke(main, "inspect_workspace_security");
@@ -789,7 +812,8 @@ async function run() {
         await main.locator(`[data-node-id="${expectedPrimary.nodes[0].id}"]`).waitFor({ state: "visible" });
         requireCondition(report.summary.pageErrorCount === 0, "native_restore_page_errors_detected");
         if (terminal === "redone") await close("main");
-        return { processExitedCleanly: true, newProcessLaunched: true, lockedBeforeUnlock: true,
+        return { processExitedCleanly: exitMode === "graceful", processForciblyTerminated: exitMode === "forced",
+          newProcessLaunched: true, lockedBeforeUnlock: true,
           oldOwnerRejected: true, primaryMatches: true, recoveryMatches: true, uiNodeVisible: true };
       });
     }
