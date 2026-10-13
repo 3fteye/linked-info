@@ -91,6 +91,10 @@ test("native restore scenarios require real process replacement and authenticate
   assert.match(scenario, /locked\.encrypted && locked\.locked && !locked\.systemUnlockEnabled/);
   assert.match(scenario, /reopenedOwner\.ownerId !== previousOwner\.ownerId/);
   assert.match(scenario, /oldOwnerRejected && reopened\.primaryMatches && reopened\.recoveryMatches/);
+  const undoStored = scenario.indexOf('"native_restore_undo_not_persisted"');
+  const undoVisible = scenario.indexOf('await main.locator(`[data-node-id="${primary.nodes[0].id}"]`).waitFor');
+  const redo = scenario.indexOf('main.keyboard.press("Control+y")');
+  assert.ok(undoStored >= 0 && undoVisible > undoStored && redo > undoVisible);
   assert.doesNotMatch(scenario, /\.reload\(|fs\.|\.screenshot\(|\.tracing\.|report\.[^;]*(?:syntheticPassword|expectedPrimary|expectedRecovery)/);
 });
 

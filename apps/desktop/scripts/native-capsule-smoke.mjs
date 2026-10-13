@@ -755,6 +755,7 @@ async function run() {
             const slots = await checkSlots(primary, recovery);
             return slots.primaryMatches && slots.recoveryMatches;
           }, "native_restore_undo_not_persisted");
+          await main.locator(`[data-node-id="${primary.nodes[0].id}"]`).waitFor({ state: "visible" });
         }
         if (terminal === "redone") {
           await main.keyboard.press("Control+y");
