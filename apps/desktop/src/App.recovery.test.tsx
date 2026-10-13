@@ -384,6 +384,7 @@ async function submitCurrentPassword(): Promise<void> {
 describe("App recovery transaction boundary", () => {
   let container: HTMLDivElement;
   let root: Root;
+  let captureBeforeTeardown: (() => void) | undefined;
 
   async function renderApp(options: {
     persistence: WorkspacePersistence;
@@ -460,6 +461,7 @@ describe("App recovery transaction boundary", () => {
   }
 
   beforeEach(() => {
+    captureBeforeTeardown = undefined;
     (
       globalThis as typeof globalThis & {
         IS_REACT_ACT_ENVIRONMENT: boolean;
@@ -480,9 +482,14 @@ describe("App recovery transaction boundary", () => {
   });
 
   afterEach(async () => {
-    await act(async () => root.unmount());
-    container.remove();
-    vi.restoreAllMocks();
+    try {
+      captureBeforeTeardown?.();
+    } finally {
+      captureBeforeTeardown = undefined;
+      await act(async () => root.unmount());
+      container.remove();
+      vi.restoreAllMocks();
+    }
   });
 
   it("publishes a capsule note only after durable commit and treats the full record as one undo transaction", async () => {
@@ -2017,7 +2024,11 @@ describe("App recovery transaction boundary", () => {
     const startedAt = performance.now();
     const phases: Array<{ name: string; startMs: number; endMs?: number }> = [];
     async function phase<T>(name: string, operation: () => Promise<T>): Promise<T> {
-      const entry = { name, startMs: Math.round(performance.now() - startedAt), endMs: undefined as number | undefined };
+      const entry = {
+        name,
+        startMs: Math.round(performance.now() - startedAt),
+        endMs: undefined as number | undefined,
+      };
       phases.push(entry);
       const result = await operation();
       entry.endMs = Math.round(performance.now() - startedAt);
@@ -2049,15 +2060,42 @@ describe("App recovery transaction boundary", () => {
       metadata: remainingSnapshot,
       encryptedExport: "encrypted-restore-preview",
     }));
-    onTestFinished(() => {
-      // Synthetic test metadata only: no DOM text, passwords, target data or errors.
-      console.info("recovery-readonly-phases", JSON.stringify({ phases,
+    function capture() {
+      // Synthetic metadata only; freeze before unmount, even on test timeout.
+      // Do not retain DOM nodes, text, passwords, target data or errors.
+      return {
+        phases: phases.map((entry) => ({ ...entry })),
         elapsedMs: Math.round(performance.now() - startedAt),
-        calls: { inspect: inspectTargets.mock.calls.length, list: list.mock.calls.length,
-          delete: deleteSnapshot.mock.calls.length, download: download.mock.calls.length },
-        entries: document.querySelectorAll(".offsite-entry-actions").length,
-        recoveryBanner: document.querySelector('[data-testid="offsite-config-recovery-message"]') !== null,
-      }));
+        calls: {
+          inspect: inspectTargets.mock.calls.length,
+          list: list.mock.calls.length,
+          delete: deleteSnapshot.mock.calls.length,
+          download: download.mock.calls.length,
+        },
+        mounted: container.isConnected && container.childElementCount > 0,
+        entries: container.querySelectorAll(".offsite-entry-actions").length,
+        recoveryBanner: container.querySelector(
+          '[data-testid="offsite-config-recovery-message"]',
+        ) !== null,
+        restorePassword: container.querySelector("#encrypted-import-password") !== null,
+      };
+    }
+    let report: ReturnType<typeof capture> | undefined;
+    let completed = false;
+    captureBeforeTeardown = () => { report = capture(); };
+    onTestFinished(() => {
+      console.info("recovery-readonly-phases", JSON.stringify(report));
+      // Guard the actual hook ordering: the live UI must have been captured,
+      // although React and its container have already been removed here.
+      expect(container.isConnected).toBe(false);
+      expect(report?.mounted).toBe(true);
+      if (completed) {
+        expect(report).toMatchObject({
+          entries: 2,
+          recoveryBanner: true,
+          restorePassword: true,
+        });
+      }
     });
     const offsiteBackup: OffsiteBackupService = {
       ...unavailableOffsiteBackupService,
@@ -2110,6 +2148,7 @@ describe("App recovery transaction boundary", () => {
     expect((await find("offsite-config-recovery-message")).textContent).toBe(
       recoveryMessage,
     );
+    completed = true;
   });
 
   it("coordinates config recovery when the committed snapshot-delete refresh rejects", async () => {
