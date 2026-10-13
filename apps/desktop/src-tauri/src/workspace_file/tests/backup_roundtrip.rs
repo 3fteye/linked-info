@@ -79,11 +79,21 @@ fn encrypted_s3_roundtrip_restores_without_source_vault_and_preserves_protected_
         let expired = BackupSnapshot::new(
             uuid::Uuid::new_v4(),
             now - 35 * day,
-            encrypted.clone().into_bytes(),
+            encrypt_export(&workspace_export("expired-snapshot"), &metadata, &key)
+                .unwrap()
+                .into_bytes(),
         )
         .unwrap();
-        let latest =
-            BackupSnapshot::new(uuid::Uuid::new_v4(), now, encrypted.clone().into_bytes()).unwrap();
+        let latest = BackupSnapshot::new(
+            uuid::Uuid::new_v4(),
+            now,
+            encrypt_export(&workspace_export("latest-snapshot"), &metadata, &key)
+                .unwrap()
+                .into_bytes(),
+        )
+        .unwrap();
+        assert_ne!(proof.metadata.sha256, expired.metadata.sha256);
+        assert_ne!(proof.metadata.sha256, latest.metadata.sha256);
         for snapshot in [&proof, &expired, &latest] {
             target.upload(snapshot.clone()).await.unwrap();
         }
@@ -99,8 +109,21 @@ fn encrypted_s3_roundtrip_restores_without_source_vault_and_preserves_protected_
 
         let downloaded = target.download(proof.metadata.id).await.unwrap().unwrap();
         let ciphertext = String::from_utf8(downloaded.payload).unwrap();
-        assert!(open_encrypted_export(&ciphertext, "incorrect synthetic password").is_err());
-        assert!(!destination.base_directory.exists());
+        let sentinel = workspace("untouched-before-restore");
+        destination
+            .write_plaintext(WorkspaceFileSlot::Primary, &sentinel)
+            .unwrap();
+        let sentinel_bytes = fs::read(destination.path(WorkspaceFileSlot::Primary)).unwrap();
+        assert_eq!(
+            test_offsite_workspace_restore(&ciphertext, "incorrect password", None, None),
+            Err("workspace_vault_invalid_password".to_owned())
+        );
+        assert_eq!(
+            fs::read(destination.path(WorkspaceFileSlot::Primary)).unwrap(),
+            sentinel_bytes
+        );
+        assert!(destination.read_vault_metadata().unwrap().is_none());
+        test_offsite_workspace_restore(&ciphertext, password, None, None).unwrap();
         let (envelope, opened_key, preview) = open_encrypted_export(&ciphertext, password).unwrap();
         assert_eq!(preview, export);
         let installed_key = install_prepared_workspace_restore(
@@ -124,6 +147,12 @@ fn encrypted_s3_roundtrip_restores_without_source_vault_and_preserves_protected_
             Some(expected)
         );
         let restored_bytes = fs::read(destination.path(WorkspaceFileSlot::Primary)).unwrap();
+        assert_eq!(
+            destination
+                .read(WorkspaceFileSlot::Recovery, Some(&reopened_key))
+                .unwrap(),
+            Some(sentinel)
+        );
 
         service.interrupt_next_upload();
         let interrupted =
