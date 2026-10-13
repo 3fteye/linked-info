@@ -17,6 +17,10 @@ on:
         description: Collect three independent cold-start samples without retries
         type: boolean
         default: false
+      startup_phase_experiment:
+        description: Validate two injected phase delays and an undelayed control
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -54,12 +58,16 @@ jobs:
         run: node --test scripts/test-arrangement-cold-start.test.mjs
 
       - name: Verify arrangement cold-start fix
-        if: ${{ github.event_name != 'workflow_dispatch' || !inputs.cold_start_experiment }}
+        if: ${{ github.event_name != 'workflow_dispatch' || (!inputs.cold_start_experiment && !inputs.startup_phase_experiment) }}
         run: node scripts/test-arrangement-cold-start.mjs ${{ inputs.startup_samples && '--startup-samples' || '' }}
 
       - name: Run optional arrangement cold-start experiment
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.cold_start_experiment }}
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.cold_start_experiment && !inputs.startup_phase_experiment }}
         run: node scripts/test-arrangement-cold-start.mjs --experiment
+
+      - name: Run controlled startup phase experiment
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.startup_phase_experiment }}
+        run: node scripts/test-arrangement-cold-start.mjs --phase-experiment
 
   quality:
     name: Windows core, frontend and Worker

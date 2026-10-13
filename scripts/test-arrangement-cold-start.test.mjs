@@ -243,6 +243,73 @@ test("three explicit startup samples retain every first-attempt outcome without 
   assert.deepEqual(result.outcomes.map((entry) => entry.status), ["verified", "failed", "verified"]);
 });
 
+test("phase experiment always executes both interventions and the undelayed control", () => {
+  const calls = [];
+  const summary = runColdStartValidation(["--phase-experiment"], (variant) => {
+    calls.push(variant);
+    if (variant === "startup-delay") throw new Error("synthetic wrong failure");
+  });
+  assert.deepEqual(calls, ["startup-delay", "worker-delay", "fixed"]);
+  assert.equal(summary.exitCode, 1);
+  assert.deepEqual(summary.outcomes.map((entry) => entry.status), ["failed", "verified", "verified"]);
+});
+
+async function phaseReport(phase) {
+  const startup = await diagnosticFixture();
+  startup.pageErrors = 0;
+  startup.resources.entry.failed = 0;
+  startup.resources.entry.finished = 1;
+  startup.resources.entry.httpErrors = 0;
+  const startupPhase = phase === "startup-delay";
+  startup.dom.rootHasChildren = !startupPhase;
+  startup.dom.firstSeenMs.canvas = startupPhase ? null : 9;
+  startup.dom.firstSeenMs.flowReady = startupPhase ? null : 10;
+  const locator = startupPhase ? "graph-canvas" : "smart-arrangement-dialog";
+  const assertion = startupPhase ? "toBeVisible" : "toBeHidden";
+  const value = report(false, `Error: expect(locator).${assertion} failed\nLocator: getByTestId('${locator}')\nTimeout: 5000ms`);
+  const attachments = [{ name: "startup-diagnostics", contentType: "application/json",
+    body: Buffer.from(JSON.stringify(startup)).toString("base64") }];
+  if (!startupPhase) attachments.push({ name: "arrangement-diagnostics", contentType: "application/json",
+    body: Buffer.from(JSON.stringify({ schemaVersion: 1, elapsedMs: 5100, workerCount: 1, dropped: 0,
+      createdMs: 50, handlerReadyMs: null, closedMs: null, probeFailed: false,
+      domAvailable: true, dialogPresent: true, applyDisabled: true, dialogErrorPresent: false })).toString("base64") });
+  value.suites[0].specs[0].tests[0].results[0].attachments = attachments;
+  return value;
+}
+
+for (const phase of ["startup-delay", "worker-delay"]) {
+  test(`${phase} requires the exact assertion and observed intervention, never any generic timeout`, async () => {
+    const value = await phaseReport(phase);
+    const log = `phase-hold=${phase}`;
+    assert.doesNotThrow(() => validateColdStartResult(phase, 1, value, log));
+    assert.equal(collectColdStartEvidence(phase, 1, value, log).failures.length, 0);
+    for (const badLog of ["", `${log}\n${log}`, `${log}\noptimized dependencies changed. reloading`]) {
+      assert.throws(() => validateColdStartResult(phase, 1, value, badLog));
+    }
+    assert.throws(() => validateColdStartResult(phase, 0, value, log));
+    const attempt = value.suites[0].specs[0].tests[0].results[0];
+    attempt.errors.push({ message: "synthetic unrelated failure" });
+    assert.throws(() => validateColdStartResult(phase, 1, value, log));
+    attempt.errors = [{ message: "Test timeout of 30000ms exceeded" }];
+    assert.throws(() => validateColdStartResult(phase, 1, value, log));
+  });
+}
+
+test("phase controls reject contradictory state and missing diagnostic attachments", async () => {
+  for (const phase of ["startup-delay", "worker-delay"]) {
+    const value = await phaseReport(phase);
+    const attempt = value.suites[0].specs[0].tests[0].results[0];
+    const attachment = attempt.attachments.at(-1);
+    const diagnostic = JSON.parse(Buffer.from(attachment.body, "base64").toString("utf8"));
+    if (phase === "startup-delay") diagnostic.dom.rootHasChildren = true;
+    else diagnostic.applyDisabled = false;
+    attachment.body = Buffer.from(JSON.stringify(diagnostic)).toString("base64");
+    assert.throws(() => validateColdStartResult(phase, 1, value, `phase-hold=${phase}`));
+    attempt.attachments = [];
+    assert.throws(() => validateColdStartResult(phase, 1, value, `phase-hold=${phase}`));
+  }
+});
+
 test("the explicit experiment verifies the baseline before independently running the fix", () => {
   const calls = [];
   const summary = runColdStartValidation(["--experiment"], (variant) => {
