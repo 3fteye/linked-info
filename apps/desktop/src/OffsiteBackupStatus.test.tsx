@@ -59,6 +59,14 @@ describe("OffsiteBackupStatus", () => {
     expect(text).toContain("No successful recovery drill recorded");
   });
 
+  it.each([true, false])("preserves both first-upload and pending facts when automaticEnabled=%s", (automaticEnabled) => {
+    const text = render({ automaticEnabled, automaticPending: true }).textContent;
+    expect(text).toContain("No successful upload recorded");
+    expect(text).toContain("Local changes are waiting for upload");
+    expect(text).not.toContain("No pending changes");
+    expect(text).toContain("Last successful upload: Never");
+  });
+
   it.each([5, 30])("does not infer snapshot identity from drill time %s", (time) => {
     const text = render({ lastUploadAtMs: 10, lastRestoreTestAtMs: time }).textContent;
     expect(text).toContain("A snapshot has passed a recovery drill");

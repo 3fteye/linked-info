@@ -39,6 +39,9 @@ export default function OffsiteBackupStatus({
       <section aria-label={t("offsiteBackup.health.uploadTitle")}>
         <strong>{t("offsiteBackup.health.uploadTitle")}</strong>
         <p>{t(`offsiteBackup.health.upload.${upload}`)}</p>
+        {target.lastUploadAtMs === null && target.automaticPending && (
+          <p>{t("offsiteBackup.health.upload.pending")}</p>
+        )}
         <small>{t("offsiteBackup.health.uploadTime", { time: date(target.lastUploadAtMs) })}</small>
       </section>
       <section aria-label={t("offsiteBackup.health.restoreTitle")}>
