@@ -163,7 +163,10 @@ pub fn validate_extension_package(
         let entry = archive
             .by_index(index)
             .map_err(|_| ExtensionPackageError::InvalidArchive)?;
-        let path = entry.name().to_owned();
+        let path = entry
+            .name()
+            .map_err(|_| ExtensionPackageError::InvalidArchive)?
+            .into_owned();
         validate_entry_path(&path)?;
         if entry.is_dir()
             || entry
@@ -1108,6 +1111,45 @@ mod tests {
             validate_extension_package(&package, SignaturePolicy::RequireSigned),
             Err(ExtensionPackageError::InvalidEntryPath(
                 "../escape".to_owned()
+            ))
+        );
+    }
+
+    #[test]
+    fn rejects_non_ascii_paths_after_zip_name_encoding_fallback() {
+        let name = "é.txt";
+        let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+        writer
+            .start_file(
+                name,
+                SimpleFileOptions::default().compression_method(CompressionMethod::Stored),
+            )
+            .unwrap();
+        writer.write_all(b"synthetic").unwrap();
+        let mut package = writer.finish().unwrap().into_inner();
+        // Even with bit 11, zip 9 falls back to CP437 for invalid UTF-8.
+        // The application must still reject the resulting non-ASCII path.
+        for (signature, flags_offset) in [(b"PK\x03\x04", 6), (b"PK\x01\x02", 8)] {
+            let header = package
+                .windows(signature.len())
+                .position(|bytes| bytes == signature)
+                .unwrap();
+            package[header + flags_offset + 1] |= 0x08;
+        }
+        let positions = package
+            .windows(name.len())
+            .enumerate()
+            .filter_map(|(index, bytes)| (bytes == name.as_bytes()).then_some(index))
+            .collect::<Vec<_>>();
+        // Corrupt both local and central UTF-8 names, leaving payload/CRC intact.
+        assert_eq!(positions.len(), 2);
+        for position in positions {
+            package[position] = 0xff;
+        }
+        assert_eq!(
+            validate_extension_package(&package, SignaturePolicy::AllowUnsignedDevelopment),
+            Err(ExtensionPackageError::InvalidEntryPath(
+                "\u{a0}\u{2310}.txt".to_owned()
             ))
         );
     }
