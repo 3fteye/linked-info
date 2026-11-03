@@ -2156,7 +2156,7 @@ test("expanded canvas help remains scrollable in a small window", async ({ page 
 
 test("title copy preserves selection and copies only the full name", async ({ page }) => {
   const nodes = gridNodes(2, 1);
-  nodes[0].name = "完整标题 title ".repeat(12);
+  nodes[0].name = "完整标题 title ".repeat(12).trim();
   await page.addInitScript(() => {
     Object.defineProperty(navigator, "clipboard", { configurable: true, value: {
       writeText: async (text: string) => { (window as any).__copiedTitle = text; },
