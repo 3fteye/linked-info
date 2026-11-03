@@ -212,6 +212,8 @@ interface InformationNodeData extends Record<string, unknown> {
   onRemoveReference: (sourceNodeId: string, targetNodeId: string) => void;
   onCopyCodeSource: ((containsSensitive: boolean) => Promise<void>) | null;
   onCopyDerivedSecret: ((value: string) => Promise<void>) | null;
+  copyTitleLabel: string;
+  onCopyTitle: (title: string) => Promise<void>;
   onNameChange: (nodeId: string, name: string) => boolean;
   onFitNodeContent: (nodeId: string) => void;
   onResizeEnd: (
@@ -283,6 +285,9 @@ interface GraphLabels {
   copyNodes: string;
   copyCodeFailed: string;
   copyCodeSuccess: string;
+  copyTitle: string;
+  copyTitleSuccess: string;
+  copyTitleFailed: string;
   copySecretFailed: string;
   copySecretSuccess: string;
   editMarker: (markerLabel: string) => string;
@@ -880,6 +885,28 @@ export function InformationNodeCard({
             <strong data-unnamed={data.name === null}>{data.name ?? data.unnamedLabel}</strong>
           </>
         )}
+        <button
+          aria-label={data.copyTitleLabel}
+          className="nodrag nowheel graph-node-fit-button graph-node-copy-title"
+          disabled={!data.interactive || !(data.editing ? draft.name : data.name ?? "").trim()}
+          onPointerDown={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+          }}
+          onClick={(event) => {
+            event.stopPropagation();
+            const title = data.editing ? draft.name : data.name ?? "";
+            if (data.interactive && title.trim()) void data.onCopyTitle(title);
+          }}
+          onDoubleClick={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+          }}
+          title={data.copyTitleLabel}
+          type="button"
+        >
+          <Copy aria-hidden="true" size={13} />
+        </button>
         {contentOverflowing && (
           <button
             aria-label={data.fitNodeContentLabel}
@@ -2011,7 +2038,7 @@ export default function GraphCanvas({
     }, 6_000);
   }, [labels.copySecretFailed, labels.copySecretSuccess, onCopySecret]);
 
-  const copyText = useCallback(async (text: string) => {
+  const copyText = useCallback(async (text: string, kind: "code" | "title" = "code") => {
     if (text.length === 0) {
       return;
     }
@@ -2020,15 +2047,17 @@ export default function GraphCanvas({
     }
     try {
       await navigator.clipboard.writeText(text);
-      setSecretClipboardNotice({ error: false, message: labels.copyCodeSuccess });
+      setSecretClipboardNotice({ error: false, message: kind === "title" ? labels.copyTitleSuccess : labels.copyCodeSuccess });
     } catch {
-      setSecretClipboardNotice({ error: true, message: labels.copyCodeFailed });
+      setSecretClipboardNotice({ error: true, message: kind === "title" ? labels.copyTitleFailed : labels.copyCodeFailed });
     }
     secretClipboardNoticeTimerRef.current = window.setTimeout(() => {
       setSecretClipboardNotice(null);
       secretClipboardNoticeTimerRef.current = null;
     }, 6_000);
-  }, [labels.copyCodeFailed, labels.copyCodeSuccess]);
+  }, [labels.copyCodeFailed, labels.copyCodeSuccess, labels.copyTitleFailed, labels.copyTitleSuccess]);
+
+  const copyTitle = useCallback((title: string) => copyText(title, "title"), [copyText]);
 
   const copyCodeSource = useCallback(async (
     nodeId: string,
@@ -2678,6 +2707,8 @@ export default function GraphCanvas({
                 : (containsSensitive) => copyCodeSource(node.id, containsSensitive),
             onCopyDerivedSecret:
               onCopySecret === null ? null : copyTextAsSecret,
+            copyTitleLabel: labels.copyTitle,
+            onCopyTitle: copyTitle,
             onNameChange: onNodeNameChange,
             onFitNodeContent: fitNodeContent,
             onResizeEnd: commitNodeDimensions,
@@ -2692,6 +2723,7 @@ export default function GraphCanvas({
     contentProcessorByNodeId,
     contentProcessorOptions,
     copyCodeSource,
+    copyTitle,
     copyTextAsSecret,
     commitNodeDimensions,
     commitNodeAndScheduleAvoidance,

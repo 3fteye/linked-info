@@ -347,6 +347,11 @@ export const resources = {
           sql: "SQL",
         },
       },
+      nodeTitleCopy: {
+        copy: "复制标题",
+        copied: "标题已复制",
+        failed: "无法复制标题，请检查剪贴板权限",
+      },
       codePreview: {
         copy: "复制原文",
         copied: "代码原文已复制",
@@ -1453,6 +1458,11 @@ export const resources = {
         copied: "Code source copied",
         copyFailed: "Could not copy code source",
         truncated: "Canvas preview truncated; edit or copy the source to view everything",
+      },
+      nodeTitleCopy: {
+        copy: "Copy title",
+        copied: "Title copied",
+        failed: "Could not copy title; check clipboard permissions",
       },
       extensions: {
         manager: {

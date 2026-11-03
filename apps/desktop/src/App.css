@@ -1043,6 +1043,11 @@ h1 {
   border-color: #2d7d58 !important;
 }
 
+.graph-node-copy-title:disabled {
+  cursor: default;
+  opacity: 0.35;
+}
+
 .graph-node-resize-handle {
   width: 9px !important;
   height: 9px !important;
