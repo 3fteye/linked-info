@@ -1127,6 +1127,15 @@ mod tests {
             .unwrap();
         writer.write_all(b"synthetic").unwrap();
         let mut package = writer.finish().unwrap().into_inner();
+        // Explicitly mark both headers as UTF-8. Without bit 11 the reader may
+        // decode arbitrary bytes as CP437, exercising path rejection instead.
+        for (signature, flags_offset) in [(b"PK\x03\x04", 6), (b"PK\x01\x02", 8)] {
+            let header = package
+                .windows(signature.len())
+                .position(|bytes| bytes == signature)
+                .unwrap();
+            package[header + flags_offset + 1] |= 0x08;
+        }
         let positions = package
             .windows(name.len())
             .enumerate()
