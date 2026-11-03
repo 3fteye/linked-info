@@ -163,7 +163,10 @@ pub fn validate_extension_package(
         let entry = archive
             .by_index(index)
             .map_err(|_| ExtensionPackageError::InvalidArchive)?;
-        let path = entry.name().to_owned();
+        let path = entry
+            .name()
+            .map_err(|_| ExtensionPackageError::InvalidArchive)?
+            .into_owned();
         validate_entry_path(&path)?;
         if entry.is_dir()
             || entry
@@ -1109,6 +1112,34 @@ mod tests {
             Err(ExtensionPackageError::InvalidEntryPath(
                 "../escape".to_owned()
             ))
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_utf8_archive_entry_names() {
+        let name = "é.txt";
+        let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+        writer
+            .start_file(
+                name,
+                SimpleFileOptions::default().compression_method(CompressionMethod::Stored),
+            )
+            .unwrap();
+        writer.write_all(b"synthetic").unwrap();
+        let mut package = writer.finish().unwrap().into_inner();
+        let positions = package
+            .windows(name.len())
+            .enumerate()
+            .filter_map(|(index, bytes)| (bytes == name.as_bytes()).then_some(index))
+            .collect::<Vec<_>>();
+        // Corrupt both local and central UTF-8 names, leaving payload/CRC intact.
+        assert_eq!(positions.len(), 2);
+        for position in positions {
+            package[position] = 0xff;
+        }
+        assert_eq!(
+            validate_extension_package(&package, SignaturePolicy::AllowUnsignedDevelopment),
+            Err(ExtensionPackageError::InvalidArchive)
         );
     }
 
