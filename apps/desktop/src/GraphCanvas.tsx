@@ -887,7 +887,7 @@ export function InformationNodeCard({
         )}
         <button
           aria-label={data.copyTitleLabel}
-          className="nodrag nowheel graph-node-fit-button graph-node-copy-title"
+          className="nodrag nowheel graph-node-copy-title"
           disabled={!data.interactive || !(data.editing ? draft.name : data.name ?? "").trim()}
           onPointerDown={(event) => {
             event.preventDefault();

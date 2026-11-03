@@ -1014,6 +1014,7 @@ h1 {
 }
 
 .graph-node-filter-button,
+.graph-node-copy-title,
 .graph-node-fit-button {
   display: inline-flex;
   align-items: center;
@@ -1030,6 +1031,8 @@ h1 {
 }
 
 .graph-node-filter-button:hover,
+.graph-node-copy-title:not(:disabled):hover,
+.graph-node-copy-title:focus-visible,
 .graph-node-fit-button:hover,
 .graph-node-fit-button:focus-visible,
 .graph-node-filter-button[data-active="true"] {
@@ -5579,11 +5582,13 @@ h1 {
 }
 
 :root[data-theme="starry-dark"] .graph-node-filter-button,
+:root[data-theme="starry-dark"] .graph-node-copy-title,
 :root[data-theme="starry-dark"] .graph-node-fit-button {
   color: #a9b9d3;
 }
 
 :root[data-theme="starry-dark"] .graph-node-filter-button:hover,
+:root[data-theme="starry-dark"] .graph-node-copy-title:not(:disabled):hover,
 :root[data-theme="starry-dark"] .graph-node-fit-button:hover,
 :root[data-theme="starry-dark"] .graph-node-filter-button[data-active="true"] {
   border-color: #667fae;

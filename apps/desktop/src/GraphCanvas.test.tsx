@@ -201,6 +201,7 @@ describe("InformationNodeCard", () => {
     const bubble = vi.fn();
     for (const event of ["pointerdown", "click", "dblclick"]) container.addEventListener(event, bubble);
     const button = container.querySelector<HTMLButtonElement>('[aria-label="Copy title"]')!;
+    expect(button.classList.contains("graph-node-fit-button")).toBe(false);
     act(() => {
       button.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, cancelable: true }));
       button.click();
