@@ -197,16 +197,30 @@ describe("InformationNodeCard", () => {
   it("copies the full title without bubbling pointer, click or double-click events", () => {
     const name = "完整标题 ".repeat(80);
     const onCopyTitle = vi.fn(async () => {});
-    renderCard(root, cardProps({ editing: false, name, onCopyTitle }));
     const bubble = vi.fn();
-    for (const event of ["pointerdown", "click", "dblclick"]) container.addEventListener(event, bubble);
+    // Observe the React ancestor, not another native listener on React's
+    // delegation root (stopPropagation does not stop same-target listeners).
+    act(() => root.render(
+      <div onPointerDown={bubble} onClick={bubble} onDoubleClick={bubble}>
+        <button data-testid="event-probe" type="button">Probe</button>
+        <ReactFlowProvider>
+          <InformationNodeCard {...cardProps({ editing: false, name, onCopyTitle })} />
+        </ReactFlowProvider>
+      </div>,
+    ));
+    function dispatchEvents(button: HTMLButtonElement) {
+      act(() => {
+        button.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, cancelable: true }));
+        button.click();
+        button.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, cancelable: true }));
+      });
+    }
+    dispatchEvents(container.querySelector<HTMLButtonElement>('[data-testid="event-probe"]')!);
+    expect(bubble.mock.calls.map(([event]) => event.type)).toEqual(["pointerdown", "click", "dblclick"]);
+    bubble.mockClear();
     const button = container.querySelector<HTMLButtonElement>('[aria-label="Copy title"]')!;
     expect(button.classList.contains("graph-node-fit-button")).toBe(false);
-    act(() => {
-      button.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, cancelable: true }));
-      button.click();
-      button.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, cancelable: true }));
-    });
+    dispatchEvents(button);
     expect(onCopyTitle).toHaveBeenCalledExactlyOnceWith(name);
     expect(bubble).not.toHaveBeenCalled();
   });
