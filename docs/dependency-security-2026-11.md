@@ -10,7 +10,7 @@
 
 | 依赖（旧版本） | 源码证据与判断 | 目标版本 |
 | --- | --- | --- |
-| ctutils 0.4.2（1 条） | 锁文件经 digest 0.11.3 进入 hmac/sha2 新版本链。不是应用直接调用；具体 Windows 使用链以云端 feature 图为准。常量时间保证不能仅凭 x64 排除，升级，不宣称已证明密钥泄露或不受影响。 | 0.4.4 |
+| ctutils 0.4.2（1 条） | 云端 feature 图确认 digest 0.11.3 → hmac 0.13/sha2 0.11 → aws-sigv4 和 linked-info-desktop。offsite_backup.rs 使用 HMAC 认证配置并调用 verify_slice；属于实际敏感链路。常量时间保证不能仅凭 x64 排除，升级，不宣称已证明密钥泄露。 | 0.4.4 |
 | rustls 0.23.45（4 条） | reqwest 的 rustls-tls 用于 S3、模型下载和可选远端模型。仓库没有自定义 ClientSessionStore/会话 Debug 输出、ECH 启用接口；旧锁文件 rustls 依赖不含 brotli，需 feature 图复核。密钥交换预测问题仍应修复，不以服务器行为作为安全保证。 | 0.23.46 |
 | rustls-webpki 0.103.14（1 条） | TLS 证书链验证用于上述真实网络入口；不能排除攻击者伪造受影响证书链的风险。模型哈希和备份密文不替代服务器身份验证。 | 0.103.16 |
 | webpki-roots 1.0.9（1 条） | hyper-rustls/reqwest 使用的根信任集；与证书验证库一起升级，避免仅修其中一个组件。 | 1.0.10 |
@@ -29,4 +29,12 @@
 
 云端生成锁文件后，核对每个更新项和新增传递依赖；保留 RustSec、许可证、SBOM、核心/扩展/桌面/Worker、前端构建和交互门禁。zip 9 为主版本升级，任何 API 差异只按编译与现有回归证据处理，不改安全校验策略。工作区 schema、密文格式、备份协议、扩展 WIT 均不变。
 
-当前只提交影响分析和只读权限的云端锁文件准备任务，尚未声称升级完成。准备任务不提交或推送仓库；产物须匹配预期 run/head 后由代理审查并提交。完成安全 PR 验证与审查后，将其修复合入标题复制任务分支，重新执行该功能验证；PR 合并仍需 owner 单独授权。
+### 已取得的锁文件与功能证据
+
+- 云端准备运行 [41593942017](https://github.com/3fteye/linked-info/actions/runs/41593942017) 成功；PR head 为 `6014f6a58305c6dcce15bf733f575d19bd2e770a`，检出的合成 merge SHA 为 `e3f4fdef6d9f00ddfa9ca4233bd329b99ae4181c`。唯一 artifact `13211915036` 的名称与该 SHA 一致，包含更新前后六份 feature 图、Cargo.toml/Cargo.lock 和解析 diff。
+- Windows feature 图确认 rustls 只启用 log/logging、ring、std、tls12，没有 brotli 或 aws-lc-rs 混合后量子组。故 Brotli 分配和该公告所述混合组降级场景在本配置缺少条件；普通证书信任风险仍需要升级。TLS 还用于 ort-sys 的构建期二进制下载。
+- Wasmtime feature 图没有 async、component-model-async、gc；源码同步调用、无宿主 StructType 创建的判断得到功能配置支持。仍按不可信组件编译边界升级，不宣称全部 16 条都不可达。
+- zip 仅 deflate 系列功能，升级后维持该集合。锁文件除六个包与 Wasmtime/Cranelift/Pulley 配套补丁外，解析器还将 typed-path 升至 0.12.4，并重新选择了若干包所用的已有 windows-sys 0.59/0.60 依赖边。没有手工猜测校验和，也没有回写未经 Cargo 验证的依赖图；此额外解析差异由完整 Windows CI 核验。
+- 锁文件已与下载产物逐字节比对一致；Cargo.toml 仅应用两处版本下限调整，保留本地 LF 换行。云端 metadata --locked 已确认解析一致性。一次性准备工作流已经移除，避免在新版本上重复执行旧基线替换；可从 6014f6a 历史提交复核生成方法。
+
+当前升级提交仍待完整 CI 和普通/安全复审，不声称漏洞审计已清零或兼容性验证已通过。完成安全 PR 验证与审查后，将其修复合入标题复制任务分支，重新执行该功能验证；PR 合并仍需 owner 单独授权。
