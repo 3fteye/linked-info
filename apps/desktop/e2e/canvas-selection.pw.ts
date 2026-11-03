@@ -2157,6 +2157,9 @@ test("expanded canvas help remains scrollable in a small window", async ({ page 
 test("title copy preserves selection and copies only the full name", async ({ page }) => {
   const nodes = gridNodes(2, 1);
   nodes[0].name = "完整标题 title ".repeat(12).trim();
+  // Keep the long title wrapped: automatic width can overlap the selected
+  // neighbor and legitimately place its header above this copy button.
+  nodes[0].width = 320;
   await page.addInitScript(() => {
     Object.defineProperty(navigator, "clipboard", { configurable: true, value: {
       writeText: async (text: string) => { (window as any).__copiedTitle = text; },
@@ -2164,6 +2167,11 @@ test("title copy preserves selection and copies only the full name", async ({ pa
   });
   await openSyntheticWorkspace(page, nodes);
   await node(page, nodes[1].id).click();
+  const firstBounds = await node(page, nodes[0].id).boundingBox();
+  const secondBounds = await node(page, nodes[1].id).boundingBox();
+  expect(firstBounds).not.toBeNull();
+  expect(secondBounds).not.toBeNull();
+  expect(firstBounds!.x + firstBounds!.width).toBeLessThan(secondBounds!.x);
   const titleCopy = node(page, nodes[0].id).getByRole("button", { name: "Copy title", exact: true });
   await titleCopy.click();
   await expect.poll(() => page.evaluate(() => (window as any).__copiedTitle)).toBe(nodes[0].name);
