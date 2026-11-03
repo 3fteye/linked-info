@@ -102,6 +102,8 @@ function cardProps(overrides: Record<string, unknown> = {}): NodeProps<any> {
       nameConflict: false,
       nameConflictLabel: "Conflict",
       nameLabel: "Name",
+      copyTitleLabel: "Copy title",
+      onCopyTitle: vi.fn(async () => {}),
       namePlaceholder: "Name",
       incomingReferenceCount: 0,
       incomingReferencesLabel: "Referenced by 0 nodes",
@@ -181,6 +183,54 @@ describe("InformationNodeCard", () => {
     act(() => root.unmount());
     container.remove();
     vi.useRealTimers();
+  });
+
+  it.each([null, "", "   "])("disables title copy for an empty name: %s", (name) => {
+    const onCopyTitle = vi.fn(async () => {});
+    renderCard(root, cardProps({ editing: false, name, onCopyTitle }));
+    const button = container.querySelector<HTMLButtonElement>('[aria-label="Copy title"]')!;
+    expect(button.disabled).toBe(true);
+    act(() => button.click());
+    expect(onCopyTitle).not.toHaveBeenCalled();
+  });
+
+  it("copies the full title without bubbling pointer, click or double-click events", () => {
+    const name = "完整标题 ".repeat(80);
+    const onCopyTitle = vi.fn(async () => {});
+    const bubble = vi.fn();
+    // Observe the React ancestor, not another native listener on React's
+    // delegation root (stopPropagation does not stop same-target listeners).
+    act(() => root.render(
+      <div onPointerDown={bubble} onClick={bubble} onDoubleClick={bubble}>
+        <button data-testid="event-probe" type="button">Probe</button>
+        <ReactFlowProvider>
+          <InformationNodeCard {...cardProps({ editing: false, name, onCopyTitle })} />
+        </ReactFlowProvider>
+      </div>,
+    ));
+    function dispatchEvents(button: HTMLButtonElement) {
+      act(() => {
+        button.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, cancelable: true }));
+        button.click();
+        button.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, cancelable: true }));
+      });
+    }
+    dispatchEvents(container.querySelector<HTMLButtonElement>('[data-testid="event-probe"]')!);
+    expect(bubble.mock.calls.map(([event]) => event.type)).toEqual(["pointerdown", "click", "dblclick"]);
+    bubble.mockClear();
+    const button = container.querySelector<HTMLButtonElement>('[aria-label="Copy title"]')!;
+    expect(button.classList.contains("graph-node-fit-button")).toBe(false);
+    dispatchEvents(button);
+    expect(onCopyTitle).toHaveBeenCalledExactlyOnceWith(name);
+    expect(bubble).not.toHaveBeenCalled();
+  });
+
+  it("copies the current title draft, not the last rendered name", () => {
+    const onCopyTitle = vi.fn(async () => {});
+    renderCard(root, cardProps({ onCopyTitle }));
+    act(() => input(container.querySelector<HTMLInputElement>('[aria-label="Name"]')!, "New title"));
+    act(() => container.querySelector<HTMLButtonElement>('[aria-label="Copy title"]')!.click());
+    expect(onCopyTitle).toHaveBeenCalledExactlyOnceWith("New title");
   });
 
   it("preserves the caret while editing long content in the middle", () => {
