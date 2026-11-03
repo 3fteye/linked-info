@@ -1116,7 +1116,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_invalid_utf8_archive_entry_names() {
+    fn rejects_non_ascii_paths_after_zip_name_encoding_fallback() {
         let name = "é.txt";
         let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
         writer
@@ -1127,8 +1127,8 @@ mod tests {
             .unwrap();
         writer.write_all(b"synthetic").unwrap();
         let mut package = writer.finish().unwrap().into_inner();
-        // Explicitly mark both headers as UTF-8. Without bit 11 the reader may
-        // decode arbitrary bytes as CP437, exercising path rejection instead.
+        // Even with bit 11, zip 9 falls back to CP437 for invalid UTF-8.
+        // The application must still reject the resulting non-ASCII path.
         for (signature, flags_offset) in [(b"PK\x03\x04", 6), (b"PK\x01\x02", 8)] {
             let header = package
                 .windows(signature.len())
@@ -1148,7 +1148,9 @@ mod tests {
         }
         assert_eq!(
             validate_extension_package(&package, SignaturePolicy::AllowUnsignedDevelopment),
-            Err(ExtensionPackageError::InvalidArchive)
+            Err(ExtensionPackageError::InvalidEntryPath(
+                "\u{a0}\u{2310}.txt".to_owned()
+            ))
         );
     }
 
