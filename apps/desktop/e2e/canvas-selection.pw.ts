@@ -2157,9 +2157,12 @@ test("expanded canvas help remains scrollable in a small window", async ({ page 
 test("feature demos show all steps without mutating the workspace", async ({ page }) => {
   await page.emulateMedia({ reducedMotion: "reduce" });
   await openSyntheticWorkspace(page, gridNodes(2, 1));
+  // The fixture starts at v2; startup asynchronously saves its v6 migration.
+  // Read the baseline after that commit, not while the 300 ms save is pending.
+  await expect.poll(() => storedWorkspace(page)).toMatchObject({ version: 6 });
+  const before = await storedWorkspace(page);
   await page.getByTestId("settings-navigation").click();
   await page.getByTestId("settings-tab-operations").click();
-  const before = await storedWorkspace(page);
   const guide = page.getByTestId("canvas-operation-guide");
   for (const language of ["zh-CN", "en-US"]) {
     await page.getByTestId("settings-tab-general").click();

@@ -63,7 +63,7 @@ export function arrangementScratchPrefix(desktop) {
 }
 
 export function validateColdStartResult(variant, status, report, log) {
-  assert.ok(variant === "baseline" || variant === "fixed", "Unknown cold-start variant");
+  assert.ok(["baseline", "fixed", "startup-delay", "worker-delay"].includes(variant), "Unknown cold-start variant");
   assert.deepEqual(report.errors, [], "The runner must not have unrelated setup errors");
   const specs = allSpecs(report.suites);
   assert.equal(specs.length, 1, "Exactly the full arrangement regression must run");
@@ -73,7 +73,57 @@ export function validateColdStartResult(variant, status, report, log) {
   assert.equal(results.length, 1, "Retries must not hide a cold-start failure");
   assert.equal(report.stats.flaky, 0);
   assert.equal(report.stats.skipped, 0);
-  if (variant === "baseline") {
+  if (variant === "startup-delay" || variant === "worker-delay") {
+    assert.equal(status, 1, "The injected delay must fail the original assertion");
+    assert.equal(results[0].status, "failed");
+    assert.equal(report.stats.unexpected, 1);
+    assert.equal(report.stats.expected, 0);
+    assert.equal(log.split(`phase-hold=${variant}`).length - 1, 1, "One precise delay must be observed");
+    assert.ok(!log.includes(optimizerReload), "Optimizer reload is not the phase being tested");
+    assert.equal(results[0].errors.length, 1, "Unrelated failures invalidate the experiment");
+    const message = (results[0].errors[0].message ?? "").replace(/\x1b\[[0-9;]*m/g, "");
+    assert.match(message, /Timeout:\s+5000ms/);
+    const startup = startupDiagnosticsFromReport(report);
+    assert.equal(startup.pageErrors, 0);
+    assert.equal(startup.dropped, 0);
+    assert.ok(Object.values(startup.resources).every((row) => row.failed === 0 && row.httpErrors === 0),
+      "Unrelated resource failures invalidate the phase experiment");
+    assert.equal(startup.dom.available, true);
+    assert.equal(startup.dom.firstSeenMs.storageError, null);
+    assert.notEqual(startup.navigationCompletedMs, null);
+    if (variant === "startup-delay") {
+      assert.match(message, /getByTestId\(['"]graph-canvas['"]\)/);
+      assert.match(message, /toBeVisible/);
+      assert.equal(startup.resources.workspace.pending, 1);
+      assert.equal(startup.resources.workspace.finished, 0);
+      assert.equal(startup.dom.firstSeenMs.canvas, null);
+      assert.equal(startup.dom.rootHasChildren, false);
+      assert.equal(arrangementDiagnosticsFromReport(report), null);
+    } else {
+      assert.match(message, /getByTestId\(['"]smart-arrangement-dialog['"]\)/);
+      assert.match(message, /toBeHidden/);
+      assert.notEqual(startup.dom.firstSeenMs.flowReady, null);
+      const arrangement = arrangementDiagnosticsFromReport(report, true);
+      assert.equal(arrangement.domAvailable, true);
+      assert.equal(arrangement.dialogPresent, true);
+      assert.equal(arrangement.applyDisabled, true);
+      assert.equal(arrangement.dialogErrorPresent, false);
+      assert.equal(arrangement.closedMs, null);
+      assert.notEqual(arrangement.workerRequestMs, null);
+      assert.equal(arrangement.workerFinishedMs, null);
+      assert.equal(arrangement.resourceFailures, 0);
+      assert.equal(arrangement.pageErrors, 0);
+      assert.equal(arrangement.httpErrors, 0);
+      assert.equal(arrangement.requestFailures, 0);
+      assert.equal(arrangement.workerRequests, 1);
+      assert.ok(arrangement.workerCount <= 1);
+      assert.equal(arrangement.createdMs === null, arrangement.workerCount === 0);
+      assert.equal(arrangement.handlerReadyMs, null);
+      assert.equal(arrangement.probeFailed, false);
+      assert.equal(arrangement.dropped, 0);
+      assert.ok(arrangement.elapsedMs >= 5000);
+    }
+  } else if (variant === "baseline") {
     assert.equal(status, 1, "The old configuration must reproduce the reload failure");
     assert.equal(results[0].status, "failed");
     assert.equal(report.stats.unexpected, 1);
@@ -104,7 +154,8 @@ export function runColdStartValidation(args, runVariant) {
   if (args.length === 0) variants = ["fixed"];
   else if (args.length === 1 && args[0] === "--experiment") variants = ["baseline", "fixed"];
   else if (args.length === 1 && args[0] === "--startup-samples") variants = ["fixed", "fixed", "fixed"];
-  else throw new Error("Cold-start validation accepts only --experiment, --startup-samples or no arguments");
+  else if (args.length === 1 && args[0] === "--phase-experiment") variants = ["startup-delay", "worker-delay", "fixed"];
+  else throw new Error("Cold-start validation accepts only --experiment, --startup-samples, --phase-experiment or no arguments");
 
   // A historical timing failure is experimental evidence, not a prerequisite
   // for exercising the current configuration. Keep both outcomes independent.
@@ -143,7 +194,8 @@ function main() {
       env: {
         ...process.env,
         DEBUG: "pw:webserver",
-        LINKED_INFO_ARRANGEMENT_VARIANT: variant,
+        LINKED_INFO_ARRANGEMENT_VARIANT: variant === "baseline" ? "baseline" : "fixed",
+        LINKED_INFO_ARRANGEMENT_PHASE_DELAY: variant.endsWith("-delay") ? variant : "",
         LINKED_INFO_ARRANGEMENT_CACHE: path.join(scratch, `${variant}-vite-cache`),
         LINKED_INFO_ARRANGEMENT_OUTPUT: path.join(scratch, `${variant}-test-results`),
         LINKED_INFO_ARRANGEMENT_REPORT: reportPath,
@@ -178,6 +230,7 @@ function main() {
     }
     const evidence = variant === "baseline"
       ? "dependency=@dagrejs/dagre optimizer-reload=true navigation-failure=true"
+      : variant.endsWith("-delay") ? "controlled-timeout=verified historical-cause=unproven"
       : "first-attempt=passed optimizer-reload=false navigation-count=0";
     process.stdout.write(`arrangement-cold-start ${variant}: ${evidence}\n`);
   });
